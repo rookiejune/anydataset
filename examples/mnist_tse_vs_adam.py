@@ -148,6 +148,52 @@ class RunningAverage:
         return self.total / max(1, self.count)
 
 
+class ChainedOptimizer:
+    def __init__(self, *optimizers: torch.optim.Optimizer) -> None:
+        self.optimizers = optimizers
+        self.last_regularizer_loss = None
+
+    @property
+    def param_groups(self):
+        groups = []
+        for optimizer in self.optimizers:
+            groups.extend(optimizer.param_groups)
+        return groups
+
+    @property
+    def state(self):
+        merged = {}
+        for optimizer in self.optimizers:
+            merged.update(optimizer.state)
+        return merged
+
+    @property
+    def defaults(self):
+        return self.optimizers[0].defaults
+
+    def zero_grad(self, *args, **kwargs) -> None:
+        for optimizer in self.optimizers:
+            optimizer.zero_grad(*args, **kwargs)
+
+    def step(self, closure=None):
+        if closure is not None:
+            loss = closure()
+        else:
+            loss = None
+
+        for optimizer in self.optimizers:
+            optimizer.step()
+        return loss
+
+
+def is_tse_matrix_parameter(name: str, parameter: torch.nn.Parameter) -> bool:
+    if not parameter.requires_grad or parameter.ndim != 2:
+        return False
+    if "norm" in name or name.endswith("bias"):
+        return False
+    return True
+
+
 def build_dataset(
     dataset_name: str,
     split: str,
@@ -187,28 +233,63 @@ def build_optimizer(args: argparse.Namespace, model: nn.Module):
     if args.optimizer == "adam":
         return torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
 
+    if args.optimizer == "muon":
+        return build_muon_optimizer(args, model)
+
     if args.torch_tse_path:
         sys.path.insert(0, str(Path(args.torch_tse_path).expanduser()))
     from torch_tse import TSEOptimizer
 
-    def tse_filter(name: str, parameter: torch.nn.Parameter) -> bool:
-        if not parameter.requires_grad or parameter.ndim < 2:
-            return False
-        if "norm" in name or name.endswith("bias"):
-            return False
-        if name in {"cls_token", "position_embedding"}:
-            return False
-        return True
+    if args.optimizer == "tse":
+        base = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    elif args.optimizer == "tse_muon":
+        base = build_muon_optimizer(args, model)
+    else:
+        raise ValueError(f"Unknown optimizer: {args.optimizer}")
 
-    base = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     return TSEOptimizer(
         base,
         module=model,
         weight=args.tse_weight,
         gap=args.tse_gap,
         power=args.tse_power,
-        parameter_filter=tse_filter,
+        parameter_filter=is_tse_matrix_parameter,
     )
+
+
+def build_muon_optimizer(args: argparse.Namespace, model: nn.Module) -> ChainedOptimizer:
+    matrix_params = []
+    auxiliary_params = []
+    for name, parameter in model.named_parameters():
+        if is_tse_matrix_parameter(name, parameter):
+            matrix_params.append(parameter)
+        elif parameter.requires_grad:
+            auxiliary_params.append(parameter)
+
+    if not matrix_params:
+        raise ValueError("Muon requires at least one 2D matrix parameter.")
+
+    optimizers: list[torch.optim.Optimizer] = [
+        torch.optim.Muon(
+            matrix_params,
+            lr=args.lr,
+            weight_decay=args.weight_decay,
+            momentum=args.muon_momentum,
+            nesterov=not args.no_muon_nesterov,
+            ns_steps=args.muon_ns_steps,
+            adjust_lr_fn=args.muon_adjust_lr_fn,
+        )
+    ]
+    if auxiliary_params:
+        optimizers.append(
+            torch.optim.Adam(
+                auxiliary_params,
+                lr=args.aux_lr,
+                weight_decay=args.aux_weight_decay,
+            )
+        )
+
+    return ChainedOptimizer(*optimizers)
 
 
 def evaluate(model: nn.Module, loader: DataLoader, device: torch.device, max_batches: int) -> tuple[float, float]:
@@ -285,7 +366,11 @@ def train(args: argparse.Namespace) -> None:
     writer.add_scalar("config/learning_rate", args.lr, 0)
     writer.add_scalar("config/batch_size", args.batch_size, 0)
     writer.add_scalar("config/max_steps", args.max_steps, 0)
-    if args.optimizer == "tse":
+    if args.optimizer in {"muon", "tse_muon"}:
+        writer.add_scalar("config/aux_learning_rate", args.aux_lr, 0)
+        writer.add_scalar("config/muon_momentum", args.muon_momentum, 0)
+        writer.add_scalar("config/muon_ns_steps", args.muon_ns_steps, 0)
+    if args.optimizer in {"tse", "tse_muon"}:
         writer.add_scalar("config/tse_weight", args.tse_weight, 0)
         writer.add_scalar("config/tse_gap", args.tse_gap, 0)
 
@@ -346,7 +431,7 @@ def train(args: argparse.Namespace) -> None:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Compare Adam and TSE on image classification with a Transformer.")
     parser.add_argument("--dataset", choices=sorted(DATASETS), default="mnist")
-    parser.add_argument("--optimizer", choices=["adam", "tse"], required=True)
+    parser.add_argument("--optimizer", choices=["adam", "tse", "muon", "tse_muon"], required=True)
     parser.add_argument("--run-name", default="")
     parser.add_argument("--log-dir", default="runs/image_transformer_tse_vs_adam")
     parser.add_argument("--data-dir", default="data")
@@ -362,6 +447,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--lr", type=float, default=3e-4)
     parser.add_argument("--weight-decay", type=float, default=0.0)
+    parser.add_argument("--aux-lr", type=float, default=3e-4)
+    parser.add_argument("--aux-weight-decay", type=float, default=0.0)
+    parser.add_argument("--muon-momentum", type=float, default=0.95)
+    parser.add_argument("--muon-ns-steps", type=int, default=5)
+    parser.add_argument("--muon-adjust-lr-fn", choices=["original", "match_rms_adamw"], default="original")
+    parser.add_argument("--no-muon-nesterov", action="store_true")
     parser.add_argument("--patch-size", type=int, default=4)
     parser.add_argument("--hidden-dim", type=int, default=128)
     parser.add_argument("--depth", type=int, default=4)
