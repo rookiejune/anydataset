@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import math
 import random
 import sys
 import time
@@ -12,27 +11,57 @@ from typing import Iterator
 import torch
 from torch import nn
 from torch.utils.data import DataLoader
-from torch.utils.tensorboard import SummaryWriter
 
 from anydatasets import AnyIterableDataset, DatasetSpec, Task
 from anydatasets.adapters.base import DatasetAdapter
 from anydatasets.cache import CacheManifest
 
 
-class TorchVisionMNISTAdapter(DatasetAdapter):
+DATASETS = {
+    "mnist": {
+        "torchvision_name": "MNIST",
+        "image_size": 28,
+        "image_channels": 1,
+        "num_classes": 10,
+        "mean": (0.1307,),
+        "std": (0.3081,),
+    },
+    "cifar10": {
+        "torchvision_name": "CIFAR10",
+        "image_size": 32,
+        "image_channels": 3,
+        "num_classes": 10,
+        "mean": (0.4914, 0.4822, 0.4465),
+        "std": (0.2470, 0.2435, 0.2616),
+    },
+}
+
+
+class TorchVisionImageClassificationAdapter(DatasetAdapter):
     def prepare(self, spec: DatasetSpec, cache: CacheManifest):
         try:
             from torchvision import datasets, transforms
         except ImportError as exc:
-            raise ImportError("MNIST example requires torchvision.") from exc
+            raise ImportError("This example requires torchvision.") from exc
 
         split = spec.split or "train"
         train = split == "train"
         root = Path(spec.options.get("root", cache.cache_path / "torchvision"))
-        return datasets.MNIST(
+        dataset_name = spec.options["torchvision_name"]
+        mean = tuple(spec.options["mean"])
+        std = tuple(spec.options["std"])
+
+        transform = transforms.Compose(
+            [
+                transforms.ToTensor(),
+                transforms.Normalize(mean=mean, std=std),
+            ]
+        )
+        dataset_cls = getattr(datasets, dataset_name)
+        return dataset_cls(
             root=str(root),
             train=train,
-            transform=transforms.ToTensor(),
+            transform=transform,
             download=True,
         )
 
@@ -44,7 +73,8 @@ class TorchVisionMNISTAdapter(DatasetAdapter):
 class PatchTransformerClassifier(nn.Module):
     def __init__(
         self,
-        image_size: int = 28,
+        image_size: int,
+        image_channels: int,
         patch_size: int = 4,
         hidden_dim: int = 128,
         depth: int = 4,
@@ -58,7 +88,7 @@ class PatchTransformerClassifier(nn.Module):
             raise ValueError("image_size must be divisible by patch_size")
 
         self.patch_size = patch_size
-        patch_dim = patch_size * patch_size
+        patch_dim = image_channels * patch_size * patch_size
         patch_count = (image_size // patch_size) ** 2
 
         self.patch_projection = nn.Linear(patch_dim, hidden_dim)
@@ -85,8 +115,8 @@ class PatchTransformerClassifier(nn.Module):
     def forward(self, images: torch.Tensor) -> torch.Tensor:
         patches = images.unfold(2, self.patch_size, self.patch_size)
         patches = patches.unfold(3, self.patch_size, self.patch_size)
-        patches = patches.contiguous().view(images.shape[0], 1, -1, self.patch_size * self.patch_size)
-        patches = patches.squeeze(1)
+        patches = patches.permute(0, 2, 3, 1, 4, 5).contiguous()
+        patches = patches.view(images.shape[0], -1, images.shape[1] * self.patch_size * self.patch_size)
 
         tokens = self.patch_projection(patches)
         cls_tokens = self.cls_token.expand(images.shape[0], -1, -1)
@@ -110,16 +140,28 @@ class RunningAverage:
         return self.total / max(1, self.count)
 
 
-def build_dataset(split: str, batch_size: int, data_dir: Path, cache_dir: Path) -> AnyIterableDataset:
-    key = f"mnist-{split}"
+def build_dataset(
+    dataset_name: str,
+    split: str,
+    batch_size: int,
+    data_dir: Path,
+    cache_dir: Path,
+) -> AnyIterableDataset:
+    config = DATASETS[dataset_name]
+    key = f"{dataset_name}-{split}"
     dataset_map = {
         key: DatasetSpec(
             source="torchvision",
-            path="MNIST",
+            path=config["torchvision_name"],
             name=key,
             split=split,
-            adapter=TorchVisionMNISTAdapter(),
-            options={"root": str(data_dir)},
+            adapter=TorchVisionImageClassificationAdapter(),
+            options={
+                "root": str(data_dir / dataset_name),
+                "torchvision_name": config["torchvision_name"],
+                "mean": config["mean"],
+                "std": config["std"],
+            },
         )
     }
     return AnyIterableDataset(
@@ -184,34 +226,57 @@ def evaluate(model: nn.Module, loader: DataLoader, device: torch.device, max_bat
 
 
 def train(args: argparse.Namespace) -> None:
+    from torch.utils.tensorboard import SummaryWriter
+
     torch.manual_seed(args.seed)
     random.seed(args.seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(args.seed)
         torch.backends.cuda.matmul.allow_tf32 = True
 
+    dataset_config = DATASETS[args.dataset]
     device = torch.device(args.device if args.device else ("cuda" if torch.cuda.is_available() else "cpu"))
-    run_dir = Path(args.log_dir).expanduser() / args.run_name / args.optimizer
+    run_name = args.run_name or f"{args.dataset}-transformer"
+    run_dir = Path(args.log_dir).expanduser() / run_name / args.optimizer
     run_dir.mkdir(parents=True, exist_ok=True)
     writer = SummaryWriter(log_dir=str(run_dir))
 
-    train_dataset = build_dataset("train", args.batch_size, Path(args.data_dir), Path(args.cache_dir))
-    test_dataset = build_dataset("test", args.batch_size, Path(args.data_dir), Path(args.cache_dir))
+    train_dataset = build_dataset(
+        args.dataset,
+        "train",
+        args.batch_size,
+        Path(args.data_dir),
+        Path(args.cache_dir),
+    )
+    test_dataset = build_dataset(
+        args.dataset,
+        "test",
+        args.batch_size,
+        Path(args.data_dir),
+        Path(args.cache_dir),
+    )
     train_loader = DataLoader(train_dataset, batch_size=None, num_workers=args.num_workers, pin_memory=device.type == "cuda")
     test_loader = DataLoader(test_dataset, batch_size=None, num_workers=0, pin_memory=device.type == "cuda")
 
     model = PatchTransformerClassifier(
+        image_size=dataset_config["image_size"],
+        image_channels=dataset_config["image_channels"],
+        patch_size=args.patch_size,
         hidden_dim=args.hidden_dim,
         depth=args.depth,
         heads=args.heads,
         mlp_dim=args.mlp_dim,
+        num_classes=dataset_config["num_classes"],
         dropout=args.dropout,
     ).to(device)
     optimizer = build_optimizer(args, model)
     criterion = nn.CrossEntropyLoss()
 
+    writer.add_text("config/dataset", args.dataset)
     writer.add_text("config/optimizer", args.optimizer)
     writer.add_scalar("config/learning_rate", args.lr, 0)
+    writer.add_scalar("config/batch_size", args.batch_size, 0)
+    writer.add_scalar("config/max_steps", args.max_steps, 0)
     if args.optimizer == "tse":
         writer.add_scalar("config/tse_weight", args.tse_weight, 0)
         writer.add_scalar("config/tse_gap", args.tse_gap, 0)
@@ -219,6 +284,8 @@ def train(args: argparse.Namespace) -> None:
     model.train()
     step = 0
     start = time.time()
+    last_time = start
+    last_step = 0
     while step < args.max_steps:
         for batch in train_loader:
             model.train()
@@ -237,6 +304,18 @@ def train(args: argparse.Namespace) -> None:
             if hasattr(optimizer, "last_regularizer_loss") and optimizer.last_regularizer_loss is not None:
                 writer.add_scalar("train/tse_regularizer", optimizer.last_regularizer_loss, step)
 
+            if step % args.time_every == 0 or step == args.max_steps:
+                now = time.time()
+                elapsed = now - start
+                recent_steps = max(1, step - last_step)
+                writer.add_scalar("time/seconds_elapsed", elapsed, step)
+                writer.add_scalar("time/seconds_per_step_mean", elapsed / step, step)
+                writer.add_scalar("time/seconds_per_step_recent", (now - last_time) / recent_steps, step)
+                if device.type == "cuda":
+                    writer.add_scalar("time/max_cuda_memory_gb", torch.cuda.max_memory_allocated() / 1e9, step)
+                last_time = now
+                last_step = step
+
             if step % args.eval_every == 0 or step == args.max_steps:
                 val_loss, val_acc = evaluate(model, test_loader, device, args.val_batches)
                 writer.add_scalar("val/loss", val_loss, step)
@@ -245,18 +324,24 @@ def train(args: argparse.Namespace) -> None:
             if step >= args.max_steps:
                 break
 
-    writer.add_scalar("train/seconds", time.time() - start, step)
+    elapsed = time.time() - start
+    writer.add_scalar("time/seconds_total", elapsed, step)
+    writer.add_scalar("time/seconds_per_step_total", elapsed / max(1, step), step)
     writer.flush()
     writer.close()
-    print(f"{args.optimizer} finished: steps={step}, log_dir={run_dir}")
+    print(
+        f"{args.optimizer} finished: steps={step}, seconds={elapsed:.3f}, "
+        f"seconds_per_step={elapsed / max(1, step):.6f}, log_dir={run_dir}"
+    )
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Compare Adam and TSE on MNIST with a Transformer classifier.")
+    parser = argparse.ArgumentParser(description="Compare Adam and TSE on image classification with a Transformer.")
+    parser.add_argument("--dataset", choices=sorted(DATASETS), default="mnist")
     parser.add_argument("--optimizer", choices=["adam", "tse"], required=True)
-    parser.add_argument("--run-name", default="mnist-transformer")
-    parser.add_argument("--log-dir", default="runs/mnist_tse_vs_adam")
-    parser.add_argument("--data-dir", default="data/mnist")
+    parser.add_argument("--run-name", default="")
+    parser.add_argument("--log-dir", default="runs/image_transformer_tse_vs_adam")
+    parser.add_argument("--data-dir", default="data")
     parser.add_argument("--cache-dir", default=".cache/anydatasets")
     parser.add_argument("--torch-tse-path", default="")
     parser.add_argument("--device", default="")
@@ -264,10 +349,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--max-steps", type=int, default=600)
     parser.add_argument("--eval-every", type=int, default=100)
+    parser.add_argument("--time-every", type=int, default=50)
     parser.add_argument("--val-batches", type=int, default=20)
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--lr", type=float, default=3e-4)
     parser.add_argument("--weight-decay", type=float, default=0.0)
+    parser.add_argument("--patch-size", type=int, default=4)
     parser.add_argument("--hidden-dim", type=int, default=128)
     parser.add_argument("--depth", type=int, default=4)
     parser.add_argument("--heads", type=int, default=4)
