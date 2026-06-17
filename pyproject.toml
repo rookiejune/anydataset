@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "anydatasets"
+version = "0.1.0"
+description = "PyTorch-first iterable datasets assembled from multiple cached sources."
+readme = "todo.md"
+requires-python = ">=3.9"
+dependencies = ["torch>=2.0"]
+
+[project.optional-dependencies]
+huggingface = ["datasets>=2.0"]
+examples = ["tensorboard>=2.0", "torchvision>=0.15"]
+test = ["pytest>=8.0"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
