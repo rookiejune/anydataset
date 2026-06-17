@@ -26,6 +26,14 @@ DATASETS = {
         "mean": (0.1307,),
         "std": (0.3081,),
     },
+    "fashion_mnist": {
+        "torchvision_name": "FashionMNIST",
+        "image_size": 28,
+        "image_channels": 1,
+        "num_classes": 10,
+        "mean": (0.2860,),
+        "std": (0.3530,),
+    },
     "cifar10": {
         "torchvision_name": "CIFAR10",
         "image_size": 32,
