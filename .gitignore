@@ -2,6 +2,7 @@
 __pycache__/
 *.py[cod]
 *.egg-info/
+.cache/
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
@@ -12,4 +13,3 @@ dist/
 runs/
 logs/
 data/
-
