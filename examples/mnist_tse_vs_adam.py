@@ -34,6 +34,14 @@ DATASETS = {
         "mean": (0.2860,),
         "std": (0.3530,),
     },
+    "kmnist": {
+        "torchvision_name": "KMNIST",
+        "image_size": 28,
+        "image_channels": 1,
+        "num_classes": 10,
+        "mean": (0.1918,),
+        "std": (0.3483,),
+    },
     "cifar10": {
         "torchvision_name": "CIFAR10",
         "image_size": 32,
