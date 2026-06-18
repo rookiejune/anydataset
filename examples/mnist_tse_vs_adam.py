@@ -12,9 +12,13 @@ import torch
 from torch import nn
 from torch.utils.data import DataLoader
 
-from anydatasets import AnyIterableDataset, DatasetSpec, Task
-from anydatasets.adapters.base import DatasetAdapter
 from anydatasets.cache import CacheManifest
+from anydatasets import AnyIterableDataset, DatasetSpec, Task
+
+try:
+    from anydatasets.datasets.base import DatasetAdapter
+except ImportError:
+    from anydatasets.adapters.base import DatasetAdapter
 
 
 DATASETS = {
@@ -261,6 +265,11 @@ def build_optimizer(args: argparse.Namespace, model: nn.Module):
         weight=args.tse_weight,
         gap=args.tse_gap,
         power=args.tse_power,
+        mode=args.tse_mode,
+        projection_strength=args.tse_projection_strength,
+        projection_interval=args.tse_projection_interval,
+        spectral_lr=args.tse_spectral_lr,
+        spectral_momentum=args.tse_spectral_momentum,
         parameter_filter=is_tse_matrix_parameter,
     )
 
@@ -334,7 +343,10 @@ def train(args: argparse.Namespace) -> None:
     dataset_config = DATASETS[args.dataset]
     device = torch.device(args.device if args.device else ("cuda" if torch.cuda.is_available() else "cpu"))
     run_name = args.run_name or f"{args.dataset}-transformer"
-    run_dir = Path(args.log_dir).expanduser() / run_name / args.optimizer
+    optimizer_label = args.optimizer
+    if args.optimizer in {"tse", "tse_muon"}:
+        optimizer_label = f"{args.optimizer}_{args.tse_mode}"
+    run_dir = Path(args.log_dir).expanduser() / run_name / optimizer_label
     run_dir.mkdir(parents=True, exist_ok=True)
     writer = SummaryWriter(log_dir=str(run_dir))
 
@@ -371,6 +383,7 @@ def train(args: argparse.Namespace) -> None:
 
     writer.add_text("config/dataset", args.dataset)
     writer.add_text("config/optimizer", args.optimizer)
+    writer.add_text("config/optimizer_label", optimizer_label)
     writer.add_scalar("config/learning_rate", args.lr, 0)
     writer.add_scalar("config/batch_size", args.batch_size, 0)
     writer.add_scalar("config/max_steps", args.max_steps, 0)
@@ -379,8 +392,13 @@ def train(args: argparse.Namespace) -> None:
         writer.add_scalar("config/muon_momentum", args.muon_momentum, 0)
         writer.add_scalar("config/muon_ns_steps", args.muon_ns_steps, 0)
     if args.optimizer in {"tse", "tse_muon"}:
+        writer.add_text("config/tse_mode", args.tse_mode)
         writer.add_scalar("config/tse_weight", args.tse_weight, 0)
         writer.add_scalar("config/tse_gap", args.tse_gap, 0)
+        writer.add_scalar("config/tse_projection_strength", args.tse_projection_strength, 0)
+        writer.add_scalar("config/tse_projection_interval", args.tse_projection_interval, 0)
+        writer.add_scalar("config/tse_spectral_lr", args.tse_spectral_lr, 0)
+        writer.add_scalar("config/tse_spectral_momentum", args.tse_spectral_momentum, 0)
 
     model.train()
     step = 0
@@ -470,6 +488,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--tse-weight", type=float, default=1e-4)
     parser.add_argument("--tse-gap", type=float, default=1.0 - 0.5772156649015329)
     parser.add_argument("--tse-power", type=float, default=1.0)
+    parser.add_argument(
+        "--tse-mode",
+        choices=["regularizer", "projection", "spectral_momentum", "periodic_projection"],
+        default="regularizer",
+    )
+    parser.add_argument("--tse-projection-strength", type=float, default=1.0)
+    parser.add_argument("--tse-projection-interval", type=int, default=100)
+    parser.add_argument("--tse-spectral-lr", type=float, default=0.1)
+    parser.add_argument("--tse-spectral-momentum", type=float, default=0.9)
     return parser.parse_args()
 
 
