@@ -63,23 +63,10 @@ def default_task_adapter_registry() -> TaskAdapterRegistry:
 
 
 def register_builtin_task_adapters(registry: TaskAdapterRegistry) -> None:
-    from anydataset.datasets.esc50.adapters.audio_codec import ESC50AudioCodecAdapter
-    from anydataset.datasets.fleurs.adapters.audio_codec import FleursAudioCodecAdapter
-    from anydataset.datasets.fsd50k.adapters.audio_codec import FSD50KAudioCodecAdapter
-    from anydataset.datasets.librispeech_asr.adapters.audio_codec import (
-        LibriSpeechASRAudioCodecAdapter,
-    )
-    from anydataset.datasets.nsynth.adapters.audio_codec import NSynthAudioCodecAdapter
+    from anydataset.datasets.catalog import DEFAULT_TASK_ADAPTER_REGISTRARS
 
-    registry.register("esc50", Task.AUDIO_CODEC, lambda spec: ESC50AudioCodecAdapter())
-    registry.register("fleurs", Task.AUDIO_CODEC, lambda spec: FleursAudioCodecAdapter())
-    registry.register("fsd50k", Task.AUDIO_CODEC, lambda spec: FSD50KAudioCodecAdapter())
-    registry.register(
-        "librispeech_asr",
-        Task.AUDIO_CODEC,
-        lambda spec: LibriSpeechASRAudioCodecAdapter(),
-    )
-    registry.register("nsynth", Task.AUDIO_CODEC, lambda spec: NSynthAudioCodecAdapter())
+    for register_task_adapters in DEFAULT_TASK_ADAPTER_REGISTRARS:
+        register_task_adapters(registry)
 
 
 def _validate_dataset_name(dataset_name: str) -> None:

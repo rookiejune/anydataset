@@ -147,7 +147,9 @@ dataset task adapter 负责把 raw item 映射成某个 task 的 canonical sampl
 `DatasetSpec`，而是通过 `TaskAdapterRegistry` 按 `(dataset_name, task)` 注册。
 
 `DatasetSource` 迭代时用 `spec.name` 和 `task` 精确查询 registry；没有注册项时
-raw row 原样进入 formatter。内置 adapter 由 `default_task_adapter_registry()` 注册。
+raw row 原样进入 formatter。内置 adapter 由各 `datasets/<dataset_name>/dataset.py`
+里的 `register_task_adapters(registry)` 声明，`default_task_adapter_registry()`
+只负责调用这些 dataset registrar。
 自定义数据集需要 task adapter 时，应创建 registry 并传给 `AnyDataset` 或
 `DatasetSource`。
 

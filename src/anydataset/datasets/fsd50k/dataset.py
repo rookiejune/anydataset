@@ -15,6 +15,7 @@ from anydataset.datasets.base import DatasetAdapter
 
 if TYPE_CHECKING:
     from anydataset.api.cache import CacheManifest
+    from anydataset.datasets.task_adapters import TaskAdapterRegistry
 
 
 _VALID_SPLITS = frozenset({"dev", "eval"})
@@ -28,6 +29,14 @@ def fsd50k_spec(split: str = "dev") -> DatasetSpec:
         split=split,
         adapter=FSD50KDataset(),
     )
+
+
+def register_task_adapters(registry: "TaskAdapterRegistry") -> None:
+    from anydataset.tasks import Task
+
+    from .adapters.audio_codec import FSD50KAudioCodecAdapter
+
+    registry.register("fsd50k", Task.AUDIO_CODEC, lambda spec: FSD50KAudioCodecAdapter())
 
 
 class FSD50KDataset(DatasetAdapter):

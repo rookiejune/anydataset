@@ -2,7 +2,10 @@ import unittest
 
 from anydataset import DatasetSpec, Task, TaskAdapterRegistry
 from anydataset.datasets.esc50 import ESC50AudioCodecAdapter
-from anydataset.datasets.fleurs import FleursAudioCodecAdapter
+from anydataset.datasets.fleurs import (
+    FleursAudioCodecAdapter,
+    register_task_adapters as register_fleurs_task_adapters,
+)
 from anydataset.datasets.fsd50k import FSD50KAudioCodecAdapter
 from anydataset.datasets.librispeech_asr import LibriSpeechASRAudioCodecAdapter
 from anydataset.datasets.local_files.adapters.audio_codec import AudioCodecSampleAdapter
@@ -85,6 +88,20 @@ class TaskAdapterRegistryTest(unittest.TestCase):
         )
 
         adapter = default_task_adapter_registry().resolve(spec, Task.AUDIO_CODEC)
+
+        self.assertIsInstance(adapter, FleursAudioCodecAdapter)
+
+    def test_dataset_module_registers_own_task_adapter(self):
+        registry = TaskAdapterRegistry()
+        register_fleurs_task_adapters(registry)
+        spec = DatasetSpec(
+            source="huggingface",
+            path="google/fleurs",
+            name="fleurs",
+            split="train",
+        )
+
+        adapter = registry.resolve(spec, Task.AUDIO_CODEC)
 
         self.assertIsInstance(adapter, FleursAudioCodecAdapter)
 
