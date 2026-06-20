@@ -12,13 +12,10 @@ import torch
 from torch import nn
 from torch.utils.data import DataLoader
 
-from anydatasets.cache import CacheManifest
-from anydatasets import AnyIterableDataset, DatasetSpec, Task
-
-try:
-    from anydatasets.datasets.base import DatasetAdapter
-except ImportError:
-    from anydatasets.adapters.base import DatasetAdapter
+from anydataset import AnyIterableDataset, DatasetSpec, Task
+from anydataset.api.cache import CacheManifest
+from anydataset.datasets.base import DatasetAdapter
+from anydataset.tasks import ImageClassificationFormatter
 
 
 DATASETS = {
@@ -66,10 +63,10 @@ class TorchVisionImageClassificationAdapter(DatasetAdapter):
 
         split = spec.split or "train"
         train = split == "train"
-        root = Path(spec.options.get("root", cache.cache_path / "torchvision"))
-        dataset_name = spec.options["torchvision_name"]
-        mean = tuple(spec.options["mean"])
-        std = tuple(spec.options["std"])
+        root = Path(spec.load_options.get("root", cache.cache_path / "torchvision"))
+        dataset_name = spec.load_options["torchvision_name"]
+        mean = tuple(spec.load_options["mean"])
+        std = tuple(spec.load_options["std"])
 
         transform = transforms.Compose(
             [
@@ -209,7 +206,6 @@ def is_tse_matrix_parameter(name: str, parameter: torch.nn.Parameter) -> bool:
 def build_dataset(
     dataset_name: str,
     split: str,
-    batch_size: int,
     data_dir: Path,
     cache_dir: Path,
 ) -> AnyIterableDataset:
@@ -222,7 +218,7 @@ def build_dataset(
             name=key,
             split=split,
             adapter=TorchVisionImageClassificationAdapter(),
-            options={
+            load_options={
                 "root": str(data_dir / dataset_name),
                 "torchvision_name": config["torchvision_name"],
                 "mean": config["mean"],
@@ -233,11 +229,9 @@ def build_dataset(
     return AnyIterableDataset(
         datasets=[key],
         task=Task.IMAGE_CLASSIFICATION,
-        batch_size=batch_size,
         dataset_map=dataset_map,
         cache_dir=str(cache_dir),
-        shuffle=False,
-        drop_last=(split == "train"),
+        formatter=ImageClassificationFormatter(),
     )
 
 
@@ -353,19 +347,26 @@ def train(args: argparse.Namespace) -> None:
     train_dataset = build_dataset(
         args.dataset,
         "train",
-        args.batch_size,
         Path(args.data_dir),
         Path(args.cache_dir),
     )
     test_dataset = build_dataset(
         args.dataset,
         "test",
-        args.batch_size,
         Path(args.data_dir),
         Path(args.cache_dir),
     )
-    train_loader = DataLoader(train_dataset, batch_size=None, num_workers=args.num_workers, pin_memory=device.type == "cuda")
-    test_loader = DataLoader(test_dataset, batch_size=None, num_workers=0, pin_memory=device.type == "cuda")
+    train_loader = train_dataset.dataloader(
+        batch_size=args.batch_size,
+        drop_last=True,
+        num_workers=args.num_workers,
+        pin_memory=device.type == "cuda",
+    )
+    test_loader = test_dataset.dataloader(
+        batch_size=args.batch_size,
+        num_workers=0,
+        pin_memory=device.type == "cuda",
+    )
 
     model = PatchTransformerClassifier(
         image_size=dataset_config["image_size"],
@@ -461,7 +462,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--run-name", default="")
     parser.add_argument("--log-dir", default="runs/image_transformer_tse_vs_adam")
     parser.add_argument("--data-dir", default="data")
-    parser.add_argument("--cache-dir", default=".cache/anydatasets")
+    parser.add_argument("--cache-dir", default=".cache/anydataset")
     parser.add_argument("--torch-tse-path", default="")
     parser.add_argument("--device", default="")
     parser.add_argument("--seed", type=int, default=7)
