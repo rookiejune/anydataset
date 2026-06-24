@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import torch
 
-from anydataset.samples import Sample
-from anydataset.tasks.base import SampleFormatter
-from anydataset.tasks.image_classification.schema import IMAGE_KEY, LABEL_KEY
+from ...samples import Sample
+from ..base import SampleFormatter
+from .schema import IMAGE_KEY, LABEL_KEY
 
 
 class ImageClassificationFormatter(SampleFormatter):
@@ -38,7 +38,7 @@ class ImageClassificationFormatter(SampleFormatter):
 def _as_tensor(value):
     try:
         return torch.as_tensor(value)
-    except (TypeError, ValueError, RuntimeError) as exc:
+    except (TypeError, ValueError, RuntimeError):
         try:
             import numpy as np
         except ImportError as import_exc:

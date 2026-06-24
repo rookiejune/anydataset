@@ -1,5 +1,5 @@
 from .api.dataset import AnyDataset, DatasetSource
-from .api.resolver import DatasetResolver
+from .api.resolver import DatasetRef, DatasetResolver, resolve_dataset_spec, resolve_dataset_specs
 from .api.spec import DatasetSpec
 from .api.strategy import (
     IterationStrategy,
@@ -7,50 +7,76 @@ from .api.strategy import (
     SequentialStrategy,
     WeightedRandomStrategy,
 )
-from .datasets import (
-    ESC50AudioCodecAdapter,
-    FSD50KAudioCodecAdapter,
-    FSD50KDataset,
-    FleursAudioCodecAdapter,
-    LibriSpeechASRAudioCodecAdapter,
-    NSynthAudioCodecAdapter,
-    TaskSampleAdapter,
-    TaskAdapterRegistry,
-    default_task_adapter_registry,
+from .adapters import (
+    DatasetAdapter,
+    ESC50Adapter,
+    FSD50KAdapter,
+    FleursAdapter,
+    HuggingFaceAdapter,
+    LibriSpeechASRAdapter,
+    LocalFilesAdapter,
+    MissingModalityError,
+    ModalityAdapter,
+    NSynthAdapter,
+    UnifiedDatasetAdapter,
     esc50_spec,
     fleurs_spec,
     fsd50k_spec,
     librispeech_asr_spec,
     nsynth_spec,
 )
-from .datasets.local_files.adapters.audio_codec import AudioCodecSampleAdapter
+from .modalities import ModalityKey, ModalityRole, ViewRef
+from .modalities.audio import AudioKey, AudioOptKey, AudioView
+from .modalities.text import TextKey, TextOptKey
+from .providers import LongCatCodec, LongCatViewProvider
+from .store import ViewInput, ViewMaterializer
 from .tasks import (
+    AudioCodecKey,
+    AudioCodecSampleKey,
     Task,
 )
 
 __all__ = [
-    "AudioCodecSampleAdapter",
+    "AudioCodecKey",
+    "AudioCodecSampleKey",
     "AnyDataset",
+    "AudioKey",
+    "AudioOptKey",
+    "AudioView",
     "DatasetResolver",
+    "DatasetRef",
     "DatasetSource",
     "DatasetSpec",
-    "ESC50AudioCodecAdapter",
-    "FSD50KAudioCodecAdapter",
-    "FSD50KDataset",
-    "FleursAudioCodecAdapter",
+    "DatasetAdapter",
+    "ESC50Adapter",
+    "FSD50KAdapter",
+    "FleursAdapter",
+    "HuggingFaceAdapter",
     "IterationStrategy",
-    "LibriSpeechASRAudioCodecAdapter",
-    "NSynthAudioCodecAdapter",
+    "LibriSpeechASRAdapter",
+    "LocalFilesAdapter",
+    "LongCatCodec",
+    "LongCatViewProvider",
+    "MissingModalityError",
+    "ModalityKey",
+    "ModalityAdapter",
+    "ModalityRole",
+    "NSynthAdapter",
+    "UnifiedDatasetAdapter",
     "RoundRobinStrategy",
     "SequentialStrategy",
     "Task",
-    "TaskAdapterRegistry",
-    "TaskSampleAdapter",
+    "TextKey",
+    "TextOptKey",
+    "ViewInput",
+    "ViewMaterializer",
+    "ViewRef",
     "WeightedRandomStrategy",
-    "default_task_adapter_registry",
     "esc50_spec",
     "fleurs_spec",
     "fsd50k_spec",
     "librispeech_asr_spec",
     "nsynth_spec",
+    "resolve_dataset_spec",
+    "resolve_dataset_specs",
 ]

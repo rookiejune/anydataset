@@ -75,7 +75,6 @@ def _spec_metadata(spec: DatasetSpec) -> dict[str, Any]:
         "split": spec.split,
         "version": spec.version,
         "load_options": dict(spec.load_options),
-        "adapter": type(spec.adapter).__name__ if spec.adapter is not None else None,
     }
 
 

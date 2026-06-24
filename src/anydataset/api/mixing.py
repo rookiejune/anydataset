@@ -7,7 +7,7 @@ from dataclasses import dataclass
 import threading
 from typing import Iterator, Sequence
 
-from anydataset.samples import Sample
+from ..samples import Sample
 
 
 @dataclass

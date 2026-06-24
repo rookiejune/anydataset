@@ -9,17 +9,15 @@ from unittest import mock
 
 from anydataset import (
     AnyDataset,
+    LocalFilesAdapter,
     DatasetSource,
     DatasetSpec,
     RoundRobinStrategy,
     Task,
-    TaskAdapterRegistry,
     WeightedRandomStrategy,
 )
-from anydataset.datasets.base import DatasetAdapter
-from anydataset.datasets.local_files.adapters.audio_codec import AudioCodecSampleAdapter
-from anydataset.samples import Sample
-from anydataset.tasks import AudioCodecFormatter, SampleFormatter
+from anydataset.adapters import DatasetAdapter
+from anydataset import AudioKey, AudioView, ModalityKey
 
 
 class StaticAdapter(DatasetAdapter):
@@ -48,25 +46,31 @@ class CountingMaterializeAdapter(StaticAdapter):
         return self.rows
 
 
-class RecordingSampleFormatter(SampleFormatter):
-    def __init__(self):
-        self.calls = []
-
-    def __call__(self, sample):
-        self.calls.append((sample.dataset_name, sample.sample_index))
-        data = dict(sample.data)
-        data["value"] *= 10
-        return Sample(
-            data=data,
-            dataset_name=sample.dataset_name,
-            sample_index=sample.sample_index,
+class _StaticAudioAdapter(StaticAdapter):
+    def __init__(self, rows):
+        super().__init__(rows)
+        self._fields = LocalFilesAdapter(
+            waveform_field="samples",
+            sample_rate_field="sr",
         )
+
+    def audio(self, row, role=None):
+        return self._fields.audio(row, role=role)
 
 
 class AnyDatasetTest(unittest.TestCase):
     def test_rejects_string_task(self):
         with self.assertRaises(TypeError):
             AnyDataset(datasets=["mnist:train"], task="image_classification")
+
+    def test_accepts_single_dataset_string(self):
+        dataset = AnyDataset(
+            datasets="mnist:train",
+            task=Task.IMAGE_CLASSIFICATION,
+        )
+
+        self.assertEqual(len(dataset.specs), 1)
+        self.assertEqual(dataset.specs[0].key, "mnist:train")
 
     def test_iterates_single_dataset_samples(self):
         adapter = StaticAdapter(
@@ -76,7 +80,10 @@ class AnyDatasetTest(unittest.TestCase):
             ]
         )
         dataset_map = {
-            "toy": _static_spec("toy", adapter),
+            "toy": _static_spec("toy"),
+        }
+        adapter_map = {
+            "toy": adapter,
         }
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -84,6 +91,7 @@ class AnyDatasetTest(unittest.TestCase):
                 datasets=["toy:train"],
                 task=Task.IMAGE_CLASSIFICATION,
                 dataset_map=dataset_map,
+                adapter_map=adapter_map,
                 cache_dir=tmpdir,
             )
             samples = list(dataset)
@@ -95,8 +103,12 @@ class AnyDatasetTest(unittest.TestCase):
 
     def test_default_strategy_iterates_datasets_sequentially(self):
         dataset_map = {
-            "a": _static_spec("a", [{"value": 1}]),
-            "b": _static_spec("b", [{"value": 2}]),
+            "a": _static_spec("a"),
+            "b": _static_spec("b"),
+        }
+        adapter_map = {
+            "a": StaticAdapter([{"value": 1}]),
+            "b": StaticAdapter([{"value": 2}]),
         }
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -104,6 +116,7 @@ class AnyDatasetTest(unittest.TestCase):
                 datasets=["a:train", "b:train"],
                 task=Task.IMAGE_CLASSIFICATION,
                 dataset_map=dataset_map,
+                adapter_map=adapter_map,
                 cache_dir=tmpdir,
             )
             samples = list(dataset)
@@ -113,18 +126,12 @@ class AnyDatasetTest(unittest.TestCase):
 
     def test_round_robin_strategy_interleaves_datasets(self):
         dataset_map = {
-            "a": DatasetSpec(
-                source="static",
-                path="a",
-                name="a",
-                adapter=StaticAdapter([{"value": "a0"}, {"value": "a1"}]),
-            ),
-            "b": DatasetSpec(
-                source="static",
-                path="b",
-                name="b",
-                adapter=StaticAdapter([{"value": "b0"}]),
-            ),
+            "a": _static_spec("a"),
+            "b": _static_spec("b"),
+        }
+        adapter_map = {
+            "a": StaticAdapter([{"value": "a0"}, {"value": "a1"}]),
+            "b": StaticAdapter([{"value": "b0"}]),
         }
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -132,6 +139,7 @@ class AnyDatasetTest(unittest.TestCase):
                 datasets=["a:train", "b:train"],
                 task=Task.IMAGE_CLASSIFICATION,
                 dataset_map=dataset_map,
+                adapter_map=adapter_map,
                 cache_dir=tmpdir,
                 strategy=RoundRobinStrategy(),
             )
@@ -141,8 +149,12 @@ class AnyDatasetTest(unittest.TestCase):
 
     def test_weighted_random_strategy_can_disable_dataset(self):
         dataset_map = {
-            "a": _static_spec("a", [{"value": 1}]),
-            "b": _static_spec("b", [{"value": 2}]),
+            "a": _static_spec("a"),
+            "b": _static_spec("b"),
+        }
+        adapter_map = {
+            "a": StaticAdapter([{"value": 1}]),
+            "b": StaticAdapter([{"value": 2}]),
         }
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -150,6 +162,7 @@ class AnyDatasetTest(unittest.TestCase):
                 datasets=["a:train", "b:train"],
                 task=Task.IMAGE_CLASSIFICATION,
                 dataset_map=dataset_map,
+                adapter_map=adapter_map,
                 cache_dir=tmpdir,
                 strategy=WeightedRandomStrategy(weights={"b:train": 0.0}, seed=1),
             )
@@ -157,58 +170,14 @@ class AnyDatasetTest(unittest.TestCase):
 
         self.assertEqual([sample.dataset_name for sample in samples], ["a:train"])
 
-    def test_sample_formatter_is_used_and_preserves_dataset_order(self):
-        dataset_map = {
-            "a": _static_spec("a", [{"value": 1}]),
-            "b": _static_spec("b", [{"value": 2}]),
-        }
-        formatter = RecordingSampleFormatter()
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            dataset = AnyDataset(
-                datasets=["a:train", "b:train"],
-                task=Task.IMAGE_CLASSIFICATION,
-                dataset_map=dataset_map,
-                formatter=formatter,
-                cache_dir=tmpdir,
-            )
-            samples = list(dataset)
-
-        self.assertEqual([sample.dataset_name for sample in samples], ["a:train", "b:train"])
-        self.assertEqual([sample.data["value"] for sample in samples], [10, 20])
-        self.assertEqual(formatter.calls, [("a:train", 0), ("b:train", 0)])
-
-    def test_function_formatter_is_supported(self):
-        adapter = StaticAdapter([{"value": 3}])
-        dataset_map = {
-            "toy": _static_spec("toy", adapter),
-        }
-
-        def formatter(sample):
-            data = dict(sample.data)
-            data["value"] += 4
-            return Sample(
-                data=data,
-                dataset_name=sample.dataset_name,
-                sample_index=sample.sample_index,
-            )
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            dataset = AnyDataset(
-                datasets=["toy:train"],
-                task=Task.IMAGE_CLASSIFICATION,
-                dataset_map=dataset_map,
-                formatter=formatter,
-                cache_dir=tmpdir,
-            )
-            samples = list(dataset)
-
-        self.assertEqual(samples[0].data["value"], 7)
-
     def test_getitem_returns_single_dataset(self):
         dataset_map = {
-            "a": _static_spec("a", [{"value": 1}]),
-            "b": _static_spec("b", [{"value": 2}]),
+            "a": _static_spec("a"),
+            "b": _static_spec("b"),
+        }
+        adapter_map = {
+            "a": StaticAdapter([{"value": 1}]),
+            "b": StaticAdapter([{"value": 2}]),
         }
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -216,6 +185,7 @@ class AnyDatasetTest(unittest.TestCase):
                 datasets=["a:train", "b:train"],
                 task=Task.IMAGE_CLASSIFICATION,
                 dataset_map=dataset_map,
+                adapter_map=adapter_map,
                 cache_dir=tmpdir,
             )
             single = dataset["b:train"]
@@ -232,13 +202,13 @@ class AnyDatasetTest(unittest.TestCase):
             path="toy",
             name="toy",
             split="train",
-            adapter=StaticAdapter([{"value": 3}]),
         )
 
         with tempfile.TemporaryDirectory() as tmpdir:
             dataset = DatasetSource(
                 spec=spec,
                 task=Task.IMAGE_CLASSIFICATION,
+                adapter=StaticAdapter([{"value": 3}]),
                 cache_dir=tmpdir,
             )
             samples = list(dataset)
@@ -254,8 +224,12 @@ class AnyDatasetTest(unittest.TestCase):
 
     def test_dataset_accepts_prebuilt_sources(self):
         dataset_map = {
-            "a": DatasetSpec(source="static", path="a", name="a", split="train", adapter=StaticAdapter([{"value": 1}])),
-            "b": DatasetSpec(source="static", path="b", name="b", split="train", adapter=StaticAdapter([{"value": 2}])),
+            "a": DatasetSpec(source="static", path="a", name="a", split="train"),
+            "b": DatasetSpec(source="static", path="b", name="b", split="train"),
+        }
+        adapter_map = {
+            "a": StaticAdapter([{"value": 1}]),
+            "b": StaticAdapter([{"value": 2}]),
         }
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -263,11 +237,13 @@ class AnyDatasetTest(unittest.TestCase):
                 DatasetSource(
                     spec=dataset_map["a"],
                     task=Task.IMAGE_CLASSIFICATION,
+                    adapter=adapter_map["a"],
                     cache_dir=tmpdir,
                 ),
                 DatasetSource(
                     spec=dataset_map["b"],
                     task=Task.IMAGE_CLASSIFICATION,
+                    adapter=adapter_map["b"],
                     cache_dir=tmpdir,
                 ),
             ]
@@ -279,13 +255,15 @@ class AnyDatasetTest(unittest.TestCase):
 
         self.assertEqual([sample.data["value"] for sample in samples], [1, 2])
 
-    def test_prebuilt_sources_reject_outer_mapping_and_formatter(self):
-        spec = _static_spec("toy", [{"value": 1}])
+    def test_prebuilt_sources_reject_outer_mapping_and_options(self):
+        spec = _static_spec("toy")
+        adapter = StaticAdapter([{"value": 1}])
 
         with tempfile.TemporaryDirectory() as tmpdir:
             single = DatasetSource(
                 spec=spec,
                 task=Task.IMAGE_CLASSIFICATION,
+                adapter=adapter,
                 cache_dir=tmpdir,
             )
             with self.assertRaises(ValueError):
@@ -296,7 +274,7 @@ class AnyDatasetTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 AnyDataset(
                     datasets=[single],
-                    formatter=RecordingSampleFormatter(),
+                    adapter_map={"toy": adapter},
                 )
             with self.assertRaises(ValueError):
                 AnyDataset(
@@ -304,8 +282,8 @@ class AnyDatasetTest(unittest.TestCase):
                     cache_dir=tmpdir,
                 )
 
-    def test_audio_formatter_and_task_adapter(self):
-        adapter = StaticAdapter(
+    def test_audio_task_uses_modality_adapter(self):
+        adapter = _StaticAudioAdapter(
             [
                 {
                     "samples": [1.0],
@@ -318,47 +296,36 @@ class AnyDatasetTest(unittest.TestCase):
                 source="static",
                 path="audio",
                 name="audio",
-                adapter=adapter,
             ),
         }
-        registry = TaskAdapterRegistry()
-        registry.register(
-            "audio",
-            Task.AUDIO_CODEC,
-            lambda spec: AudioCodecSampleAdapter(
-                waveform_key="samples",
-                sample_rate_key="sr",
-            ),
-        )
-
+        adapter_map = {"audio": adapter}
         with tempfile.TemporaryDirectory() as tmpdir:
             dataset = AnyDataset(
                 datasets=["audio:train"],
                 task=Task.AUDIO_CODEC,
                 dataset_map=dataset_map,
-                task_adapter_registry=registry,
+                adapter_map=adapter_map,
                 cache_dir=tmpdir,
-                formatter=AudioCodecFormatter(
-                    sample_rate=2,
-                    channels=1,
-                    max_clip_seconds=1.0,
-                ),
             )
             sample = next(iter(dataset))
 
-        self.assertEqual(tuple(sample.data["waveform"].shape), (1, 1))
+        audio = sample.data[ModalityKey.AUDIO]
+        self.assertEqual(audio[AudioKey.VIEWS][AudioView.WAVEFORM], [1.0])
+        self.assertEqual(audio[AudioKey.SAMPLE_RATE], 2)
 
     def test_manual_shards_are_disjoint(self):
         rows = [{"image": [[index]], "label": index} for index in range(6)]
         dataset_map = {
-            "toy": _static_spec("toy", rows),
+            "toy": _static_spec("toy"),
         }
+        adapter_map = {"toy": StaticAdapter(rows)}
 
         with tempfile.TemporaryDirectory() as tmpdir:
             dataset = AnyDataset(
                 datasets=["toy:train"],
                 task=Task.IMAGE_CLASSIFICATION,
                 dataset_map=dataset_map,
+                adapter_map=adapter_map,
                 cache_dir=tmpdir,
             )
             even_indices = _sample_indices(dataset.shard(2, 0))
@@ -371,14 +338,16 @@ class AnyDatasetTest(unittest.TestCase):
     def test_workers_are_sharded_inside_single_dataset(self):
         rows = [{"image": [[index]], "label": index} for index in range(8)]
         dataset_map = {
-            "toy": _static_spec("toy", rows),
+            "toy": _static_spec("toy"),
         }
+        adapter_map = {"toy": StaticAdapter(rows)}
 
         with tempfile.TemporaryDirectory() as tmpdir:
             dataset = AnyDataset(
                 datasets=["toy:train"],
                 task=Task.IMAGE_CLASSIFICATION,
                 dataset_map=dataset_map,
+                adapter_map=adapter_map,
                 cache_dir=tmpdir,
             )
             with mock.patch(
@@ -401,14 +370,16 @@ class AnyDatasetTest(unittest.TestCase):
     def test_distributed_iteration_requires_explicit_shard(self):
         rows = [{"image": [[index]], "label": index} for index in range(6)]
         dataset_map = {
-            "toy": _static_spec("toy", rows),
+            "toy": _static_spec("toy"),
         }
+        adapter_map = {"toy": StaticAdapter(rows)}
 
         with tempfile.TemporaryDirectory() as tmpdir:
             dataset = AnyDataset(
                 datasets=["toy:train"],
                 task=Task.IMAGE_CLASSIFICATION,
                 dataset_map=dataset_map,
+                adapter_map=adapter_map,
                 cache_dir=tmpdir,
             )
             with mock.patch.dict(os.environ, {"WORLD_SIZE": "2", "RANK": "1"}):
@@ -424,14 +395,16 @@ class AnyDatasetTest(unittest.TestCase):
             delay=0.2,
         )
         dataset_map = {
-            "toy": _static_spec("toy", adapter),
+            "toy": _static_spec("toy"),
         }
+        adapter_map = {"toy": adapter}
 
         def consume(cache_dir):
             dataset = AnyDataset(
                 datasets=["toy:train"],
                 task=Task.IMAGE_CLASSIFICATION,
                 dataset_map=dataset_map,
+                adapter_map=adapter_map,
                 cache_dir=cache_dir,
             )
             return [sample.sample_index for sample in dataset]
@@ -448,17 +421,11 @@ def _sample_indices(dataset):
     return [sample.sample_index for sample in dataset]
 
 
-def _static_spec(name, rows_or_adapter):
-    adapter = (
-        rows_or_adapter
-        if isinstance(rows_or_adapter, DatasetAdapter)
-        else StaticAdapter(rows_or_adapter)
-    )
+def _static_spec(name):
     return DatasetSpec(
         source="static",
         path=name,
         name=name,
-        adapter=adapter,
     )
 
 

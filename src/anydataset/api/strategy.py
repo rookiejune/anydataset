@@ -5,7 +5,7 @@ from dataclasses import dataclass
 import random
 from typing import Iterator, Mapping, Protocol, Sequence
 
-from anydataset.samples import Sample
+from ..samples import Sample
 
 
 class SampleSource(Protocol):

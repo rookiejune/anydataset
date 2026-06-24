@@ -1,14 +1,14 @@
 from __future__ import annotations
 
-from abc import ABC
-from enum import Enum, auto
+from abc import ABC, abstractmethod
+from enum import auto
+from typing import TYPE_CHECKING, Any, Mapping
 
-from anydataset.samples import Sample
+from ..enums import AutoNameEnum
+from ..samples import Sample
 
-
-class AutoNameEnum(str, Enum):
-    def _generate_next_value_(name, start, count, last_values):
-        return name.lower()
+if TYPE_CHECKING:
+    from anydataset.adapters import ModalityAdapter
 
 
 class Task(AutoNameEnum):
@@ -16,9 +16,31 @@ class Task(AutoNameEnum):
     AUDIO_CODEC = auto()
 
 
+class TaskAdapter(ABC):
+    @abstractmethod
+    def adapt(
+        self,
+        row: Mapping[str, Any],
+        adapter: "ModalityAdapter",
+    ) -> Mapping[str, Any]:
+        raise NotImplementedError
+
+
 class SampleFormatter(ABC):
     def __call__(self, sample: Sample) -> Sample:
         return sample
+
+
+def get_task_adapter(task: Task) -> TaskAdapter:
+    if not isinstance(task, Task):
+        raise TypeError(f"task must be a Task enum value, got {task!r}.")
+
+    if task is Task.AUDIO_CODEC:
+        from .audio_codec import AudioCodecAdapter
+
+        return AudioCodecAdapter()
+
+    raise ValueError(f"Task {task.value!r} does not define a dataset adapter hook.")
 
 
 def get_sample_formatter(task: Task, **formatter_kwargs) -> SampleFormatter:

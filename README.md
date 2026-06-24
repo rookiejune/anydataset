@@ -1,7 +1,7 @@
 # anydataset
 
 `anydataset` is a PyTorch-first iterable dataset library. It reads samples from one
-or more dataset sources and returns formatted `Sample` objects. Multi-source
+or more dataset sources and returns structured `Sample` objects. Multi-source
 datasets behave like a single `IterableDataset`; batching and collation stay in
 the caller's PyTorch `DataLoader`.
 
@@ -40,9 +40,16 @@ for batch in loader:
     break
 ```
 
-`AnyDataset` initialization is intentionally thin. Per-sample formatting
-belongs to `formatter`, multi-source iteration order belongs to `strategy`, and
-distributed sharding belongs to `.shard(...)`.
+`datasets` accepts either a single dataset reference such as `"mnist:train"` or a
+sequence of references/specs. String references are resolved through the default
+catalog and optional `dataset_map`.
+
+`DatasetSpec` describes the physical data source. Dataset adapters are provided
+separately through `adapter_map` when raw rows need dataset-specific mapping into
+logical modalities.
+
+`AnyDataset` initialization is intentionally thin. Multi-source iteration order
+belongs to `strategy`, and distributed sharding belongs to `.shard(...)`.
 
 ```python
 rank_dataset = dataset.shard(num_shards=8, shard_id=0)
@@ -75,12 +82,15 @@ weighted = AnyDataset(
 Streaming is enabled through `DatasetSpec.load_options` and is passed to
 `datasets.load_dataset(...)`.
 
+Built-in audio/parquet catalog entries such as `fleurs`, `librispeech_asr`,
+`esc50`, and `nsynth` default to `load_options={"streaming": True}`. Explicit
+`hf://...` references and custom `DatasetSpec` values do not force streaming;
+set `load_options` yourself when you want that behavior.
+
 ```python
 from torch.utils.data import DataLoader
 
 from anydataset import AnyDataset, DatasetSpec, Task
-from anydataset.tasks import ImageClassificationFormatter
-
 dataset = AnyDataset(
     datasets=["mnist_stream"],
     task=Task.IMAGE_CLASSIFICATION,
@@ -93,7 +103,6 @@ dataset = AnyDataset(
             load_options={"streaming": True},
         )
     },
-    formatter=ImageClassificationFormatter(),
 )
 
 loader = DataLoader(dataset, batch_size=32, collate_fn=lambda samples: samples)
@@ -115,8 +124,7 @@ materializing Arrow files.
 
 ```python
 from anydataset import AnyDataset, DatasetSpec, Task
-from anydataset.datasets import LocalFilesDataset
-from anydataset.tasks import ImageClassificationFormatter
+from anydataset.adapters import LocalFilesAdapter
 
 dataset = AnyDataset(
     datasets=["my_images:train"],
@@ -126,25 +134,19 @@ dataset = AnyDataset(
             source="local_files",
             path="/data/my_images",
             name="my_images",
-            adapter=LocalFilesDataset(),
         )
     },
-    formatter=ImageClassificationFormatter(),
+    adapter_map={
+        "my_images": LocalFilesAdapter(),
+    },
 )
 ```
 
-Task adapters are registered by dataset name and task:
+Dataset adapters can define both row iteration and modality extraction:
 
 ```python
-from anydataset import AnyDataset, DatasetSpec, Task, TaskAdapterRegistry
-from anydataset.datasets.local_files.adapters.audio_codec import AudioCodecSampleAdapter
-
-registry = TaskAdapterRegistry()
-registry.register(
-    "my_audio",
-    Task.AUDIO_CODEC,
-    lambda spec: AudioCodecSampleAdapter(waveform_key="samples", sample_rate_key="sr"),
-)
+from anydataset import AnyDataset, DatasetSpec, Task
+from anydataset.adapters import LocalFilesAdapter
 
 dataset = AnyDataset(
     datasets=["my_audio:train"],
@@ -156,8 +158,74 @@ dataset = AnyDataset(
             name="my_audio",
         )
     },
-    task_adapter_registry=registry,
+    adapter_map={
+        "my_audio": LocalFilesAdapter(waveform_field="samples", sample_rate_field="sr"),
+    },
 )
+```
+
+## Unified Store
+
+Datasets written by `DatasetWriter` can be read back with `source="unified"`.
+The MVP reader supports default-role audio `waveform` and `file` views.
+
+```python
+from anydataset import AnyDataset, DatasetSpec, Task
+
+dataset = AnyDataset(
+    datasets=DatasetSpec(
+        source="unified",
+        path="/data/my_anydataset",
+        name="my_audio",
+        split="train",
+    ),
+    task=Task.AUDIO_CODEC,
+)
+```
+
+The same source is available as a string reference:
+
+```python
+dataset = AnyDataset(
+    datasets="unified:///data/my_anydataset:train",
+    task=Task.AUDIO_CODEC,
+)
+```
+
+`ViewMaterializer` can create a new self-contained unified dataset with an
+additional or replaced view:
+
+```python
+import torch
+
+from anydataset import AudioView, ModalityKey, ViewMaterializer, ViewRef
+
+ViewMaterializer(
+    input_dir="/data/my_anydataset",
+    output_dir="/data/my_anydataset_longcat",
+    input_ref=ViewRef(ModalityKey.AUDIO, AudioView.WAVEFORM),
+    output_ref=ViewRef(ModalityKey.AUDIO, AudioView.LONGCAT),
+    transform=lambda view: {"semantic_codes": view.value.to(torch.int64)},
+    provider_name="toy_longcat",
+    provider_version="1",
+).write()
+```
+
+LongCat can be used as a lazy optional provider. Pass an initialized codec to
+avoid importing `anytrain`; otherwise the provider loads
+`anytrain.codec.longcat.LongCatAudioCodec` on first use:
+
+```python
+from anydataset import LongCatViewProvider
+
+LongCatViewProvider(
+    device="cuda",
+    n_acoustic_codebooks=2,
+    local_files_only=True,
+).materializer(
+    input_dir="/data/my_anydataset",
+    output_dir="/data/my_anydataset_longcat",
+).write()
 ```
 
 ## Development

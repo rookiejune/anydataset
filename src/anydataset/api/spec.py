@@ -11,10 +11,7 @@ class DatasetSpec:
     name: str
     split: str | None = None
     version: str | None = None
-    adapter: Any | None = None
     load_options: Mapping[str, Any] = field(default_factory=dict)
-    sample_metadata: Mapping[str, Any] = field(default_factory=dict)
-    ref: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.name, str) or not self.name:
@@ -22,8 +19,6 @@ class DatasetSpec:
 
     @property
     def key(self) -> str:
-        if self.ref:
-            return self.ref
         if self.name and self.split:
             return f"{self.name}:{self.split}"
         return self.name

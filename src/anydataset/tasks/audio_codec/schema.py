@@ -1,6 +1,13 @@
 from __future__ import annotations
 
+from ...modalities import ModalityKey
+from ...modalities.audio import AudioKey, AudioOptKey
+from ...modalities.text import TextKey, TextOptKey
 
-WAVEFORM_KEY = "waveform"
-SAMPLE_RATE_KEY = "sample_rate"
-TEXT_KEY = "text"
+
+class AudioCodecKey:
+    TEXT = ModalityKey.TEXT
+    LANG = TextOptKey.LANG
+
+
+type AudioCodecSampleKey = ModalityKey | AudioKey | AudioOptKey | TextKey | TextOptKey

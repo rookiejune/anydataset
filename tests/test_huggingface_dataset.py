@@ -6,10 +6,10 @@ from unittest import mock
 
 from anydataset.api.cache import CacheManager
 from anydataset.api.spec import DatasetSpec
-from anydataset.datasets.huggingface import HuggingFaceDataset
+from anydataset.adapters import HuggingFaceAdapter
 
 
-class HuggingFaceDatasetTest(unittest.TestCase):
+class HuggingFaceAdapterTest(unittest.TestCase):
     def test_prepare_maps_config_name_to_load_dataset_name(self):
         calls = []
         fake_datasets = types.ModuleType("datasets")
@@ -33,7 +33,7 @@ class HuggingFaceDatasetTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             cache = CacheManager(tmpdir).prepare(spec)
             with mock.patch.dict(sys.modules, {"datasets": fake_datasets}):
-                manifest = HuggingFaceDataset().prepare(spec, cache)
+                manifest = HuggingFaceAdapter().prepare(spec, cache)
 
         self.assertEqual(manifest, [{"value": 1}])
         self.assertEqual(calls[0][0], ("org/audio",))
@@ -51,7 +51,7 @@ class HuggingFaceDatasetTest(unittest.TestCase):
         )
 
         rows = list(
-            HuggingFaceDataset().iter_indexed_samples(
+            HuggingFaceAdapter().iter_indexed_samples(
                 manifest,
                 num_shards=2,
                 shard_id=1,

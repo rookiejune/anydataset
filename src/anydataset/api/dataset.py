@@ -3,28 +3,24 @@ from __future__ import annotations
 from dataclasses import dataclass
 import os
 from pathlib import Path
-from typing import Any, Callable, Iterator, Mapping, Sequence
+from typing import Any, Iterator, Mapping, Sequence
 
 from torch.utils.data import IterableDataset, get_worker_info
 
-from anydataset.datasets.base import DatasetAdapter
-from anydataset.datasets.huggingface import HuggingFaceDataset
-from anydataset.datasets.local_files import LocalFilesDataset
-from anydataset.datasets.task_adapters import (
-    TaskAdapterRegistry,
-    default_task_adapter_registry,
-)
-from anydataset.samples import Sample
-from anydataset.tasks import SampleFormatter, Task
+from ..adapters import DatasetAdapter, HuggingFaceAdapter, LocalFilesAdapter, UnifiedDatasetAdapter
+from ..adapters.catalog import DEFAULT_ADAPTER_MAP, AdapterBinding
+from ..samples import Sample
+from ..tasks import Task, get_task_adapter
 
 from .cache import CacheManager
-from .resolver import DatasetResolver
+from .resolver import DatasetRef, DatasetResolver
 from .spec import DatasetSpec
 from .strategy import IterationStrategy, SequentialStrategy
 
 
 _SHARD_UNSET = object()
-SampleFormatterLike = SampleFormatter | Callable[[Sample], Sample]
+
+type AdapterMap = Mapping[str, AdapterBinding]
 
 
 class DatasetSource(IterableDataset):
@@ -33,40 +29,31 @@ class DatasetSource(IterableDataset):
         spec: DatasetSpec,
         task: Task,
         *,
-        formatter: SampleFormatterLike | None = None,
         cache_dir: str | Path = "~/.cache/anydataset",
-        task_adapter_registry: TaskAdapterRegistry | None = None,
+        adapter: DatasetAdapter | None = None,
+        dataset_name: str | None = None,
         shard: "_ShardInfo | None" = None,
     ):
         if not isinstance(spec, DatasetSpec):
             raise TypeError("spec must be a DatasetSpec.")
         if not isinstance(task, Task):
             raise TypeError("task must be a Task enum value.")
-        if formatter is not None and not callable(formatter):
-            raise TypeError("formatter must be callable.")
-        if task_adapter_registry is not None and not isinstance(
-            task_adapter_registry,
-            TaskAdapterRegistry,
-        ):
-            raise TypeError("task_adapter_registry must be a TaskAdapterRegistry.")
+        if adapter is not None and not isinstance(adapter, DatasetAdapter):
+            raise TypeError("adapter must be a DatasetAdapter.")
 
         super().__init__()
         self.task = task
         self.spec = spec
-        self.formatter = formatter
+        self.adapter = adapter if adapter is not None else _adapter_for(spec)
+        self._name = dataset_name or spec.key
         self.cache = CacheManager(cache_dir)
-        self.task_adapter_registry = (
-            task_adapter_registry
-            if task_adapter_registry is not None
-            else default_task_adapter_registry()
-        )
         self._shard = shard
         if self._shard is not None:
             _validate_shard(self._shard.num_shards, self._shard.shard_id)
 
     @property
     def name(self) -> str:
-        return self.spec.key
+        return self._name
 
     def __iter__(self) -> Iterator[Sample]:
         self._ensure_distributed_shard()
@@ -77,16 +64,16 @@ class DatasetSource(IterableDataset):
         return self._clone(shard=_ShardInfo(num_shards=num_shards, shard_id=shard_id))
 
     def matches(self, dataset_ref: str) -> bool:
-        return dataset_ref in {self.spec.key, self.spec.ref, self.spec.name}
+        return dataset_ref in {self.name, self.spec.key, self.spec.name}
 
     def _clone(self, shard: Any = _SHARD_UNSET) -> "DatasetSource":
         clone_shard = self._shard if shard is _SHARD_UNSET else shard
         return DatasetSource(
             spec=self.spec,
             task=self.task,
-            formatter=self.formatter,
             cache_dir=self.cache.root,
-            task_adapter_registry=self.task_adapter_registry,
+            adapter=self.adapter,
+            dataset_name=self.name,
             shard=clone_shard,
         )
 
@@ -95,14 +82,14 @@ class DatasetSource(IterableDataset):
 
     def _iter_samples(self, shard: "_ShardInfo") -> Iterator[Sample]:
         cache = self.cache.prepare(self.spec)
-        adapter = _adapter_for(self.spec)
+        adapter = self.adapter
         manifest = self._prepare_manifest(cache, adapter)
         rows = adapter.iter_indexed_samples(
             manifest,
             num_shards=shard.num_shards,
             shard_id=shard.shard_id,
         )
-        yield from self._wrap_samples(rows)
+        yield from self._wrap_samples(rows, adapter)
 
     def _prepare_manifest(self, cache, adapter: DatasetAdapter):
         if not self.cache.is_ready(cache):
@@ -113,23 +100,18 @@ class DatasetSource(IterableDataset):
                     return manifest
         return adapter.prepare(self.spec, cache)
 
-    def _wrap_samples(self, rows: Iterator[tuple[int, dict]]) -> Iterator[Sample]:
-        task_adapter = self.task_adapter_registry.resolve(self.spec, self.task)
+    def _wrap_samples(
+        self,
+        rows: Iterator[tuple[int, dict]],
+        adapter: DatasetAdapter,
+    ) -> Iterator[Sample]:
+        task_adapter = _task_adapter_for(self.task)
         for index, row in rows:
-            data = dict(self.spec.sample_metadata)
-            data.update(row)
+            data = dict(row)
             if task_adapter is not None:
-                data = dict(task_adapter.adapt(data))
-            sample = Sample(data=data, dataset_name=self.spec.key, sample_index=index)
-            yield self._format_sample(sample)
-
-    def _format_sample(self, sample: Sample) -> Sample:
-        if self.formatter is None:
-            return sample
-        formatted = self.formatter(sample)
-        if not isinstance(formatted, Sample):
-            raise TypeError("formatter must return a Sample.")
-        return formatted
+                data = dict(task_adapter.adapt(data, adapter))
+            sample = Sample(data=data, dataset_name=self.name, sample_index=index)
+            yield sample
 
     def _ensure_distributed_shard(self) -> None:
         if _distributed_world_size() > 1 and self._shard is None:
@@ -139,74 +121,50 @@ class DatasetSource(IterableDataset):
 class AnyDataset(IterableDataset):
     def __init__(
         self,
-        datasets: Sequence[str | DatasetSpec | DatasetSource],
+        datasets: DatasetRef | Sequence[DatasetRef] | Sequence[DatasetSource],
         task: Task | None = None,
         dataset_map: Mapping[str, DatasetSpec] | None = None,
-        formatter: SampleFormatterLike | None = None,
+        adapter_map: AdapterMap | None = None,
         cache_dir: str | Path | None = None,
-        task_adapter_registry: TaskAdapterRegistry | None = None,
         strategy: IterationStrategy | None = None,
     ):
-        if not datasets:
-            raise ValueError("datasets must contain at least one dataset.")
-        if formatter is not None and not callable(formatter):
-            raise TypeError("formatter must be callable.")
         if strategy is not None and not isinstance(strategy, IterationStrategy):
             raise TypeError("strategy must be an IterationStrategy.")
-        if task_adapter_registry is not None and not isinstance(
-            task_adapter_registry,
-            TaskAdapterRegistry,
-        ):
-            raise TypeError("task_adapter_registry must be a TaskAdapterRegistry.")
 
         super().__init__()
         self.strategy = strategy or SequentialStrategy()
         self.dataset_map = dict(dataset_map or {})
+        self.adapter_map = _adapter_map(adapter_map)
         self.resolver = DatasetResolver(self.dataset_map)
-        self.formatter = formatter
-        self.task_adapter_registry = (
-            task_adapter_registry
-            if task_adapter_registry is not None
-            else default_task_adapter_registry()
-        )
         self.cache_dir = (
             Path(cache_dir).expanduser()
             if cache_dir is not None
             else Path("~/.cache/anydataset").expanduser()
         )
 
-        if all(isinstance(dataset, DatasetSource) for dataset in datasets):
+        dataset_values = _dataset_values(datasets)
+        if not dataset_values:
+            raise ValueError("datasets must contain at least one dataset.")
+
+        if all(isinstance(dataset, DatasetSource) for dataset in dataset_values):
             if dataset_map:
                 raise ValueError("dataset_map does not apply to pre-built DatasetSource values.")
-            if formatter is not None:
-                raise ValueError("formatter does not apply to pre-built DatasetSource values.")
+            if adapter_map:
+                raise ValueError("adapter_map does not apply to pre-built DatasetSource values.")
             if cache_dir is not None:
                 raise ValueError("cache_dir does not apply to pre-built DatasetSource values.")
-            if task_adapter_registry is not None:
-                raise ValueError(
-                    "task_adapter_registry does not apply to pre-built DatasetSource values."
-                )
-            self.datasets = list(datasets)
+            self.datasets = list(dataset_values)
             self.task = task or self.datasets[0].task
             for dataset in self.datasets:
                 if dataset.task is not self.task:
                     raise ValueError("All DatasetSource values must use the same task.")
-        elif any(isinstance(dataset, DatasetSource) for dataset in datasets):
+        elif any(isinstance(dataset, DatasetSource) for dataset in dataset_values):
             raise TypeError("datasets must be all refs/specs or all DatasetSource values.")
         else:
             if not isinstance(task, Task):
                 raise TypeError("task must be a Task enum value.")
             self.task = task
-            self.datasets = [
-                DatasetSource(
-                    spec=dataset if isinstance(dataset, DatasetSpec) else self.resolver.resolve(dataset),
-                    task=task,
-                    formatter=formatter,
-                    cache_dir=self.cache_dir,
-                    task_adapter_registry=self.task_adapter_registry,
-                )
-                for dataset in datasets
-            ]
+            self.datasets = [self._source_for(dataset, task) for dataset in dataset_values]
 
         self.specs = [dataset.spec for dataset in self.datasets]
 
@@ -230,14 +188,85 @@ class AnyDataset(IterableDataset):
             strategy=self.strategy,
         )
 
-def _adapter_for(spec: DatasetSpec) -> DatasetAdapter:
-    if spec.adapter is not None:
-        return spec.adapter
+    def _source_for(
+        self,
+        dataset: DatasetRef,
+        task: Task,
+    ) -> DatasetSource:
+        if isinstance(dataset, DatasetSpec):
+            spec = dataset
+            dataset_name = spec.key
+        else:
+            spec = self.resolver.resolve(dataset)
+            dataset_name = dataset
+        return DatasetSource(
+            spec=spec,
+            task=task,
+            cache_dir=self.cache_dir,
+            adapter=_adapter_for(spec, self.adapter_map),
+            dataset_name=dataset_name,
+        )
+
+
+def _adapter_for(
+    spec: DatasetSpec,
+    adapter_map: AdapterMap | None = None,
+) -> DatasetAdapter:
+    bindings = DEFAULT_ADAPTER_MAP if adapter_map is None else adapter_map
+    if spec.name in bindings:
+        return _adapter_from_binding(spec, bindings[spec.name])
     if spec.source == "huggingface":
-        return HuggingFaceDataset()
+        return HuggingFaceAdapter()
     if spec.source == "local_files":
-        return LocalFilesDataset()
+        return LocalFilesAdapter()
+    if spec.source == "unified":
+        return UnifiedDatasetAdapter()
     raise ValueError(f"No default adapter for source {spec.source!r}.")
+
+
+def _adapter_map(adapter_map: AdapterMap | None) -> dict[str, AdapterBinding]:
+    merged = dict(DEFAULT_ADAPTER_MAP)
+    if adapter_map:
+        for name, binding in adapter_map.items():
+            _validate_adapter_binding(name, binding)
+        merged.update(adapter_map)
+    return merged
+
+
+def _adapter_from_binding(
+    spec: DatasetSpec,
+    binding: AdapterBinding,
+) -> DatasetAdapter:
+    if isinstance(binding, DatasetAdapter):
+        return binding
+    adapter = binding(spec)
+    if not isinstance(adapter, DatasetAdapter):
+        raise TypeError(f"adapter_map factory for {spec.name!r} must return a DatasetAdapter.")
+    return adapter
+
+
+def _validate_adapter_binding(name: str, binding: AdapterBinding) -> None:
+    if not isinstance(name, str) or not name:
+        raise ValueError("adapter_map keys must be non-empty dataset names.")
+    if isinstance(binding, DatasetAdapter):
+        return
+    if not callable(binding):
+        raise TypeError("adapter_map values must be DatasetAdapter instances or factories.")
+
+
+def _task_adapter_for(task: Task):
+    try:
+        return get_task_adapter(task)
+    except ValueError:
+        return None
+
+
+def _dataset_values(
+    datasets: DatasetRef | Sequence[DatasetRef] | Sequence[DatasetSource],
+) -> list[DatasetRef | DatasetSource]:
+    if isinstance(datasets, (str, DatasetSpec, DatasetSource)):
+        return [datasets]
+    return list(datasets)
 
 
 @dataclass(frozen=True)

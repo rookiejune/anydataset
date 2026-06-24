@@ -1,11 +1,44 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from typing import Mapping
+from typing import Mapping, Sequence
 
-from anydataset.datasets.catalog import DEFAULT_DATASET_MAP
+from ..adapters.catalog import DEFAULT_DATASET_MAP
 
 from .spec import DatasetSpec
+
+DatasetRef = str | DatasetSpec
+
+
+def resolve_dataset_spec(
+    dataset: DatasetRef,
+    dataset_map: Mapping[str, DatasetSpec] | None = None,
+) -> DatasetSpec:
+    if isinstance(dataset, DatasetSpec):
+        return dataset
+    if isinstance(dataset, str):
+        return DatasetResolver(dataset_map).resolve(dataset)
+    raise TypeError("dataset must be a string reference or DatasetSpec.")
+
+
+def resolve_dataset_specs(
+    datasets: DatasetRef | Sequence[DatasetRef],
+    dataset_map: Mapping[str, DatasetSpec] | None = None,
+) -> list[DatasetSpec]:
+    dataset_refs = _dataset_refs(datasets)
+    if not dataset_refs:
+        raise ValueError("datasets must contain at least one dataset.")
+
+    resolver = DatasetResolver(dataset_map)
+    specs: list[DatasetSpec] = []
+    for dataset in dataset_refs:
+        if isinstance(dataset, DatasetSpec):
+            specs.append(dataset)
+        elif isinstance(dataset, str):
+            specs.append(resolver.resolve(dataset))
+        else:
+            raise TypeError("datasets must contain only string references or DatasetSpec values.")
+    return specs
 
 
 class DatasetResolver:
@@ -24,7 +57,6 @@ class DatasetResolver:
                 path=path,
                 name=path,
                 split=split,
-                ref=dataset_ref,
             )
 
         if source == "local":
@@ -36,7 +68,17 @@ class DatasetResolver:
                 path=path,
                 name=path,
                 split=split,
-                ref=dataset_ref,
+            )
+
+        if source == "unified":
+            path, split = _split_name_and_split(body)
+            if not path:
+                raise ValueError("unified dataset references must include a named path.")
+            return DatasetSpec(
+                source="unified",
+                path=path,
+                name=path,
+                split=split,
             )
 
         name, split = _split_name_and_split(dataset_ref)
@@ -54,7 +96,6 @@ class DatasetResolver:
         return replace(
             spec,
             split=split or spec.split,
-            ref=dataset_ref,
         )
 
 
@@ -73,6 +114,8 @@ def _split_source_prefix(dataset_ref: str) -> tuple[str | None, str]:
         return "hf", dataset_ref[len("hf://") :]
     if dataset_ref.startswith("local://"):
         return "local", dataset_ref[len("local://") :]
+    if dataset_ref.startswith("unified://"):
+        return "unified", dataset_ref[len("unified://") :]
     return None, dataset_ref
 
 
@@ -81,3 +124,9 @@ def _split_name_and_split(value: str) -> tuple[str, str | None]:
         return value, None
     name, split = value.rsplit(":", 1)
     return name, split or None
+
+
+def _dataset_refs(datasets: DatasetRef | Sequence[DatasetRef]) -> list[DatasetRef]:
+    if isinstance(datasets, (str, DatasetSpec)):
+        return [datasets]
+    return list(datasets)

@@ -1,154 +1,214 @@
 import unittest
 
-from anydataset import DatasetSpec, Task, TaskAdapterRegistry
-from anydataset.datasets.esc50 import ESC50AudioCodecAdapter
-from anydataset.datasets.fleurs import (
-    FleursAudioCodecAdapter,
-    register_task_adapters as register_fleurs_task_adapters,
+from anydataset import (
+    AudioKey,
+    AudioOptKey,
+    AudioView,
+    ModalityKey,
+    TextKey,
+    TextOptKey,
 )
-from anydataset.datasets.fsd50k import FSD50KAudioCodecAdapter
-from anydataset.datasets.librispeech_asr import LibriSpeechASRAudioCodecAdapter
-from anydataset.datasets.local_files.adapters.audio_codec import AudioCodecSampleAdapter
-from anydataset.datasets.nsynth import NSynthAudioCodecAdapter
-from anydataset.datasets.task_adapters import default_task_adapter_registry
+from anydataset.adapters import (
+    ESC50Adapter,
+    FSD50KAdapter,
+    FleursAdapter,
+    LibriSpeechASRAdapter,
+    LocalFilesAdapter,
+    MissingModalityError,
+    NSynthAdapter,
+)
+from anydataset.tasks.audio_codec import AudioCodecAdapter
 
 
-class TaskAdapterTest(unittest.TestCase):
-    def test_audio_codec_adapter_maps_dataset_fields_to_canonical_sample(self):
-        adapter = AudioCodecSampleAdapter(
-            audio_key="audio",
-            text_key="sentence",
+class ModalityAdapterTest(unittest.TestCase):
+    def test_local_files_adapter_maps_dataset_fields_to_modalities(self):
+        adapter = LocalFilesAdapter(
+            audio_field="audio",
+            text_field="sentence",
+            duration_field="seconds",
+            label_field="category",
+            labels_fields={
+                "target": "target",
+                "subset": "subset",
+            },
+            file_field="path",
         )
+        row = {
+            "audio": {
+                "array": [1.0, 2.0],
+                "sampling_rate": 16000,
+            },
+            "sentence": "hello",
+            "seconds": 0.5,
+            "category": "speech",
+            "target": 1,
+            "subset": "toy",
+            "path": "/tmp/a.wav",
+        }
 
-        sample = adapter.adapt(
-            {
-                "audio": {
-                    "array": [1.0, 2.0],
-                    "sampling_rate": 16000,
-                },
-                "sentence": "hello",
-            }
+        audio = adapter.audio(row)
+        text = adapter.text(row)
+
+        self.assertEqual(audio[AudioKey.VIEWS][AudioView.WAVEFORM], [1.0, 2.0])
+        self.assertEqual(audio[AudioKey.VIEWS][AudioView.FILE], "/tmp/a.wav")
+        self.assertEqual(audio[AudioKey.SAMPLE_RATE], 16000)
+        self.assertEqual(audio[AudioOptKey.DURATION], 0.5)
+        self.assertEqual(audio[AudioOptKey.LABEL], "speech")
+        self.assertEqual(audio[AudioOptKey.LABELS], {"target": 1, "subset": "toy"})
+        self.assertEqual(text[TextKey.CONTENT], "hello")
+
+    def test_local_files_adapter_decodes_torchcodec_audio(self):
+        adapter = LocalFilesAdapter(audio_field="audio")
+
+        audio = adapter.audio({"audio": _FakeAudioDecoder()})
+
+        self.assertEqual(audio[AudioKey.VIEWS][AudioView.WAVEFORM], [0.1, 0.2])
+        self.assertEqual(audio[AudioKey.SAMPLE_RATE], 16000)
+
+    def test_text_roles_map_to_dataset_fields(self):
+        adapter = LocalFilesAdapter(
+            text_fields={
+                "source": "en",
+                "target": "zh",
+            },
+            lang_fields={
+                "source": "source_lang",
+                "target": "target_lang",
+            },
         )
+        row = {
+            "en": "hello",
+            "zh": "ni hao",
+            "source_lang": "en",
+            "target_lang": "zh",
+        }
 
-        self.assertEqual(sample["waveform"], [1.0, 2.0])
-        self.assertEqual(sample["sample_rate"], 16000)
-        self.assertEqual(sample["text"], "hello")
-        self.assertNotIn("audio_source", sample)
+        source = adapter.text(row, role="source")
+        target = adapter.text(row, role="target")
 
-    def test_audio_codec_adapter_decodes_torchcodec_audio(self):
-        adapter = AudioCodecSampleAdapter(audio_key="audio")
-
-        sample = adapter.adapt({"audio": _FakeAudioDecoder()})
-
-        self.assertEqual(sample["waveform"], [0.1, 0.2])
-        self.assertEqual(sample["sample_rate"], 16000)
-        self.assertNotIn("audio_source", sample)
+        self.assertEqual(source[TextKey.CONTENT], "hello")
+        self.assertEqual(source[TextOptKey.LANG], "en")
+        self.assertEqual(target[TextKey.CONTENT], "ni hao")
+        self.assertEqual(target[TextOptKey.LANG], "zh")
+        with self.assertRaises(MissingModalityError):
+            adapter.text(row)
 
     def test_builtin_text_adapters_map_text(self):
-        audio = {"array": [0.1, 0.2], "sampling_rate": 16000}
+        audio_row = {"array": [0.1, 0.2], "sampling_rate": 16000}
         cases = [
-            (FleursAudioCodecAdapter(), {"audio": audio, "transcription": "bonjour"}),
-            (LibriSpeechASRAudioCodecAdapter(), {"audio": audio, "text": "hello"}),
+            (FleursAdapter(), {"audio": audio_row, "transcription": "bonjour"}, "en_us"),
+            (LibriSpeechASRAdapter(), {"audio": audio_row, "text": "hello"}, "en"),
         ]
 
-        for adapter, row in cases:
+        for adapter, row, lang in cases:
             with self.subTest(adapter=type(adapter).__name__):
-                sample = adapter.adapt(row)
+                audio = adapter.audio(row)
+                text = adapter.text(row)
 
-                self.assertEqual(sample["waveform"], [0.1, 0.2])
-                self.assertEqual(sample["sample_rate"], 16000)
-                self.assertIsInstance(sample["text"], str)
-                self.assertNotIn("audio_source", sample)
+                self.assertEqual(audio[AudioKey.VIEWS][AudioView.WAVEFORM], [0.1, 0.2])
+                self.assertEqual(audio[AudioKey.SAMPLE_RATE], 16000)
+                self.assertIsInstance(text[TextKey.CONTENT], str)
+                self.assertEqual(text[TextOptKey.LANG], lang)
 
-    def test_builtin_audio_adapters_without_text_do_not_emit_text(self):
-        audio = {"array": [0.1, 0.2], "sampling_rate": 44100}
-        adapters = [
-            ESC50AudioCodecAdapter(),
-            FSD50KAudioCodecAdapter(),
-            NSynthAudioCodecAdapter(),
-        ]
-
-        for adapter in adapters:
-            with self.subTest(adapter=type(adapter).__name__):
-                sample = adapter.adapt({"audio": audio, "text": "ignored"})
-
-                self.assertEqual(sample["waveform"], [0.1, 0.2])
-                self.assertEqual(sample["sample_rate"], 44100)
-                self.assertNotIn("text", sample)
-                self.assertNotIn("audio_source", sample)
-
-
-class TaskAdapterRegistryTest(unittest.TestCase):
-    def test_default_registry_resolves_builtin_dataset_adapter(self):
-        spec = DatasetSpec(
-            source="huggingface",
-            path="google/fleurs",
-            name="fleurs",
-            split="train",
-        )
-
-        adapter = default_task_adapter_registry().resolve(spec, Task.AUDIO_CODEC)
-
-        self.assertIsInstance(adapter, FleursAudioCodecAdapter)
-
-    def test_dataset_module_registers_own_task_adapter(self):
-        registry = TaskAdapterRegistry()
-        register_fleurs_task_adapters(registry)
-        spec = DatasetSpec(
-            source="huggingface",
-            path="google/fleurs",
-            name="fleurs",
-            split="train",
-        )
-
-        adapter = registry.resolve(spec, Task.AUDIO_CODEC)
-
-        self.assertIsInstance(adapter, FleursAudioCodecAdapter)
-
-    def test_registry_resolves_by_unique_dataset_name(self):
-        registry = TaskAdapterRegistry()
-        registry.register(
-            "custom_audio",
-            Task.AUDIO_CODEC,
-            lambda spec: AudioCodecSampleAdapter(
-                waveform_key="samples",
-                sample_rate_key="sr",
+    def test_builtin_audio_adapters_map_audio_opt_keys_and_reject_text(self):
+        audio_row = {"array": [0.1, 0.2], "sampling_rate": 44100}
+        cases = [
+            (
+                ESC50Adapter(),
+                {
+                    "audio": audio_row,
+                    "category": "dog",
+                    "target": 3,
+                    "esc10": True,
+                    "text": "ignored",
+                },
+                "dog",
+                {"target": 3, "esc10": True},
+                None,
             ),
+            (
+                FSD50KAdapter(),
+                {
+                    "audio": audio_row,
+                    "audio_path": "/tmp/fsd.wav",
+                    "text": "ignored",
+                },
+                None,
+                None,
+                "/tmp/fsd.wav",
+            ),
+            (
+                NSynthAdapter(),
+                {
+                    "audio": audio_row,
+                    "instrument_family_str": "guitar",
+                    "instrument_source_str": "acoustic",
+                    "pitch": 60,
+                    "velocity": 80,
+                    "text": "ignored",
+                },
+                None,
+                {
+                    "instrument_family": "guitar",
+                    "instrument_source": "acoustic",
+                    "pitch": 60,
+                    "velocity": 80,
+                },
+                None,
+            ),
+        ]
+
+        for adapter, row, label, labels, file_path in cases:
+            with self.subTest(adapter=type(adapter).__name__):
+                audio = adapter.audio(row)
+
+                self.assertEqual(audio[AudioKey.VIEWS][AudioView.WAVEFORM], [0.1, 0.2])
+                self.assertEqual(audio[AudioKey.SAMPLE_RATE], 44100)
+                if label is not None:
+                    self.assertEqual(audio[AudioOptKey.LABEL], label)
+                if labels is not None:
+                    self.assertEqual(audio[AudioOptKey.LABELS], labels)
+                if file_path is not None:
+                    self.assertEqual(audio[AudioKey.VIEWS][AudioView.FILE], file_path)
+                with self.assertRaises(MissingModalityError):
+                    adapter.text(row)
+
+
+class AudioCodecTaskAdapterTest(unittest.TestCase):
+    def test_audio_codec_adapter_assembles_task_sample(self):
+        row = {
+            "audio": {
+                "array": [1.0, 2.0],
+                "sampling_rate": 16000,
+            },
+            "transcription": "hello",
+        }
+
+        sample = AudioCodecAdapter().adapt(row, FleursAdapter())
+
+        self.assertEqual(
+            sample[ModalityKey.AUDIO][AudioKey.VIEWS][AudioView.WAVEFORM],
+            [1.0, 2.0],
         )
-        spec = DatasetSpec(
-            source="local_files",
-            path="/tmp/audio.jsonl",
-            name="custom_audio",
-        )
+        self.assertEqual(sample[ModalityKey.AUDIO][AudioKey.SAMPLE_RATE], 16000)
+        self.assertEqual(sample[ModalityKey.TEXT][TextKey.CONTENT], "hello")
+        self.assertEqual(sample[ModalityKey.TEXT][TextOptKey.LANG], "en_us")
 
-        adapter = registry.resolve(spec, Task.AUDIO_CODEC)
+    def test_audio_codec_adapter_omits_missing_optional_text(self):
+        row = {
+            "audio": {
+                "array": [1.0, 2.0],
+                "sampling_rate": 16000,
+            },
+            "category": "dog",
+            "target": 3,
+            "esc10": True,
+        }
 
-        self.assertIsInstance(adapter, AudioCodecSampleAdapter)
-        self.assertEqual(adapter.waveform_key, "samples")
-        self.assertEqual(adapter.sample_rate_key, "sr")
+        sample = AudioCodecAdapter().adapt(row, ESC50Adapter())
 
-    def test_registry_rejects_duplicate_dataset_task(self):
-        registry = TaskAdapterRegistry()
-        registry.register("custom_audio", Task.AUDIO_CODEC, lambda spec: AudioCodecSampleAdapter())
-
-        with self.assertRaises(ValueError):
-            registry.register(
-                "custom_audio",
-                Task.AUDIO_CODEC,
-                lambda spec: AudioCodecSampleAdapter(),
-            )
-
-    def test_registry_rejects_factory_returning_wrong_type(self):
-        registry = TaskAdapterRegistry()
-        registry.register("custom_audio", Task.AUDIO_CODEC, lambda spec: object())
-        spec = DatasetSpec(
-            source="local_files",
-            path="/tmp/audio.jsonl",
-            name="custom_audio",
-        )
-
-        with self.assertRaises(TypeError):
-            registry.resolve(spec, Task.AUDIO_CODEC)
+        self.assertIn(ModalityKey.AUDIO, sample)
+        self.assertNotIn(ModalityKey.TEXT, sample)
 
 
 class _FakeAudioDecoder:

@@ -1,7 +1,7 @@
 from .cache import CacheManager, CacheManifest
 from .dataset import AnyDataset, DatasetSource
 from .mixing import PrefetchingDatasetMixer, SampleStream, WeightedDatasetMixer
-from .resolver import DatasetResolver
+from .resolver import DatasetRef, DatasetResolver, resolve_dataset_spec, resolve_dataset_specs
 from .spec import DatasetSpec
 from .strategy import (
     IterationStrategy,
@@ -15,6 +15,7 @@ __all__ = [
     "CacheManager",
     "CacheManifest",
     "DatasetResolver",
+    "DatasetRef",
     "DatasetSpec",
     "DatasetSource",
     "IterationStrategy",
@@ -24,4 +25,6 @@ __all__ = [
     "SequentialStrategy",
     "WeightedDatasetMixer",
     "WeightedRandomStrategy",
+    "resolve_dataset_spec",
+    "resolve_dataset_specs",
 ]

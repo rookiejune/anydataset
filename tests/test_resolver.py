@@ -1,17 +1,28 @@
 import unittest
 
-from anydataset import Task
-from anydataset.api.resolver import DatasetResolver
+from anydataset.api.resolver import DatasetResolver, resolve_dataset_spec, resolve_dataset_specs
 from anydataset.api.spec import DatasetSpec
-from anydataset.datasets.esc50 import ESC50AudioCodecAdapter
-from anydataset.datasets.fleurs import FleursAudioCodecAdapter
-from anydataset.datasets.fsd50k import FSD50KAudioCodecAdapter, FSD50KDataset
-from anydataset.datasets.librispeech_asr import LibriSpeechASRAudioCodecAdapter
-from anydataset.datasets.nsynth import NSynthAudioCodecAdapter
-from anydataset.datasets.task_adapters import default_task_adapter_registry
 
 
 class DatasetResolverTest(unittest.TestCase):
+    def test_resolve_dataset_spec_accepts_string_and_spec(self):
+        spec = resolve_dataset_spec("mnist:train")
+
+        self.assertEqual(spec.source, "huggingface")
+        self.assertEqual(spec.path, "ylecun/mnist")
+        self.assertEqual(spec.name, "mnist")
+        self.assertEqual(spec.split, "train")
+
+        explicit = DatasetSpec(source="local_files", path="/tmp/data.jsonl", name="custom")
+
+        self.assertIs(resolve_dataset_spec(explicit), explicit)
+
+    def test_resolve_dataset_specs_treats_single_string_as_one_ref(self):
+        specs = resolve_dataset_specs("mnist:train")
+
+        self.assertEqual(len(specs), 1)
+        self.assertEqual(specs[0].key, "mnist:train")
+
     def test_resolves_default_dataset_with_split(self):
         spec = DatasetResolver().resolve("mnist:train")
 
@@ -58,6 +69,7 @@ class DatasetResolverTest(unittest.TestCase):
         self.assertEqual(spec.path, "org/name")
         self.assertEqual(spec.name, "org/name")
         self.assertEqual(spec.split, "train")
+        self.assertEqual(spec.load_options, {})
 
     def test_resolves_explicit_local_reference_with_path_as_name(self):
         spec = DatasetResolver().resolve("local:///tmp/custom.jsonl:validation")
@@ -67,6 +79,14 @@ class DatasetResolverTest(unittest.TestCase):
         self.assertEqual(spec.name, "/tmp/custom.jsonl")
         self.assertEqual(spec.split, "validation")
 
+    def test_resolves_explicit_unified_reference_with_path_as_name(self):
+        spec = DatasetResolver().resolve("unified:///tmp/unified_audio:train")
+
+        self.assertEqual(spec.source, "unified")
+        self.assertEqual(spec.path, "/tmp/unified_audio")
+        self.assertEqual(spec.name, "/tmp/unified_audio")
+        self.assertEqual(spec.split, "train")
+
     def test_resolves_builtin_audio_datasets(self):
         cases = {
             "fleurs": (
@@ -74,7 +94,6 @@ class DatasetResolverTest(unittest.TestCase):
                 "google/fleurs",
                 "train",
                 "en_us",
-                FleursAudioCodecAdapter,
                 True,
             ),
             "librispeech_asr": (
@@ -82,16 +101,14 @@ class DatasetResolverTest(unittest.TestCase):
                 "openslr/librispeech_asr",
                 "train.100",
                 "clean",
-                LibriSpeechASRAudioCodecAdapter,
                 True,
             ),
-            "esc50": ("huggingface", "ashraq/esc50", "train", None, ESC50AudioCodecAdapter, True),
+            "esc50": ("huggingface", "ashraq/esc50", "train", None, True),
             "nsynth": (
                 "huggingface",
                 "confit/nsynth-parquet",
                 "train",
                 "instrument",
-                NSynthAudioCodecAdapter,
                 True,
             ),
             "fsd50k": (
@@ -99,15 +116,12 @@ class DatasetResolverTest(unittest.TestCase):
                 "Fhrozen/FSD50k",
                 "dev",
                 None,
-                FSD50KAudioCodecAdapter,
                 False,
             ),
         }
-        registry = default_task_adapter_registry()
-
         for (
             name,
-            (source, path, split, config_name, adapter_type, uses_hf_streaming),
+            (source, path, split, config_name, uses_hf_streaming),
         ) in cases.items():
             with self.subTest(name=name):
                 spec = DatasetResolver().resolve(name)
@@ -118,13 +132,12 @@ class DatasetResolverTest(unittest.TestCase):
                 self.assertEqual(spec.split, split)
                 if uses_hf_streaming:
                     self.assertTrue(spec.load_options["streaming"])
+                else:
+                    self.assertNotIn("streaming", spec.load_options)
                 if config_name is None:
                     self.assertNotIn("config_name", spec.load_options)
                 else:
                     self.assertEqual(spec.load_options["config_name"], config_name)
-                self.assertIsInstance(registry.resolve(spec, Task.AUDIO_CODEC), adapter_type)
-                if name == "fsd50k":
-                    self.assertIsInstance(spec.adapter, FSD50KDataset)
 
     def test_builtin_audio_dataset_split_can_be_overridden(self):
         spec = DatasetResolver().resolve("fleurs:validation")
