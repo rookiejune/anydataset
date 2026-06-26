@@ -28,7 +28,7 @@ class HuggingFaceDatasetTest(unittest.TestCase):
                         "streaming": True,
                     },
                 ),
-                cache_dir=tmpdir,
+                cache_root=tmpdir,
             )
             with mock.patch.dict(sys.modules, {"datasets": fake_datasets}):
                 prepared = dataset.prepare()
@@ -58,7 +58,7 @@ class HuggingFaceDatasetTest(unittest.TestCase):
                     split="validation",
                     load_options={"keep_in_memory": True},
                 ),
-                cache_dir=tmpdir,
+                cache_root=tmpdir,
             )
             with mock.patch.dict(sys.modules, {"datasets": fake_datasets}):
                 prepared = dataset.prepare()
@@ -78,7 +78,7 @@ class HuggingFaceDatasetTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             dataset = AnyDataset(
                 Spec(source=Source.HF_DISK, path="/tmp/saved_dataset"),
-                cache_dir=tmpdir,
+                cache_root=tmpdir,
             )
             with mock.patch.dict(sys.modules, {"datasets": fake_datasets}):
                 with self.assertRaises(ValueError):

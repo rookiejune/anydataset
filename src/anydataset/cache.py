@@ -13,11 +13,10 @@ if TYPE_CHECKING:
     from .types import Spec
 
 
-def _default_cache_dir() -> Path:
-    if os.environ.get("ANYDATASET_CACHE_DIR"):
-        return Path(os.environ["ANYDATASET_CACHE_DIR"]).expanduser()
-    else:
-        return Path("~/.cache/anydataset").expanduser()
+def default_cache_root() -> Path:
+    if os.environ.get("ANYDATASET_CACHE_ROOT"):
+        return Path(os.environ["ANYDATASET_CACHE_ROOT"]).expanduser()
+    return Path("~/.cache/anydataset").expanduser()
 
 
 @dataclass(frozen=True)
@@ -29,8 +28,9 @@ class CacheManifest:
 
 
 class CacheManager:
-    def __init__(self, cache_dir: str | Path = _default_cache_dir()):
-        self.root = Path(cache_dir).expanduser()
+    def __init__(self, cache_root: str | Path | None = None):
+        root = cache_root if cache_root is not None else default_cache_root()
+        self.root = Path(root).expanduser()
 
     def prepare(self, spec: Spec) -> CacheManifest:
         cache_path = self._cache_path(spec)
@@ -66,15 +66,7 @@ class CacheManager:
                     fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
     def _cache_path(self, spec: Spec) -> Path:
-        source = _safe_segment(spec.source.value)
-        return self.root / source / spec.id
-
-
-def _safe_segment(value: str) -> str:
-    cleaned = "".join(
-        ch if ch.isalnum() or ch in ("-", "_", ".") else "_" for ch in value
-    )
-    return cleaned.strip("._") or "dataset"
+        return self.root / spec.cache_relpath
 
 
 _PROCESS_LOCKS: dict[str, threading.Lock] = {}

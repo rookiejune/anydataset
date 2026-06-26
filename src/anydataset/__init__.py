@@ -1,4 +1,4 @@
-from .cache import CacheManager, CacheManifest
+from .cache import CacheManager, default_cache_root
 from .dataset import (
     AnyDataset,
     Batch,
@@ -46,6 +46,7 @@ from .store import (
     ViewMaterializer,
     ViewRef,
 )
+from .dataset.source import for_source, has_source, register_source
 from .utils import resolve_dataset
 
 __all__ = [
@@ -57,7 +58,6 @@ __all__ = [
     "AudioView",
     "Batch",
     "CacheManager",
-    "CacheManifest",
     "DatasetWriter",
     "FieldGroup",
     "FieldRef",
@@ -95,5 +95,9 @@ __all__ = [
     "ViewRef",
     "WeightedRandomStrategy",
     "collate_fn",
+    "default_cache_root",
+    "for_source",
+    "has_source",
+    "register_source",
     "resolve_dataset",
 ]

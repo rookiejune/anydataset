@@ -224,12 +224,12 @@ def build_dataset(
     dataset_name: str,
     split: str,
     data_dir: Path,
-    cache_dir: Path,
+    cache_root: Path,
 ) -> AnyDataset:
     config = DATASETS[dataset_name]
     return TorchVisionImageDataset(
         spec=Spec(
-            source=Source.LOCAL,
+            source=Source.HF,
             path=str(data_dir / dataset_name),
             split=split,
             load_options={
@@ -239,7 +239,7 @@ def build_dataset(
                 "std": config["std"],
             },
         ),
-        cache_dir=str(cache_dir),
+        cache_root=str(cache_root),
     )
 
 
@@ -357,13 +357,13 @@ def train(args: argparse.Namespace) -> None:
         args.dataset,
         "train",
         Path(args.data_dir),
-        Path(args.cache_dir),
+        Path(args.cache_root),
     )
     test_dataset = build_dataset(
         args.dataset,
         "test",
         Path(args.data_dir),
-        Path(args.cache_dir),
+        Path(args.cache_root),
     )
     train_loader = DataLoader(
         train_dataset,
@@ -476,7 +476,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--run-name", default="")
     parser.add_argument("--log-dir", default="runs/image_transformer_tse_vs_adam")
     parser.add_argument("--data-dir", default="data")
-    parser.add_argument("--cache-dir", default=".cache/anydataset")
+    parser.add_argument("--cache-root", default=".cache/anydataset")
     parser.add_argument("--torch-tse-path", default="")
     parser.add_argument("--device", default="")
     parser.add_argument("--seed", type=int, default=7)

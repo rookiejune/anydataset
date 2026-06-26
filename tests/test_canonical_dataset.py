@@ -1,4 +1,5 @@
 import unittest
+from unittest import mock
 
 import torch
 
@@ -13,6 +14,7 @@ from anydataset import (
     FieldRef,
     IterableAnyDataset,
     Modality,
+    MultipleAnyDataset,
     Preset,
     Role,
     Source,
@@ -161,7 +163,7 @@ class CanonicalDatasetTest(unittest.TestCase):
 
     def test_iterable_dataset_uses_source_native_shard(self):
         dataset = IterableAnyDataset(
-            spec=Spec(source=Source.LOCAL, path="/tmp/missing"),
+            spec=Spec(source=Source.HF, path="/tmp/missing"),
             parse_fn=lambda row: row["value"],
         )
         dataset._dataset = _ShardableRows(
@@ -180,7 +182,7 @@ class CanonicalDatasetTest(unittest.TestCase):
 
     def test_iterable_dataset_falls_back_to_modulo_shard(self):
         dataset = IterableAnyDataset(
-            spec=Spec(source=Source.LOCAL, path="/tmp/missing"),
+            spec=Spec(source=Source.HF, path="/tmp/missing"),
             parse_fn=lambda row: row["value"],
         )
         dataset._dataset = [
@@ -194,6 +196,40 @@ class CanonicalDatasetTest(unittest.TestCase):
         )
 
         self.assertEqual(list(dataset.iter_shard(2, 1)), [1, 3])
+
+    def test_iterable_dataset_merges_rank_and_worker_shards(self):
+        dataset = IterableAnyDataset(
+            spec=Spec(source=Source.HF, path="/tmp/missing"),
+            parse_fn=lambda row: row["value"],
+            num_shards=2,
+            shard_id=1,
+        )
+        dataset._dataset = _ShardableRows([{"value": index} for index in range(12)])
+        worker = _WorkerInfo(num_workers=3, id=2)
+
+        with mock.patch("anydataset.dataset.abc.get_worker_info", return_value=worker):
+            values = list(dataset)
+
+        self.assertEqual(values, [5, 11])
+        self.assertEqual(dataset.dataset.shard_calls, [(6, 5)])
+
+    def test_multiple_dataset_splits_pytorch_workers(self):
+        dataset = MultipleAnyDataset([range(6)])
+        worker = _WorkerInfo(num_workers=2, id=1)
+
+        with mock.patch("anydataset.dataset.abc.get_worker_info", return_value=worker):
+            values = list(dataset)
+
+        self.assertEqual(values, [1, 3, 5])
+
+    def test_multiple_dataset_merges_rank_and_worker_shards(self):
+        dataset = MultipleAnyDataset([range(12)], num_shards=2, shard_id=1)
+        worker = _WorkerInfo(num_workers=3, id=2)
+
+        with mock.patch("anydataset.dataset.abc.get_worker_info", return_value=worker):
+            values = list(dataset)
+
+        self.assertEqual(values, [5, 11])
 
     def test_collate_fn_pads_tensor_last_dim_and_returns_masks(self):
         ref = (Role.DEFAULT, Modality.AUDIO)
@@ -284,6 +320,12 @@ class _ShardableRows:
             for row_index, row in enumerate(self.rows)
             if row_index % num_shards == index
         )
+
+
+class _WorkerInfo:
+    def __init__(self, *, num_workers: int, id: int) -> None:
+        self.num_workers = num_workers
+        self.id = id
 
 
 if __name__ == "__main__":

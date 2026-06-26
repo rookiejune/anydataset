@@ -9,6 +9,7 @@ from anydataset import (
     AudioItem,
     AudioKey,
     AudioOptKey,
+    AudioReq,
     AudioView,
     Modality,
     Role,
@@ -18,8 +19,8 @@ from anydataset import (
     TextView,
     ViewRef,
 )
-from anydataset.dataset.source.unified import UnifiedDatasetSource
 from anydataset.store import DatasetWriter, ViewInput, ViewMaterializer
+from anydataset.store.reader import read_store_dataset
 
 
 class UnifiedDatasetSourceTest(unittest.TestCase):
@@ -41,7 +42,7 @@ class UnifiedDatasetSourceTest(unittest.TestCase):
 
             dataset = AnyDataset(
                 Spec(source=Source.UNIFIED, path=str(output), split="train"),
-                cache_dir=root / "cache",
+                cache_root=root / "cache",
             )
             sample = dataset[0]
 
@@ -65,7 +66,7 @@ class UnifiedDatasetSourceTest(unittest.TestCase):
 
             dataset = AnyDataset(
                 Spec(source=Source.UNIFIED, path=str(output)),
-                cache_dir=root / "cache",
+                cache_root=root / "cache",
             )
             sample = dataset[0]
 
@@ -93,7 +94,7 @@ class UnifiedDatasetSourceTest(unittest.TestCase):
 
             dataset = AnyDataset(
                 Spec(source=Source.UNIFIED, path=str(output)),
-                cache_dir=root / "cache",
+                cache_root=root / "cache",
             )
             values = [
                 sample[Role.DEFAULT, Modality.AUDIO]
@@ -129,7 +130,7 @@ class UnifiedDatasetSourceTest(unittest.TestCase):
 
             dataset = AnyDataset(
                 Spec(source=Source.UNIFIED, path=str(target), split="train"),
-                cache_dir=root / "cache",
+                cache_root=root / "cache",
             )
             sample = dataset[0]
 
@@ -142,7 +143,7 @@ class UnifiedDatasetSourceTest(unittest.TestCase):
             )
         )
 
-    def test_explicit_missing_view_raises(self):
+    def test_schema_selects_requested_views(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             source = root / "source.wav"
@@ -152,17 +153,88 @@ class UnifiedDatasetSourceTest(unittest.TestCase):
                 [_audio_sample(file=str(source), sample_rate=16000)]
             )
 
-            unified = UnifiedDatasetSource(
-                views=(ViewRef(Modality.AUDIO, AudioView.WAVEFORM),)
+            dataset = AnyDataset(
+                Spec(source=Source.UNIFIED, path=str(output)),
+                cache_root=root / "cache",
+            )
+            sample = dataset[0]
+            schema = {
+                (Role.DEFAULT, Modality.AUDIO): AudioReq(
+                    views=frozenset({AudioView.FILE}),
+                    required=frozenset({AudioKey.SAMPLE_RATE}),
+                )
+            }
+
+            resolved = AnyDataset.resolve_sample(sample, schema)
+
+        audio = resolved[Role.DEFAULT, Modality.AUDIO]
+        self.assertEqual(set(audio.views), {AudioView.FILE})
+        self.assertEqual(audio.required[AudioKey.SAMPLE_RATE], 16000)
+
+    def test_reader_can_load_selected_view_indexes(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            source = root / "source.wav"
+            source.write_bytes(b"RIFF-data")
+            output = root / "dataset"
+            DatasetWriter(output, dataset_id="multi-view").write(
+                [
+                    _audio_sample(
+                        waveform=torch.tensor([[1.0, 2.0]]),
+                        file=str(source),
+                        sample_rate=16000,
+                    )
+                ]
+            )
+            ref = ViewRef(Modality.AUDIO, AudioView.FILE)
+
+            dataset = read_store_dataset(
+                output,
+                cache_path=root / "cache",
+                views=(ref,),
+            )
+
+        self.assertEqual(set(dataset.views), {ref})
+        self.assertEqual(len(dataset.samples), 1)
+
+    def test_schema_missing_view_raises(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            source = root / "source.wav"
+            source.write_bytes(b"RIFF-data")
+            output = root / "dataset"
+            DatasetWriter(output, dataset_id="file-audio").write(
+                [_audio_sample(file=str(source), sample_rate=16000)]
             )
             dataset = AnyDataset(
                 Spec(source=Source.UNIFIED, path=str(output)),
-                cache_dir=root / "cache",
+                cache_root=root / "cache",
             )
-            cache = dataset.cache_manager.prepare(dataset.spec)
+            sample = dataset[0]
+            schema = {
+                (Role.DEFAULT, Modality.AUDIO): AudioReq(
+                    views=frozenset({AudioView.WAVEFORM}),
+                    required=frozenset({AudioKey.SAMPLE_RATE}),
+                )
+            }
 
             with self.assertRaises(KeyError):
-                unified.prepare(dataset.spec, cache)
+                AnyDataset.resolve_sample(sample, schema)
+
+    def test_reader_rejects_missing_selected_view(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            output = root / "dataset"
+            DatasetWriter(output, dataset_id="file-audio").write(
+                [_audio_sample(file=b"RIFF-data", sample_rate=16000)]
+            )
+
+            with self.assertRaises(KeyError):
+                read_store_dataset(
+                    output,
+                    cache_path=root / "cache",
+                    views=(ViewRef(Modality.AUDIO, AudioView.WAVEFORM),),
+                )
 
     def test_sharded_iteration_is_disjoint(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -175,7 +247,7 @@ class UnifiedDatasetSourceTest(unittest.TestCase):
             DatasetWriter(output, dataset_id="toy-audio", split="train").write(samples)
             dataset = AnyDataset(
                 Spec(source=Source.UNIFIED, path=str(output), split="train"),
-                cache_dir=root / "cache",
+                cache_root=root / "cache",
             )
 
             shard_zero = [

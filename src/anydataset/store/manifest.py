@@ -384,19 +384,6 @@ def _int_value(value: Any, name: str) -> int:
     return value
 
 
-def _optional_float(data: Mapping[str, Any], key: str) -> float | None:
-    value = data.get(key)
-    if value is None:
-        return None
-    return _number_value(value, key)
-
-
-def _number_value(value: Any, name: str) -> float:
-    if not isinstance(value, int | float) or isinstance(value, bool):
-        raise TypeError(f"{name} must be a number.")
-    return float(value)
-
-
 def _optional_mapping(data: Mapping[str, Any], key: str) -> Mapping[str, Any]:
     value = data.get(key, {})
     if not isinstance(value, Mapping):

@@ -1,12 +1,24 @@
-from ..errors import MissingModalityError, RoleLike
-from .local_files import LocalFilesSource, iter_local, prepare_local
+from .protocol import DatasetSource
+from .huggingface import (
+    HuggingFaceDiskSource,
+    HuggingFaceSource,
+    prepare_hf,
+    prepare_hf_disk,
+)
+from .registry import for_source, has_source, register_source
+from .sharded_csv import ShardedCsvDataset, ShardedCsvSource
 from .unified import UnifiedDatasetSource
 
 __all__ = [
-    "LocalFilesSource",
-    "MissingModalityError",
-    "RoleLike",
+    "DatasetSource",
+    "HuggingFaceDiskSource",
+    "HuggingFaceSource",
+    "ShardedCsvDataset",
+    "ShardedCsvSource",
     "UnifiedDatasetSource",
-    "iter_local",
-    "prepare_local",
+    "for_source",
+    "has_source",
+    "prepare_hf",
+    "prepare_hf_disk",
+    "register_source",
 ]

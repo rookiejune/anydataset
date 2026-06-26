@@ -51,7 +51,7 @@ String shorthands are resolved by `resolve_dataset`:
 from anydataset import resolve_dataset
 
 spec = resolve_dataset("mnist:train")
-local = resolve_dataset("local:///data/images.jsonl")
+hf = resolve_dataset("hf://ylecun/mnist:train")
 unified = resolve_dataset("unified:///data/my_anydataset:train")
 ```
 
@@ -77,8 +77,27 @@ dataset = AnyDataset(
 )
 ```
 
-For local files, point `Source.LOCAL` at a file or directory. JSONL files yield
-one decoded object per line; other files yield `{"path": ...}` rows.
+For local JSON, image, or audio files, use `Source.HF` with Hugging Face
+`load_dataset(...)` options such as `data_files` or `data_dir`. For structured
+local datasets with canonical samples, use `Source.UNIFIED`.
+
+New physical source types can be registered with a small factory:
+
+```python
+from pathlib import Path
+from anydataset import IterableAnyDataset, Spec, register_source
+
+class DatabaseSource:
+    def prepare(self, spec: Spec, cache_path: Path):
+        return connect_rows(spec.path, **spec.load_options)
+
+register_source("database", DatabaseSource)
+
+dataset = IterableAnyDataset(
+    Spec(source="database", path="postgresql://host/db", split="train"),
+    parse_fn=parse,
+)
+```
 
 ## Multiple Datasets
 

@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterator
 
+from torch.utils.data import Dataset
+
 from ..types import item
 from .jsonio import read_json
 from .manifest import (
@@ -28,13 +30,12 @@ from .payload import matches_checksum, payload_value, read_payload_bytes
 
 
 @dataclass(frozen=True)
-class StoreDataset:
+class StoreDataset(Dataset):
     root: Path
     cache_path: Path
     manifest: DatasetManifest
     samples: tuple[SampleManifestEntry, ...]
     views: Mapping[ViewRef, "StoreView"]
-    require_selected_views: bool
 
     def __len__(self) -> int:
         return len(self.samples)
@@ -44,9 +45,6 @@ class StoreDataset:
             yield self[index]
 
     def __getitem__(self, index: int) -> item.Sample:
-        return self.sample_at(index)
-
-    def sample_at(self, index: int) -> item.Sample:
         return _sample_for_entry(self, self.samples[index])
 
 
@@ -75,11 +73,7 @@ def read_store_dataset(
             "sample manifest row count must match dataset.json sample_count."
         )
 
-    requested = None if views is None else tuple(views)
-    if requested is not None:
-        for ref in requested:
-            _validate_view_ref(ref)
-    selections = _selected_views(manifest, requested)
+    selections = _view_selections(manifest, views)
     indexes = {
         selection.ref: _load_view(root, selection.ref, selection.revision)
         for selection in selections
@@ -90,7 +84,6 @@ def read_store_dataset(
         manifest=manifest,
         samples=samples,
         views=indexes,
-        require_selected_views=requested is not None,
     )
 
 
@@ -112,21 +105,25 @@ def _validate_split(split: str | None, manifest: DatasetManifest) -> None:
         )
 
 
-def _selected_views(
+def _view_selections(
     manifest: DatasetManifest,
-    requested: tuple[ViewRef, ...] | None,
+    views: Sequence[ViewRef] | None,
 ):
+    if views is None:
+        return manifest.views
     available = {selection.ref: selection for selection in manifest.views}
-    if requested is not None:
-        missing = [ref for ref in requested if ref not in available]
-        if missing:
-            raise KeyError(f"Unified dataset is missing requested views: {missing!r}.")
-        return tuple(available[ref] for ref in requested)
-    return manifest.views
+    selections = []
+    for ref in views:
+        if not isinstance(ref, ViewRef):
+            raise TypeError("views entries must be ViewRef instances.")
+        selection = available.get(ref)
+        if selection is None:
+            raise KeyError(f"Unified dataset is missing requested view: {ref.path_parts()}.")
+        selections.append(selection)
+    return tuple(selections)
 
 
 def _load_view(root: Path, ref: ViewRef, revision: str) -> StoreView:
-    _validate_view_ref(ref)
     if not view_ready_path(root, ref, revision).exists():
         raise ValueError(f"Unified dataset view is not ready: {ref.path_parts()}.")
     entries: dict[str, ViewManifestEntry] = {}
@@ -149,14 +146,10 @@ def _sample_for_entry(
     for ref, view in dataset.views.items():
         entry = view.entries.get(sample.sample_id)
         if entry is None:
-            if dataset.require_selected_views:
-                raise KeyError(
-                    f"Sample {sample.sample_id!r} is missing view {ref.path_parts()}."
-                )
             continue
         sample_ref = ref.sample_ref
         views = views_by_ref.setdefault(sample_ref, {})
-        views[_view_key(ref)] = _view_value(dataset, view, entry)
+        views[ref.view_key] = _view_value(dataset, view, entry)
 
     result: dict[tuple[item.Role, item.Modality], item.Item] = {}
     item_entries = {entry.ref: entry for entry in sample.items}
@@ -206,8 +199,7 @@ def _view_value(
     entry: ViewManifestEntry,
 ) -> Any:
     data = read_payload_bytes(dataset.root, view.ref, view.revision, entry)
-    view_key = _view_key(view.ref)
-    if view.ref.modality is item.Modality.AUDIO and view_key == item.AudioView.FILE:
+    if view.ref.modality is item.Modality.AUDIO and view.ref.view_key == item.AudioView.FILE:
         return str(_cache_file_payload(dataset.cache_path, entry, data))
     return payload_value(view.ref, data)
 
@@ -221,16 +213,6 @@ def _cache_file_payload(
         return target
     target.write_bytes(data)
     return target
-
-
-def _validate_view_ref(ref: ViewRef) -> None:
-    if not isinstance(ref, ViewRef):
-        raise TypeError("views entries must be ViewRef instances.")
-    _view_key(ref)
-
-
-def _view_key(ref: ViewRef):
-    return ref.view_key
 
 
 def _enum_keys(values: Mapping[str, Any], enum_type):

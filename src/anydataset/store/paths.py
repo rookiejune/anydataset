@@ -22,7 +22,7 @@ def dataset_ready_path(root: str | Path) -> Path:
 
 
 def view_dir(root: str | Path, ref: ViewRef, revision: str) -> Path:
-    _validate_revision(revision)
+    _validate_segment("revision", revision)
     return Path(root).joinpath(*ref.path_parts(), str(revision))
 
 
@@ -49,10 +49,6 @@ def view_shards_dir(root: str | Path, ref: ViewRef, revision: str) -> Path:
 def view_shard_path(root: str | Path, ref: ViewRef, revision: str, shard: str) -> Path:
     _validate_segment("shard", shard)
     return view_shards_dir(root, ref, revision) / str(shard)
-
-
-def _validate_revision(revision: str) -> None:
-    _validate_segment("revision", revision)
 
 
 def _validate_segment(name: str, value: str) -> None:

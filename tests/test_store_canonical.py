@@ -76,7 +76,7 @@ class CanonicalStoreTest(unittest.TestCase):
 
             dataset = AnyDataset(
                 Spec(source=Source.UNIFIED, path=str(output), split=None),
-                cache_dir=root / "cache",
+                cache_root=root / "cache",
             )
             sample = dataset[0]
 

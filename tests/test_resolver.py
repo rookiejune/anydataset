@@ -9,6 +9,11 @@ class ResolverTest(unittest.TestCase):
         self.assertEqual(Preset.LIBRISPEECH_ASR.value, "librispeech_asr")
         self.assertEqual(Preset.FSD50K.value, "fsd50k")
 
+    def test_source_uses_auto_str_value(self):
+        self.assertEqual(Source.HF.value, "hf")
+        self.assertEqual(Source.HF_DISK.value, "hf-disk")
+        self.assertEqual(Source.UNIFIED.value, "unified")
+
     def test_preset_spec_resolves_builtin(self):
         spec = Preset.FLEURS.spec(split="validation")
 
@@ -31,7 +36,7 @@ class ResolverTest(unittest.TestCase):
         self.assertEqual(preset.path, "Fhrozen/FSD50k")
         self.assertEqual(preset.split, "dev")
 
-        explicit = Spec(source=Source.LOCAL, path="/tmp/data.jsonl")
+        explicit = Spec(source=Source.UNIFIED, path="/tmp/data")
 
         self.assertIs(resolve_dataset(explicit), explicit)
 
@@ -41,11 +46,6 @@ class ResolverTest(unittest.TestCase):
             "hf-disk:///tmp/saved_dataset:validation": (
                 Source.HF_DISK,
                 "/tmp/saved_dataset",
-                "validation",
-            ),
-            "local:///tmp/custom.jsonl:validation": (
-                Source.LOCAL,
-                "/tmp/custom.jsonl",
                 "validation",
             ),
             "unified:///tmp/unified_audio:train": (

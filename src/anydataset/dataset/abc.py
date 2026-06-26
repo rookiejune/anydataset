@@ -4,13 +4,14 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Iterator
 
-from torch.utils.data import Dataset, IterableDataset
+from torch.utils.data import Dataset, IterableDataset, get_worker_info
 
 from .. import types
-from ..types import Source, Spec
+from ..types import Spec
 
 if TYPE_CHECKING:
-    from ..cache import CacheManager, CacheManifest
+    from ..cache import CacheManager
+    from .source import DatasetSource
     from ..types.item import Reference, Sample, Schema
 
 
@@ -31,43 +32,24 @@ class _Base(ABC):
         self,
         spec: Spec,
         parse_fn: Callable[[Any], Sample] | None = None,
-        cache_dir: str | Path | None = None,
+        cache_root: str | Path | None = None,
     ) -> None:
         self.spec = spec
         self._cache_manager = None
-        if cache_dir is not None:
+        if cache_root is not None:
             from ..cache import CacheManager
 
-            self._cache_manager = CacheManager(cache_dir)
+            self._cache_manager = CacheManager(cache_root)
         self._dataset = None
+        self._source: DatasetSource | None = None
         self.parse_fn = parse_fn or _identity_sample
 
     def prepare(self) -> Any:
         if self._dataset is not None:
             return self._dataset
 
-        cache_manifest = self.cache_manager.prepare(self.spec)
-        match self.spec.source:
-            case Source.HF:
-                self._dataset = _prepare_hf(self.spec, cache_manifest)
-            case Source.HF_DISK:
-                self._dataset = _prepare_hf_disk(self.spec)
-            case Source.LOCAL:
-                from .source.local_files import prepare_local
-
-                self._dataset = prepare_local(self.spec, cache_manifest)
-            case Source.UNIFIED:
-                from ..store.reader import read_store_dataset
-
-                self._dataset = read_store_dataset(
-                    self.spec.path,
-                    split=self.spec.split,
-                    cache_path=cache_manifest.cache_path,
-                )
-            case _:
-                raise NotImplementedError(
-                    f"Unsupported dataset source: {self.spec.source!r}."
-                )
+        cache = self.cache_manager.prepare(self.spec)
+        self._dataset = self.source.prepare(self.spec, cache.cache_path)
         return self._dataset
 
     @property
@@ -81,6 +63,14 @@ class _Base(ABC):
     @property
     def dataset(self) -> Any:
         return self.prepare()
+
+    @property
+    def source(self) -> DatasetSource:
+        if self._source is None:
+            from .source import for_source
+
+            self._source = for_source(self.spec.source)
+        return self._source
 
     def __iter__(self) -> Iterator[Sample]:
         yield from self.iter_shard(num_shards=1, shard_id=0)
@@ -98,20 +88,25 @@ class _Base(ABC):
 
 
 class IterableAnyDataset(_Base, IterableDataset):
+    def __init__(
+        self,
+        spec: Spec,
+        parse_fn: Callable[[Any], Sample] | None = None,
+        cache_root: str | Path | None = None,
+        *,
+        num_shards: int = 1,
+        shard_id: int = 0,
+    ) -> None:
+        _validate_shard(num_shards, shard_id)
+        super().__init__(spec, parse_fn=parse_fn, cache_root=cache_root)
+        self.num_shards = num_shards
+        self.shard_id = shard_id
+
     def __iter__(self) -> Iterator[Sample]:
-        rows = self.iter_rows()
-        for row in rows:
-            yield self.parse_fn(row)
+        num_shards, shard_id = _worker_shard(self.num_shards, self.shard_id)
+        yield from self.iter_shard(num_shards, shard_id)
 
     def iter_rows(self) -> Iterator[Any]:
-        if self.spec.source is Source.LOCAL:
-            from .source.local_files import iter_local
-
-            yield from iter_local(self.dataset)
-            return
-        if self.spec.source is Source.UNIFIED:
-            yield from self.dataset
-            return
         yield from self.dataset
 
     def iter_shard(self, num_shards: int, shard_id: int) -> Iterator[Sample]:
@@ -157,43 +152,11 @@ def _iter_modulo(
             yield row
 
 
-def _prepare_hf(spec: Spec, cache: CacheManifest) -> Any:
-    try:
-        from datasets import load_dataset
-    except ImportError as exc:
-        raise ImportError(
-            "HuggingFace datasets support requires `pip install anydataset[huggingface]`."
-        ) from exc
-
-    split = spec.split or "train"
-    load_kwargs = dict(spec.load_options)
-    config_name = load_kwargs.pop("config_name", None)
-    if config_name is not None:
-        if "name" in load_kwargs:
-            raise ValueError("Use either `config_name` or `name`, not both.")
-        load_kwargs["name"] = config_name
-    return load_dataset(
-        spec.path,
-        split=split,
-        cache_dir=str(cache.cache_path),
-        **load_kwargs,
+def _worker_shard(num_shards: int, shard_id: int) -> tuple[int, int]:
+    worker = get_worker_info()
+    if worker is None:
+        return num_shards, shard_id
+    return (
+        num_shards * worker.num_workers,
+        shard_id * worker.num_workers + worker.id,
     )
-
-
-def _prepare_hf_disk(spec: Spec) -> Any:
-    try:
-        from datasets import DatasetDict, load_from_disk
-    except ImportError as exc:
-        raise ImportError(
-            "HuggingFace datasets support requires `pip install anydataset[huggingface]`."
-        ) from exc
-
-    dataset = load_from_disk(spec.path, **dict(spec.load_options))
-    if not isinstance(dataset, DatasetDict):
-        return dataset
-
-    if spec.split is None:
-        raise ValueError("huggingface_disk DatasetDict specs must set split.")
-    if spec.split not in dataset:
-        raise KeyError(f"HuggingFace disk dataset is missing split {spec.split!r}.")
-    return dataset[spec.split]

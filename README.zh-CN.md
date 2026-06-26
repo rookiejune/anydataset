@@ -126,10 +126,9 @@ dataset = IterableAnyDataset(
 
 - `Source.HF`：通过 `datasets.load_dataset(...)` 读取。
 - `Source.HF_DISK`：通过 `datasets.load_from_disk(...)` 读取。
-- `Source.LOCAL`：读取本地文件。
 - `Source.UNIFIED`：读取 `anydataset` 的 unified store。
 
-准备数据源时的缓存目录默认是 `~/.cache/anydataset`。如果希望缓存放到项目自己的 `storage/`、`outputs/` 或其它目录，可以设置 `ANYDATASET_CACHE_DIR`，也可以在 dataset 构造函数里传 `cache_dir`。
+准备数据源时的缓存根目录默认是 `~/.cache/anydataset`。如果希望缓存放到项目自己的 `storage/`、`outputs/` 或其它目录，可以设置 `ANYDATASET_CACHE_ROOT`，也可以在 dataset 构造函数里传 `cache_root`。
 
 只需要得到 `Spec` 时，也可以使用字符串 shorthand：
 
@@ -138,8 +137,25 @@ from anydataset import resolve_dataset
 
 spec = resolve_dataset("hf://ylecun/mnist:train")
 disk_spec = resolve_dataset("hf-disk:///data/mnist_saved:train")
-local_spec = resolve_dataset("local:///data/my_rows.jsonl")
 unified_spec = resolve_dataset("unified:///data/my_anydataset:train")
+```
+
+新增物理 source 类型时，注册一个工厂即可；`AnyDataset` 会按 `Spec.source` 从注册器取 source：
+
+```python
+from pathlib import Path
+from anydataset import IterableAnyDataset, Spec, register_source
+
+class DatabaseSource:
+    def prepare(self, spec: Spec, cache_path: Path):
+        return open_database_rows(spec.path, **spec.load_options)
+
+register_source("database", DatabaseSource)
+
+dataset = IterableAnyDataset(
+    Spec(source="database", path="postgresql://host/db", split="train"),
+    parse_fn=parse,
+)
 ```
 
 ## 组合数据集
@@ -303,7 +319,7 @@ dataset = AnyDataset(
         path="/data/my_anydataset",
         split="train",
     ),
-    cache_dir="/data/my_anydataset_cache",
+    cache_root="/data/my_anydataset_cache",
 )
 ```
 

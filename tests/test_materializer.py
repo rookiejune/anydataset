@@ -147,7 +147,7 @@ class ViewMaterializerTest(unittest.TestCase):
 
             dataset = AnyDataset(
                 Spec(source=Source.UNIFIED, path=str(target), split="train"),
-                cache_dir=root / "cache",
+                cache_root=root / "cache",
             )
             sample = dataset[0]
             manifest = DatasetManifest.from_dict(read_json(dataset_json_path(target)))

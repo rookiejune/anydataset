@@ -4,7 +4,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from .types import Preset, Source, Spec
+from .types import Preset, Source, SourceKey, Spec, source_key
 from .types.item import (
     AudioItem,
     AudioKey,
@@ -226,7 +226,9 @@ def _resolve_shorthand(shorthand: str) -> Spec:
     if source is not None:
         path, split = _split_name_and_split(body)
         if not path:
-            raise ValueError(f"{source.value} dataset shorthand must include a path.")
+            raise ValueError(
+                f"{source_key(source)} dataset shorthand must include a path."
+            )
         return Spec(source=source, path=path, split=split)
 
     name, split = _split_name_and_split(shorthand)
@@ -234,21 +236,23 @@ def _resolve_shorthand(shorthand: str) -> Spec:
         preset = Preset(name)
     except ValueError as exc:
         raise KeyError(
-            f"Unknown dataset preset {name!r}. Use an explicit `hf://`, "
-            "`hf-disk://`, `local://` or `unified://` shorthand for raw specs."
+            f"Unknown dataset preset {name!r}. Use a registered source shorthand "
+            "such as `hf://`, `hf-disk://` or `unified://` for raw specs."
         ) from exc
     return preset.spec(split=split)
 
 
-def _split_source_prefix(shorthand: str) -> tuple[Source | None, str]:
+def _split_source_prefix(shorthand: str) -> tuple[SourceKey | None, str]:
     if shorthand.startswith("hf://"):
         return Source.HF, shorthand[len("hf://") :]
-    if shorthand.startswith("hf-disk://"):
-        return Source.HF_DISK, shorthand[len("hf-disk://") :]
-    if shorthand.startswith("local://"):
-        return Source.LOCAL, shorthand[len("local://") :]
     if shorthand.startswith("unified://"):
         return Source.UNIFIED, shorthand[len("unified://") :]
+    if "://" in shorthand:
+        from .dataset.source import has_source
+
+        source, body = shorthand.split("://", 1)
+        if has_source(source):
+            return source, body
     return None, shorthand
 
 

@@ -8,7 +8,7 @@ from typing import Iterator, Protocol, runtime_checkable
 from torch.utils.data import IterableDataset
 
 from ..types.item import Sample
-from .abc import _validate_shard
+from .abc import _validate_shard, _worker_shard
 
 
 class IterationStrategy(Protocol):
@@ -83,15 +83,19 @@ class WeightedRandomStrategy:
 class MultipleAnyDataset(IterableDataset):
     datasets: Sequence[Iterable[Sample]]
     strategy: IterationStrategy = field(default_factory=SequentialStrategy)
+    num_shards: int = 1
+    shard_id: int = 0
 
     def __post_init__(self) -> None:
+        _validate_shard(self.num_shards, self.shard_id)
         datasets = tuple(self.datasets)
         if not datasets:
             raise ValueError("MultipleAnyDataset requires at least one dataset.")
         object.__setattr__(self, "datasets", datasets)
 
     def __iter__(self) -> Iterator[Sample]:
-        yield from self.iter_shard(num_shards=1, shard_id=0)
+        num_shards, shard_id = _worker_shard(self.num_shards, self.shard_id)
+        yield from self.iter_shard(num_shards, shard_id)
 
     def iter_shard(self, num_shards: int, shard_id: int) -> Iterator[Sample]:
         _validate_shard(num_shards, shard_id)

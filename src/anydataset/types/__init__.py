@@ -4,6 +4,7 @@ import hashlib
 import json
 from dataclasses import dataclass, field
 from enum import StrEnum, auto
+from pathlib import Path
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Callable, Mapping, Sequence
 
@@ -43,23 +44,34 @@ if TYPE_CHECKING:
 
 
 class Source(StrEnum):
-    HF = "huggingface"
-    HF_DISK = "huggingface_disk"
-    LOCAL = "local_files"
-    UNIFIED = "unified"
+    @staticmethod
+    def _generate_next_value_(
+        name: str,
+        start: int,
+        count: int,
+        last_values: list[str],
+    ) -> str:
+        return name.lower().replace("_", "-")
+
+    HF = auto()
+    HF_DISK = auto()
+    UNIFIED = auto()
+
+
+type SourceKey = Source | str
 
 
 @dataclass(frozen=True)
 class Spec:
-    source: Source
+    source: SourceKey
     path: str
     split: str | None = None
     version: str | None = None
     load_options: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        if not isinstance(self.source, Source):
-            object.__setattr__(self, "source", Source(self.source))
+        if not isinstance(self.source, Source | str):
+            raise TypeError("Spec.source must be a Source or string source key.")
         object.__setattr__(
             self, "load_options", MappingProxyType(dict(self.load_options))
         )
@@ -67,6 +79,10 @@ class Spec:
     @property
     def id(self) -> str:
         return _stable_hash(_identity_payload(self))
+
+    @property
+    def cache_relpath(self) -> Path:
+        return Path(self.id)
 
     def __hash__(self) -> int:
         return hash(self.id)
@@ -114,7 +130,7 @@ class Task(StrEnum):
 
 def _identity_payload(spec: Spec) -> dict[str, Any]:
     return {
-        "source": spec.source.value,
+        "source": source_key(spec.source),
         "path": spec.path,
         "split": spec.split,
         "version": spec.version,
@@ -125,6 +141,16 @@ def _identity_payload(spec: Spec) -> dict[str, Any]:
 def _stable_hash(value: Any) -> str:
     payload = json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(payload).hexdigest()[:16]
+
+
+def source_key(source: SourceKey) -> str:
+    if isinstance(source, Source):
+        return source.value
+    if not isinstance(source, str):
+        raise TypeError("source key must be a Source or string source key.")
+    if not source:
+        raise ValueError("source key must not be empty.")
+    return source
 
 
 def _normalize(value: Any) -> Any:
@@ -162,6 +188,7 @@ __all__ = [
     "Sample",
     "Schema",
     "Source",
+    "SourceKey",
     "Spec",
     "Task",
     "TextItem",
