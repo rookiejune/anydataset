@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import torch
 
@@ -77,6 +78,30 @@ class UnifiedDatasetSourceTest(unittest.TestCase):
             self.assertTrue(file_view.is_file())
             self.assertEqual(file_view.read_bytes(), b"RIFF-data")
             self.assertTrue(str(file_view).startswith(str(root / "cache")))
+
+    def test_file_view_reuses_verified_cache_file(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            source = root / "source.wav"
+            source.write_bytes(b"RIFF-data")
+            output = root / "dataset"
+            DatasetWriter(output, dataset_id="file-audio").write(
+                [_audio_sample(file=str(source), sample_rate=16000)]
+            )
+            dataset = AnyDataset(
+                Spec(source=Source.UNIFIED, path=str(output)),
+                cache_root=root / "cache",
+            )
+            dataset[0]
+
+            with mock.patch(
+                "anydataset.store.reader.read_payload_bytes",
+                side_effect=AssertionError("cache miss"),
+            ):
+                sample = dataset[0]
+
+            file_view = Path(sample[Role.DEFAULT, Modality.AUDIO].views[AudioView.FILE])
+            self.assertEqual(file_view.read_bytes(), b"RIFF-data")
 
     def test_reader_loads_payloads_across_writer_shards(self):
         with tempfile.TemporaryDirectory() as tmpdir:

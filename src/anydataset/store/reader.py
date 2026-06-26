@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -36,6 +36,7 @@ class StoreDataset(Dataset):
     manifest: DatasetManifest
     samples: tuple[SampleManifestEntry, ...]
     views: Mapping[ViewRef, "StoreView"]
+    _files: dict[str, Path] = field(default_factory=dict, compare=False, repr=False)
 
     def __len__(self) -> int:
         return len(self.samples)
@@ -198,21 +199,45 @@ def _view_value(
     view: StoreView,
     entry: ViewManifestEntry,
 ) -> Any:
-    data = read_payload_bytes(dataset.root, view.ref, view.revision, entry)
     if view.ref.modality is item.Modality.AUDIO and view.ref.view_key == item.AudioView.FILE:
-        return str(_cache_file_payload(dataset.cache_path, entry, data))
+        return str(_cached_file_payload(dataset, entry, view))
+
+    data = read_payload_bytes(dataset.root, view.ref, view.revision, entry)
     return payload_value(view.ref, data)
 
 
-def _cache_file_payload(
-    cache_path: Path, entry: ViewManifestEntry, data: bytes
+def _cached_file_payload(
+    dataset: StoreDataset,
+    entry: ViewManifestEntry,
+    view: StoreView,
 ) -> Path:
-    target = cache_path / "files" / entry.key
-    target.parent.mkdir(parents=True, exist_ok=True)
+    cached = dataset._files.get(entry.key)
+    if cached is not None:
+        return cached
+
+    target = _file_cache_path(dataset.cache_path, entry)
     if target.exists() and matches_checksum(target.read_bytes(), entry.checksum):
+        dataset._files[entry.key] = target
         return target
+
+    data = read_payload_bytes(dataset.root, view.ref, view.revision, entry)
+    return _cache_file_payload(dataset, entry, data)
+
+
+def _cache_file_payload(
+    dataset: StoreDataset,
+    entry: ViewManifestEntry,
+    data: bytes,
+) -> Path:
+    target = _file_cache_path(dataset.cache_path, entry)
+    target.parent.mkdir(parents=True, exist_ok=True)
     target.write_bytes(data)
+    dataset._files[entry.key] = target
     return target
+
+
+def _file_cache_path(cache_path: Path, entry: ViewManifestEntry) -> Path:
+    return cache_path / "files" / entry.key
 
 
 def _enum_keys(values: Mapping[str, Any], enum_type):

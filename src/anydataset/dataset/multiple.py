@@ -3,12 +3,13 @@ from __future__ import annotations
 import random
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
-from typing import Iterator, Protocol, runtime_checkable
+from typing import Iterator, Protocol
 
 from torch.utils.data import IterableDataset
 
+from .._sharding import runtime_shard, validate_shard
 from ..types.item import Sample
-from .abc import _validate_shard, _worker_shard
+from .abc import AnyDataset, IterableAnyDataset
 
 
 class IterationStrategy(Protocol):
@@ -79,49 +80,27 @@ class WeightedRandomStrategy:
         return weights
 
 
-@dataclass(frozen=True)
+@dataclass
 class MultipleAnyDataset(IterableDataset):
-    datasets: Sequence[Iterable[Sample]]
+    datasets: Sequence[AnyDataset | IterableAnyDataset]
     strategy: IterationStrategy = field(default_factory=SequentialStrategy)
-    num_shards: int = 1
-    shard_id: int = 0
 
     def __post_init__(self) -> None:
-        _validate_shard(self.num_shards, self.shard_id)
         datasets = tuple(self.datasets)
         if not datasets:
             raise ValueError("MultipleAnyDataset requires at least one dataset.")
-        object.__setattr__(self, "datasets", datasets)
+        self.datasets = datasets
 
     def __iter__(self) -> Iterator[Sample]:
-        num_shards, shard_id = _worker_shard(self.num_shards, self.shard_id)
-        yield from self.iter_shard(num_shards, shard_id)
+        shard = runtime_shard()
+        yield from self.iter_shard(shard.count, shard.index)
 
     def iter_shard(self, num_shards: int, shard_id: int) -> Iterator[Sample]:
-        _validate_shard(num_shards, shard_id)
+        validate_shard(num_shards, shard_id)
         datasets = tuple(
-            _iter_shard(dataset, num_shards, shard_id) for dataset in self.datasets
+            dataset.iter_shard(num_shards, shard_id) for dataset in self.datasets
         )
         yield from self.strategy.iter(datasets)
 
     def shard(self, num_shards: int, shard_id: int) -> Iterator[Sample]:
         yield from self.iter_shard(num_shards, shard_id)
-
-
-@runtime_checkable
-class _Shardable(Protocol):
-    def iter_shard(self, num_shards: int, shard_id: int) -> Iterator[Sample]: ...
-
-
-def _iter_shard(
-    dataset: Iterable[Sample],
-    num_shards: int,
-    shard_id: int,
-) -> Iterator[Sample]:
-    if isinstance(dataset, _Shardable):
-        yield from dataset.iter_shard(num_shards, shard_id)
-        return
-
-    for index, sample in enumerate(dataset):
-        if index % num_shards == shard_id:
-            yield sample

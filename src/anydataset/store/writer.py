@@ -7,7 +7,6 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
-from ..dataset.abc import Sample
 from ..types.item import (
     AudioItem,
     AudioKey,
@@ -15,6 +14,7 @@ from ..types.item import (
     Item,
     Modality,
     Role,
+    Sample,
     TextItem,
 )
 from .jsonio import write_json

@@ -4,27 +4,15 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Iterator
 
-from torch.utils.data import Dataset, IterableDataset, get_worker_info
+from torch.utils.data import Dataset, IterableDataset
 
-from .. import types
+from .._sharding import runtime_shard, validate_shard
 from ..types import Spec
 
 if TYPE_CHECKING:
     from ..cache import CacheManager
+    from ..types.item import Sample, Schema
     from .source import DatasetSource
-    from ..types.item import Reference, Sample, Schema
-
-
-type Ref = types.Reference
-type Sample = types.Sample
-type Schema = types.Schema
-
-
-def _validate_shard(num_shards: int, shard_id: int) -> None:
-    if num_shards <= 0:
-        raise ValueError("num_shards must be positive.")
-    if shard_id < 0 or shard_id >= num_shards:
-        raise ValueError("shard_id must satisfy 0 <= shard_id < num_shards.")
 
 
 class _Base(ABC):
@@ -73,7 +61,8 @@ class _Base(ABC):
         return self._source
 
     def __iter__(self) -> Iterator[Sample]:
-        yield from self.iter_shard(num_shards=1, shard_id=0)
+        shard = runtime_shard()
+        yield from self.iter_shard(shard.count, shard.index)
 
     @abstractmethod
     def iter_shard(self, num_shards: int, shard_id: int) -> Iterator[Sample]:
@@ -88,34 +77,16 @@ class _Base(ABC):
 
 
 class IterableAnyDataset(_Base, IterableDataset):
-    def __init__(
-        self,
-        spec: Spec,
-        parse_fn: Callable[[Any], Sample] | None = None,
-        cache_root: str | Path | None = None,
-        *,
-        num_shards: int = 1,
-        shard_id: int = 0,
-    ) -> None:
-        _validate_shard(num_shards, shard_id)
-        super().__init__(spec, parse_fn=parse_fn, cache_root=cache_root)
-        self.num_shards = num_shards
-        self.shard_id = shard_id
-
-    def __iter__(self) -> Iterator[Sample]:
-        num_shards, shard_id = _worker_shard(self.num_shards, self.shard_id)
-        yield from self.iter_shard(num_shards, shard_id)
-
     def iter_rows(self) -> Iterator[Any]:
         yield from self.dataset
 
     def iter_shard(self, num_shards: int, shard_id: int) -> Iterator[Sample]:
-        _validate_shard(num_shards, shard_id)
+        validate_shard(num_shards, shard_id)
         for row in self.iter_shard_rows(num_shards, shard_id):
             yield self.parse_fn(row)
 
     def iter_shard_rows(self, num_shards: int, shard_id: int) -> Iterator[Any]:
-        _validate_shard(num_shards, shard_id)
+        validate_shard(num_shards, shard_id)
         dataset = self.dataset
         shard = getattr(dataset, "shard", None)
         if shard is not None:
@@ -133,7 +104,7 @@ class AnyDataset(_Base, Dataset):
         return self.parse_fn(self.dataset[index])
 
     def iter_shard(self, num_shards: int, shard_id: int):
-        _validate_shard(num_shards, shard_id)
+        validate_shard(num_shards, shard_id)
         for index in range(shard_id, len(self), num_shards):
             yield self[index]
 
@@ -150,13 +121,3 @@ def _iter_modulo(
     for index, row in enumerate(rows):
         if index % num_shards == shard_id:
             yield row
-
-
-def _worker_shard(num_shards: int, shard_id: int) -> tuple[int, int]:
-    worker = get_worker_info()
-    if worker is None:
-        return num_shards, shard_id
-    return (
-        num_shards * worker.num_workers,
-        shard_id * worker.num_workers + worker.id,
-    )

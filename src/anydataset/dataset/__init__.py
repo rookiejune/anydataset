@@ -1,11 +1,9 @@
 from .abc import (
     AnyDataset,
     IterableAnyDataset,
-    Ref,
-    Sample,
-    Schema,
 )
 from .collate import Batch, FieldGroup, FieldRef, collate_fn
+from .filter import FilteredDataset, FilterRule, cached_filter
 from ..types import Source, Spec, Task
 from ..types.item import (
     AudioItem,
@@ -22,7 +20,10 @@ from ..types.item import (
     Key,
     Modality,
     OptKey,
+    Ref,
     Role,
+    Sample,
+    Schema,
     TextItem,
     TextKey,
     TextOptKey,
@@ -49,6 +50,8 @@ __all__ = [
     "Batch",
     "FieldGroup",
     "FieldRef",
+    "FilteredDataset",
+    "FilterRule",
     "ImageItem",
     "ImageKey",
     "ImageOptKey",
@@ -78,5 +81,6 @@ __all__ = [
     "TextView",
     "View",
     "WeightedRandomStrategy",
+    "cached_filter",
     "collate_fn",
 ]

@@ -201,32 +201,42 @@ class CanonicalDatasetTest(unittest.TestCase):
         dataset = IterableAnyDataset(
             spec=Spec(source=Source.HF, path="/tmp/missing"),
             parse_fn=lambda row: row["value"],
-            num_shards=2,
-            shard_id=1,
         )
         dataset._dataset = _ShardableRows([{"value": index} for index in range(12)])
         worker = _WorkerInfo(num_workers=3, id=2)
 
-        with mock.patch("anydataset.dataset.abc.get_worker_info", return_value=worker):
+        with (
+            mock.patch("anydataset._sharding.dist.is_available", return_value=True),
+            mock.patch("anydataset._sharding.dist.is_initialized", return_value=True),
+            mock.patch("anydataset._sharding.dist.get_world_size", return_value=2),
+            mock.patch("anydataset._sharding.dist.get_rank", return_value=1),
+            mock.patch("anydataset._sharding.get_worker_info", return_value=worker),
+        ):
             values = list(dataset)
 
         self.assertEqual(values, [5, 11])
         self.assertEqual(dataset.dataset.shard_calls, [(6, 5)])
 
     def test_multiple_dataset_splits_pytorch_workers(self):
-        dataset = MultipleAnyDataset([range(6)])
+        dataset = MultipleAnyDataset([_map_dataset(range(6))])
         worker = _WorkerInfo(num_workers=2, id=1)
 
-        with mock.patch("anydataset.dataset.abc.get_worker_info", return_value=worker):
+        with mock.patch("anydataset._sharding.get_worker_info", return_value=worker):
             values = list(dataset)
 
         self.assertEqual(values, [1, 3, 5])
 
     def test_multiple_dataset_merges_rank_and_worker_shards(self):
-        dataset = MultipleAnyDataset([range(12)], num_shards=2, shard_id=1)
+        dataset = MultipleAnyDataset([_map_dataset(range(12))])
         worker = _WorkerInfo(num_workers=3, id=2)
 
-        with mock.patch("anydataset.dataset.abc.get_worker_info", return_value=worker):
+        with (
+            mock.patch("anydataset._sharding.dist.is_available", return_value=True),
+            mock.patch("anydataset._sharding.dist.is_initialized", return_value=True),
+            mock.patch("anydataset._sharding.dist.get_world_size", return_value=2),
+            mock.patch("anydataset._sharding.dist.get_rank", return_value=1),
+            mock.patch("anydataset._sharding.get_worker_info", return_value=worker),
+        ):
             values = list(dataset)
 
         self.assertEqual(values, [5, 11])
@@ -320,6 +330,15 @@ class _ShardableRows:
             for row_index, row in enumerate(self.rows)
             if row_index % num_shards == index
         )
+
+
+def _map_dataset(rows):
+    dataset = AnyDataset(
+        spec=Spec(source=Source.HF, path="/tmp/missing"),
+        parse_fn=lambda row: row,
+    )
+    dataset._dataset = list(rows)
+    return dataset
 
 
 class _WorkerInfo:

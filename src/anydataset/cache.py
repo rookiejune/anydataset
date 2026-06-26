@@ -55,30 +55,51 @@ class CacheManager:
 
     @contextmanager
     def prepare_lock(self, cache: CacheManifest):
-        lock = _lock_for(cache.lock_path)
-        with lock:
-            cache.lock_path.parent.mkdir(parents=True, exist_ok=True)
-            with cache.lock_path.open("a+", encoding="utf-8") as handle:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-                try:
-                    yield
-                finally:
-                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        with FileLock(cache.lock_path):
+            yield
 
     def _cache_path(self, spec: Spec) -> Path:
         return self.root / spec.cache_relpath
 
 
-_PROCESS_LOCKS: dict[str, threading.Lock] = {}
-_PROCESS_LOCKS_GUARD = threading.Lock()
+_LOCKS: dict[str, threading.Lock] = {}
+_LOCKS_GUARD = threading.Lock()
 
 
-def _lock_for(path: Path) -> threading.Lock:
+class FileLock:
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self.file = None
+
+    def __enter__(self):
+        lock = _thread_lock(self.path)
+        lock.acquire()
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            self.file = self.path.open("a+", encoding="utf-8")
+            fcntl.flock(self.file.fileno(), fcntl.LOCK_EX)
+            return self
+        except Exception:
+            if self.file is not None:
+                self.file.close()
+                self.file = None
+            lock.release()
+            raise
+
+    def __exit__(self, exc_type, exc, traceback) -> None:
+        if self.file is not None:
+            fcntl.flock(self.file.fileno(), fcntl.LOCK_UN)
+            self.file.close()
+            self.file = None
+        _thread_lock(self.path).release()
+
+
+def _thread_lock(path: Path) -> threading.Lock:
     key = str(path)
-    with _PROCESS_LOCKS_GUARD:
-        if key not in _PROCESS_LOCKS:
-            _PROCESS_LOCKS[key] = threading.Lock()
-        return _PROCESS_LOCKS[key]
+    with _LOCKS_GUARD:
+        if key not in _LOCKS:
+            _LOCKS[key] = threading.Lock()
+        return _LOCKS[key]
 
 
 def _write_json(path: Path, value: Any) -> None:

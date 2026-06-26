@@ -11,8 +11,9 @@ from urllib.request import Request, urlopen
 
 import torch
 
+from .._sharding import validate_shard
 from ..dataset import AudioView
-from ..dataset.abc import AnyDataset, _validate_shard
+from ..dataset.abc import AnyDataset
 from ..types.item import Sample
 from ..types import Preset
 from ..utils import sample_from_row
@@ -62,7 +63,7 @@ class FSD50K(AnyDataset):
         return self.parse_fn(_row_for(self.dataset, index))
 
     def iter_shard(self, num_shards: int, shard_id: int) -> Iterator[Sample]:
-        _validate_shard(num_shards, shard_id)
+        validate_shard(num_shards, shard_id)
         for index in range(shard_id, len(self), num_shards):
             yield self[index]
 
