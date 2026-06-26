@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from ..modalities import ViewRef
+from .manifest import ViewRef
 
 
 def dataset_json_path(root: str | Path) -> Path:
@@ -11,6 +11,10 @@ def dataset_json_path(root: str | Path) -> Path:
 
 def samples_jsonl_path(root: str | Path) -> Path:
     return Path(root) / "samples.jsonl"
+
+
+def samples_parquet_path(root: str | Path) -> Path:
+    return Path(root) / "samples.parquet"
 
 
 def dataset_ready_path(root: str | Path) -> Path:
@@ -28,6 +32,10 @@ def view_json_path(root: str | Path, ref: ViewRef, revision: str) -> Path:
 
 def view_manifest_path(root: str | Path, ref: ViewRef, revision: str) -> Path:
     return view_dir(root, ref, revision) / "manifest.jsonl"
+
+
+def view_manifest_parquet_path(root: str | Path, ref: ViewRef, revision: str) -> Path:
+    return view_dir(root, ref, revision) / "manifest.parquet"
 
 
 def view_ready_path(root: str | Path, ref: ViewRef, revision: str) -> Path:

@@ -1,9 +1,14 @@
 # anydataset
 
-`anydataset` is a PyTorch-first iterable dataset library. It reads samples from one
-or more dataset sources and returns structured `Sample` objects. Multi-source
-datasets behave like a single `IterableDataset`; batching and collation stay in
-the caller's PyTorch `DataLoader`.
+`anydataset` is a small PyTorch dataset layer for mapping different physical
+sources into one canonical `Sample` shape:
+
+```python
+Sample = Mapping[tuple[Role, Modality], AudioItem | ImageItem | TextItem]
+```
+
+The source layer only prepares and iterates raw rows. Presets decide how those
+rows are parsed into canonical samples.
 
 ## Install
 
@@ -11,229 +16,144 @@ the caller's PyTorch `DataLoader`.
 pip install -e '.[huggingface,test]'
 ```
 
-For audio datasets:
+For audio file loading:
 
 ```bash
 pip install -e '.[huggingface,audio]'
 ```
 
-## Basic Usage
+## Presets
+
+Use `Preset` when a built-in dataset already knows both its source and parser.
 
 ```python
-from torch.utils.data import DataLoader
+from anydataset import AudioView, Modality, Preset, Role
 
-from anydataset import AnyDataset, Task
+dataset = Preset.FLEURS.create(split="validation")
+sample = next(iter(dataset))
+
+audio = sample[Role.DEFAULT, Modality.AUDIO]
+waveform = audio.views[AudioView.WAVEFORM]
+sample_rate = audio.required["sample_rate"]
+```
+
+`Preset.spec(...)` returns the physical source only:
+
+```python
+from anydataset import Preset
+
+spec = Preset.MNIST.spec(split="train")
+```
+
+String shorthands are resolved by `resolve_dataset`:
+
+```python
+from anydataset import resolve_dataset
+
+spec = resolve_dataset("mnist:train")
+local = resolve_dataset("local:///data/images.jsonl")
+unified = resolve_dataset("unified:///data/my_anydataset:train")
+```
+
+## Custom Sources
+
+`AnyDataset` is map-style. `IterableAnyDataset` is iterable-style. Both take a
+`Spec` and an optional `parse_fn` that maps one raw row to a canonical `Sample`.
+
+```python
+from anydataset import AnyDataset, ImageItem, ImageOptKey, ImageView, Modality, Role, Source, Spec
+
+def parse(row):
+    return {
+        (Role.DEFAULT, Modality.IMAGE): ImageItem(
+            views={ImageView.PIXEL: row["image"]},
+            optional={ImageOptKey.LABEL: row["label"]},
+        )
+    }
 
 dataset = AnyDataset(
-    datasets=["mnist:train"],
-    task=Task.IMAGE_CLASSIFICATION,
+    Spec(source=Source.HF, path="ylecun/mnist", split="train"),
+    parse_fn=parse,
 )
-
-for sample in dataset:
-    print(sample.dataset_name, sample.sample_index, sample.data.keys())
-    break
-
-loader = DataLoader(dataset, batch_size=32, collate_fn=lambda samples: samples)
-
-for batch in loader:
-    print(len(batch), batch[0].dataset_name, batch[0].sample_index)
-    break
 ```
 
-`datasets` accepts either a single dataset reference such as `"mnist:train"` or a
-sequence of references/specs. String references are resolved through the default
-catalog and optional `dataset_map`.
+For local files, point `Source.LOCAL` at a file or directory. JSONL files yield
+one decoded object per line; other files yield `{"path": ...}` rows.
 
-`DatasetSpec` describes the physical data source. Dataset adapters are provided
-separately through `adapter_map` when raw rows need dataset-specific mapping into
-logical modalities.
+## Multiple Datasets
 
-`AnyDataset` initialization is intentionally thin. Multi-source iteration order
-belongs to `strategy`, and distributed sharding belongs to `.shard(...)`.
+Combine already-created datasets with `MultipleAnyDataset`.
 
 ```python
-rank_dataset = dataset.shard(num_shards=8, shard_id=0)
-loader = DataLoader(rank_dataset, batch_size=32, num_workers=4, collate_fn=lambda samples: samples)
-```
+from anydataset import MultipleAnyDataset, Preset, RoundRobinStrategy
 
-For multiple sources, choose an iteration strategy at construction time:
-
-```python
-from anydataset import RoundRobinStrategy, WeightedRandomStrategy
-
-round_robin = AnyDataset(
-    datasets=["fleurs:train", "librispeech_asr:train.100"],
-    task=Task.AUDIO_CODEC,
+dataset = MultipleAnyDataset(
+    [
+        Preset.FLEURS.create(split="train"),
+        Preset.LIBRISPEECH_ASR.create(split="train.100"),
+    ],
     strategy=RoundRobinStrategy(),
 )
-
-weighted = AnyDataset(
-    datasets=["fleurs:train", "librispeech_asr:train.100"],
-    task=Task.AUDIO_CODEC,
-    strategy=WeightedRandomStrategy(
-        weights={"fleurs:train": 1.0, "librispeech_asr:train.100": 2.0},
-        seed=13,
-    ),
-)
 ```
 
-## HuggingFace Streaming
-
-Streaming is enabled through `DatasetSpec.load_options` and is passed to
-`datasets.load_dataset(...)`.
-
-Built-in audio/parquet catalog entries such as `fleurs`, `librispeech_asr`,
-`esc50`, and `nsynth` default to `load_options={"streaming": True}`. Explicit
-`hf://...` references and custom `DatasetSpec` values do not force streaming;
-set `load_options` yourself when you want that behavior.
-
-```python
-from torch.utils.data import DataLoader
-
-from anydataset import AnyDataset, DatasetSpec, Task
-dataset = AnyDataset(
-    datasets=["mnist_stream"],
-    task=Task.IMAGE_CLASSIFICATION,
-    dataset_map={
-        "mnist_stream": DatasetSpec(
-            source="huggingface",
-            path="ylecun/mnist",
-            name="mnist_stream",
-            split="train",
-            load_options={"streaming": True},
-        )
-    },
-)
-
-loader = DataLoader(dataset, batch_size=32, collate_fn=lambda samples: samples)
-```
-
-On Fudan server `145`, direct access to `huggingface.co` timed out during the
-streaming smoke test. Use the HuggingFace mirror endpoint there:
-
-```bash
-HF_ENDPOINT=https://hf-mirror.com python your_training_script.py
-```
-
-The 145 smoke test verified that `load_options={"streaming": True}` returns a
-`datasets.iterable_dataset.IterableDataset`, can produce samples through
-`AnyDataset`, and can be consumed by PyTorch `DataLoader` without
-materializing Arrow files.
-
-## Custom Dataset Map
-
-```python
-from anydataset import AnyDataset, DatasetSpec, Task
-from anydataset.adapters import LocalFilesAdapter
-
-dataset = AnyDataset(
-    datasets=["my_images:train"],
-    task=Task.IMAGE_CLASSIFICATION,
-    dataset_map={
-        "my_images": DatasetSpec(
-            source="local_files",
-            path="/data/my_images",
-            name="my_images",
-        )
-    },
-    adapter_map={
-        "my_images": LocalFilesAdapter(),
-    },
-)
-```
-
-Dataset adapters can define both row iteration and modality extraction:
-
-```python
-from anydataset import AnyDataset, DatasetSpec, Task
-from anydataset.adapters import LocalFilesAdapter
-
-dataset = AnyDataset(
-    datasets=["my_audio:train"],
-    task=Task.AUDIO_CODEC,
-    dataset_map={
-        "my_audio": DatasetSpec(
-            source="local_files",
-            path="/data/audio.jsonl",
-            name="my_audio",
-        )
-    },
-    adapter_map={
-        "my_audio": LocalFilesAdapter(waveform_field="samples", sample_rate_field="sr"),
-    },
-)
-```
+Every dataset exposes `iter_shard(num_shards, shard_id)` for distributed reads.
 
 ## Unified Store
 
-Datasets written by `DatasetWriter` can be read back with `source="unified"`.
-The MVP reader supports default-role audio `waveform` and `file` views.
-
-```python
-from anydataset import AnyDataset, DatasetSpec, Task
-
-dataset = AnyDataset(
-    datasets=DatasetSpec(
-        source="unified",
-        path="/data/my_anydataset",
-        name="my_audio",
-        split="train",
-    ),
-    task=Task.AUDIO_CODEC,
-)
-```
-
-The same source is available as a string reference:
-
-```python
-dataset = AnyDataset(
-    datasets="unified:///data/my_anydataset:train",
-    task=Task.AUDIO_CODEC,
-)
-```
-
-`ViewMaterializer` can create a new self-contained unified dataset with an
-additional or replaced view:
+`DatasetWriter` writes canonical samples to a self-describing store. The same
+store can be read back through `Source.UNIFIED`.
 
 ```python
 import torch
 
-from anydataset import AudioView, ModalityKey, ViewMaterializer, ViewRef
+from anydataset import (
+    AnyDataset,
+    AudioItem,
+    AudioKey,
+    AudioView,
+    DatasetWriter,
+    Modality,
+    Role,
+    Source,
+    Spec,
+)
+
+sample = {
+    (Role.DEFAULT, Modality.AUDIO): AudioItem(
+        views={AudioView.WAVEFORM: torch.zeros(1, 16000)},
+        required={AudioKey.SAMPLE_RATE: 16000},
+    )
+}
+
+DatasetWriter("/data/my_anydataset", dataset_id="toy-audio").write([sample])
+
+dataset = AnyDataset(
+    Spec(source=Source.UNIFIED, path="/data/my_anydataset"),
+)
+restored = dataset[0]
+```
+
+`ViewMaterializer` adds derived views to a unified store.
+
+```python
+from anydataset import AudioView, Modality, ViewMaterializer, ViewRef
 
 ViewMaterializer(
     input_dir="/data/my_anydataset",
     output_dir="/data/my_anydataset_longcat",
-    input_ref=ViewRef(ModalityKey.AUDIO, AudioView.WAVEFORM),
-    output_ref=ViewRef(ModalityKey.AUDIO, AudioView.LONGCAT),
+    input_ref=ViewRef(Modality.AUDIO, AudioView.WAVEFORM),
+    output_ref=ViewRef(Modality.AUDIO, AudioView.LONGCAT),
     transform=lambda view: {"semantic_codes": view.value.to(torch.int64)},
     provider_name="toy_longcat",
     provider_version="1",
 ).write()
 ```
 
-LongCat can be used as a lazy optional provider. Pass an initialized codec to
-avoid importing `anytrain`; otherwise the provider loads
-`anytrain.codec.longcat.LongCatAudioCodec` on first use:
-
-```python
-from anydataset import LongCatViewProvider
-
-LongCatViewProvider(
-    device="cuda",
-    n_acoustic_codebooks=2,
-    local_files_only=True,
-).materializer(
-    input_dir="/data/my_anydataset",
-    output_dir="/data/my_anydataset_longcat",
-).write()
-```
+Use `mode="self_contained"` to copy existing views into the output dataset, or
+set `input_dir == output_dir` to register the new view in place.
 
 ## Development
 
 ```bash
-python -m compileall -q src tests examples
-python -m pytest -q
+/Users/zhuyin/miniconda3/envs/torch2.12/bin/python -m pytest -q
 ```
-
-Design decisions live in [docs/design.md](docs/design.md). Pending work lives in
-[todo.md](todo.md).

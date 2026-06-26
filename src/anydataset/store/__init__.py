@@ -1,49 +1,23 @@
-from .jsonio import read_json, read_jsonl, write_json, write_jsonl
-from .materializer import ViewInput, ViewMaterializer
-from .paths import (
-    dataset_json_path,
-    dataset_ready_path,
-    samples_jsonl_path,
-    view_dir,
-    view_json_path,
-    view_manifest_path,
-    view_ready_path,
-    view_shard_path,
-    view_shards_dir,
+from .manifest import ViewRef
+from .materializer import (
+    ViewInput,
+    ViewMaterializer,
+    write_self_contained_dataset,
+    write_view_dataset,
+    write_view_in_place,
 )
-from .schema import (
-    STORE_SCHEMA_VERSION,
-    DatasetManifest,
-    SampleManifestEntry,
-    ViewManifestEntry,
-    ViewSelection,
-    view_ref_from_dict,
-    view_ref_to_dict,
-)
+from .reader import StoreDataset, StoreView, read_store_dataset
 from .writer import DatasetWriter
 
 __all__ = [
-    "STORE_SCHEMA_VERSION",
-    "DatasetManifest",
     "DatasetWriter",
-    "SampleManifestEntry",
+    "StoreDataset",
+    "StoreView",
     "ViewInput",
-    "ViewManifestEntry",
     "ViewMaterializer",
-    "ViewSelection",
-    "dataset_json_path",
-    "dataset_ready_path",
-    "read_json",
-    "read_jsonl",
-    "samples_jsonl_path",
-    "view_dir",
-    "view_json_path",
-    "view_manifest_path",
-    "view_ready_path",
-    "view_ref_from_dict",
-    "view_ref_to_dict",
-    "view_shard_path",
-    "view_shards_dir",
-    "write_json",
-    "write_jsonl",
+    "ViewRef",
+    "read_store_dataset",
+    "write_self_contained_dataset",
+    "write_view_dataset",
+    "write_view_in_place",
 ]

@@ -1,61 +1,42 @@
+from io import BytesIO
 import shutil
+import tarfile
 import tempfile
 import unittest
-from io import BytesIO
 from pathlib import Path
-import tarfile
 
 import torch
 
 from anydataset import (
     AnyDataset,
+    AudioItem,
     AudioKey,
     AudioView,
-    DatasetSpec,
-    ModalityKey,
-    Task,
+    Modality,
+    Role,
+    Source,
+    Spec,
     ViewRef,
 )
-from anydataset.samples import Sample
-from anydataset.store import (
-    DatasetManifest,
-    DatasetWriter,
-    ViewInput,
-    ViewManifestEntry,
-    ViewMaterializer,
-    dataset_json_path,
-    read_json,
-    read_jsonl,
-    view_manifest_path,
-    view_shard_path,
-)
+from anydataset.store import DatasetWriter, ViewInput, ViewMaterializer
+from anydataset.store.jsonio import read_json
+from anydataset.store.manifest import DatasetManifest
+from anydataset.store.manifestio import read_view_manifest
+from anydataset.store.paths import dataset_json_path, view_dir, view_shard_path
 
 
 class ViewMaterializerTest(unittest.TestCase):
-    def test_materializer_adds_new_view_and_output_is_self_contained(self):
+    def test_materializer_writes_only_new_view_by_default(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             source = root / "source"
             target = root / "target"
             waveform = torch.tensor([[1.0, 2.0, 3.0]])
             DatasetWriter(source, dataset_id="toy-audio", split="train").write(
-                [
-                    Sample(
-                        data={
-                            ModalityKey.AUDIO: {
-                                AudioKey.SAMPLE_RATE: 4,
-                                AudioKey.VIEWS: {
-                                    AudioView.WAVEFORM: waveform,
-                                },
-                            },
-                        },
-                        dataset_name="source:train",
-                        sample_index=0,
-                    )
-                ]
+                [_audio_sample(waveform)]
             )
-            input_ref = ViewRef(ModalityKey.AUDIO, AudioView.WAVEFORM)
-            output_ref = ViewRef(ModalityKey.AUDIO, AudioView.LONGCAT)
+            input_ref = ViewRef(Modality.AUDIO, AudioView.WAVEFORM)
+            output_ref = ViewRef(Modality.AUDIO, AudioView.LONGCAT)
 
             def provider(view: ViewInput):
                 return {
@@ -73,84 +54,119 @@ class ViewMaterializerTest(unittest.TestCase):
                 provider_version="1",
                 config={"offset": 10},
             ).write()
-            shutil.rmtree(source)
 
-            dataset = AnyDataset(
-                datasets=DatasetSpec(source="unified", path=str(target), name="target"),
-                task=Task.AUDIO_CODEC,
-                cache_dir=root / "cache",
-            )
-            sample = next(iter(dataset))
             manifest = DatasetManifest.from_dict(read_json(dataset_json_path(target)))
-            longcat_revision = next(
-                selection.revision for selection in manifest.views if selection.ref == output_ref
+            revision = next(
+                selection.revision
+                for selection in manifest.views
+                if selection.ref == output_ref
             )
-            longcat_entry = ViewManifestEntry.from_dict(
-                next(read_jsonl(view_manifest_path(target, output_ref, longcat_revision)))
-            )
+            entry = next(read_view_manifest(target, output_ref, revision))
 
-            self.assertTrue(torch.equal(sample.data[ModalityKey.AUDIO][AudioKey.VIEWS][AudioView.WAVEFORM], waveform))
-            self.assertEqual({selection.ref for selection in manifest.views}, {input_ref, output_ref})
-            self.assertEqual(longcat_entry.ref, output_ref)
+            self.assertEqual({selection.ref for selection in manifest.views}, {output_ref})
+            self.assertFalse(view_dir(target, input_ref, "raw").exists())
+            self.assertEqual(entry.ref, output_ref)
             with tarfile.open(
-                view_shard_path(target, output_ref, longcat_entry.revision, longcat_entry.shard),
+                view_shard_path(target, output_ref, entry.revision, entry.shard),
                 "r",
             ) as archive:
-                payload = archive.extractfile(longcat_entry.key).read()
+                payload = archive.extractfile(entry.key).read()
             loaded = torch.load(BytesIO(payload), map_location="cpu")
-            self.assertTrue(torch.equal(loaded["semantic_codes"], torch.tensor([[11, 12, 13]])))
-            self.assertEqual(longcat_entry.provenance["name"], "toy_longcat")
-            self.assertEqual(longcat_entry.provenance["config"], {"offset": 10})
+            self.assertTrue(
+                torch.equal(loaded["semantic_codes"], torch.tensor([[11, 12, 13]]))
+            )
+            self.assertEqual(entry.provenance["name"], "toy_longcat")
+            self.assertEqual(entry.provenance["config"], {"offset": 10})
 
-    def test_materializer_can_replace_selected_revision_for_existing_view(self):
+    def test_materializer_can_register_new_view_in_place(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            source = root / "source"
+            waveform = torch.tensor([[1.0, 2.0, 3.0]])
+            DatasetWriter(source, dataset_id="toy-audio", split="train").write(
+                [_audio_sample(waveform)]
+            )
+            input_ref = ViewRef(Modality.AUDIO, AudioView.WAVEFORM)
+            output_ref = ViewRef(Modality.AUDIO, AudioView.LONGCAT)
+
+            ViewMaterializer(
+                input_dir=source,
+                output_dir=source,
+                input_ref=input_ref,
+                output_ref=output_ref,
+                transform=lambda view: {"semantic_codes": view.value.to(torch.int64)},
+                provider_name="toy_longcat",
+                provider_version="1",
+            ).write()
+
+            manifest = DatasetManifest.from_dict(read_json(dataset_json_path(source)))
+            revision = next(
+                selection.revision
+                for selection in manifest.views
+                if selection.ref == output_ref
+            )
+            entry = next(read_view_manifest(source, output_ref, revision))
+
+            self.assertEqual(
+                {selection.ref for selection in manifest.views},
+                {input_ref, output_ref},
+            )
+            self.assertTrue(view_dir(source, input_ref, "raw").exists())
+            self.assertTrue(view_dir(source, output_ref, revision).exists())
+            with tarfile.open(
+                view_shard_path(source, output_ref, entry.revision, entry.shard),
+                "r",
+            ) as archive:
+                payload = archive.extractfile(entry.key).read()
+            loaded = torch.load(BytesIO(payload), map_location="cpu")
+            self.assertTrue(torch.equal(loaded["semantic_codes"], torch.tensor([[1, 2, 3]])))
+
+    def test_materializer_self_contained_mode_copies_existing_views(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             source = root / "source"
             target = root / "target"
+            waveform = torch.tensor([[1.0, 2.0, 3.0]])
             DatasetWriter(source, dataset_id="toy-audio", split="train").write(
-                [
-                    Sample(
-                        data={
-                            ModalityKey.AUDIO: {
-                                AudioKey.SAMPLE_RATE: 4,
-                                AudioKey.VIEWS: {
-                                    AudioView.WAVEFORM: torch.tensor([[1.0]]),
-                                },
-                            },
-                        },
-                        dataset_name="source:train",
-                        sample_index=0,
-                    )
-                ]
+                [_audio_sample(waveform)]
             )
-            ref = ViewRef(ModalityKey.AUDIO, AudioView.WAVEFORM)
+            input_ref = ViewRef(Modality.AUDIO, AudioView.WAVEFORM)
+            output_ref = ViewRef(Modality.AUDIO, AudioView.LONGCAT)
 
             ViewMaterializer(
                 input_dir=source,
                 output_dir=target,
-                input_ref=ref,
-                output_ref=ref,
-                transform=lambda view: view.value * 2,
-                provider_name="double_waveform",
+                input_ref=input_ref,
+                output_ref=output_ref,
+                transform=lambda view: {"semantic_codes": view.value.to(torch.int64)},
+                provider_name="toy_longcat",
                 provider_version="1",
+                mode="self_contained",
             ).write()
+            shutil.rmtree(source)
 
             dataset = AnyDataset(
-                datasets=DatasetSpec(source="unified", path=str(target), name="target"),
-                task=Task.AUDIO_CODEC,
+                Spec(source=Source.UNIFIED, path=str(target), split="train"),
                 cache_dir=root / "cache",
             )
-            sample = next(iter(dataset))
+            sample = dataset[0]
             manifest = DatasetManifest.from_dict(read_json(dataset_json_path(target)))
 
-            self.assertEqual(len(manifest.views), 1)
-            self.assertNotEqual(manifest.views[0].revision, "raw")
-            self.assertTrue(
-                torch.equal(
-                    sample.data[ModalityKey.AUDIO][AudioKey.VIEWS][AudioView.WAVEFORM],
-                    torch.tensor([[2.0]]),
-                )
+            self.assertEqual(
+                {selection.ref for selection in manifest.views},
+                {input_ref, output_ref},
             )
+            audio = sample[Role.DEFAULT, Modality.AUDIO]
+            self.assertTrue(torch.equal(audio.views[AudioView.WAVEFORM], waveform))
+
+
+def _audio_sample(waveform: torch.Tensor):
+    return {
+        (Role.DEFAULT, Modality.AUDIO): AudioItem(
+            views={AudioView.WAVEFORM: waveform},
+            required={AudioKey.SAMPLE_RATE: 4},
+        )
+    }
 
 
 if __name__ == "__main__":

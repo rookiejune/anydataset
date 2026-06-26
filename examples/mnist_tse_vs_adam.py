@@ -12,10 +12,17 @@ import torch
 from torch import nn
 from torch.utils.data import DataLoader
 
-from anydataset import AnyIterableDataset, DatasetSpec, Task
-from anydataset.api.cache import CacheManifest
-from anydataset.datasets.base import DatasetAdapter
-from anydataset.tasks import ImageClassificationFormatter
+from anydataset import (
+    AnyDataset,
+    ImageItem,
+    ImageOptKey,
+    ImageView,
+    Modality,
+    Role,
+    Source,
+    Spec,
+    Task,
+)
 
 
 DATASETS = {
@@ -54,19 +61,23 @@ DATASETS = {
 }
 
 
-class TorchVisionImageClassificationAdapter(DatasetAdapter):
-    def prepare(self, spec: DatasetSpec, cache: CacheManifest):
+class TorchVisionImageDataset(AnyDataset):
+    def prepare(self):
+        if self._dataset is not None:
+            return self._dataset
+
         try:
             from torchvision import datasets, transforms
         except ImportError as exc:
             raise ImportError("This example requires torchvision.") from exc
 
-        split = spec.split or "train"
+        self.cache_manager.prepare(self.spec)
+        split = self.spec.split or "train"
         train = split == "train"
-        root = Path(spec.load_options.get("root", cache.cache_path / "torchvision"))
-        dataset_name = spec.load_options["torchvision_name"]
-        mean = tuple(spec.load_options["mean"])
-        std = tuple(spec.load_options["std"])
+        root = Path(self.spec.load_options["root"])
+        dataset_name = self.spec.load_options["torchvision_name"]
+        mean = tuple(self.spec.load_options["mean"])
+        std = tuple(self.spec.load_options["std"])
 
         transform = transforms.Compose(
             [
@@ -75,16 +86,22 @@ class TorchVisionImageClassificationAdapter(DatasetAdapter):
             ]
         )
         dataset_cls = getattr(datasets, dataset_name)
-        return dataset_cls(
+        self._dataset = dataset_cls(
             root=str(root),
             train=train,
             transform=transform,
             download=True,
         )
+        return self._dataset
 
-    def iter_samples(self, manifest) -> Iterator[dict]:
-        for image, label in manifest:
-            yield {"image": image, "label": int(label)}
+    def __getitem__(self, index: int):
+        image, label = self.dataset[index]
+        return {
+            (Role.DEFAULT, Modality.IMAGE): ImageItem(
+                views={ImageView.PIXEL: image},
+                optional={ImageOptKey.LABEL: int(label)},
+            )
+        }
 
 
 class PatchTransformerClassifier(nn.Module):
@@ -208,30 +225,21 @@ def build_dataset(
     split: str,
     data_dir: Path,
     cache_dir: Path,
-) -> AnyIterableDataset:
+) -> AnyDataset:
     config = DATASETS[dataset_name]
-    key = f"{dataset_name}-{split}"
-    dataset_map = {
-        key: DatasetSpec(
-            source="torchvision",
-            path=config["torchvision_name"],
-            name=key,
+    return TorchVisionImageDataset(
+        spec=Spec(
+            source=Source.LOCAL,
+            path=str(data_dir / dataset_name),
             split=split,
-            adapter=TorchVisionImageClassificationAdapter(),
             load_options={
                 "root": str(data_dir / dataset_name),
                 "torchvision_name": config["torchvision_name"],
                 "mean": config["mean"],
                 "std": config["std"],
             },
-        )
-    }
-    return AnyIterableDataset(
-        datasets=[key],
-        task=Task.IMAGE_CLASSIFICATION,
-        dataset_map=dataset_map,
+        ),
         cache_dir=str(cache_dir),
-        formatter=ImageClassificationFormatter(),
     )
 
 
@@ -312,8 +320,9 @@ def evaluate(model: nn.Module, loader: DataLoader, device: torch.device, max_bat
 
     with torch.no_grad():
         for batch_index, batch in enumerate(loader):
-            images = batch.images.to(device, non_blocking=True)
-            labels = batch.labels.to(device, non_blocking=True)
+            item = batch.sample[(Role.DEFAULT, Modality.IMAGE)]
+            images = item.views[ImageView.PIXEL].to(device, non_blocking=True)
+            labels = item.optional[ImageOptKey.LABEL].to(device, non_blocking=True)
             logits = model(images)
             loss = criterion(logits, labels)
             losses.update(float(loss.item()), labels.numel())
@@ -356,16 +365,20 @@ def train(args: argparse.Namespace) -> None:
         Path(args.data_dir),
         Path(args.cache_dir),
     )
-    train_loader = train_dataset.dataloader(
+    train_loader = DataLoader(
+        train_dataset,
         batch_size=args.batch_size,
         drop_last=True,
         num_workers=args.num_workers,
         pin_memory=device.type == "cuda",
+        collate_fn=Task.IMAGE_CLASSIFICATION.collate_fn(),
     )
-    test_loader = test_dataset.dataloader(
+    test_loader = DataLoader(
+        test_dataset,
         batch_size=args.batch_size,
         num_workers=0,
         pin_memory=device.type == "cuda",
+        collate_fn=Task.IMAGE_CLASSIFICATION.collate_fn(),
     )
 
     model = PatchTransformerClassifier(
@@ -409,8 +422,9 @@ def train(args: argparse.Namespace) -> None:
     while step < args.max_steps:
         for batch in train_loader:
             model.train()
-            images = batch.images.to(device, non_blocking=True)
-            labels = batch.labels.to(device, non_blocking=True)
+            item = batch.sample[(Role.DEFAULT, Modality.IMAGE)]
+            images = item.views[ImageView.PIXEL].to(device, non_blocking=True)
+            labels = item.optional[ImageOptKey.LABEL].to(device, non_blocking=True)
 
             optimizer.zero_grad(set_to_none=True)
             logits = model(images)

@@ -1,47 +1,54 @@
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
-from dataclasses import dataclass, field
-import hashlib
-from io import BytesIO
-import os
-from pathlib import Path
 import re
 import tarfile
-import uuid
+from collections.abc import Iterable, Mapping
+from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
-import torch
-
-from ..modalities import ModalityKey, ViewRef
-from ..modalities.audio import AudioKey, AudioOptKey, AudioView
-from ..modalities.text import TextKey
-from ..samples import Sample
-from .jsonio import write_json, write_jsonl
-from .paths import (
-    dataset_json_path,
-    dataset_ready_path,
-    samples_jsonl_path,
-    view_json_path,
-    view_manifest_path,
-    view_ready_path,
-    view_shard_path,
+from ..dataset.abc import Sample
+from ..types.item import (
+    AudioItem,
+    AudioKey,
+    AudioView,
+    ImageItem,
+    ImageView,
+    Item,
+    Modality,
+    Role,
+    TextItem,
+    TextView,
+    View,
 )
-from .schema import (
+from .jsonio import write_json
+from .manifest import (
     STORE_SCHEMA_VERSION,
     DatasetManifest,
+    SampleItemEntry,
     SampleManifestEntry,
     ViewManifestEntry,
+    ViewRef,
     ViewSelection,
     view_ref_to_dict,
 )
-
-
-DEFAULT_AUDIO_VIEWS = (
-    ViewRef(ModalityKey.AUDIO, AudioView.WAVEFORM),
-    ViewRef(ModalityKey.AUDIO, AudioView.FILE),
+from .manifestio import (
+    ManifestFormat,
+    preflight_manifest_format,
+    write_samples_manifest,
+    write_view_manifest,
 )
-WRITER_PROVIDER = {"name": "DatasetWriter", "version": "mvp"}
+from .paths import (
+    dataset_json_path,
+    dataset_ready_path,
+    view_json_path,
+    view_ready_path,
+    view_shard_path,
+)
+from .atomic import replace_dir
+from .payload import add_payload, checksum, payload_for_view
+
+WRITER_PROVIDER = {"name": "DatasetWriter", "version": "canonical-v2"}
 
 
 @dataclass
@@ -51,29 +58,30 @@ class DatasetWriter:
     split: str | None = None
     revision: str = "raw"
     views: tuple[ViewRef, ...] | None = None
+    max_shard_samples: int | None = None
+    max_shard_bytes: int | None = None
+    manifest_format: ManifestFormat = "parquet"
     config: Mapping[str, Any] = field(default_factory=dict)
     provenance: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         self.output_dir = Path(self.output_dir)
+        self.max_shard_samples = _optional_positive_int(
+            "max_shard_samples",
+            self.max_shard_samples,
+        )
+        self.max_shard_bytes = _optional_positive_int(
+            "max_shard_bytes",
+            self.max_shard_bytes,
+        )
+        preflight_manifest_format(self.manifest_format)
         if self.views is not None:
             self.views = tuple(self.views)
             for ref in self.views:
-                _validate_supported_ref(ref)
+                _validate_view_ref(ref)
 
     def write(self, samples: Iterable[Sample]) -> Path:
-        output_dir = Path(self.output_dir)
-        _validate_target(output_dir)
-        tmp_dir = _tmp_dir(output_dir)
-        tmp_dir.mkdir(parents=True)
-        try:
-            self._write_to_tmp(tmp_dir, samples)
-            if output_dir.exists():
-                output_dir.rmdir()
-            os.replace(tmp_dir, output_dir)
-            return output_dir
-        except Exception:
-            raise
+        return replace_dir(self.output_dir, lambda tmp: self._write_to_tmp(tmp, samples))
 
     def _write_to_tmp(self, root: Path, samples: Iterable[Sample]) -> Path:
         sinks: dict[ViewRef, _ViewSink] = {}
@@ -81,23 +89,41 @@ class DatasetWriter:
 
         try:
             for index, sample in enumerate(samples):
-                if not isinstance(sample, Sample):
-                    raise TypeError("DatasetWriter.write expects Sample instances.")
-                sample_id = _sample_id(sample, index)
-                audio = _audio_mapping(sample)
-                refs = self.views if self.views is not None else _available_supported_refs(audio)
+                if not isinstance(sample, Mapping):
+                    raise TypeError("DatasetWriter.write expects Sample mappings.")
+                sample_id = _sample_id(self.dataset_id, index)
+                _validate_sample(sample)
+                refs = (
+                    self.views if self.views is not None else _sample_view_refs(sample)
+                )
                 if not refs:
-                    raise ValueError(f"Sample {sample_id} has no supported audio views.")
-                sample_entries.append(_sample_manifest_entry(sample, sample_id, audio))
+                    raise ValueError(f"Sample {sample_id} has no views.")
+                sample_entries.append(
+                    _sample_manifest_entry(
+                        sample=sample,
+                        sample_id=sample_id,
+                        sample_index=index,
+                        dataset_id=self.dataset_id,
+                    )
+                )
                 for ref in refs:
-                    value = _view_value(audio, ref)
+                    value = _sample_view_value(sample, ref)
                     if value is None:
                         if self.views is not None:
-                            raise KeyError(f"Sample {sample_id} is missing view {ref.path_parts()}.")
+                            raise KeyError(
+                                f"Sample {sample_id} is missing view {ref.path_parts()}."
+                            )
                         continue
                     sink = sinks.get(ref)
                     if sink is None:
-                        sink = _ViewSink(root=root, ref=ref, revision=self.revision)
+                        sink = _ViewSink(
+                            root=root,
+                            ref=ref,
+                            revision=self.revision,
+                            max_shard_samples=self.max_shard_samples,
+                            max_shard_bytes=self.max_shard_bytes,
+                            manifest_format=self.manifest_format,
+                        )
                         sinks[ref] = sink
                     sink.write(sample_id, value)
 
@@ -114,7 +140,7 @@ class DatasetWriter:
                 provenance=self.provenance,
             )
             write_json(dataset_json_path(root), manifest.to_dict())
-            write_jsonl(samples_jsonl_path(root), (entry.to_dict() for entry in sample_entries))
+            write_samples_manifest(root, sample_entries, self.manifest_format)
             for sink in sinks.values():
                 sink.close()
             dataset_ready_path(root).touch()
@@ -126,23 +152,36 @@ class DatasetWriter:
 
 
 class _ViewSink:
-    def __init__(self, root: Path, ref: ViewRef, revision: str):
+    def __init__(
+        self,
+        root: Path,
+        ref: ViewRef,
+        revision: str,
+        max_shard_samples: int | None,
+        max_shard_bytes: int | None,
+        manifest_format: ManifestFormat,
+    ) -> None:
         self.root = root
         self.ref = ref
         self.revision = revision
-        self.shard = "000000.tar"
+        self.max_shard_samples = max_shard_samples
+        self.max_shard_bytes = max_shard_bytes
+        self.manifest_format: ManifestFormat = manifest_format
+        self.shard_index = 0
+        self.shard = _shard_name(self.shard_index)
+        self.shard_samples = 0
+        self.shard_bytes = 0
         self.entries: list[ViewManifestEntry] = []
-        path = view_shard_path(root, ref, revision, self.shard)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        self.tar = tarfile.open(path, "w")
+        self.tar = self._open_shard(self.shard)
         self.closed = False
 
     def write(self, sample_id: str, value: Any) -> None:
-        payload = _payload_for_view(self.ref, sample_id, value)
-        info = tarfile.TarInfo(payload.key)
-        info.size = len(payload.data)
-        info.mtime = 0
-        self.tar.addfile(info, BytesIO(payload.data))
+        payload = payload_for_view(self.ref, sample_id, value, WRITER_PROVIDER)
+        if self._should_roll(len(payload.data)):
+            self._roll_shard()
+        add_payload(self.tar, payload)
+        self.shard_samples += 1
+        self.shard_bytes += len(payload.data)
         self.entries.append(
             ViewManifestEntry(
                 ref=self.ref,
@@ -152,7 +191,7 @@ class _ViewSink:
                 key=payload.key,
                 shape=payload.shape,
                 dtype=payload.dtype,
-                checksum=f"sha256:{hashlib.sha256(payload.data).hexdigest()}",
+                checksum=checksum(payload.data),
                 provenance=payload.provenance,
             )
         )
@@ -166,9 +205,12 @@ class _ViewSink:
             "provider": WRITER_PROVIDER,
         }
         write_json(view_json_path(self.root, self.ref, self.revision), view_json)
-        write_jsonl(
-            view_manifest_path(self.root, self.ref, self.revision),
-            (entry.to_dict() for entry in self.entries),
+        write_view_manifest(
+            self.root,
+            self.ref,
+            self.revision,
+            self.entries,
+            self.manifest_format,
         )
         view_ready_path(self.root, self.ref, self.revision).touch()
 
@@ -177,158 +219,171 @@ class _ViewSink:
             self.tar.close()
             self.closed = True
 
+    def _should_roll(self, payload_bytes: int) -> bool:
+        if self.shard_samples == 0:
+            return False
+        if (
+            self.max_shard_samples is not None
+            and self.shard_samples >= self.max_shard_samples
+        ):
+            return True
+        return (
+            self.max_shard_bytes is not None
+            and self.shard_bytes + payload_bytes > self.max_shard_bytes
+        )
 
-@dataclass(frozen=True)
-class _Payload:
-    key: str
-    data: bytes
-    shape: tuple[int, ...] | None
-    dtype: str
-    provenance: Mapping[str, Any]
+    def _roll_shard(self) -> None:
+        self.tar.close()
+        self.shard_index += 1
+        self.shard = _shard_name(self.shard_index)
+        self.shard_samples = 0
+        self.shard_bytes = 0
+        self.tar = self._open_shard(self.shard)
 
-
-def _validate_target(path: Path) -> None:
-    if path.exists():
-        if not path.is_dir():
-            raise ValueError(f"Target path exists and is not a directory: {path}")
-        if any(path.iterdir()):
-            raise ValueError(f"Target directory must be empty: {path}")
-    path.parent.mkdir(parents=True, exist_ok=True)
-
-
-def _tmp_dir(path: Path) -> Path:
-    return path.parent / f".{path.name}.{uuid.uuid4().hex}.tmp"
-
-
-def _validate_supported_ref(ref: ViewRef) -> None:
-    if not isinstance(ref, ViewRef):
-        raise TypeError("views entries must be ViewRef instances.")
-    if ref.role is not None:
-        raise ValueError("DatasetWriter MVP only supports default-role views.")
-    if ref.modality is not ModalityKey.AUDIO:
-        raise ValueError("DatasetWriter MVP only supports audio views.")
-    if ref.view_key not in {AudioView.WAVEFORM, AudioView.FILE}:
-        raise ValueError("DatasetWriter MVP only supports waveform and file audio views.")
-
-
-def _audio_mapping(sample: Sample) -> Mapping[str, Any]:
-    if ModalityKey.AUDIO not in sample.data:
-        raise KeyError(f"Sample {sample.dataset_name}:{sample.sample_index} has no audio modality.")
-    audio = sample.data[ModalityKey.AUDIO]
-    if not isinstance(audio, Mapping):
-        raise TypeError("audio modality must be a mapping.")
-    if AudioKey.VIEWS not in audio:
-        raise KeyError("audio modality must include views.")
-    if not isinstance(audio[AudioKey.VIEWS], Mapping):
-        raise TypeError("audio views must be a mapping.")
-    return audio
-
-
-def _available_supported_refs(audio: Mapping[str, Any]) -> tuple[ViewRef, ...]:
-    views = audio[AudioKey.VIEWS]
-    return tuple(ref for ref in DEFAULT_AUDIO_VIEWS if ref.view_key in views)
-
-
-def _view_value(audio: Mapping[str, Any], ref: ViewRef) -> Any:
-    _validate_supported_ref(ref)
-    return audio[AudioKey.VIEWS].get(ref.view_key)
+    def _open_shard(self, shard: str) -> tarfile.TarFile:
+        path = view_shard_path(self.root, self.ref, self.revision, shard)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        return tarfile.open(path, "w")
 
 
 def _sample_manifest_entry(
     sample: Sample,
     sample_id: str,
-    audio: Mapping[str, Any],
+    sample_index: int,
+    dataset_id: str,
 ) -> SampleManifestEntry:
-    text = sample.data.get(ModalityKey.TEXT)
-    if isinstance(text, Mapping):
-        content = text.get(TextKey.CONTENT)
-        if content is not None:
-            content = str(content)
-    elif text is not None:
-        content = str(text)
-    else:
-        content = None
     return SampleManifestEntry(
         sample_id=sample_id,
-        dataset_name=sample.dataset_name,
-        sample_index=sample.sample_index,
+        dataset_name=dataset_id,
+        sample_index=sample_index,
         source={
-            "dataset_name": sample.dataset_name,
-            "sample_index": sample.sample_index,
+            "dataset_name": dataset_id,
+            "sample_index": sample_index,
         },
-        modality=ModalityKey.AUDIO,
-        duration=_optional_float(audio.get(AudioOptKey.DURATION)),
-        sample_rate=_optional_int(audio.get(AudioKey.SAMPLE_RATE)),
-        label=audio.get(AudioOptKey.LABEL),
-        text=content,
-        metadata=_sample_metadata(audio),
+        items=tuple(_item_entry(ref, item) for ref, item in sample.items()),
     )
 
 
-def _sample_metadata(audio: Mapping[str, Any]) -> dict[str, Any]:
-    metadata = {}
-    labels = audio.get(AudioOptKey.LABELS)
-    if labels is not None:
-        metadata["labels"] = labels
-    return metadata
-
-
-def _payload_for_view(ref: ViewRef, sample_id: str, value: Any) -> _Payload:
-    if ref.view_key == AudioView.WAVEFORM:
-        return _waveform_payload(sample_id, value)
-    if ref.view_key == AudioView.FILE:
-        return _file_payload(sample_id, value)
-    raise ValueError(f"Unsupported view: {ref.view_key}")
-
-
-def _waveform_payload(sample_id: str, value: Any) -> _Payload:
-    tensor = value.detach().cpu() if isinstance(value, torch.Tensor) else torch.as_tensor(value)
-    tensor = tensor.contiguous()
-    buffer = BytesIO()
-    torch.save(tensor, buffer)
-    return _Payload(
-        key=f"{sample_id}.pt",
-        data=buffer.getvalue(),
-        shape=tuple(tensor.shape),
-        dtype=str(tensor.dtype),
-        provenance=WRITER_PROVIDER,
+def _item_entry(ref: tuple[Role, Modality], item: Item) -> SampleItemEntry:
+    return SampleItemEntry(
+        ref=ref,
+        required=_string_key_dict(item.required),
+        optional=_string_key_dict(item.optional),
     )
 
 
-def _file_payload(sample_id: str, value: Any) -> _Payload:
-    if not isinstance(value, str | Path):
-        raise TypeError("file audio view must be a filesystem path.")
-    path = Path(value)
-    if not path.is_file():
-        raise FileNotFoundError(path)
-    data = path.read_bytes()
-    suffix = path.suffix if path.suffix else ".bin"
-    return _Payload(
-        key=f"{sample_id}{suffix}",
-        data=data,
-        shape=(len(data),),
-        dtype="bytes",
-        provenance={**WRITER_PROVIDER, "source_path": str(path)},
-    )
+def _sample_view_refs(sample: Sample) -> tuple[ViewRef, ...]:
+    refs: list[ViewRef] = []
+    for (role, modality), item in sample.items():
+        for view in item.views:
+            refs.append(ViewRef(modality=modality, view_key=view, role=role))
+    return tuple(refs)
 
 
-def _sample_id(sample: Sample, index: int) -> str:
-    dataset = _slug(sample.dataset_name)
-    return f"{index:012d}-{dataset}-{sample.sample_index:012d}"
+def _sample_view_value(sample: Sample, ref: ViewRef) -> Any:
+    _validate_view_ref(ref)
+    item = sample.get(ref.sample_ref)
+    if item is None:
+        return None
+    match ref.modality:
+        case Modality.AUDIO:
+            if not isinstance(item, AudioItem):
+                raise TypeError("audio sample items must be AudioItem instances.")
+            return item.views.get(_audio_view_key(ref))
+        case Modality.IMAGE:
+            if not isinstance(item, ImageItem):
+                raise TypeError("image sample items must be ImageItem instances.")
+            return item.views.get(_image_view_key(ref))
+        case Modality.TEXT:
+            if not isinstance(item, TextItem):
+                raise TypeError("text sample items must be TextItem instances.")
+            return item.views.get(_text_view_key(ref))
+
+
+def _validate_item(modality: Modality, item: Item) -> None:
+    match modality:
+        case Modality.AUDIO:
+            if not isinstance(item, AudioItem):
+                raise TypeError("audio sample items must be AudioItem instances.")
+            sample_rate = item.required.get(AudioKey.SAMPLE_RATE)
+            if sample_rate is None:
+                raise ValueError("audio sample items require sample_rate.")
+            if not isinstance(sample_rate, int) or isinstance(sample_rate, bool):
+                raise TypeError("audio sample_rate must be an integer.")
+        case Modality.IMAGE:
+            if not isinstance(item, ImageItem):
+                raise TypeError("image sample items must be ImageItem instances.")
+        case Modality.TEXT:
+            if not isinstance(item, TextItem):
+                raise TypeError("text sample items must be TextItem instances.")
+
+
+def _validate_sample(sample: Sample) -> None:
+    for ref, item in sample.items():
+        if not isinstance(ref, tuple) or len(ref) != 2:
+            raise TypeError("sample keys must be (Role, Modality) tuples.")
+        role, modality = ref
+        if not isinstance(role, Role):
+            raise TypeError("sample role keys must be Role instances.")
+        if not isinstance(modality, Modality):
+            raise TypeError("sample modality keys must be Modality instances.")
+        _validate_item(modality, item)
+
+
+def _validate_view_ref(ref: ViewRef) -> None:
+    if not isinstance(ref, ViewRef):
+        raise TypeError("views entries must be ViewRef instances.")
+    _view_key(ref)
+
+
+def _view_key(ref: ViewRef) -> View:
+    return ref.view_key
+
+
+def _audio_view_key(ref: ViewRef) -> AudioView:
+    if not isinstance(ref.view_key, AudioView):
+        raise TypeError("audio view refs must use AudioView keys.")
+    return ref.view_key
+
+
+def _image_view_key(ref: ViewRef) -> ImageView:
+    if not isinstance(ref.view_key, ImageView):
+        raise TypeError("image view refs must use ImageView keys.")
+    return ref.view_key
+
+
+def _text_view_key(ref: ViewRef) -> TextView:
+    if not isinstance(ref.view_key, TextView):
+        raise TypeError("text view refs must use TextView keys.")
+    return ref.view_key
+
+
+def _string_key_dict(values: Mapping[Any, Any]) -> dict[str, Any]:
+    return {
+        str(key.value if hasattr(key, "value") else key): value
+        for key, value in values.items()
+    }
+
+
+def _shard_name(index: int) -> str:
+    return f"{index:06d}.tar"
+
+
+def _optional_positive_int(name: str, value: int | None) -> int | None:
+    if value is None:
+        return None
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise TypeError(f"{name} must be an integer.")
+    if value <= 0:
+        raise ValueError(f"{name} must be positive.")
+    return value
+
+
+def _sample_id(dataset_id: str, index: int) -> str:
+    dataset = _slug(dataset_id)
+    return f"{index:012d}-{dataset}"
 
 
 def _slug(value: str) -> str:
     text = re.sub(r"[^0-9A-Za-z._-]+", "-", value).strip("-")
     return text or "sample"
-
-
-def _optional_int(value: Any) -> int | None:
-    if value is None:
-        return None
-    return int(value)
-
-
-def _optional_float(value: Any) -> float | None:
-    if value is None:
-        return None
-    return float(value)

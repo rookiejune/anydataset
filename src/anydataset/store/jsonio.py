@@ -5,7 +5,11 @@ import json
 import os
 from pathlib import Path
 import tempfile
-from typing import Any, TextIO
+from typing import Any, Protocol
+
+
+class _TextWriter(Protocol):
+    def write(self, text: str, /) -> object: ...
 
 
 def read_json(path: str | Path) -> Any:
@@ -35,19 +39,26 @@ def read_jsonl(path: str | Path) -> Iterator[dict[str, Any]]:
 
 def write_jsonl(path: str | Path, rows: Iterable[Mapping[str, Any]]) -> None:
     target = Path(path)
-    _atomic_write(target, lambda file: _write_jsonl_rows(file, rows))
+
+    def write(file: _TextWriter) -> None:
+        _write_jsonl_rows(file, rows)
+
+    _atomic_write(target, write)
 
 
 def _atomic_write_text(path: Path, text: str) -> None:
-    _atomic_write(path, lambda file: file.write(text))
+    def write(file: _TextWriter) -> None:
+        file.write(text)
+
+    _atomic_write(path, write)
 
 
-def _write_jsonl_rows(file: TextIO, rows: Iterable[Mapping[str, Any]]) -> None:
+def _write_jsonl_rows(file: _TextWriter, rows: Iterable[Mapping[str, Any]]) -> None:
     for row in rows:
         file.write(json.dumps(dict(row), ensure_ascii=True, sort_keys=True) + "\n")
 
 
-def _atomic_write(path: Path, write: Callable[[TextIO], None]) -> None:
+def _atomic_write(path: Path, write: Callable[[_TextWriter], None]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = None
     try:

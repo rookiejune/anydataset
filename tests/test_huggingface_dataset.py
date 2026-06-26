@@ -4,12 +4,10 @@ import types
 import unittest
 from unittest import mock
 
-from anydataset.api.cache import CacheManager
-from anydataset.api.spec import DatasetSpec
-from anydataset.adapters import HuggingFaceAdapter
+from anydataset import AnyDataset, Source, Spec
 
 
-class HuggingFaceAdapterTest(unittest.TestCase):
+class HuggingFaceDatasetTest(unittest.TestCase):
     def test_prepare_maps_config_name_to_load_dataset_name(self):
         calls = []
         fake_datasets = types.ModuleType("datasets")
@@ -19,64 +17,72 @@ class HuggingFaceAdapterTest(unittest.TestCase):
             return [{"value": 1}]
 
         fake_datasets.load_dataset = load_dataset
-        spec = DatasetSpec(
-            source="huggingface",
-            path="org/audio",
-            name="audio",
-            split="train",
-            load_options={
-                "config_name": "clean",
-                "streaming": True,
-            },
-        )
-
         with tempfile.TemporaryDirectory() as tmpdir:
-            cache = CacheManager(tmpdir).prepare(spec)
+            dataset = AnyDataset(
+                Spec(
+                    source=Source.HF,
+                    path="org/audio",
+                    split="train",
+                    load_options={
+                        "config_name": "clean",
+                        "streaming": True,
+                    },
+                ),
+                cache_dir=tmpdir,
+            )
             with mock.patch.dict(sys.modules, {"datasets": fake_datasets}):
-                manifest = HuggingFaceAdapter().prepare(spec, cache)
+                prepared = dataset.prepare()
 
-        self.assertEqual(manifest, [{"value": 1}])
+        self.assertEqual(prepared, [{"value": 1}])
         self.assertEqual(calls[0][0], ("org/audio",))
         self.assertEqual(calls[0][1]["split"], "train")
         self.assertEqual(calls[0][1]["name"], "clean")
         self.assertTrue(calls[0][1]["streaming"])
 
-    def test_iter_indexed_samples_preserves_global_indices(self):
-        manifest = _ShardableManifest(
-            rows=[
-                {"value": 0},
-                {"value": 1},
-                {"value": 2},
-            ]
-        )
+    def test_prepare_loads_dataset_from_disk_split(self):
+        fake_datasets = types.ModuleType("datasets")
 
-        rows = list(
-            HuggingFaceAdapter().iter_indexed_samples(
-                manifest,
-                num_shards=2,
-                shard_id=1,
+        class DatasetDict(dict):
+            pass
+
+        fake_datasets.DatasetDict = DatasetDict
+        fake_datasets.load_from_disk = lambda *args, **kwargs: DatasetDict(
+            train=[{"value": 1}],
+            validation=[{"value": 2}],
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dataset = AnyDataset(
+                Spec(
+                    source=Source.HF_DISK,
+                    path="/tmp/saved_dataset",
+                    split="validation",
+                    load_options={"keep_in_memory": True},
+                ),
+                cache_dir=tmpdir,
             )
+            with mock.patch.dict(sys.modules, {"datasets": fake_datasets}):
+                prepared = dataset.prepare()
+
+        self.assertEqual(prepared, [{"value": 2}])
+
+    def test_prepare_requires_split_for_dataset_dict(self):
+        fake_datasets = types.ModuleType("datasets")
+
+        class DatasetDict(dict):
+            pass
+
+        fake_datasets.DatasetDict = DatasetDict
+        fake_datasets.load_from_disk = lambda *args, **kwargs: DatasetDict(
+            train=[{"value": 1}],
         )
-
-        self.assertEqual(manifest.shard_calls, [])
-        self.assertEqual(rows, [(1, {"value": 1})])
-
-
-class _ShardableManifest:
-    def __init__(self, rows):
-        self.rows = rows
-        self.shard_calls = []
-
-    def __iter__(self):
-        yield from self.rows
-
-    def shard(self, num_shards, index):
-        self.shard_calls.append((num_shards, index))
-        return [
-            row
-            for row_index, row in enumerate(self.rows)
-            if row_index % num_shards == index
-        ]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dataset = AnyDataset(
+                Spec(source=Source.HF_DISK, path="/tmp/saved_dataset"),
+                cache_dir=tmpdir,
+            )
+            with mock.patch.dict(sys.modules, {"datasets": fake_datasets}):
+                with self.assertRaises(ValueError):
+                    dataset.prepare()
 
 
 if __name__ == "__main__":
