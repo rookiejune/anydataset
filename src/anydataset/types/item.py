@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum, auto
 from typing import Any, Self
@@ -14,30 +14,26 @@ def _select[KeyT, ValueT](
 
 
 @dataclass(frozen=True)
-class _Requirement[ViewT, KeyT, OptKeyT]:
+class _Requirement[ViewT, MetaT]:
     views: frozenset[ViewT] = frozenset()
-    required: frozenset[KeyT] = frozenset()
-    optional: frozenset[OptKeyT] = frozenset()
+    meta: frozenset[MetaT] = frozenset()
 
     @classmethod
     def from_iter(
         cls,
         views: Iterable[ViewT],
-        required: Iterable[KeyT],
-        optional: Iterable[OptKeyT],
+        meta: Iterable[MetaT],
     ):
         return cls(
             views=frozenset(views),
-            required=frozenset(required),
-            optional=frozenset(optional),
+            meta=frozenset(meta),
         )
 
 
 @dataclass(frozen=True)
-class _Item[ViewT, KeyT, OptT]:
+class _Item[ViewT, MetaT]:
     views: Mapping[ViewT, Any] = field(default_factory=dict)
-    required: Mapping[KeyT, Any] = field(default_factory=dict)
-    optional: Mapping[OptT, Any] = field(default_factory=dict)
+    meta: Mapping[MetaT, Any] = field(default_factory=dict)
 
     def select_by(
         self,
@@ -45,17 +41,12 @@ class _Item[ViewT, KeyT, OptT]:
     ) -> Self:
         return type(self)(
             views=_select(self.views, requirement.views),
-            required=_select(self.required, requirement.required),
-            optional=_select(self.optional, requirement.optional),
+            meta=_select(self.meta, requirement.meta),
         )
 
 
-class AudioKey(StrEnum):
-    SAMPLE_RATE = auto()
-
-
-class AudioOptKey(StrEnum):
-    DURATION = auto()
+class AudioMeta(StrEnum):
+    # DURATION = auto()  # derived from waveform.size(-1) / sample_rate
     LABEL = auto()
     LABELS = auto()
 
@@ -68,14 +59,11 @@ class AudioView(StrEnum):
 
 
 @dataclass(frozen=True)
-class AudioItem(_Item[AudioView, AudioKey, AudioOptKey]):
+class AudioItem(_Item[AudioView, AudioMeta]):
     pass
 
 
-class ImageKey(StrEnum): ...
-
-
-class ImageOptKey(StrEnum):
+class ImageMeta(StrEnum):
     LABEL = auto()
 
 
@@ -84,14 +72,11 @@ class ImageView(StrEnum):
 
 
 @dataclass(frozen=True)
-class ImageItem(_Item[ImageView, ImageKey, ImageOptKey]):
+class ImageItem(_Item[ImageView, ImageMeta]):
     pass
 
 
-class TextKey(StrEnum): ...
-
-
-class TextOptKey(StrEnum):
+class TextMeta(StrEnum):
     LANG = auto()
 
 
@@ -100,7 +85,7 @@ class TextView(StrEnum):
 
 
 @dataclass(frozen=True)
-class TextItem(_Item[TextView, TextKey, TextOptKey]):
+class TextItem(_Item[TextView, TextMeta]):
     pass
 
 
@@ -108,8 +93,7 @@ class TextItem(_Item[TextView, TextKey, TextOptKey]):
 class AudioReq(
     _Requirement[
         AudioView,
-        AudioKey,
-        AudioOptKey,
+        AudioMeta,
     ]
 ): ...
 
@@ -118,8 +102,7 @@ class AudioReq(
 class ImageReq(
     _Requirement[
         ImageView,
-        ImageKey,
-        ImageOptKey,
+        ImageMeta,
     ]
 ): ...
 
@@ -128,15 +111,13 @@ class ImageReq(
 class TextReq(
     _Requirement[
         TextView,
-        TextKey,
-        TextOptKey,
+        TextMeta,
     ]
 ): ...
 
 
 type View = AudioView | ImageView | TextView
-type Key = AudioKey | ImageKey | TextKey
-type OptKey = AudioOptKey | ImageOptKey | TextOptKey
+type Meta = AudioMeta | ImageMeta | TextMeta
 type Item = AudioItem | ImageItem | TextItem
 type Requirement = AudioReq | ImageReq | TextReq
 
@@ -154,7 +135,7 @@ class Modality(StrEnum):
 
 
 type Reference = tuple[Role, Modality]
-type Ref = Reference
-
+type ItemTransform = Callable[[Item], Item]
+type Transforms = Mapping[Reference, ItemTransform]
 type Schema = Mapping[Reference, Requirement]
 type Sample = Mapping[Reference, Item]

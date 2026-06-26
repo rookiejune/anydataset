@@ -14,14 +14,20 @@ import torch
 from .._sharding import validate_shard
 from ..dataset import AudioView
 from ..dataset.abc import AnyDataset
-from ..types.item import Sample
 from ..types import Preset
+from ..types.item import Sample, Transforms
 from ..utils import sample_from_row
 from .registry import preset_spec
 
 
 class FSD50K(AnyDataset):
-    def __init__(self, split: str | None = None, **load_options: Any) -> None:
+    def __init__(
+        self,
+        split: str | None = None,
+        *,
+        transforms: Transforms | None = None,
+        **load_options: Any,
+    ) -> None:
         super().__init__(
             spec=preset_spec(Preset.FSD50K, split=split, **load_options),
             parse_fn=partial(
@@ -30,6 +36,7 @@ class FSD50K(AnyDataset):
                     "audio": AudioView.WAVEFORM,
                 },
             ),
+            transforms=transforms,
         )
 
     def prepare(self) -> dict[str, Any]:
@@ -60,7 +67,7 @@ class FSD50K(AnyDataset):
         return len(self.dataset["files"])
 
     def __getitem__(self, index: int) -> Sample:
-        return self.parse_fn(_row_for(self.dataset, index))
+        return self.transform_sample(self.parse_fn(_row_for(self.dataset, index)))
 
     def iter_shard(self, num_shards: int, shard_id: int) -> Iterator[Sample]:
         validate_shard(num_shards, shard_id)

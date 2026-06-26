@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from ..dataset.abc import AnyDataset, IterableAnyDataset
+    from ..types.item import Transforms
     from . import Spec
 
 
@@ -26,8 +27,10 @@ class Preset(StrEnum):
     def create(
         self,
         split: str | None = None,
+        *,
+        transforms: Transforms | None = None,
         **load_options: Any,
     ) -> AnyDataset | IterableAnyDataset:
         from ..presets.registry import create_preset
 
-        return create_preset(self, split=split, **load_options)
+        return create_preset(self, split=split, transforms=transforms, **load_options)

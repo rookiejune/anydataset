@@ -8,7 +8,7 @@
 - `Sample` 统一使用 `Mapping[tuple[Role, Modality], Item]`，不要恢复旧的 wrapper / `.data` 结构。
 - `AnyDataset` 表示 map-style 数据集；`IterableAnyDataset` 表示 iterable 数据集。
 - `MultipleAnyDataset` 只组合已经构造好的 dataset，迭代顺序交给 `IterationStrategy`。
-- unified store 的公开入口是 `DatasetWriter`、`ViewMaterializer`、`ViewRef` 和 `Source.UNIFIED`。
+- store 的公开入口是 `DatasetWriter`、`ViewMaterializer`、`ViewRef` 和 `Source.STORE`。
 
 ## 开发约定
 
@@ -21,6 +21,5 @@
 
 ## 多 worker 和多卡
 
-- dataset 层应暴露 `iter_shard(num_shards, shard_id)`，上层训练按 rank / worker 显式传入 shard 参数。
 - source 如果原生支持 sharding，优先使用 source 原生 shard；否则用 index modulo 作为保底。
 - cache path 只由物理 `Spec` 决定，不能因为 task、schema 或 sample metadata 不同而分裂。

@@ -5,46 +5,42 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+from ..types.item import Modality, Role, View
 from .jsonio import write_json
 from .manifest import (
-    STORE_SCHEMA_VERSION,
     ViewManifestEntry,
-    ViewRef,
-    view_ref_to_dict,
 )
-from .manifestio import ManifestFormat, ViewManifestWriter
+from .manifestio import view_manifest_writer
 from .paths import view_json_path, view_ready_path, view_shard_path
-from .payload import add_payload, checksum, payload_for_view
+from .payload import add_payload, payload_for_view
 
 
 class ViewWriter:
     def __init__(
         self,
         root: Path,
-        ref: ViewRef,
-        revision: str,
-        provider: Mapping[str, Any],
-        manifest_format: ManifestFormat = "parquet",
+        view: tuple[Role, Modality, View],
+        provider: Mapping[str, Any] | None = None,
         max_shard_samples: int | None = None,
         max_shard_bytes: int | None = None,
+        shard_prefix: str = "",
     ) -> None:
         self.root = root
-        self.ref = ref
-        self.revision = revision
-        self.provider = dict(provider)
-        self.manifest_format: ManifestFormat = manifest_format
+        self.view = view
+        self.provider = dict(provider or {})
         self.max_shard_samples = max_shard_samples
         self.max_shard_bytes = max_shard_bytes
+        self.shard_prefix = shard_prefix
         self.shard_index = 0
-        self.shard = _shard_name(self.shard_index)
+        self.shard = _shard_name(self.shard_index, self.shard_prefix)
         self.shard_samples = 0
         self.shard_bytes = 0
-        self.manifest = ViewManifestWriter(root, ref, revision, manifest_format)
+        self.manifest = view_manifest_writer(root, view)
         self.tar = self._open_shard(self.shard)
         self.closed = False
 
     def write(self, sample_id: str, value: Any) -> None:
-        payload = payload_for_view(self.ref, sample_id, value, self.provider)
+        payload = payload_for_view(self.view, sample_id, value)
         if self._should_roll(len(payload.data)):
             self._roll_shard()
         add_payload(self.tar, payload)
@@ -52,29 +48,26 @@ class ViewWriter:
         self.shard_bytes += len(payload.data)
         self.manifest.write(
             ViewManifestEntry(
-                ref=self.ref,
-                revision=self.revision,
+                role=self.view[0],
+                modality=self.view[1],
+                view=self.view[2],
                 sample_id=sample_id,
                 shard=self.shard,
                 key=payload.key,
-                shape=payload.shape,
-                dtype=payload.dtype,
-                checksum=checksum(payload.data),
-                provenance=payload.provenance,
             )
         )
 
     def close(self) -> None:
         self.close_payload()
         view_json = {
-            "schema_version": STORE_SCHEMA_VERSION,
-            **view_ref_to_dict(self.ref),
-            "revision": self.revision,
+            "role": self.view[0],
+            "modality": self.view[1],
+            "view": self.view[2],
             "provider": self.provider,
         }
-        write_json(view_json_path(self.root, self.ref, self.revision), view_json)
+        write_json(view_json_path(self.root, self.view), view_json)
         self.manifest.close()
-        view_ready_path(self.root, self.ref, self.revision).touch()
+        view_ready_path(self.root, self.view).touch()
 
     def close_payload(self) -> None:
         if not self.closed:
@@ -101,16 +94,16 @@ class ViewWriter:
     def _roll_shard(self) -> None:
         self.tar.close()
         self.shard_index += 1
-        self.shard = _shard_name(self.shard_index)
+        self.shard = _shard_name(self.shard_index, self.shard_prefix)
         self.shard_samples = 0
         self.shard_bytes = 0
         self.tar = self._open_shard(self.shard)
 
     def _open_shard(self, shard: str) -> tarfile.TarFile:
-        path = view_shard_path(self.root, self.ref, self.revision, shard)
+        path = view_shard_path(self.root, self.view, shard)
         path.parent.mkdir(parents=True, exist_ok=True)
         return tarfile.open(path, "w")
 
 
-def _shard_name(index: int) -> str:
-    return f"{index:06d}.tar"
+def _shard_name(index: int, prefix: str = "") -> str:
+    return f"{prefix}{index:06d}.tar"

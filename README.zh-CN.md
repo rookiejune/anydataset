@@ -28,7 +28,7 @@ pip install -e '.[huggingface,audio]'
 from torch.utils.data import DataLoader
 
 from anydataset import (
-    ImageOptKey,
+    ImageMeta,
     ImageReq,
     ImageView,
     Modality,
@@ -42,7 +42,7 @@ dataset = Preset.MNIST.create(split="train")
 schema = {
     (Role.DEFAULT, Modality.IMAGE): ImageReq(
         views=frozenset({ImageView.PIXEL}),
-        optional=frozenset({ImageOptKey.LABEL}),
+        meta=frozenset({ImageMeta.LABEL}),
     )
 }
 
@@ -51,10 +51,10 @@ batch = next(iter(loader))
 
 image = batch.sample[(Role.DEFAULT, Modality.IMAGE)]
 pixels = image.views[ImageView.PIXEL]
-labels = image.optional[ImageOptKey.LABEL]
+labels = image.meta[ImageMeta.LABEL]
 ```
 
-`pixels` 和 `labels` 都已经是 batch 后的值。tensor 字段形状一致时会直接 stack；如果只有最后一个维度长度不同，collator 会 pad 到最长长度，并把有效位置记录在 `batch.masks` 中。
+`pixels` 和 `labels` 都已经是 batch 后的值。collator 只会 batch 已经是 `torch.Tensor` 的字段；形状一致时会直接 stack，如果只有最后一个维度长度不同，会 pad 到最长长度，并把有效位置记录在 `batch.masks` 中。需要转 tensor、统一 dtype 或设备时，请在 dataset transform / preset parse 阶段完成。
 
 ## 加载任意数据集
 
@@ -74,7 +74,7 @@ from functools import partial
 
 from anydataset import (
     AnyDataset,
-    ImageOptKey,
+    ImageMeta,
     ImageView,
     Source,
     Spec,
@@ -91,7 +91,7 @@ dataset = AnyDataset(
         sample_from_row,
         image={
             "image": ImageView.PIXEL,
-            "label": ImageOptKey.LABEL,
+            "label": ImageMeta.LABEL,
         },
     ),
 )
@@ -126,7 +126,7 @@ dataset = IterableAnyDataset(
 
 - `Source.HF`：通过 `datasets.load_dataset(...)` 读取。
 - `Source.HF_DISK`：通过 `datasets.load_from_disk(...)` 读取。
-- `Source.UNIFIED`：读取 `anydataset` 的 unified store。
+- `Source.STORE`：读取 `anydataset` 的 store。
 
 准备数据源时的缓存根目录默认是 `~/.cache/anydataset`。如果希望缓存放到项目自己的 `storage/`、`outputs/` 或其它目录，可以设置 `ANYDATASET_CACHE_ROOT`，也可以在 dataset 构造函数里传 `cache_root`。
 
@@ -137,7 +137,7 @@ from anydataset import resolve_dataset
 
 spec = resolve_dataset("hf://ylecun/mnist:train")
 disk_spec = resolve_dataset("hf-disk:///data/mnist_saved:train")
-unified_spec = resolve_dataset("unified:///data/my_anydataset:train")
+store_spec = resolve_dataset("store:///data/my_anydataset:train")
 ```
 
 新增物理 source 类型时，注册一个工厂即可；`AnyDataset` 会按 `Spec.source` 从注册器取 source：
@@ -199,12 +199,11 @@ rank_iter = dataset.shard(num_shards=8, shard_id=0)
 `Schema` 是从 `(Role, Modality)` 到 requirement 的映射。requirement 指定这个 batch 需要哪些 view 和字段。
 
 ```python
-from anydataset import AudioKey, AudioReq, AudioView, Modality, Role
+from anydataset import AudioReq, AudioView, Modality, Role
 
 schema = {
     (Role.DEFAULT, Modality.AUDIO): AudioReq(
         views=frozenset({AudioView.WAVEFORM}),
-        required=frozenset({AudioKey.SAMPLE_RATE}),
     )
 }
 ```
@@ -250,13 +249,12 @@ schema = {
 `Batch.sample` 和单条 `Sample` 的逻辑结构相同，只是每个字段都已经 batch 化。
 
 ```python
-from anydataset import AudioKey, AudioView, FieldGroup, FieldRef, Modality, Role
+from anydataset import AudioView, FieldGroup, FieldRef, Modality, Role
 
 audio_ref = (Role.DEFAULT, Modality.AUDIO)
 audio = batch.sample[audio_ref]
 
-waveform = audio.views[AudioView.WAVEFORM]
-sample_rate = audio.required[AudioKey.SAMPLE_RATE]
+waveform, sample_rate = audio.views[AudioView.WAVEFORM]
 
 waveform_mask = batch.masks[
     FieldRef(
@@ -267,35 +265,32 @@ waveform_mask = batch.masks[
 ]
 ```
 
-optional 字段需要先在 schema 里声明，然后从 `item.optional` 里取：
+meta 字段需要先在 schema 里声明，然后从 `item.meta` 里取：
 
 ```python
-from anydataset import ImageOptKey
+from anydataset import ImageMeta
 
-labels = batch.sample[(Role.DEFAULT, Modality.IMAGE)].optional[ImageOptKey.LABEL]
+labels = batch.sample[(Role.DEFAULT, Modality.IMAGE)].meta[ImageMeta.LABEL]
 ```
 
-如果某个 optional 字段在整个 batch 中都不存在，它不会出现在 batched item 里。如果只在部分样本中存在，tensor-like 值会被 pad 并生成 mask；非 tensor 值会返回 list，缺失位置是 `None`。
+schema 里声明的 meta 字段必须在 batch 的每条样本中都存在；如果某个数据集不支持该字段，应在 dataset 组合或 `IterationStrategy` 层按任务拆开，而不是让 collator 在同一个 batch 里补空位。非 tensor 值会返回 list。
 
-## Unified Store 和多视图
+## Store 和多视图
 
-unified store 会把样本元信息和 view payload 保存在同一个数据集目录下。同一个模态可以有多个 view。例如音频可以同时有 waveform view、file view、LongCat token view 和 DAC token view。
+store 会把样本元信息和 view payload 保存在同一个数据集目录下。同一个模态可以有多个 view。例如音频可以同时有 waveform view、file view、LongCat token view 和 DAC token view。
 
 用 `DatasetWriter` 写出样本：
 
 ```python
 import torch
 
-from anydataset import AudioItem, AudioKey, AudioView, DatasetWriter, Modality, Role
+from anydataset import AudioItem, AudioView, DatasetWriter, Modality, Role
 
 samples = [
     {
         (Role.DEFAULT, Modality.AUDIO): AudioItem(
             views={
-                AudioView.WAVEFORM: torch.tensor([[0.0, 0.1, 0.2]]),
-            },
-            required={
-                AudioKey.SAMPLE_RATE: 16000,
+                AudioView.WAVEFORM: (torch.tensor([[0.0, 0.1, 0.2]]), 16000),
             },
         )
     }
@@ -308,14 +303,14 @@ DatasetWriter(
 ).write(samples)
 ```
 
-用 `Source.UNIFIED` 读回来：
+用 `Source.STORE` 读回来：
 
 ```python
 from anydataset import AnyDataset, Source, Spec
 
 dataset = AnyDataset(
     spec=Spec(
-        source=Source.UNIFIED,
+        source=Source.STORE,
         path="/data/my_anydataset",
         split="train",
     ),
@@ -326,80 +321,56 @@ dataset = AnyDataset(
 训练时需要哪些 view，仍然由 schema 指定：
 
 ```python
-from anydataset import AudioKey, AudioReq, AudioView, Modality, Role
+from anydataset import AudioReq, AudioView, Modality, Role
 
 schema = {
     (Role.DEFAULT, Modality.AUDIO): AudioReq(
         views=frozenset({AudioView.WAVEFORM}),
-        required=frozenset({AudioKey.SAMPLE_RATE}),
     )
 }
 ```
 
 ## 生成新的 View
 
-`ViewMaterializer` 会读取已有 unified dataset 中的一个输入 view，对每个样本调用 provider 函数，然后把生成的新 view 写回统一的 store 结构。
+store 的 view 目录直接使用 `{role}/{modality}/{view}`，真实 payload 放在该 view 目录下的 `shards/` 里。`ViewMaterializer` 会读取已有 dataset，把每个 item 的全部 views 交给 provider，由 provider 决定如何生成自己的输出 view。
 
 ```python
 import torch
 
-from anydataset import AudioView, Modality, Role, ViewMaterializer, ViewRef
+from anydataset import AnyDataset, AudioView, Source, Spec, ViewMaterializer
 
-input_ref = ViewRef(
-    modality=Modality.AUDIO,
-    view_key=AudioView.WAVEFORM,
-    role=Role.DEFAULT,
-)
-output_ref = ViewRef(
-    modality=Modality.AUDIO,
-    view_key=AudioView.LONGCAT,
-    role=Role.DEFAULT,
-)
+class ToyLongCat:
+    output = AudioView.LONGCAT
 
-def provider(view):
-    return {
-        "semantic_codes": view.value.to(torch.int64),
-    }
+    def __call__(self, views):
+        waveform, sample_rate = views[AudioView.WAVEFORM]
+        return {
+            "semantic_codes": waveform.to(torch.int64),
+        }
+
+dataset = AnyDataset(
+    Spec(source=Source.STORE, path="/data/my_anydataset", split="train"),
+    cache_root="/data/my_anydataset_cache",
+)
 
 ViewMaterializer(
-    input_dir="/data/my_anydataset",
     output_dir="/data/my_anydataset_longcat",
-    input_ref=input_ref,
-    output_ref=output_ref,
-    transform=provider,
-    provider_name="toy_longcat",
-    provider_version="1",
-    config={"example": True},
-).write()
+    dataset_id="my-audio",
+    split="train",
+).write(dataset, ToyLongCat())
 ```
 
-默认情况下，`ViewMaterializer` 会写出一个 view-only 数据集：它包含新的 view 和原样本 manifest，但不复制原来的 view payload。如果希望把新 view 直接登记到原数据集里，让原目录同时拥有旧 view 和新 view，可以让 `input_dir` 和 `output_dir` 指向同一个路径：
+默认情况下，`ViewMaterializer` 会写出一个 view-only 数据集：它保留样本和轻量 meta，只写 provider 的输出 view，不复制原来的 view payload。不同 provider、参数或实验版本由调用方通过 `output_dir`、provider 输出 view、目录命名和实验文档区分。
+
+如果希望输出目录是完整独立的数据集，同时带有原 view 和新 view，使用 `copy_inputs=True`：
 
 ```python
 ViewMaterializer(
-    input_dir="/data/my_anydataset",
-    output_dir="/data/my_anydataset",
-    input_ref=input_ref,
-    output_ref=output_ref,
-    transform=provider,
-    provider_name="toy_longcat",
-    provider_version="1",
-).write()
-```
-
-如果希望输出目录是完整独立的数据集，同时带有原 view 和新 view，使用 `mode="self_contained"`：
-
-```python
-ViewMaterializer(
-    input_dir="/data/my_anydataset",
     output_dir="/data/my_anydataset_with_longcat",
-    input_ref=input_ref,
-    output_ref=output_ref,
-    transform=provider,
-    provider_name="toy_longcat",
-    provider_version="1",
-    mode="self_contained",
-).write()
+    dataset_id="my-audio",
+    split="train",
+    copy_inputs=True,
+).write(dataset, ToyLongCat())
 ```
 
 生成的新 view 也通过 schema 选择：
@@ -408,26 +379,22 @@ ViewMaterializer(
 schema = {
     (Role.DEFAULT, Modality.AUDIO): AudioReq(
         views=frozenset({AudioView.LONGCAT}),
-        required=frozenset({AudioKey.SAMPLE_RATE}),
     )
 }
 ```
 
 ## LongCat Provider
 
-LongCat 可以作为可选 provider 使用。传入已经初始化好的 codec 可以避免导入 `anytrain`；如果不传 codec，provider 会在第一次使用时加载 `anytrain.codec.longcat.LongCatAudioCodec`：
+LongCat 可以作为可选 provider 使用。provider 会加载 `anytrain.codec.longcat.LongCatAudioCodec`。输出 view 只保存 codes；waveform 输入的采样率来自 `AudioView.WAVEFORM` 的 `(waveform, sample_rate)` value，file 输入的采样率来自 `torchaudio.load()`。
 
 ```python
 from anydataset.provider.longcat import LongCatViewProvider
 
-LongCatViewProvider(
-    device="cuda",
-    n_acoustic_codebooks=2,
-    local_files_only=True,
-).materializer(
-    input_dir="/data/my_anydataset",
+ViewMaterializer(
     output_dir="/data/my_anydataset_longcat",
-).write()
+    dataset_id="my-audio",
+    split="train",
+).write(dataset, LongCatViewProvider())
 ```
 
 ## 开发

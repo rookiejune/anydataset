@@ -11,30 +11,27 @@ from typing import TYPE_CHECKING, Any, Callable, Mapping, Sequence
 from . import item
 from .item import (
     AudioItem,
-    AudioKey,
-    AudioOptKey,
+    AudioMeta,
     AudioReq,
     AudioView,
     ImageItem,
-    ImageKey,
-    ImageOptKey,
+    ImageMeta,
     ImageReq,
     ImageView,
     Item,
-    Key,
+    ItemTransform,
     Modality,
-    OptKey,
-    Ref,
+    Meta,
     Reference,
     Requirement,
     Role,
     Sample,
     Schema,
     TextItem,
-    TextKey,
-    TextOptKey,
+    TextMeta,
     TextReq,
     TextView,
+    Transforms,
     View,
 )
 from .preset import Preset
@@ -55,7 +52,7 @@ class Source(StrEnum):
 
     HF = auto()
     HF_DISK = auto()
-    UNIFIED = auto()
+    STORE = auto()
 
 
 type SourceKey = Source | str
@@ -103,14 +100,13 @@ class Task(StrEnum):
                 return {
                     (Role.DEFAULT, Modality.IMAGE): ImageReq(
                         views=frozenset({ImageView.PIXEL}),
-                        optional=frozenset({ImageOptKey.LABEL}),
+                        meta=frozenset({ImageMeta.LABEL}),
                     )
                 }
             case Task.AUDIO_CODEC:
                 return {
                     (Role.DEFAULT, Modality.AUDIO): AudioReq(
                         views=frozenset({AudioView.WAVEFORM}),
-                        required=frozenset({AudioKey.SAMPLE_RATE}),
                     )
                 }
             case Task.MACHINE_TRANSLATION:
@@ -167,21 +163,18 @@ def _normalize(value: Any) -> Any:
 
 __all__ = [
     "AudioItem",
-    "AudioKey",
-    "AudioOptKey",
+    "AudioMeta",
     "AudioReq",
     "AudioView",
     "ImageItem",
-    "ImageKey",
-    "ImageOptKey",
+    "ImageMeta",
     "ImageReq",
     "ImageView",
     "Item",
-    "Key",
+    "ItemTransform",
     "Modality",
-    "OptKey",
+    "Meta",
     "Preset",
-    "Ref",
     "Reference",
     "Requirement",
     "Role",
@@ -192,10 +185,10 @@ __all__ = [
     "Spec",
     "Task",
     "TextItem",
-    "TextKey",
-    "TextOptKey",
+    "TextMeta",
     "TextReq",
     "TextView",
+    "Transforms",
     "View",
     "item",
 ]

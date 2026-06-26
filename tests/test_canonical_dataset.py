@@ -6,12 +6,13 @@ import torch
 from anydataset import (
     AnyDataset,
     AudioItem,
-    AudioKey,
-    AudioOptKey,
+    AudioMeta,
     AudioReq,
     AudioView,
     FieldGroup,
     FieldRef,
+    ImageItem,
+    ImageView,
     IterableAnyDataset,
     Modality,
     MultipleAnyDataset,
@@ -62,7 +63,7 @@ class CanonicalDatasetTest(unittest.TestCase):
 
         req = schema[Role.DEFAULT, Modality.AUDIO]
         self.assertEqual(req.views, frozenset({AudioView.WAVEFORM}))
-        self.assertEqual(req.required, frozenset({AudioKey.SAMPLE_RATE}))
+        self.assertEqual(req.meta, frozenset())
 
     def test_machine_translation_schema_uses_source_target_text_roles(self):
         schema = Task.MACHINE_TRANSLATION.schema()
@@ -124,42 +125,117 @@ class CanonicalDatasetTest(unittest.TestCase):
         sample = {
             (Role.DEFAULT, Modality.AUDIO): AudioItem(
                 views={
-                    AudioView.WAVEFORM: [0.0],
+                    AudioView.WAVEFORM: ([0.0], 16000),
                     AudioView.FILE: "audio.wav",
                 },
-                required={AudioKey.SAMPLE_RATE: 16000},
             )
         }
         schema = {
             (Role.DEFAULT, Modality.AUDIO): AudioReq(
                 views=frozenset({AudioView.WAVEFORM}),
-                required=frozenset({AudioKey.SAMPLE_RATE}),
             )
         }
 
         resolved = AnyDataset.resolve_sample(sample, schema)
 
         audio = resolved[Role.DEFAULT, Modality.AUDIO]
-        self.assertEqual(audio.views, {AudioView.WAVEFORM: [0.0]})
-        self.assertEqual(audio.required, {AudioKey.SAMPLE_RATE: 16000})
+        self.assertEqual(audio.views, {AudioView.WAVEFORM: ([0.0], 16000)})
+        self.assertEqual(audio.meta, {})
 
-    def test_resolve_sample_requires_selected_optional_fields(self):
+    def test_resolve_sample_requires_selected_meta_fields(self):
         sample = {
             (Role.DEFAULT, Modality.AUDIO): AudioItem(
-                views={AudioView.WAVEFORM: [0.0]},
-                required={AudioKey.SAMPLE_RATE: 16000},
+                views={AudioView.WAVEFORM: ([0.0], 16000)},
             )
         }
         schema = {
             (Role.DEFAULT, Modality.AUDIO): AudioReq(
                 views=frozenset({AudioView.WAVEFORM}),
-                required=frozenset({AudioKey.SAMPLE_RATE}),
-                optional=frozenset({AudioOptKey.LABEL}),
+                meta=frozenset({AudioMeta.LABEL}),
             )
         }
 
         with self.assertRaises(KeyError):
             AnyDataset.resolve_sample(sample, schema)
+
+    def test_preset_create_accepts_transforms(self):
+        ref = (Role.DEFAULT, Modality.IMAGE)
+        dataset = Preset.MNIST.create(
+            transforms={
+                ref: lambda item: ImageItem(
+                    views={ImageView.PIXEL: item.views[ImageView.PIXEL] + 1},
+                    meta=item.meta,
+                )
+            }
+        )
+        dataset._dataset = [
+            {
+                "image": torch.tensor([[1, 2]]),
+                "label": 0,
+            }
+        ]
+
+        image = dataset[0][ref]
+
+        self.assertTrue(
+            torch.equal(image.views[ImageView.PIXEL], torch.tensor([[2, 3]]))
+        )
+        self.assertNotIn("transforms", dataset.spec.load_options)
+
+    def test_map_dataset_applies_reference_transforms(self):
+        ref = (Role.DEFAULT, Modality.IMAGE)
+        dataset = AnyDataset(
+            spec=Spec(source=Source.HF, path="/tmp/missing"),
+            parse_fn=lambda row: row,
+            transforms={
+                ref: lambda item: ImageItem(
+                    views={ImageView.PIXEL: item.views[ImageView.PIXEL] + 1},
+                    meta=item.meta,
+                )
+            },
+        )
+        dataset._dataset = [
+            {
+                ref: ImageItem(
+                    views={ImageView.PIXEL: torch.tensor([[1, 2]])},
+                )
+            }
+        ]
+
+        image = dataset[0][ref]
+
+        self.assertTrue(
+            torch.equal(image.views[ImageView.PIXEL], torch.tensor([[2, 3]]))
+        )
+
+    def test_iterable_dataset_applies_reference_transforms(self):
+        ref = (Role.DEFAULT, Modality.AUDIO)
+        dataset = IterableAnyDataset(
+            spec=Spec(source=Source.HF, path="/tmp/missing"),
+            parse_fn=lambda row: {
+                ref: AudioItem(
+                    views={AudioView.WAVEFORM: (torch.tensor([row["value"]]), 4)},
+                )
+            },
+            transforms={
+                ref: lambda item: AudioItem(
+                    views={
+                        AudioView.WAVEFORM: (
+                            item.views[AudioView.WAVEFORM][0] * 2,
+                            item.views[AudioView.WAVEFORM][1],
+                        )
+                    },
+                    meta=item.meta,
+                )
+            },
+        )
+        dataset._dataset = [{"value": 3}]
+
+        sample = next(iter(dataset))
+        waveform, sample_rate = sample[ref].views[AudioView.WAVEFORM]
+
+        self.assertTrue(torch.equal(waveform, torch.tensor([6])))
+        self.assertEqual(sample_rate, 4)
 
     def test_iterable_dataset_uses_source_native_shard(self):
         dataset = IterableAnyDataset(
@@ -246,14 +322,12 @@ class CanonicalDatasetTest(unittest.TestCase):
         samples = [
             {
                 ref: AudioItem(
-                    views={AudioView.WAVEFORM: torch.tensor([1.0, 2.0])},
-                    required={AudioKey.SAMPLE_RATE: 16000},
+                    views={AudioView.WAVEFORM: (torch.tensor([1.0, 2.0]), 16000)},
                 )
             },
             {
                 ref: AudioItem(
-                    views={AudioView.WAVEFORM: torch.tensor([3.0])},
-                    required={AudioKey.SAMPLE_RATE: 22050},
+                    views={AudioView.WAVEFORM: (torch.tensor([3.0]), 22050)},
                 )
             },
         ]
@@ -261,58 +335,53 @@ class CanonicalDatasetTest(unittest.TestCase):
         batch = Task.AUDIO_CODEC.collate_fn()(samples)
 
         audio = batch.sample[ref]
+        waveform, sample_rates = audio.views[AudioView.WAVEFORM]
         self.assertTrue(
             torch.equal(
-                audio.views[AudioView.WAVEFORM],
+                waveform,
                 torch.tensor([[1.0, 2.0], [3.0, 0.0]]),
             )
         )
+        self.assertTrue(torch.equal(sample_rates, torch.tensor([16000, 22050])))
         self.assertTrue(
             torch.equal(
                 batch.masks[FieldRef(ref, FieldGroup.VIEWS, AudioView.WAVEFORM)],
                 torch.tensor([[True, True], [True, False]]),
             )
         )
-        self.assertTrue(
-            torch.equal(
-                audio.required[AudioKey.SAMPLE_RATE],
-                torch.tensor([16000, 22050]),
-            )
-        )
-        self.assertTrue(
-            torch.equal(
-                batch.masks[FieldRef(ref, FieldGroup.REQUIRED, AudioKey.SAMPLE_RATE)],
-                torch.tensor([True, True]),
-            )
-        )
 
-    def test_collate_fn_masks_partially_missing_optional_tensor(self):
+    def test_collate_fn_keeps_non_tensor_meta_as_values(self):
         ref = (Role.DEFAULT, Modality.AUDIO)
         schema = {
             ref: AudioReq(
-                optional=frozenset({AudioOptKey.DURATION}),
+                meta=frozenset({AudioMeta.LABEL}),
             )
         }
         samples = [
-            {ref: AudioItem(optional={AudioOptKey.DURATION: 1.5})},
-            {ref: AudioItem()},
+            {ref: AudioItem(meta={AudioMeta.LABEL: 1})},
+            {ref: AudioItem(meta={AudioMeta.LABEL: 2})},
         ]
 
         batch = collate_fn(schema)(samples)
 
         audio = batch.sample[ref]
-        self.assertTrue(
-            torch.equal(
-                audio.optional[AudioOptKey.DURATION],
-                torch.tensor([1.5, 0.0]),
+        self.assertEqual(audio.meta[AudioMeta.LABEL], [1, 2])
+        self.assertNotIn(FieldRef(ref, FieldGroup.META, AudioMeta.LABEL), batch.masks)
+
+    def test_collate_fn_requires_declared_meta_fields(self):
+        ref = (Role.DEFAULT, Modality.AUDIO)
+        schema = {
+            ref: AudioReq(
+                meta=frozenset({AudioMeta.LABEL}),
             )
-        )
-        self.assertTrue(
-            torch.equal(
-                batch.masks[FieldRef(ref, FieldGroup.OPTIONAL, AudioOptKey.DURATION)],
-                torch.tensor([True, False]),
-            )
-        )
+        }
+        samples = [
+            {ref: AudioItem(meta={AudioMeta.LABEL: "speech"})},
+            {ref: AudioItem()},
+        ]
+
+        with self.assertRaises(KeyError):
+            collate_fn(schema)(samples)
 
 
 class _ShardableRows:

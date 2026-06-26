@@ -7,6 +7,7 @@ from ..types import Preset, Source, Spec
 
 if TYPE_CHECKING:
     from ..dataset.abc import AnyDataset, IterableAnyDataset
+    from ..types.item import Transforms
 
 
 def preset_spec(
@@ -79,38 +80,39 @@ def preset_spec(
 def create_preset(
     preset: Preset,
     split: str | None = None,
+    transforms: Transforms | None = None,
     **load_options: Any,
 ) -> AnyDataset | IterableAnyDataset:
     match preset:
         case Preset.MNIST:
             from .mnist import MNIST
 
-            return MNIST(split=split, **load_options)
+            return MNIST(split=split, transforms=transforms, **load_options)
         case Preset.CIFAR10:
             from .cifar10 import CIFAR10
 
-            return CIFAR10(split=split, **load_options)
+            return CIFAR10(split=split, transforms=transforms, **load_options)
         case Preset.FLEURS:
             from .fleurs import Fleurs
 
-            return Fleurs(split=split, **load_options)
+            return Fleurs(split=split, transforms=transforms, **load_options)
         case Preset.LIBRISPEECH_ASR:
             from .librispeech_asr import LibriSpeechASR
 
-            return LibriSpeechASR(split=split, **load_options)
+            return LibriSpeechASR(split=split, transforms=transforms, **load_options)
         case Preset.ESC50:
             from .esc50 import ESC50
 
-            return ESC50(split=split, **load_options)
+            return ESC50(split=split, transforms=transforms, **load_options)
         case Preset.NSYNTH:
             from .nsynth import NSynth
 
-            return NSynth(split=split, **load_options)
+            return NSynth(split=split, transforms=transforms, **load_options)
         case Preset.FSD50K:
             from .fsd50k import FSD50K
 
-            return FSD50K(split=split, **load_options)
+            return FSD50K(split=split, transforms=transforms, **load_options)
         case Preset.WMT19:
             from .wmt19 import WMT19
 
-            return WMT19(split=split, **load_options)
+            return WMT19(split=split, transforms=transforms, **load_options)

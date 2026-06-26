@@ -32,11 +32,11 @@ def has_source(source: SourceKey) -> bool:
 def _register_builtin_sources() -> None:
     from .huggingface import HuggingFaceDiskSource, HuggingFaceSource
     from .sharded_csv import ShardedCsvSource
-    from .unified import UnifiedDatasetSource
+    from .store import StoreSource
 
     register_source(Source.HF, HuggingFaceSource)
     register_source(Source.HF_DISK, HuggingFaceDiskSource)
-    register_source(Source.UNIFIED, UnifiedDatasetSource)
+    register_source(Source.STORE, StoreSource)
     register_source("sharded_csv", ShardedCsvSource)
 
 

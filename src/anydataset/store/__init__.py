@@ -1,6 +1,5 @@
-from .manifest import ViewRef
+from ..view import FunctionViewProvider, Provider, ViewProvider, ViewTransform
 from .materializer import (
-    ViewInput,
     ViewMaterializer,
 )
 from .reader import StoreDataset, StoreView, read_store_dataset
@@ -8,10 +7,12 @@ from .writer import DatasetWriter
 
 __all__ = [
     "DatasetWriter",
+    "FunctionViewProvider",
+    "Provider",
     "StoreDataset",
     "StoreView",
-    "ViewInput",
     "ViewMaterializer",
-    "ViewRef",
+    "ViewProvider",
+    "ViewTransform",
     "read_store_dataset",
 ]

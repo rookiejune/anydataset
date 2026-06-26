@@ -33,8 +33,7 @@ dataset = Preset.FLEURS.create(split="validation")
 sample = next(iter(dataset))
 
 audio = sample[Role.DEFAULT, Modality.AUDIO]
-waveform = audio.views[AudioView.WAVEFORM]
-sample_rate = audio.required["sample_rate"]
+waveform, sample_rate = audio.views[AudioView.WAVEFORM]
 ```
 
 `Preset.spec(...)` returns the physical source only:
@@ -52,7 +51,7 @@ from anydataset import resolve_dataset
 
 spec = resolve_dataset("mnist:train")
 hf = resolve_dataset("hf://ylecun/mnist:train")
-unified = resolve_dataset("unified:///data/my_anydataset:train")
+store = resolve_dataset("store:///data/my_anydataset:train")
 ```
 
 ## Custom Sources
@@ -61,13 +60,13 @@ unified = resolve_dataset("unified:///data/my_anydataset:train")
 `Spec` and an optional `parse_fn` that maps one raw row to a canonical `Sample`.
 
 ```python
-from anydataset import AnyDataset, ImageItem, ImageOptKey, ImageView, Modality, Role, Source, Spec
+from anydataset import AnyDataset, ImageItem, ImageMeta, ImageView, Modality, Role, Source, Spec
 
 def parse(row):
     return {
         (Role.DEFAULT, Modality.IMAGE): ImageItem(
             views={ImageView.PIXEL: row["image"]},
-            optional={ImageOptKey.LABEL: row["label"]},
+            meta={ImageMeta.LABEL: row["label"]},
         )
     }
 
@@ -79,7 +78,7 @@ dataset = AnyDataset(
 
 For local JSON, image, or audio files, use `Source.HF` with Hugging Face
 `load_dataset(...)` options such as `data_files` or `data_dir`. For structured
-local datasets with canonical samples, use `Source.UNIFIED`.
+local datasets with canonical samples, use `Source.STORE`.
 
 New physical source types can be registered with a small factory:
 
@@ -117,10 +116,10 @@ dataset = MultipleAnyDataset(
 
 Every dataset exposes `iter_shard(num_shards, shard_id)` for distributed reads.
 
-## Unified Store
+## Store
 
 `DatasetWriter` writes canonical samples to a self-describing store. The same
-store can be read back through `Source.UNIFIED`.
+store can be read back through `Source.STORE`.
 
 ```python
 import torch
@@ -128,7 +127,6 @@ import torch
 from anydataset import (
     AnyDataset,
     AudioItem,
-    AudioKey,
     AudioView,
     DatasetWriter,
     Modality,
@@ -139,37 +137,43 @@ from anydataset import (
 
 sample = {
     (Role.DEFAULT, Modality.AUDIO): AudioItem(
-        views={AudioView.WAVEFORM: torch.zeros(1, 16000)},
-        required={AudioKey.SAMPLE_RATE: 16000},
+        views={AudioView.WAVEFORM: (torch.zeros(1, 16000), 16000)},
     )
 }
 
 DatasetWriter("/data/my_anydataset", dataset_id="toy-audio").write([sample])
 
 dataset = AnyDataset(
-    Spec(source=Source.UNIFIED, path="/data/my_anydataset"),
+    Spec(source=Source.STORE, path="/data/my_anydataset"),
 )
 restored = dataset[0]
 ```
 
-`ViewMaterializer` adds derived views to a unified store.
+Views are stored under `{role}/{modality}/{view}/`; payloads live in that
+view directory's `shards/` files. `ViewMaterializer` adds derived views to a
+new store.
 
 ```python
-from anydataset import AudioView, Modality, ViewMaterializer, ViewRef
+from anydataset import AnyDataset, AudioView, Source, Spec, ViewMaterializer
+
+class ToyLongCat:
+    output = AudioView.LONGCAT
+
+    def __call__(self, views):
+        waveform, sample_rate = views[AudioView.WAVEFORM]
+        return {"semantic_codes": waveform.to(torch.int64)}
+
+dataset = AnyDataset(
+    Spec(source=Source.STORE, path="/data/my_anydataset"),
+)
 
 ViewMaterializer(
-    input_dir="/data/my_anydataset",
     output_dir="/data/my_anydataset_longcat",
-    input_ref=ViewRef(Modality.AUDIO, AudioView.WAVEFORM),
-    output_ref=ViewRef(Modality.AUDIO, AudioView.LONGCAT),
-    transform=lambda view: {"semantic_codes": view.value.to(torch.int64)},
-    provider_name="toy_longcat",
-    provider_version="1",
-).write()
+    dataset_id="toy-audio",
+).write(dataset, ToyLongCat())
 ```
 
-Use `mode="self_contained"` to copy existing views into the output dataset, or
-set `input_dir == output_dir` to register the new view in place.
+Set `copy_inputs=True` to include existing views in the output dataset.
 
 ## Development
 

@@ -12,7 +12,7 @@ class ResolverTest(unittest.TestCase):
     def test_source_uses_auto_str_value(self):
         self.assertEqual(Source.HF.value, "hf")
         self.assertEqual(Source.HF_DISK.value, "hf-disk")
-        self.assertEqual(Source.UNIFIED.value, "unified")
+        self.assertEqual(Source.STORE.value, "store")
 
     def test_preset_spec_resolves_builtin(self):
         spec = Preset.FLEURS.spec(split="validation")
@@ -36,7 +36,7 @@ class ResolverTest(unittest.TestCase):
         self.assertEqual(preset.path, "Fhrozen/FSD50k")
         self.assertEqual(preset.split, "dev")
 
-        explicit = Spec(source=Source.UNIFIED, path="/tmp/data")
+        explicit = Spec(source=Source.STORE, path="/tmp/data")
 
         self.assertIs(resolve_dataset(explicit), explicit)
 
@@ -48,9 +48,9 @@ class ResolverTest(unittest.TestCase):
                 "/tmp/saved_dataset",
                 "validation",
             ),
-            "unified:///tmp/unified_audio:train": (
-                Source.UNIFIED,
-                "/tmp/unified_audio",
+            "store:///tmp/store_audio:train": (
+                Source.STORE,
+                "/tmp/store_audio",
                 "train",
             ),
         }

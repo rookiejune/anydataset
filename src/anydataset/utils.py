@@ -7,16 +7,15 @@ from typing import Any
 from .types import Preset, Source, SourceKey, Spec, source_key
 from .types.item import (
     AudioItem,
-    AudioKey,
-    AudioOptKey,
+    AudioMeta,
     AudioView,
     ImageItem,
-    ImageOptKey,
+    ImageMeta,
     ImageView,
     Modality,
     Role,
     TextItem,
-    TextOptKey,
+    TextMeta,
     TextView,
     Sample,
 )
@@ -39,13 +38,13 @@ class Labels:
 @dataclass(frozen=True)
 class TextMap:
     fields: TextFields
-    values: Mapping[TextOptKey, Any] | None = None
+    values: Mapping[TextMeta, Any] | None = None
 
 
 type FieldPath = str | tuple[str, ...]
-type AudioField = AudioView | AudioKey | AudioOptKey | Labels
-type ImageField = ImageView | ImageOptKey
-type TextField = TextView | TextOptKey
+type AudioField = AudioView | AudioMeta | Labels
+type ImageField = ImageView | ImageMeta
+type TextField = TextView | TextMeta
 type AudioFields = Mapping[FieldPath, AudioField]
 type ImageFields = Mapping[FieldPath, ImageField]
 type TextFields = Mapping[FieldPath, TextField]
@@ -67,7 +66,7 @@ def image_map(fields: ImageFields) -> ImageMap:
 def text_map(
     fields: TextFields,
     *,
-    values: Mapping[TextOptKey, Any] | None = None,
+    values: Mapping[TextMeta, Any] | None = None,
 ) -> TextMap:
     return TextMap(fields=fields, values=values)
 
@@ -89,7 +88,7 @@ def sample_from_row(
     audio: AudioFields | None = None,
     image: ImageFields | None = None,
     text: TextFields | None = None,
-    text_values: Mapping[TextOptKey, Any] | None = None,
+    text_values: Mapping[TextMeta, Any] | None = None,
 ) -> Sample:
     sample: dict[tuple[Role, Modality], Any] = {}
     if items is not None:
@@ -122,8 +121,7 @@ def sample_from_row(
 
 def load_audio(row: Mapping[str, Any], fields: AudioFields) -> AudioItem:
     views: dict[AudioView, Any] = {}
-    required: dict[AudioKey, Any] = {}
-    optional: dict[AudioOptKey, Any] = {}
+    meta: dict[AudioMeta, Any] = {}
     label_values: dict[str, Any] = {}
 
     for field, key in fields.items():
@@ -131,62 +129,58 @@ def load_audio(row: Mapping[str, Any], fields: AudioFields) -> AudioItem:
         if isinstance(key, AudioView):
             if key == AudioView.WAVEFORM:
                 waveform, sample_rate = _audio(value)
-                views[key] = waveform
-                if sample_rate is not None:
-                    required.setdefault(AudioKey.SAMPLE_RATE, sample_rate)
+                if sample_rate is None:
+                    raise ValueError("audio waveform views require sample_rate.")
+                views[key] = (waveform, sample_rate)
                 continue
             views[key] = value
-        elif isinstance(key, AudioKey):
-            required[key] = _maybe_int(value)
-        elif isinstance(key, AudioOptKey):
-            optional[key] = value
+        elif isinstance(key, AudioMeta):
+            meta[key] = value
         elif isinstance(key, Labels):
             label_values[key.name] = value
         else:
             raise TypeError(f"Unsupported audio field key: {key!r}.")
 
     if label_values:
-        if AudioOptKey.LABELS in optional:
+        if AudioMeta.LABELS in meta:
             raise ValueError("Use either direct labels field or label field mappings.")
-        optional[AudioOptKey.LABELS] = label_values
-    if AudioKey.SAMPLE_RATE not in required:
-        raise ValueError("audio samples require sample_rate.")
-    return AudioItem(views=views, required=required, optional=optional)
+        meta[AudioMeta.LABELS] = label_values
+    return AudioItem(views=views, meta=meta)
 
 
 def load_image(row: Mapping[str, Any], fields: ImageFields) -> ImageItem:
     views: dict[ImageView, Any] = {}
-    optional: dict[ImageOptKey, Any] = {}
+    meta: dict[ImageMeta, Any] = {}
 
     for field, key in fields.items():
         value = _value(row, field)
         if isinstance(key, ImageView):
             views[key] = value
-        elif isinstance(key, ImageOptKey):
-            optional[key] = value
+        elif isinstance(key, ImageMeta):
+            meta[key] = value
         else:
             raise TypeError(f"Unsupported image field key: {key!r}.")
-    return ImageItem(views=views, optional=optional)
+    return ImageItem(views=views, meta=meta)
 
 
 def load_text(
     row: Mapping[str, Any],
     fields: TextFields,
     *,
-    values: Mapping[TextOptKey, Any] | None = None,
+    values: Mapping[TextMeta, Any] | None = None,
 ) -> TextItem:
     views: dict[TextView, Any] = {}
-    optional: dict[TextOptKey, Any] = dict(values or {})
+    meta: dict[TextMeta, Any] = dict(values or {})
 
     for field, key in fields.items():
         value = _value(row, field)
         if isinstance(key, TextView):
             views[key] = value
-        elif isinstance(key, TextOptKey):
-            optional[key] = value
+        elif isinstance(key, TextMeta):
+            meta[key] = value
         else:
             raise TypeError(f"Unsupported text field key: {key!r}.")
-    return TextItem(views=views, optional=optional)
+    return TextItem(views=views, meta=meta)
 
 
 def _load_item(
@@ -237,7 +231,7 @@ def _resolve_shorthand(shorthand: str) -> Spec:
     except ValueError as exc:
         raise KeyError(
             f"Unknown dataset preset {name!r}. Use a registered source shorthand "
-            "such as `hf://`, `hf-disk://` or `unified://` for raw specs."
+            "such as `hf://`, `hf-disk://` or `store://` for raw specs."
         ) from exc
     return preset.spec(split=split)
 
@@ -245,8 +239,8 @@ def _resolve_shorthand(shorthand: str) -> Spec:
 def _split_source_prefix(shorthand: str) -> tuple[SourceKey | None, str]:
     if shorthand.startswith("hf://"):
         return Source.HF, shorthand[len("hf://") :]
-    if shorthand.startswith("unified://"):
-        return Source.UNIFIED, shorthand[len("unified://") :]
+    if shorthand.startswith("store://"):
+        return Source.STORE, shorthand[len("store://") :]
     if "://" in shorthand:
         from .dataset.source import has_source
 

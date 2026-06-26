@@ -1,6 +1,5 @@
-from .longcat import LongCatCodec, LongCatViewProvider
+from .longcat import LongCatViewProvider
 
 __all__ = [
-    "LongCatCodec",
     "LongCatViewProvider",
 ]

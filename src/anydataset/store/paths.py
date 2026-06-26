@@ -2,15 +2,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from .manifest import ViewRef
+from ..types.item import Modality, Role, View
 
 
 def dataset_json_path(root: str | Path) -> Path:
     return Path(root) / "dataset.json"
-
-
-def samples_jsonl_path(root: str | Path) -> Path:
-    return Path(root) / "samples.jsonl"
 
 
 def samples_parquet_path(root: str | Path) -> Path:
@@ -21,34 +17,49 @@ def dataset_ready_path(root: str | Path) -> Path:
     return Path(root) / ".ready"
 
 
-def view_dir(root: str | Path, ref: ViewRef, revision: str) -> Path:
-    _validate_segment("revision", revision)
-    return Path(root).joinpath(*ref.path_parts(), str(revision))
+def view_dir(
+    root: str | Path,
+    view: tuple[Role, Modality, View],
+) -> Path:
+    role, modality, key = view
+    return Path(root) / role.value / modality.value / key.value
 
 
-def view_json_path(root: str | Path, ref: ViewRef, revision: str) -> Path:
-    return view_dir(root, ref, revision) / "view.json"
+def view_json_path(
+    root: str | Path,
+    view: tuple[Role, Modality, View],
+) -> Path:
+    return view_dir(root, view) / "view.json"
 
 
-def view_manifest_path(root: str | Path, ref: ViewRef, revision: str) -> Path:
-    return view_dir(root, ref, revision) / "manifest.jsonl"
+def view_manifest_parquet_path(
+    root: str | Path,
+    view: tuple[Role, Modality, View],
+) -> Path:
+    return view_dir(root, view) / "manifest.parquet"
 
 
-def view_manifest_parquet_path(root: str | Path, ref: ViewRef, revision: str) -> Path:
-    return view_dir(root, ref, revision) / "manifest.parquet"
+def view_ready_path(
+    root: str | Path,
+    view: tuple[Role, Modality, View],
+) -> Path:
+    return view_dir(root, view) / ".ready"
 
 
-def view_ready_path(root: str | Path, ref: ViewRef, revision: str) -> Path:
-    return view_dir(root, ref, revision) / ".ready"
+def view_shards_dir(
+    root: str | Path,
+    view: tuple[Role, Modality, View],
+) -> Path:
+    return view_dir(root, view) / "shards"
 
 
-def view_shards_dir(root: str | Path, ref: ViewRef, revision: str) -> Path:
-    return view_dir(root, ref, revision) / "shards"
-
-
-def view_shard_path(root: str | Path, ref: ViewRef, revision: str, shard: str) -> Path:
+def view_shard_path(
+    root: str | Path,
+    view: tuple[Role, Modality, View],
+    shard: str,
+) -> Path:
     _validate_segment("shard", shard)
-    return view_shards_dir(root, ref, revision) / str(shard)
+    return view_shards_dir(root, view) / str(shard)
 
 
 def _validate_segment(name: str, value: str) -> None:

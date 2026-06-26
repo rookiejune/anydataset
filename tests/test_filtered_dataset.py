@@ -6,7 +6,7 @@ from pathlib import Path
 from anydataset import (
     AnyDataset,
     AudioItem,
-    AudioOptKey,
+    AudioMeta,
     AudioReq,
     AudioView,
     FilterRule,
@@ -248,13 +248,13 @@ def _parse(row):
     return {
         (Role.DEFAULT, Modality.AUDIO): AudioItem(
             views={AudioView.WAVEFORM: value},
-            optional={AudioOptKey.LABEL: value},
+            meta={AudioMeta.LABEL: value},
         )
     }
 
 
 def _value(sample):
-    return sample[Role.DEFAULT, Modality.AUDIO].optional[AudioOptKey.LABEL]
+    return sample[Role.DEFAULT, Modality.AUDIO].meta[AudioMeta.LABEL]
 
 
 def _values(dataset):

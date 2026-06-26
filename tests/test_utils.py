@@ -1,14 +1,13 @@
 import unittest
 
 from anydataset import (
-    AudioKey,
-    AudioOptKey,
+    AudioMeta,
     AudioView,
-    ImageOptKey,
+    ImageMeta,
     ImageView,
     Modality,
     Role,
-    TextOptKey,
+    TextMeta,
     TextView,
 )
 from anydataset.utils import labels, sample_from_row, text_map
@@ -30,21 +29,20 @@ class PresetCommonTest(unittest.TestCase):
             row,
             audio={
                 "audio": AudioView.WAVEFORM,
-                "category": AudioOptKey.LABEL,
+                "category": AudioMeta.LABEL,
                 "target": labels("target"),
             },
             text={"transcription": TextView.TEXT},
-            text_values={TextOptKey.LANG: "en"},
+            text_values={TextMeta.LANG: "en"},
         )
 
         audio = sample[Role.DEFAULT, Modality.AUDIO]
         text = sample[Role.DEFAULT, Modality.TEXT]
-        self.assertEqual(audio.views[AudioView.WAVEFORM], [0.1, 0.2])
-        self.assertEqual(audio.required[AudioKey.SAMPLE_RATE], 16000)
-        self.assertEqual(audio.optional[AudioOptKey.LABEL], "speech")
-        self.assertEqual(audio.optional[AudioOptKey.LABELS], {"target": 3})
+        self.assertEqual(audio.views[AudioView.WAVEFORM], ([0.1, 0.2], 16000))
+        self.assertEqual(audio.meta[AudioMeta.LABEL], "speech")
+        self.assertEqual(audio.meta[AudioMeta.LABELS], {"target": 3})
         self.assertEqual(text.views[TextView.TEXT], "hello")
-        self.assertEqual(text.optional[TextOptKey.LANG], "en")
+        self.assertEqual(text.meta[TextMeta.LANG], "en")
 
     def test_sample_from_row_maps_image_classification_fields(self):
         sample = sample_from_row(
@@ -54,13 +52,13 @@ class PresetCommonTest(unittest.TestCase):
             },
             image={
                 "image": ImageView.PIXEL,
-                "label": ImageOptKey.LABEL,
+                "label": ImageMeta.LABEL,
             },
         )
 
         image = sample[Role.DEFAULT, Modality.IMAGE]
         self.assertEqual(image.views[ImageView.PIXEL], [[1, 2], [3, 4]])
-        self.assertEqual(image.optional[ImageOptKey.LABEL], 7)
+        self.assertEqual(image.meta[ImageMeta.LABEL], 7)
 
     def test_sample_from_row_requires_audio_sample_rate(self):
         with self.assertRaisesRegex(ValueError, "sample_rate"):
@@ -80,11 +78,11 @@ class PresetCommonTest(unittest.TestCase):
             items={
                 (Role.SOURCE, Modality.TEXT): text_map(
                     {("translation", "en"): TextView.TEXT},
-                    values={TextOptKey.LANG: "en"},
+                    values={TextMeta.LANG: "en"},
                 ),
                 (Role.TARGET, Modality.TEXT): text_map(
                     {("translation", "de"): TextView.TEXT},
-                    values={TextOptKey.LANG: "de"},
+                    values={TextMeta.LANG: "de"},
                 ),
             },
         )
@@ -92,9 +90,9 @@ class PresetCommonTest(unittest.TestCase):
         source = sample[Role.SOURCE, Modality.TEXT]
         target = sample[Role.TARGET, Modality.TEXT]
         self.assertEqual(source.views[TextView.TEXT], "The tea is hot.")
-        self.assertEqual(source.optional[TextOptKey.LANG], "en")
+        self.assertEqual(source.meta[TextMeta.LANG], "en")
         self.assertEqual(target.views[TextView.TEXT], "Der Tee ist heiss.")
-        self.assertEqual(target.optional[TextOptKey.LANG], "de")
+        self.assertEqual(target.meta[TextMeta.LANG], "de")
 
     def test_sample_from_row_rejects_duplicate_references(self):
         with self.assertRaises(ValueError):

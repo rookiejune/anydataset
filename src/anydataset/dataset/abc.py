@@ -11,7 +11,7 @@ from ..types import Spec
 
 if TYPE_CHECKING:
     from ..cache import CacheManager
-    from ..types.item import Sample, Schema
+    from ..types.item import Sample, Schema, Transforms
     from .source import DatasetSource
 
 
@@ -21,6 +21,7 @@ class _Base(ABC):
         spec: Spec,
         parse_fn: Callable[[Any], Sample] | None = None,
         cache_root: str | Path | None = None,
+        transforms: Transforms | None = None,
     ) -> None:
         self.spec = spec
         self._cache_manager = None
@@ -31,6 +32,7 @@ class _Base(ABC):
         self._dataset = None
         self._source: DatasetSource | None = None
         self.parse_fn = parse_fn or _identity_sample
+        self.transforms = None if transforms is None else dict(transforms)
 
     def prepare(self) -> Any:
         if self._dataset is not None:
@@ -64,6 +66,14 @@ class _Base(ABC):
         shard = runtime_shard()
         yield from self.iter_shard(shard.count, shard.index)
 
+    def transform_sample(self, sample: Sample) -> Sample:
+        if self.transforms is None:
+            return sample
+        transformed = dict(sample)
+        for reference, transform in self.transforms.items():
+            transformed[reference] = transform(sample[reference])
+        return transformed
+
     @abstractmethod
     def iter_shard(self, num_shards: int, shard_id: int) -> Iterator[Sample]:
         raise NotImplementedError
@@ -83,7 +93,7 @@ class IterableAnyDataset(_Base, IterableDataset):
     def iter_shard(self, num_shards: int, shard_id: int) -> Iterator[Sample]:
         validate_shard(num_shards, shard_id)
         for row in self.iter_shard_rows(num_shards, shard_id):
-            yield self.parse_fn(row)
+            yield self.transform_sample(self.parse_fn(row))
 
     def iter_shard_rows(self, num_shards: int, shard_id: int) -> Iterator[Any]:
         validate_shard(num_shards, shard_id)
@@ -101,7 +111,7 @@ class AnyDataset(_Base, Dataset):
         return len(self.dataset)
 
     def __getitem__(self, index: int) -> Sample:
-        return self.parse_fn(self.dataset[index])
+        return self.transform_sample(self.parse_fn(self.dataset[index]))
 
     def iter_shard(self, num_shards: int, shard_id: int):
         validate_shard(num_shards, shard_id)

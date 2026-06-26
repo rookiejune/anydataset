@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterator
@@ -11,10 +11,9 @@ from ..types import item
 from .jsonio import read_json
 from .manifest import (
     DatasetManifest,
-    SampleItemEntry,
     SampleManifestEntry,
     ViewManifestEntry,
-    ViewRef,
+    view_from_dict,
 )
 from .manifestio import (
     read_samples_manifest,
@@ -26,16 +25,15 @@ from .paths import (
     dataset_ready_path,
     view_ready_path,
 )
-from .payload import matches_checksum, payload_value, read_payload_bytes
+from .payload import payload_value, read_payload_bytes
 
 
 @dataclass(frozen=True)
 class StoreDataset(Dataset):
     root: Path
-    cache_path: Path
     manifest: DatasetManifest
     samples: tuple[SampleManifestEntry, ...]
-    views: Mapping[ViewRef, "StoreView"]
+    views: Mapping[tuple[item.Role, item.Modality, item.View], "StoreView"]
     _files: dict[str, Path] = field(default_factory=dict, compare=False, repr=False)
 
     def __len__(self) -> int:
@@ -51,37 +49,30 @@ class StoreDataset(Dataset):
 
 @dataclass(frozen=True)
 class StoreView:
-    ref: ViewRef
-    revision: str
+    view: tuple[item.Role, item.Modality, item.View]
     entries: Mapping[str, ViewManifestEntry]
 
 
 def read_store_dataset(
     root: str | Path,
-    *,
-    split: str | None = None,
-    cache_path: str | Path,
-    views: Sequence[ViewRef] | None = None,
 ) -> StoreDataset:
     root = Path(root).expanduser()
-    cache_path = Path(cache_path)
     _validate_dataset_root(root)
-    manifest = DatasetManifest.from_dict(read_json(dataset_json_path(root)))
-    _validate_split(split, manifest)
+    manifest = DatasetManifest(**read_json(dataset_json_path(root)))
     samples = tuple(read_samples_manifest(root))
     if len(samples) != manifest.sample_count:
         raise ValueError(
             "sample manifest row count must match dataset.json sample_count."
         )
+    _validate_samples(samples)
 
-    selections = _view_selections(manifest, views)
     indexes = {
-        selection.ref: _load_view(root, selection.ref, selection.revision)
-        for selection in selections
+        view: _load_view(root, view)
+        for view in _discover_views(root)
     }
+    _validate_view_coverage(samples, indexes)
     return StoreDataset(
         root=root,
-        cache_path=cache_path,
         manifest=manifest,
         samples=samples,
         views=indexes,
@@ -92,51 +83,141 @@ def _validate_dataset_root(root: Path) -> None:
     if not root.is_dir():
         raise FileNotFoundError(root)
     if not dataset_ready_path(root).exists():
-        raise ValueError(f"Unified dataset is not ready: {root}")
+        raise ValueError(f"Store dataset is not ready: {root}")
     if not dataset_json_path(root).is_file():
         raise FileNotFoundError(dataset_json_path(root))
     if not samples_manifest_exists(root):
-        raise FileNotFoundError(root / "samples.jsonl")
+        raise FileNotFoundError(root / "samples.parquet")
 
 
-def _validate_split(split: str | None, manifest: DatasetManifest) -> None:
-    if split is not None and manifest.split is not None and split != manifest.split:
-        raise ValueError(
-            f"Dataset split {manifest.split!r} does not match requested split {split!r}."
-        )
-
-
-def _view_selections(
-    manifest: DatasetManifest,
-    views: Sequence[ViewRef] | None,
-):
-    if views is None:
-        return manifest.views
-    available = {selection.ref: selection for selection in manifest.views}
-    selections = []
-    for ref in views:
-        if not isinstance(ref, ViewRef):
-            raise TypeError("views entries must be ViewRef instances.")
-        selection = available.get(ref)
-        if selection is None:
-            raise KeyError(f"Unified dataset is missing requested view: {ref.path_parts()}.")
-        selections.append(selection)
-    return tuple(selections)
-
-
-def _load_view(root: Path, ref: ViewRef, revision: str) -> StoreView:
-    if not view_ready_path(root, ref, revision).exists():
-        raise ValueError(f"Unified dataset view is not ready: {ref.path_parts()}.")
+def _load_view(root: Path, view: tuple[item.Role, item.Modality, item.View]) -> StoreView:
+    if not view_ready_path(root, view).exists():
+        raise ValueError(f"Store dataset view is not ready: {_view_path(view)}.")
     entries: dict[str, ViewManifestEntry] = {}
-    for entry in read_view_manifest(root, ref, revision):
-        if entry.ref != ref:
+    for entry in read_view_manifest(root, view):
+        if _entry_view(entry) != view:
             raise ValueError("View manifest entry ref must match its path.")
-        if entry.revision != revision:
-            raise ValueError("View manifest entry revision must match its path.")
         if entry.sample_id in entries:
             raise ValueError(f"Duplicate view entry for sample_id {entry.sample_id!r}.")
         entries[entry.sample_id] = entry
-    return StoreView(ref=ref, revision=revision, entries=entries)
+    return StoreView(view=view, entries=entries)
+
+
+def _discover_views(root: Path) -> tuple[tuple[item.Role, item.Modality, item.View], ...]:
+    views = []
+    for path in _view_dirs(root):
+        view = _view_from_dir(root, path)
+        _validate_view_dir(path, view)
+        views.append(view)
+    return tuple(sorted(views, key=_view_path))
+
+
+def _view_from_dir(
+    root: Path,
+    path: Path,
+) -> tuple[item.Role, item.Modality, item.View]:
+    parts = path.relative_to(root).parts
+    if len(parts) != 3:
+        raise ValueError(f"Store dataset view path must have three parts: {path}")
+    try:
+        role, modality, key = parts
+        return view_from_dict({"role": role, "modality": modality, "view": key})
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"Invalid store dataset view path: {path}") from exc
+
+
+def _view_dirs(root: Path) -> Iterator[Path]:
+    for path in root.glob("*/*/*"):
+        if not path.is_dir():
+            continue
+        if _runtime_path(root, path):
+            continue
+        if _has_view_marker(path):
+            yield path
+
+
+def _runtime_path(root: Path, path: Path) -> bool:
+    return any(part.startswith(".") for part in path.relative_to(root).parts)
+
+
+def _has_view_marker(path: Path) -> bool:
+    return any(
+        (path / name).exists()
+        for name in ("view.json", "manifest.parquet", ".ready", "shards")
+    )
+
+
+def _validate_view_dir(
+    path: Path,
+    view: tuple[item.Role, item.Modality, item.View],
+) -> None:
+    if not (path / ".ready").is_file():
+        raise ValueError(f"Store dataset view is not ready: {_view_path(view)}.")
+    if not (path / "view.json").is_file():
+        raise FileNotFoundError(path / "view.json")
+    if not (path / "manifest.parquet").is_file():
+        raise FileNotFoundError(path / "manifest.parquet")
+    declared = _view_from_json(path / "view.json")
+    if declared != view:
+        raise ValueError(
+            f"View metadata {path / 'view.json'} does not match its path."
+        )
+
+
+def _view_from_json(path: Path) -> tuple[item.Role, item.Modality, item.View]:
+    try:
+        return view_from_dict(read_json(path))
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError(f"Invalid store dataset view metadata: {path}") from exc
+
+
+def _validate_samples(samples: tuple[SampleManifestEntry, ...]) -> None:
+    sample_ids: set[str] = set()
+    for sample in samples:
+        if sample.sample_id in sample_ids:
+            raise ValueError(f"Duplicate sample_id {sample.sample_id!r}.")
+        sample_ids.add(sample.sample_id)
+        refs: set[tuple[item.Role, item.Modality]] = set()
+        for ref, _ in sample.items:
+            if ref in refs:
+                raise ValueError(f"Duplicate sample item ref {ref!r}.")
+            refs.add(ref)
+
+
+def _validate_view_coverage(
+    samples: tuple[SampleManifestEntry, ...],
+    views: Mapping[tuple[item.Role, item.Modality, item.View], StoreView],
+) -> None:
+    expected = _sample_ids_by_item(samples)
+    for view, store_view in views.items():
+        sample_ref = view[:2]
+        expected_ids = expected.get(sample_ref, set())
+        actual_ids = set(store_view.entries)
+        if actual_ids == expected_ids:
+            continue
+        missing = sorted(expected_ids - actual_ids)
+        extra = sorted(actual_ids - expected_ids)
+        detail = _coverage_detail(missing, extra)
+        raise ValueError(f"View {_view_path(view)} sample coverage mismatch: {detail}.")
+
+
+def _sample_ids_by_item(
+    samples: tuple[SampleManifestEntry, ...],
+) -> dict[tuple[item.Role, item.Modality], set[str]]:
+    sample_ids: dict[tuple[item.Role, item.Modality], set[str]] = {}
+    for sample in samples:
+        for ref, _ in sample.items:
+            sample_ids.setdefault(ref, set()).add(sample.sample_id)
+    return sample_ids
+
+
+def _coverage_detail(missing: list[str], extra: list[str]) -> str:
+    details = []
+    if missing:
+        details.append(f"missing sample_id {missing[0]!r}")
+    if extra:
+        details.append(f"unexpected sample_id {extra[0]!r}")
+    return ", ".join(details)
 
 
 def _sample_for_entry(
@@ -144,16 +225,20 @@ def _sample_for_entry(
     sample: SampleManifestEntry,
 ) -> item.Sample:
     views_by_ref: dict[tuple[item.Role, item.Modality], dict[Any, Any]] = {}
-    for ref, view in dataset.views.items():
+    item_entries = dict(sample.items)
+    for view_entry, view in dataset.views.items():
+        sample_ref = view_entry[:2]
+        if sample_ref not in item_entries:
+            continue
         entry = view.entries.get(sample.sample_id)
         if entry is None:
-            continue
-        sample_ref = ref.sample_ref
+            raise ValueError(
+                f"View {_view_path(view_entry)} is missing sample_id {sample.sample_id!r}."
+            )
         views = views_by_ref.setdefault(sample_ref, {})
-        views[ref.view_key] = _view_value(dataset, view, entry)
+        views[view_entry[2]] = _view_value(dataset, view, entry)
 
     result: dict[tuple[item.Role, item.Modality], item.Item] = {}
-    item_entries = {entry.ref: entry for entry in sample.items}
     for sample_ref, views in views_by_ref.items():
         item_entry = item_entries.get(sample_ref)
         result[sample_ref] = _item_from_entry(sample_ref, item_entry, views)
@@ -166,30 +251,26 @@ def _sample_for_entry(
 
 def _item_from_entry(
     sample_ref: tuple[item.Role, item.Modality],
-    entry: SampleItemEntry | None,
+    meta: Mapping[str, Any] | None,
     views: Mapping[Any, Any],
 ) -> item.Item:
     _, modality = sample_ref
-    required = {} if entry is None else dict(entry.required)
-    optional = {} if entry is None else dict(entry.optional)
+    meta = {} if meta is None else dict(meta)
     match modality:
         case item.Modality.AUDIO:
             return item.AudioItem(
                 views=views,
-                required=_enum_keys(required, item.AudioKey),
-                optional=_enum_keys(optional, item.AudioOptKey),
+                meta=_enum_keys(meta, item.AudioMeta),
             )
         case item.Modality.IMAGE:
             return item.ImageItem(
                 views=views,
-                required=_enum_keys(required, item.ImageKey),
-                optional=_enum_keys(optional, item.ImageOptKey),
+                meta=_enum_keys(meta, item.ImageMeta),
             )
         case item.Modality.TEXT:
             return item.TextItem(
                 views=views,
-                required=_enum_keys(required, item.TextKey),
-                optional=_enum_keys(optional, item.TextOptKey),
+                meta=_enum_keys(meta, item.TextMeta),
             )
     raise ValueError(f"Unsupported modality: {modality!r}.")
 
@@ -199,11 +280,11 @@ def _view_value(
     view: StoreView,
     entry: ViewManifestEntry,
 ) -> Any:
-    if view.ref.modality is item.Modality.AUDIO and view.ref.view_key == item.AudioView.FILE:
+    if view.view[1] is item.Modality.AUDIO and view.view[2] == item.AudioView.FILE:
         return str(_cached_file_payload(dataset, entry, view))
 
-    data = read_payload_bytes(dataset.root, view.ref, view.revision, entry)
-    return payload_value(view.ref, data)
+    data = read_payload_bytes(dataset.root, view.view, entry)
+    return payload_value(view.view, data)
 
 
 def _cached_file_payload(
@@ -215,12 +296,7 @@ def _cached_file_payload(
     if cached is not None:
         return cached
 
-    target = _file_cache_path(dataset.cache_path, entry)
-    if target.exists() and matches_checksum(target.read_bytes(), entry.checksum):
-        dataset._files[entry.key] = target
-        return target
-
-    data = read_payload_bytes(dataset.root, view.ref, view.revision, entry)
+    data = read_payload_bytes(dataset.root, view.view, entry)
     return _cache_file_payload(dataset, entry, data)
 
 
@@ -229,15 +305,15 @@ def _cache_file_payload(
     entry: ViewManifestEntry,
     data: bytes,
 ) -> Path:
-    target = _file_cache_path(dataset.cache_path, entry)
+    target = _file_cache_path(dataset.root, entry)
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_bytes(data)
     dataset._files[entry.key] = target
     return target
 
 
-def _file_cache_path(cache_path: Path, entry: ViewManifestEntry) -> Path:
-    return cache_path / "files" / entry.key
+def _file_cache_path(root: Path, entry: ViewManifestEntry) -> Path:
+    return root / ".cache" / "files" / entry.key
 
 
 def _enum_keys(values: Mapping[str, Any], enum_type):
@@ -245,3 +321,12 @@ def _enum_keys(values: Mapping[str, Any], enum_type):
     for key, value in values.items():
         converted[enum_type(key)] = value
     return converted
+
+
+def _entry_view(entry: ViewManifestEntry) -> tuple[item.Role, item.Modality, item.View]:
+    return entry.role, entry.modality, entry.view
+
+
+def _view_path(view: tuple[item.Role, item.Modality, item.View]) -> tuple[str, str, str]:
+    role, modality, key = view
+    return role.value, modality.value, key.value

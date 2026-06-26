@@ -3,9 +3,10 @@ from __future__ import annotations
 from functools import partial
 from typing import Any
 
-from ..dataset import Modality, Role, TextOptKey, TextView
+from ..dataset import Modality, Role, TextMeta, TextView
 from ..dataset.abc import IterableAnyDataset
 from ..types import Preset
+from ..types.item import Transforms
 from ..utils import sample_from_row, text_map
 from .registry import preset_spec
 
@@ -17,6 +18,7 @@ class WMT19(IterableAnyDataset):
         *,
         source_lang: str | None = None,
         target_lang: str | None = None,
+        transforms: Transforms | None = None,
         **load_options: Any,
     ) -> None:
         config_name = (
@@ -35,14 +37,15 @@ class WMT19(IterableAnyDataset):
                 items={
                     (Role.SOURCE, Modality.TEXT): text_map(
                         {("translation", source_lang): TextView.TEXT},
-                        values={TextOptKey.LANG: source_lang},
+                        values={TextMeta.LANG: source_lang},
                     ),
                     (Role.TARGET, Modality.TEXT): text_map(
                         {("translation", target_lang): TextView.TEXT},
-                        values={TextOptKey.LANG: target_lang},
+                        values={TextMeta.LANG: target_lang},
                     ),
                 },
             ),
+            transforms=transforms,
         )
 
 
