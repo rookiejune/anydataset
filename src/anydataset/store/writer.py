@@ -32,24 +32,22 @@ from .paths import (
 from .viewwriter import ViewWriter
 
 
+DEFAULT_MAX_SHARD_SAMPLES = 100_000
+
+
 @dataclass
 class DatasetWriter:
     output_dir: str | Path
     dataset_id: str
     split: str | None = None
     views: tuple[tuple[Role, Modality, View], ...] | None = None
-    max_shard_samples: int | None = None
-    max_shard_bytes: int | None = None
+    max_shard_samples: int = DEFAULT_MAX_SHARD_SAMPLES
 
     def __post_init__(self) -> None:
         self.output_dir = Path(self.output_dir)
-        self.max_shard_samples = _optional_positive_int(
+        self.max_shard_samples = _positive_int(
             "max_shard_samples",
             self.max_shard_samples,
-        )
-        self.max_shard_bytes = _optional_positive_int(
-            "max_shard_bytes",
-            self.max_shard_bytes,
         )
 
     def write(self, samples: Iterable[Sample]) -> Path:
@@ -92,7 +90,6 @@ class DatasetWriter:
                             root=root,
                             view=view,
                             max_shard_samples=self.max_shard_samples,
-                            max_shard_bytes=self.max_shard_bytes,
                         )
                         sinks[view] = sink
                     sink.write(sample_id, value)
@@ -191,6 +188,10 @@ def _validate_sample(sample: Sample) -> None:
 def _optional_positive_int(name: str, value: int | None) -> int | None:
     if value is None:
         return None
+    return _positive_int(name, value)
+
+
+def _positive_int(name: str, value: int) -> int:
     if not isinstance(value, int) or isinstance(value, bool):
         raise TypeError(f"{name} must be an integer.")
     if value <= 0:

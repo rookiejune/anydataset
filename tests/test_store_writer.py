@@ -16,6 +16,7 @@ from anydataset import (
     TextView,
 )
 from anydataset.store import DatasetWriter
+from anydataset.store.writer import DEFAULT_MAX_SHARD_SAMPLES
 from anydataset.store.jsonio import read_json
 from anydataset.store.manifest import DatasetManifest
 from anydataset.store.manifestio import read_samples_manifest, read_view_manifest
@@ -23,6 +24,7 @@ from anydataset.store.paths import (
     dataset_json_path,
     dataset_ready_path,
     samples_parquet_path,
+    view_dir,
     view_manifest_parquet_path,
     view_ready_path,
     view_shard_path,
@@ -62,6 +64,7 @@ class DatasetWriterTest(unittest.TestCase):
             self.assertTrue(view_ready_path(output, view).exists())
             self.assertTrue(samples_parquet_path(output).is_file())
             self.assertTrue(view_manifest_parquet_path(output, view).is_file())
+            self.assertFalse((view_dir(output, view) / "view.json").exists())
             self.assertEqual(sample_entry.sample_id, view_entry.sample_id)
             audio_entry = sample_entry.item((Role.DEFAULT, Modality.AUDIO))
             self.assertEqual(audio_entry[1]["label"], "speech")
@@ -113,6 +116,12 @@ class DatasetWriterTest(unittest.TestCase):
                 [entry.shard for entry in entries],
                 ["000000.tar", "000001.tar", "000002.tar"],
             )
+
+    def test_writer_defaults_to_100k_samples_per_shard(self):
+        writer = DatasetWriter("unused", dataset_id="toy")
+
+        self.assertEqual(writer.max_shard_samples, 100_000)
+        self.assertEqual(DEFAULT_MAX_SHARD_SAMPLES, 100_000)
 
     def test_explicit_view_must_exist_on_each_sample(self):
         with tempfile.TemporaryDirectory() as tmpdir:

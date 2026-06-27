@@ -143,7 +143,7 @@ def _runtime_path(root: Path, path: Path) -> bool:
 def _has_view_marker(path: Path) -> bool:
     return any(
         (path / name).exists()
-        for name in ("view.json", "manifest.parquet", ".ready", "shards")
+        for name in ("manifest.parquet", ".ready", "shards")
     )
 
 
@@ -153,22 +153,8 @@ def _validate_view_dir(
 ) -> None:
     if not (path / ".ready").is_file():
         raise ValueError(f"Store dataset view is not ready: {_view_path(view)}.")
-    if not (path / "view.json").is_file():
-        raise FileNotFoundError(path / "view.json")
     if not (path / "manifest.parquet").is_file():
         raise FileNotFoundError(path / "manifest.parquet")
-    declared = _view_from_json(path / "view.json")
-    if declared != view:
-        raise ValueError(
-            f"View metadata {path / 'view.json'} does not match its path."
-        )
-
-
-def _view_from_json(path: Path) -> tuple[item.Role, item.Modality, item.View]:
-    try:
-        return view_from_dict(read_json(path))
-    except (KeyError, TypeError, ValueError) as exc:
-        raise ValueError(f"Invalid store dataset view metadata: {path}") from exc
 
 
 def _validate_samples(samples: tuple[SampleManifestEntry, ...]) -> None:

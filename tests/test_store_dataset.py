@@ -139,25 +139,18 @@ class StoreSourceTest(unittest.TestCase):
             _write_empty_dataset(output)
             view_path = view_dir(output, (Role.DEFAULT, Modality.AUDIO, AudioView.WAVEFORM))
             view_path.mkdir(parents=True)
-            write_json(
-                view_path / "view.json",
-                {"role": "default", "modality": "audio", "view": "waveform"},
-            )
+            (view_path / ".ready").touch()
 
-            with self.assertRaises(ValueError):
+            with self.assertRaises(FileNotFoundError):
                 read_store_dataset(output)
 
-    def test_reader_rejects_view_metadata_that_disagrees_with_path(self):
+    def test_reader_rejects_invalid_view_path(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             output = root / "dataset"
             _write_empty_dataset(output)
-            view_path = view_dir(output, (Role.DEFAULT, Modality.AUDIO, AudioView.WAVEFORM))
+            view_path = output / "default" / "audio" / "not-a-view"
             view_path.mkdir(parents=True)
-            write_json(
-                view_path / "view.json",
-                {"role": "default", "modality": "audio", "view": "file"},
-            )
             (view_path / "manifest.parquet").write_bytes(b"not-parquet")
             (view_path / ".ready").touch()
 

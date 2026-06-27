@@ -14,6 +14,8 @@ from anydataset import (
     Spec,
 )
 from anydataset.store import DatasetWriter, ViewMaterializer, read_store_dataset
+from anydataset.store.materializer import iter_indexed_shard
+from anydataset.store.manifestio import read_samples_manifest, read_view_manifest
 from anydataset.store.paths import view_dir
 
 
@@ -126,9 +128,85 @@ class ViewMaterializerTest(unittest.TestCase):
                 )
             )
 
+    def test_iter_indexed_shard_uses_map_style_indexes(self):
+        dataset = [_audio_sample(torch.tensor([[float(index)]])) for index in range(5)]
+
+        self.assertEqual(
+            [index for index, _ in iter_indexed_shard(dataset, 2, 1)],
+            [1, 3],
+        )
+
+    def test_iter_indexed_shard_falls_back_to_iterable_modulo(self):
+        dataset = (
+            _audio_sample(torch.tensor([[float(index)]]))
+            for index in range(5)
+        )
+
+        self.assertEqual(
+            [index for index, _ in iter_indexed_shard(dataset, 2, 0)],
+            [0, 2, 4],
+        )
+
+    def test_materializer_parts_commit_readable_store(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            source = root / "source"
+            target = root / "target"
+            parts = root / "parts"
+            samples = [
+                _audio_sample(torch.tensor([[float(index)]]))
+                for index in range(4)
+            ]
+            DatasetWriter(source, dataset_id="toy-audio", split="train").write(samples)
+            dataset = _store_dataset(source, root)
+            materializer = ViewMaterializer(
+                target,
+                dataset_id="toy-audio",
+                split="train",
+            )
+
+            materializer.write_part(
+                dataset,
+                _Provider(offset=10),
+                parts_dir=parts,
+                num_shards=2,
+                shard_id=0,
+            )
+            dataset = _store_dataset(source, root)
+            materializer.write_part(
+                dataset,
+                _Provider(offset=10),
+                parts_dir=parts,
+                num_shards=2,
+                shard_id=1,
+            )
+            materializer.commit_parts(parts)
+
+            stored = read_store_dataset(target)
+            indexes = [entry.sample_index for entry in read_samples_manifest(target)]
+            view = (Role.DEFAULT, Modality.AUDIO, AudioView.LONGCAT)
+            shards = {entry.shard for entry in read_view_manifest(target, view)}
+
+            self.assertEqual(len(stored), 4)
+            self.assertEqual(indexes, [0, 1, 2, 3])
+            self.assertEqual(shards, {"part-00000-000000.tar", "part-00001-000000.tar"})
+            for index in range(4):
+                sample = stored[index]
+                self.assertTrue(
+                    torch.equal(
+                        sample[Role.DEFAULT, Modality.AUDIO]
+                        .views[AudioView.LONGCAT]["semantic_codes"],
+                        torch.tensor([[index + 10]]),
+                    )
+                )
+
 
 def _source_dataset(path: Path, root: Path, samples):
     DatasetWriter(path, dataset_id="toy-audio", split="train").write(samples)
+    return _store_dataset(path, root)
+
+
+def _store_dataset(path: Path, root: Path):
     return AnyDataset(
         Spec(source=Source.STORE, path=str(path), split="train"),
         cache_root=root / "cache-source",

@@ -25,13 +25,6 @@ def view_dir(
     return Path(root) / role.value / modality.value / key.value
 
 
-def view_json_path(
-    root: str | Path,
-    view: tuple[Role, Modality, View],
-) -> Path:
-    return view_dir(root, view) / "view.json"
-
-
 def view_manifest_parquet_path(
     root: str | Path,
     view: tuple[Role, Modality, View],
