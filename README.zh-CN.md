@@ -461,9 +461,9 @@ part 和 `<output_dir>/logs/part-xxxxx.log`，全部完成后主进程合并 sto
 
 ```python
 def provider_factory(device: str):
-    from anydataset.provider.longcat import LongCatViewProvider
+    from anydataset.provider.longcat import LongCatProvider
 
-    return LongCatViewProvider(device=device)
+    return LongCatProvider(device=device)
 
 
 delta = ViewMaterializer(
@@ -478,6 +478,16 @@ delta = ViewMaterializer(
 
 多设备 materialize 使用 Python `spawn`，所以 factory 应放在模块顶层，不能用
 lambda 或局部函数。
+
+需要让 provider 以 batch 调模型时，给 materializer 传 `batch_size`，并在
+provider 上实现 `call_batch(batch)`。`batch` 是 `collate_fn` 返回的
+`Batch(sample, masks)`；`batch_size=1` 或 provider 没有 batch 方法时会继续走
+单条 `__call__` 路径。`Batch.masks` 是通用有效位置表达，序列长度可以用
+`batch.lengths(field_ref)` 从 mask 派生。
+
+LongCat provider 的 batch 路径会把 waveform padding 后交给 LongCat encoder。
+当前 LongCat encoder 不接收 mask，所以 provider 会根据输入 waveform 的有效长度
+按比例裁剪输出 codes，避免把 padding 对应的 codes 写入 store。
 
 `merge()` 会把右侧 dataset 里的新 view 或新 item 原地合入左侧 store；如果 view 或 metadata 已经存在且发生冲突，会直接报错。也可以把 delta store 当作目标 store，执行 `AnyDataset(Spec(source=Source.STORE, path=str(delta), split="train")).merge(dataset)`，避免先复制一份 source。
 
@@ -498,12 +508,12 @@ LongCat 可以作为可选 provider 使用。provider 会加载 `anytrain.codec.
 典型流程是先用 preset 或 source 读出 waveform store，再 materialize 成 LongCat delta store，合并后在训练 schema 里选择 `AudioView.LONGCAT`：
 
 ```text
-base waveform store -> ViewMaterializer + LongCatViewProvider -> delta store -> AnyDataset(store).merge(delta) -> schema selects LONGCAT
+base waveform store -> ViewMaterializer + LongCatProvider -> delta store -> AnyDataset(store).merge(delta) -> schema selects LONGCAT
 ```
 
 ```python
 from anydataset import AnyDataset, Source, Spec
-from anydataset.provider.longcat import LongCatViewProvider
+from anydataset.provider.longcat import LongCatProvider
 
 delta = ViewMaterializer(
     output_dir="/data/my_anydataset_longcat",

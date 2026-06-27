@@ -1,8 +1,9 @@
 from .abc import (
     AnyDataset,
     IterableAnyDataset,
+    SampleDataset,
 )
-from .collate import Batch, FieldGroup, FieldRef, collate_fn
+from .collate import Batch, FieldGroup, FieldRef, collate_fn, field_lengths
 from ..filter import FilterDecision, FilteredDataset, FilterResult, FilterRule
 from ..types import Source, Spec, Task
 from ..types.item import (
@@ -65,6 +66,7 @@ __all__ = [
     "Role",
     "RoundRobinStrategy",
     "Sample",
+    "SampleDataset",
     "Schema",
     "SequentialStrategy",
     "Source",
@@ -78,4 +80,5 @@ __all__ = [
     "View",
     "WeightedRandomStrategy",
     "collate_fn",
+    "field_lengths",
 ]

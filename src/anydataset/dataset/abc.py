@@ -108,7 +108,17 @@ class IterableAnyDataset(_Base, IterableDataset):
         yield from _iter_modulo(self.iter_rows(), num_shards, shard_id)
 
 
-class AnyDataset(_Base, Dataset):
+class SampleDataset(Dataset, ABC):
+    @abstractmethod
+    def __len__(self) -> int:
+        raise NotImplementedError
+
+    @abstractmethod
+    def __getitem__(self, index: int) -> Sample:
+        raise NotImplementedError
+
+
+class AnyDataset(_Base, SampleDataset):
     def __len__(self) -> int:
         return len(self.dataset)
 

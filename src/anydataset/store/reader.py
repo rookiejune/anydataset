@@ -5,8 +5,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterator
 
-from torch.utils.data import Dataset
-
+from ..dataset.abc import SampleDataset
 from ..types import item
 from .atomic import cleanup_dir, tmp_dir
 from .jsonio import read_json
@@ -36,7 +35,7 @@ from .writer import DEFAULT_MAX_SHARD_SAMPLES
 
 
 @dataclass(frozen=True)
-class StoreDataset(Dataset):
+class StoreDataset(SampleDataset):
     root: Path
     manifest: DatasetManifest
     samples: tuple[SampleManifestEntry, ...]

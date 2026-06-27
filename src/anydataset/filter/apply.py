@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import shutil
 import threading
@@ -8,7 +10,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from ..cache import CacheManager, CacheManifest, FileLock
-from ..dataset.abc import AnyDataset
+from ..dataset.abc import AnyDataset, SampleDataset
 from ..store.jsonio import read_json, write_json
 from ..store.reader import StoreDataset
 from ..types import Source, Spec
@@ -26,10 +28,11 @@ from .types import _FilterChunk
 if TYPE_CHECKING:
     from .api import FilterResult, FilterRule
 
-FilterBase = AnyDataset | StoreDataset
+FilterBase = SampleDataset
 
 _DEFAULT_MAX_SHARD_SAMPLES = 1_000_000
 _DEFAULT_COMMIT_SAMPLES = 100_000
+_FILTER_VIEW_SCHEMA_VERSION = 1
 
 
 def apply_filter(
@@ -87,16 +90,17 @@ def ensure_filter(
     )
 
     spec = filter_spec(dataset)
+    identity = filter_identity(dataset)
     cache = filter_cache_manager(dataset, cache_root).prepare(spec)
     base_count = len(dataset)
-    expected = metadata(spec, base_count, rule)
-    cache_path = filter_path(cache, rule)
+    expected = metadata(identity, base_count, rule)
+    cache_path = filter_path(cache, rule, identity)
     metric_path = metrics_path(cache_path) if metrics else None
 
     if is_ready(cache_path, expected, metrics=metrics):
         return cache_path, metric_path
 
-    lock_path = filter_lock_path(cache, rule)
+    lock_path = filter_lock_path(cache, rule, identity)
     with FileLock(lock_path):
         if is_ready(cache_path, expected, metrics=metrics):
             return cache_path, metric_path
@@ -114,9 +118,9 @@ def ensure_filter(
 
 
 def filter_base(dataset: object) -> FilterBase:
-    if isinstance(dataset, AnyDataset | StoreDataset):
+    if isinstance(dataset, SampleDataset):
         return dataset
-    raise TypeError("dataset must be an AnyDataset or StoreDataset.")
+    raise TypeError("dataset must be a SampleDataset.")
 
 
 def filter_spec(dataset: FilterBase) -> Spec:
@@ -128,7 +132,28 @@ def filter_spec(dataset: FilterBase) -> Spec:
             path=str(dataset.root),
             split=dataset.manifest.split,
         )
+    if _is_filtered_dataset(dataset):
+        return filter_spec(dataset.base)
     raise TypeError("dataset must be an AnyDataset or StoreDataset.")
+
+
+def filter_identity(dataset: FilterBase) -> dict[str, Any]:
+    if _is_filtered_dataset(dataset):
+        return {
+            "view_schema_version": _FILTER_VIEW_SCHEMA_VERSION,
+            "kind": "filtered",
+            "base": filter_identity(dataset.base),
+            "rule": {"name": dataset.rule.name},
+            "labels": list(dataset.labels),
+            "cache_key": dataset.cache_path.name,
+            "sample_count": len(dataset),
+        }
+    spec = filter_spec(dataset)
+    return {
+        "kind": "physical",
+        "spec_id": spec.id,
+        "spec": spec.to_dict(),
+    }
 
 
 def filter_cache_manager(
@@ -139,26 +164,59 @@ def filter_cache_manager(
         return CacheManager(cache_root)
     if isinstance(dataset, AnyDataset):
         return dataset.cache_manager
+    if _is_filtered_dataset(dataset):
+        return filter_cache_manager(dataset.base, cache_root)
     return CacheManager()
 
 
-def metadata(spec: Spec, base_count: int, rule: FilterRule) -> dict[str, Any]:
-    return {
+def metadata(
+    identity: Mapping[str, Any],
+    base_count: int,
+    rule: FilterRule,
+) -> dict[str, Any]:
+    output = {
         "schema_version": 4,
         "base": {
-            "spec_id": spec.id,
             "sample_count": base_count,
         },
         "rule": {"name": rule.name},
     }
+    if identity.get("kind") == "physical":
+        output["base"]["spec_id"] = identity["spec_id"]
+    else:
+        output["base"]["view"] = dict(identity)
+    return output
 
 
-def filter_path(cache: CacheManifest, rule: FilterRule) -> Path:
-    return cache.cache_path / "filters" / rule_cache_key(rule.name)
+def filter_path(
+    cache: CacheManifest,
+    rule: FilterRule,
+    identity: Mapping[str, Any],
+) -> Path:
+    cache_name = rule.name
+    if identity.get("kind") != "physical":
+        cache_name = f"{filter_identity_key(identity)}:{rule.name}"
+    return cache.cache_path / "filters" / rule_cache_key(cache_name)
 
 
-def filter_lock_path(cache: CacheManifest, rule: FilterRule) -> Path:
-    return cache.cache_path / "filters" / f".{rule_cache_key(rule.name)}.lock"
+def filter_lock_path(
+    cache: CacheManifest,
+    rule: FilterRule,
+    identity: Mapping[str, Any],
+) -> Path:
+    path = filter_path(cache, rule, identity)
+    return path.with_name(f".{path.name}.lock")
+
+
+def filter_identity_key(identity: Mapping[str, Any]) -> str:
+    payload = json.dumps(identity, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()[:16]
+
+
+def _is_filtered_dataset(dataset: object) -> bool:
+    from .api import FilteredDataset
+
+    return isinstance(dataset, FilteredDataset)
 
 
 def metrics_path(cache_path: Path) -> Path:

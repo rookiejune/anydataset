@@ -9,7 +9,12 @@ from anydataset import (
     AnyDataset,
     AudioItem,
     AudioView,
+    FieldGroup,
+    FieldRef,
+    ImageItem,
+    ImageView,
     Modality,
+    ModalityMaterializer,
     Role,
     Source,
     Spec,
@@ -78,6 +83,62 @@ class ViewMaterializerTest(unittest.TestCase):
                     torch.tensor([[11, 12, 13]]),
                 )
             )
+
+    def test_materializer_uses_batch_provider_when_batch_size_is_set(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            source = root / "source"
+            target = root / "target"
+            dataset = _source_dataset(
+                source,
+                root,
+                [
+                    _audio_sample(torch.tensor([[1.0, 2.0, 3.0]])),
+                    _audio_sample(torch.tensor([[4.0]])),
+                ],
+            )
+            provider = _BatchProvider()
+
+            ViewMaterializer(target, batch_size=2).write(
+                dataset_factory=_DatasetFactory(dataset),
+                provider_factory=_StaticProviderFactory(provider),
+                devices="cpu",
+            )
+
+            stored = read_store_dataset(target)
+            self.assertEqual(provider.batch_shapes, [(2, 1, 3)])
+            self.assertEqual(provider.single_calls, 0)
+            self.assertTrue(
+                torch.equal(
+                    stored[0][Role.DEFAULT, Modality.AUDIO]
+                    .views[AudioView.LONGCAT]["semantic_codes"],
+                    torch.tensor([[1, 2, 3]]),
+                )
+            )
+            self.assertTrue(
+                torch.equal(
+                    stored[1][Role.DEFAULT, Modality.AUDIO]
+                    .views[AudioView.LONGCAT]["semantic_codes"],
+                    torch.tensor([[4]]),
+                )
+            )
+
+    def test_materializer_rejects_wrong_batch_provider_output_count(self):
+        provider = _BadBatchProvider()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            with self.assertRaisesRegex(ValueError, "1 outputs for 2 samples"):
+                ViewMaterializer(root / "target", batch_size=2).write(
+                    dataset_factory=_DatasetFactory(
+                        (
+                            _audio_sample(torch.tensor([[1.0]])),
+                            _audio_sample(torch.tensor([[2.0]])),
+                        )
+                    ),
+                    provider_factory=_StaticProviderFactory(provider),
+                    devices="cpu",
+                )
 
     def test_materializer_processes_multiple_roles(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -172,6 +233,101 @@ class ViewMaterializerTest(unittest.TestCase):
                     torch.tensor([[11, 12]]),
                 )
             )
+
+    def test_modality_materializer_adds_missing_modality_with_empty_meta(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            source = root / "source"
+            target = root / "target"
+            DatasetWriter(source, dataset_id="toy-text", split="train").write(
+                [
+                    {
+                        (Role.DEFAULT, Modality.TEXT): TextItem(
+                            views={TextView.TEXT: "hello"},
+                            meta={TextMeta.LANG: "en_us"},
+                        )
+                    }
+                ]
+            )
+
+            ModalityMaterializer(target, split="train").write(
+                dataset_factory=_StoreDatasetFactory(source, root),
+                provider_factory=_TTSProviderFactory(),
+                devices="cpu",
+            )
+            stored = read_store_dataset(target)
+            delta = _read_sample(target, root)
+            merged = _store_dataset(source, root).merge(_store_dataset(target, root))[0]
+
+            self.assertEqual(
+                set(stored.views),
+                {(Role.DEFAULT, Modality.AUDIO, AudioView.WAVEFORM)},
+            )
+            self.assertEqual(set(delta), {(Role.DEFAULT, Modality.AUDIO)})
+            waveform, sample_rate = delta[Role.DEFAULT, Modality.AUDIO].views[
+                AudioView.WAVEFORM
+            ]
+            self.assertTrue(torch.equal(waveform, torch.tensor([[5.0]])))
+            self.assertEqual(sample_rate, 16000)
+            self.assertEqual(delta[Role.DEFAULT, Modality.AUDIO].meta, {})
+            self.assertEqual(
+                merged[Role.DEFAULT, Modality.TEXT].meta[TextMeta.LANG],
+                "en_us",
+            )
+            self.assertEqual(merged[Role.DEFAULT, Modality.AUDIO].meta, {})
+
+    def test_modality_materializer_can_add_text_from_audio(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            source = root / "source"
+            target = root / "target"
+            DatasetWriter(source, dataset_id="toy-audio", split="train").write(
+                [_audio_sample(torch.tensor([[1.0, 2.0, 3.0]]))]
+            )
+
+            ModalityMaterializer(target, split="train").write(
+                dataset_factory=_StoreDatasetFactory(source, root),
+                provider_factory=_ASRProviderFactory(),
+                devices="cpu",
+            )
+            sample = _read_sample(target, root)
+
+            self.assertEqual(set(sample), {(Role.DEFAULT, Modality.TEXT)})
+            self.assertEqual(
+                sample[Role.DEFAULT, Modality.TEXT].views[TextView.TEXT],
+                "sum=6",
+            )
+            self.assertEqual(sample[Role.DEFAULT, Modality.TEXT].meta, {})
+
+    def test_modality_materializer_rejects_existing_output_modality(self):
+        sample = {
+            (Role.DEFAULT, Modality.TEXT): TextItem(views={TextView.TEXT: "hello"}),
+            (Role.DEFAULT, Modality.AUDIO): AudioItem(
+                views={AudioView.WAVEFORM: (torch.tensor([[1.0]]), 4)}
+            ),
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with self.assertRaisesRegex(ValueError, "already has output modality"):
+                ModalityMaterializer(Path(tmpdir) / "target").write(
+                    dataset_factory=_DatasetFactory((sample,)),
+                    provider_factory=_TTSProviderFactory(),
+                    devices="cpu",
+                )
+
+    def test_modality_materializer_rejects_ambiguous_input_modality(self):
+        sample = {
+            (Role.DEFAULT, Modality.TEXT): TextItem(views={TextView.TEXT: "hello"}),
+            (Role.DEFAULT, Modality.IMAGE): ImageItem(
+                views={ImageView.PIXEL: [[1, 2], [3, 4]]}
+            ),
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with self.assertRaisesRegex(ValueError, "exactly one input modality"):
+                ModalityMaterializer(Path(tmpdir) / "target").write(
+                    dataset_factory=_DatasetFactory((sample,)),
+                    provider_factory=_TTSProviderFactory(),
+                    devices="cpu",
+                )
 
     def test_materialized_delta_merges_into_base_store(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -285,7 +441,7 @@ class ViewMaterializerTest(unittest.TestCase):
                     )
                 )
 
-    def test_materializer_write_parallel_uses_devices_and_logs(self):
+    def test_materializer_parallel_write_uses_devices_and_logs(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             target = root / "target"
@@ -321,17 +477,53 @@ class ViewMaterializerTest(unittest.TestCase):
                 )
             )
 
+    def test_modality_materializer_parallel_write_uses_modality_mode(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = root / "target"
+            samples = tuple(
+                {
+                    (Role.DEFAULT, Modality.TEXT): TextItem(
+                        views={TextView.TEXT: "x" * (index + 1)}
+                    )
+                }
+                for index in range(4)
+            )
+
+            ModalityMaterializer(target, split="train").write(
+                dataset_factory=_DatasetFactory(samples),
+                provider_factory=_ParallelTTSProviderFactory(),
+                devices=("cpu:0", "cpu:1"),
+            )
+
+            stored = read_store_dataset(target)
+            logs = sorted((target / "logs").glob("part-*.log"))
+            self.assertEqual(len(stored), 4)
+            self.assertEqual([path.name for path in logs], ["part-00000.log", "part-00001.log"])
+            self.assertTrue(
+                torch.equal(
+                    stored[0][Role.DEFAULT, Modality.AUDIO].views[AudioView.WAVEFORM][0],
+                    torch.tensor([[1.0]]),
+                )
+            )
+            self.assertTrue(
+                torch.equal(
+                    stored[1][Role.DEFAULT, Modality.AUDIO].views[AudioView.WAVEFORM][0],
+                    torch.tensor([[102.0]]),
+                )
+            )
+
     def test_resolve_devices_auto_falls_back_to_cpu(self):
         from anydataset.store.materializer import resolve_devices
 
         self.assertTrue(resolve_devices("auto"))
 
-    def test_parallel_materializer_rejects_unpicklable_factory(self):
+    def test_materializer_rejects_unpicklable_parallel_factory(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
 
             with self.assertRaises(TypeError):
-                ViewMaterializer(root / "target").write_parallel(
+                ViewMaterializer(root / "target").write(
                     dataset_factory=lambda: (),
                     provider_factory=_ParallelProviderFactory(),
                     devices=("cpu:0", "cpu:1"),
@@ -377,6 +569,52 @@ class _Provider:
         return {"semantic_codes": waveform.to(torch.int64) + int(self.offset)}
 
 
+class _BatchProvider(_Provider):
+    def __init__(self):
+        super().__init__()
+        self.batch_shapes: list[tuple[int, ...]] = []
+        self.single_calls = 0
+
+    def __call__(self, views):
+        self.single_calls += 1
+        return super().__call__(views)
+
+    def call_batch(self, batch):
+        ref = (Role.DEFAULT, Modality.AUDIO)
+        waveform, _ = batch.sample[ref].views[AudioView.WAVEFORM]
+        self.batch_shapes.append(tuple(waveform.shape))
+        lengths = batch.lengths(
+            FieldRef(ref, FieldGroup.VIEWS, AudioView.WAVEFORM)
+        )
+        return [
+            {"semantic_codes": waveform[index, :, : int(length.item())].to(torch.int64)}
+            for index, length in enumerate(lengths)
+        ]
+
+
+class _BadBatchProvider(_Provider):
+    def call_batch(self, batch):
+        return [{"semantic_codes": torch.tensor([[1]])}]
+
+
+class _TTSProvider:
+    output = AudioView.WAVEFORM
+
+    def __init__(self, *, offset=0):
+        self.offset = offset
+
+    def __call__(self, views):
+        return torch.tensor([[float(len(views[TextView.TEXT]) + self.offset)]]), 16000
+
+
+class _ASRProvider:
+    output = TextView.TEXT
+
+    def __call__(self, views):
+        waveform, _ = views[AudioView.WAVEFORM]
+        return f"sum={int(waveform.sum().item())}"
+
+
 @dataclass(frozen=True)
 class _DatasetFactory:
     dataset: object
@@ -403,9 +641,35 @@ class _ProviderFactory:
 
 
 @dataclass(frozen=True)
+class _StaticProviderFactory:
+    provider: object
+
+    def __call__(self, device: str):
+        return self.provider
+
+
+@dataclass(frozen=True)
+class _TTSProviderFactory:
+    def __call__(self, device: str):
+        return _TTSProvider()
+
+
+@dataclass(frozen=True)
+class _ASRProviderFactory:
+    def __call__(self, device: str):
+        return _ASRProvider()
+
+
+@dataclass(frozen=True)
 class _ParallelProviderFactory:
     def __call__(self, device: str):
         return _Provider(offset=100 if device.endswith(":1") else 0)
+
+
+@dataclass(frozen=True)
+class _ParallelTTSProviderFactory:
+    def __call__(self, device: str):
+        return _TTSProvider(offset=100 if device.endswith(":1") else 0)
 
 
 if __name__ == "__main__":

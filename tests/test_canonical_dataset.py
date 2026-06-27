@@ -1,6 +1,7 @@
 import unittest
 from unittest import mock
 
+import numpy as np
 import torch
 
 from anydataset import (
@@ -347,6 +348,48 @@ class CanonicalDatasetTest(unittest.TestCase):
             torch.equal(
                 batch.masks[FieldRef(ref, FieldGroup.VIEWS, AudioView.WAVEFORM)],
                 torch.tensor([[True, True], [True, False]]),
+            )
+        )
+
+    def test_collate_fn_batches_numpy_waveforms(self):
+        ref = (Role.DEFAULT, Modality.AUDIO)
+        samples = [
+            {
+                ref: AudioItem(
+                    views={
+                        AudioView.WAVEFORM: (
+                            np.array([[1.0, 2.0, 3.0]]),
+                            16000,
+                        )
+                    },
+                )
+            },
+            {
+                ref: AudioItem(
+                    views={AudioView.WAVEFORM: (np.array([[4.0]]), 16000)},
+                )
+            },
+        ]
+
+        batch = collate_fn({ref: AudioReq(views=frozenset({AudioView.WAVEFORM}))})(
+            samples
+        )
+
+        waveform, sample_rates = batch.sample[ref].views[AudioView.WAVEFORM]
+        self.assertTrue(
+            torch.equal(
+                waveform,
+                torch.tensor(
+                    [[[1.0, 2.0, 3.0]], [[4.0, 0.0, 0.0]]],
+                    dtype=torch.float64,
+                ),
+            )
+        )
+        self.assertTrue(torch.equal(sample_rates, torch.tensor([16000, 16000])))
+        self.assertTrue(
+            torch.equal(
+                batch.masks[FieldRef(ref, FieldGroup.VIEWS, AudioView.WAVEFORM)],
+                torch.tensor([[[True, True, True]], [[True, False, False]]]),
             )
         )
 

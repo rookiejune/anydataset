@@ -7,7 +7,7 @@ import pickle
 import shutil
 import time
 import traceback
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from queue import Empty
@@ -15,25 +15,38 @@ from tempfile import TemporaryDirectory
 from typing import Any, Literal, cast
 
 from .._sharding import validate_shard
+from ..dataset.collate import Batch, collate_fn
 from ..types.item import (
     AudioItem,
+    AudioReq,
     AudioView,
     ImageItem,
+    ImageReq,
     ImageView,
     Item,
+    Requirement,
     Modality,
+    Role,
     Sample,
     TextItem,
+    TextReq,
     TextView,
     View,
 )
-from ..view import Provider, ViewProvider
+from ..view import ModalityProvider, Provider, ViewProvider
 from .parts import DatasetPartWriter, commit_store_parts
-from .writer import DEFAULT_MAX_SHARD_SAMPLES, DatasetWriter
+from .writer import DEFAULT_MAX_SHARD_SAMPLES, DatasetWriter, _positive_int
 
 type DatasetFactory = Callable[[], Any]
-type ProviderFactory = Callable[[str], Provider]
 type Devices = Literal["auto"] | str | Iterable[str]
+type ModalityProviderLike = (
+    ModalityProvider[AudioView]
+    | ModalityProvider[ImageView]
+    | ModalityProvider[TextView]
+)
+type MaterializerProvider = Provider | ModalityProviderLike
+type ProviderFactory = Callable[[str], MaterializerProvider]
+type _MaterializerMode = Literal["view", "modality"]
 
 _PROGRESS_INTERVAL = 1.0
 
@@ -43,6 +56,14 @@ class ViewMaterializer:
     output_dir: str | Path
     split: str | None = None
     max_shard_samples: int = DEFAULT_MAX_SHARD_SAMPLES
+    batch_size: int = 1
+
+    def __post_init__(self) -> None:
+        self.max_shard_samples = _positive_int(
+            "max_shard_samples",
+            self.max_shard_samples,
+        )
+        self.batch_size = _positive_int("batch_size", self.batch_size)
 
     @property
     def dataset_id(self) -> str:
@@ -58,23 +79,19 @@ class ViewMaterializer:
         resolved = resolve_devices(devices)
         if len(resolved) == 1:
             return self._write_single(dataset_factory(), provider_factory(resolved[0]))
-        return self.write_parallel(
+        return self._write_devices(
             dataset_factory=dataset_factory,
             provider_factory=provider_factory,
             devices=resolved,
         )
 
-    def write_parallel(
+    def _write_devices(
         self,
         *,
         dataset_factory: DatasetFactory,
         provider_factory: ProviderFactory,
-        devices: Devices = "auto",
+        devices: tuple[str, ...],
     ) -> Path:
-        resolved = resolve_devices(devices)
-        if len(resolved) == 1:
-            return self._write_single(dataset_factory(), provider_factory(resolved[0]))
-
         _validate_spawn_factory("dataset_factory", dataset_factory)
         _validate_spawn_factory("provider_factory", provider_factory)
         output_dir = _prepare_parallel_output_dir(Path(self.output_dir).expanduser())
@@ -88,7 +105,7 @@ class ViewMaterializer:
             self._run_parallel_parts(
                 dataset_factory=dataset_factory,
                 provider_factory=provider_factory,
-                devices=resolved,
+                devices=devices,
                 parts_dir=parts_dir,
                 logs_dir=logs_dir,
             )
@@ -99,7 +116,11 @@ class ViewMaterializer:
                 self._restore_logs(log_backup)
             return result
 
-    def _write_single(self, dataset: Iterable[Sample], provider: Provider) -> Path:
+    def _write_single(
+        self,
+        dataset: Iterable[Sample],
+        provider: MaterializerProvider,
+    ) -> Path:
         return DatasetWriter(
             self.output_dir,
             dataset_id=self.dataset_id,
@@ -110,7 +131,7 @@ class ViewMaterializer:
     def write_part(
         self,
         dataset: Any,
-        provider: Provider,
+        provider: MaterializerProvider,
         *,
         parts_dir: str | Path,
         num_shards: int,
@@ -124,9 +145,11 @@ class ViewMaterializer:
             num_shards=num_shards,
             max_shard_samples=self.max_shard_samples,
         ).write(
-            (
-                (index, _with_providers(sample, provider))
-                for index, sample in iter_indexed_shard(dataset, num_shards, shard_id)
+            self._indexed_samples(
+                dataset,
+                provider,
+                num_shards=num_shards,
+                shard_id=shard_id,
             )
         )
 
@@ -138,14 +161,19 @@ class ViewMaterializer:
             split=self.split,
         )
 
-    def _samples(self, dataset: Iterable[Sample], provider: Provider):
-        for sample in dataset:
-            yield _with_providers(sample, provider)
+    def _samples(self, dataset: Iterable[Sample], provider: MaterializerProvider):
+        if not self._uses_batch_provider(provider):
+            for sample in dataset:
+                yield self._sample_with_provider(sample, provider)
+            return
+
+        for batch in _sample_batches(dataset, self.batch_size):
+            yield from self._samples_with_batch_provider(batch, provider)
 
     def _samples_with_progress(
         self,
         dataset: Any,
-        provider: Provider,
+        provider: MaterializerProvider,
         *,
         num_shards: int,
         shard_id: int,
@@ -154,8 +182,13 @@ class ViewMaterializer:
         pending = 0
         last_flush = time.monotonic()
         try:
-            for index, sample in iter_indexed_shard(dataset, num_shards, shard_id):
-                yield index, _with_providers(sample, provider)
+            for index, sample in self._indexed_samples(
+                dataset,
+                provider,
+                num_shards=num_shards,
+                shard_id=shard_id,
+            ):
+                yield index, sample
                 pending += 1
                 now = time.monotonic()
                 if now - last_flush >= _PROGRESS_INTERVAL:
@@ -187,6 +220,8 @@ class ViewMaterializer:
                         dataset_id=self.dataset_id,
                         split=self.split,
                         max_shard_samples=self.max_shard_samples,
+                        batch_size=self.batch_size,
+                        mode=self._materializer_mode,
                         parts_dir=parts_dir,
                         logs_dir=logs_dir,
                         device=device,
@@ -241,6 +276,68 @@ class ViewMaterializer:
             shutil.rmtree(target)
         os.replace(backup, target)
 
+    @property
+    def _materializer_mode(self) -> _MaterializerMode:
+        return "view"
+
+    def _sample_with_provider(
+        self,
+        sample: Sample,
+        provider: MaterializerProvider,
+    ) -> Sample:
+        return _with_view_provider(sample, cast(Provider, provider))
+
+    def _indexed_samples(
+        self,
+        dataset: Any,
+        provider: MaterializerProvider,
+        *,
+        num_shards: int,
+        shard_id: int,
+    ) -> Iterator[tuple[int, Sample]]:
+        indexed = iter_indexed_shard(dataset, num_shards, shard_id)
+        if not self._uses_batch_provider(provider):
+            for index, sample in indexed:
+                yield index, self._sample_with_provider(sample, provider)
+            return
+
+        for batch in _indexed_sample_batches(indexed, self.batch_size):
+            indexes, samples = zip(*batch, strict=True)
+            outputs = tuple(self._samples_with_batch_provider(samples, provider))
+            _validate_batch_outputs(outputs, len(samples))
+            yield from zip(indexes, outputs, strict=True)
+
+    def _samples_with_batch_provider(
+        self,
+        samples: Sequence[Sample],
+        provider: MaterializerProvider,
+    ) -> Iterator[Sample]:
+        return _with_batch_view_provider(samples, cast(Provider, provider))
+
+    def _uses_batch_provider(self, provider: MaterializerProvider) -> bool:
+        return self.batch_size > 1 and _has_batch_provider(provider)
+
+
+@dataclass
+class ModalityMaterializer(ViewMaterializer):
+    @property
+    def _materializer_mode(self) -> _MaterializerMode:
+        return "modality"
+
+    def _sample_with_provider(
+        self,
+        sample: Sample,
+        provider: MaterializerProvider,
+    ) -> Sample:
+        return _with_modality_provider(sample, cast(ModalityProviderLike, provider))
+
+    def _samples_with_batch_provider(
+        self,
+        samples: Sequence[Sample],
+        provider: MaterializerProvider,
+    ) -> Iterator[Sample]:
+        return _with_batch_modality_provider(samples, cast(ModalityProviderLike, provider))
+
 
 @dataclass(frozen=True)
 class _WorkerConfig:
@@ -248,6 +345,8 @@ class _WorkerConfig:
     dataset_id: str
     split: str | None
     max_shard_samples: int
+    batch_size: int
+    mode: _MaterializerMode
     parts_dir: Path
     logs_dir: Path
     device: str
@@ -328,6 +427,7 @@ def _materialize_worker(
     try:
         dataset = dataset_factory()
         provider = provider_factory(config.device)
+        materializer = _worker_materializer(config)
         DatasetPartWriter(
             config.parts_dir / f"part-{config.shard_id:05d}",
             dataset_id=config.dataset_id,
@@ -336,11 +436,7 @@ def _materialize_worker(
             num_shards=config.num_shards,
             max_shard_samples=config.max_shard_samples,
         ).write(
-            ViewMaterializer(
-                config.output_dir,
-                split=config.split,
-                max_shard_samples=config.max_shard_samples,
-            )._samples_with_progress(
+            materializer._samples_with_progress(
                 dataset,
                 provider,
                 num_shards=config.num_shards,
@@ -355,6 +451,16 @@ def _materialize_worker(
         raise
     logger.info("finished shard %s", config.shard_id)
     _put_progress(progress, _Progress(config.shard_id, 0, True, None))
+
+
+def _worker_materializer(config: _WorkerConfig) -> ViewMaterializer:
+    cls = ModalityMaterializer if config.mode == "modality" else ViewMaterializer
+    return cls(
+        config.output_dir,
+        split=config.split,
+        max_shard_samples=config.max_shard_samples,
+        batch_size=config.batch_size,
+    )
 
 
 def _worker_logger(logs_dir: Path, shard_id: int) -> logging.Logger:
@@ -429,6 +535,180 @@ def _put_progress(progress: multiprocessing.Queue, message: _Progress) -> None:
     progress.put(message)
 
 
+def _sample_batches(
+    samples: Iterable[Sample],
+    batch_size: int,
+) -> Iterator[tuple[Sample, ...]]:
+    batch: list[Sample] = []
+    for sample in samples:
+        batch.append(sample)
+        if len(batch) == batch_size:
+            yield tuple(batch)
+            batch = []
+    if batch:
+        yield tuple(batch)
+
+
+def _indexed_sample_batches(
+    samples: Iterable[tuple[int, Sample]],
+    batch_size: int,
+) -> Iterator[tuple[tuple[int, Sample], ...]]:
+    batch: list[tuple[int, Sample]] = []
+    for sample in samples:
+        batch.append(sample)
+        if len(batch) == batch_size:
+            yield tuple(batch)
+            batch = []
+    if batch:
+        yield tuple(batch)
+
+
+def _with_batch_view_provider(
+    samples: Sequence[Sample],
+    provider: Provider,
+) -> Iterator[Sample]:
+    output = provider.output
+    modality = _output_modality(output)
+    refs = _batch_view_refs(samples, modality)
+    outputs: list[dict[tuple[Role, Modality], Item]] = [
+        {} for _ in samples
+    ]
+    for ref in refs:
+        batch = collate_fn({ref: _input_requirement(samples, ref)})(samples)
+        values = _call_batch(provider, batch)
+        _validate_batch_outputs(values, len(samples))
+        for index, (sample, value) in enumerate(zip(samples, values, strict=True)):
+            outputs[index][ref] = _with_view(sample[ref], output, value)
+    yield from outputs
+
+
+def _with_batch_modality_provider(
+    samples: Sequence[Sample],
+    provider: ModalityProviderLike,
+) -> Iterator[Sample]:
+    output = provider.output
+    output_modality = _output_modality(output)
+    roles = _batch_modality_input_roles(samples, output_modality)
+    outputs: list[dict[tuple[Role, Modality], Item]] = [
+        {} for _ in samples
+    ]
+    for role in roles:
+        input_ref = _batch_modality_input_ref(samples, role, output_modality)
+        batch = collate_fn({input_ref: _input_requirement(samples, input_ref)})(samples)
+        values = _call_batch(provider, batch)
+        _validate_batch_outputs(values, len(samples))
+        ref = (role, output_modality)
+        for index, value in enumerate(values):
+            outputs[index][ref] = _with_modality_view(output, value)
+    yield from outputs
+
+
+def _batch_view_refs(
+    samples: Sequence[Sample],
+    modality: Modality,
+) -> tuple[tuple[Role, Modality], ...]:
+    if not samples:
+        return ()
+    refs = _sorted_refs(ref for ref in samples[0] if ref[1] is modality)
+    for sample in samples:
+        if _sorted_refs(ref for ref in sample if ref[1] is modality) != refs:
+            raise ValueError("Batch samples must share provider input references.")
+    return refs
+
+
+def _batch_modality_input_roles(
+    samples: Sequence[Sample],
+    output: Modality,
+) -> tuple[Role, ...]:
+    if not samples:
+        return ()
+    roles = tuple(sorted(
+        (role for role, _ in _modality_inputs(_role_items(samples[0]), output)),
+        key=lambda role: role.value,
+    ))
+    for sample in samples:
+        sample_roles = tuple(sorted(
+            (role for role, _ in _modality_inputs(_role_items(sample), output)),
+            key=lambda role: role.value,
+        ))
+        if sample_roles != roles:
+            raise ValueError("Batch samples must share modality provider input roles.")
+    return roles
+
+
+def _batch_modality_input_ref(
+    samples: Sequence[Sample],
+    role: Role,
+    output: Modality,
+) -> tuple[Role, Modality]:
+    refs: list[tuple[Role, Modality]] = []
+    for sample in samples:
+        inputs = tuple(
+            (ref_role, modality)
+            for ref_role, modality in sample
+            if ref_role is role and modality is not output
+        )
+        if len(inputs) != 1:
+            names = ", ".join(sorted(modality.value for _, modality in inputs))
+            raise ValueError(
+                f"Role {role.value!r} needs exactly one input modality when "
+                f"materializing {output.value!r}; got {names or 'none'}."
+            )
+        refs.append(inputs[0])
+    ref = refs[0]
+    if any(value != ref for value in refs):
+        raise ValueError("Batch samples must share modality provider input references.")
+    return ref
+
+
+def _input_requirement(samples: Sequence[Sample], ref: tuple[Role, Modality]) -> Requirement:
+    views: set[Any] = set()
+    meta: set[Any] = set()
+    for sample in samples:
+        sample_item = sample[ref]
+        views.update(sample_item.views)
+        meta.update(sample_item.meta)
+
+    match ref[1]:
+        case Modality.AUDIO:
+            return AudioReq.from_iter(views, meta)
+        case Modality.IMAGE:
+            return ImageReq.from_iter(views, meta)
+        case Modality.TEXT:
+            return TextReq.from_iter(views, meta)
+    raise TypeError(f"Unsupported sample reference: {ref!r}.")
+
+
+def _sorted_refs(
+    refs: Iterable[tuple[Role, Modality]],
+) -> tuple[tuple[Role, Modality], ...]:
+    return tuple(sorted(refs, key=lambda ref: (ref[0].value, ref[1].value)))
+
+
+def _call_batch(provider: Any, batch: Batch) -> Sequence[Any]:
+    call_batch = getattr(provider, "call_batch", None)
+    if not callable(call_batch):
+        raise TypeError("batch provider must define call_batch().")
+    return call_batch(batch)
+
+
+def _has_batch_provider(provider: Any) -> bool:
+    call_batch = getattr(provider, "call_batch", None)
+    if not callable(call_batch):
+        return False
+    batch_transform = getattr(provider, "batch_transform_fn", None)
+    if hasattr(provider, "batch_transform_fn") and batch_transform is None:
+        return False
+    return True
+
+
+def _validate_batch_outputs(values: Sequence[Any], expected: int) -> None:
+    if len(values) != expected:
+        raise ValueError(
+            f"Batch provider returned {len(values)} outputs for {expected} samples."
+        )
+
+
 def iter_indexed_shard(
     dataset: Any,
     num_shards: int,
@@ -464,7 +744,7 @@ def iter_indexed_shard(
             yield index, sample
 
 
-def _with_providers(
+def _with_view_provider(
     sample: Sample,
     provider: Provider,
 ) -> Sample:
@@ -503,6 +783,64 @@ def _with_provider(
                 provider(item.views),
             )
     raise TypeError(f"Unsupported materializer item: {type(item).__name__}.")
+
+
+def _with_modality_provider(
+    sample: Sample,
+    provider: ModalityProviderLike,
+) -> Sample:
+    output = provider.output
+    output_modality = _output_modality(output)
+    roles = _role_items(sample)
+    return {
+        (role, output_modality): _with_modality_view(
+            output,
+            provider(input_item.views),
+        )
+        for role, input_item in _modality_inputs(roles, output_modality)
+    }
+
+
+def _role_items(
+    sample: Sample,
+) -> dict[Role, dict[Modality, Item]]:
+    roles: dict[Role, dict[Modality, Item]] = {}
+    for (role, modality), item in sample.items():
+        items = roles.setdefault(role, {})
+        items[modality] = item
+    return roles
+
+
+def _modality_inputs(
+    roles: Mapping[Role, Mapping[Modality, Item]],
+    output: Modality,
+) -> Iterator[tuple[Role, Item]]:
+    for role, items in roles.items():
+        if output in items:
+            raise ValueError(
+                f"Role {role.value!r} already has output modality {output.value!r}."
+            )
+        inputs = tuple((modality, item) for modality, item in items.items())
+        if len(inputs) != 1:
+            names = ", ".join(sorted(modality.value for modality, _ in inputs))
+            raise ValueError(
+                f"Role {role.value!r} needs exactly one input modality when "
+                f"materializing {output.value!r}; got {names or 'none'}."
+            )
+        yield role, inputs[0][1]
+
+
+def _with_modality_view(
+    view: View,
+    value: Any,
+) -> Item:
+    if isinstance(view, AudioView):
+        return AudioItem(views=_views(view, value))
+    if isinstance(view, ImageView):
+        return ImageItem(views=_views(view, value))
+    if isinstance(view, TextView):
+        return TextItem(views=_views(view, value))
+    raise TypeError("modality materializer output must be an AudioView, ImageView, or TextView.")
 
 
 def _with_view(

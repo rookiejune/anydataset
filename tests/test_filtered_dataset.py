@@ -563,6 +563,57 @@ class FilteredDatasetTest(unittest.TestCase):
         self.assertEqual(set(audio.views), {AudioView.WAVEFORM, AudioView.LONGCAT})
         self.assertEqual(sample[Role.DEFAULT, Modality.TEXT].views[TextView.TEXT], "hello")
 
+    def test_filter_rule_can_apply_to_filtered_dataset(self):
+        _register_rows_source("unit_test_filter_chain")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            dataset = _dataset("unit_test_filter_chain", root, [0, 1, 2, 3, 4])
+            first = FilterRule(
+                name="gte_two",
+                predicate=lambda sample: _value(sample) >= 2,
+            ).apply(dataset).select("accept")
+            seen = []
+            second_rule = FilterRule(
+                name="even_after_gte_two",
+                predicate=lambda sample: _track_even(sample, seen),
+            )
+
+            result = second_rule.apply(first)
+            selected = result.select("accept")
+
+        self.assertEqual(seen, [2, 3, 4])
+        self.assertEqual(_values(selected), [2, 4])
+        self.assertEqual(selected.indices, (0, 2))
+        self.assertEqual(result.counts, {"accept": 2, "reject": 1})
+
+    def test_chained_filter_cache_is_distinct_from_physical_filter_cache(self):
+        _register_rows_source("unit_test_filter_chain_cache")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            dataset = _dataset("unit_test_filter_chain_cache", root, [0, 1, 2, 3])
+            first = FilterRule(
+                name="gte_two",
+                predicate=lambda sample: _value(sample) >= 2,
+            ).apply(dataset).select("accept")
+            second_rule = FilterRule(
+                name="even",
+                predicate=lambda sample: _value(sample) % 2 == 0,
+            )
+
+            physical = second_rule.apply(dataset)
+            chained = second_rule.apply(first)
+            metadata = json.loads(
+                (chained.cache_path / "rule.json").read_text(encoding="utf-8")
+            )
+
+        self.assertNotEqual(physical.cache_path, chained.cache_path)
+        self.assertEqual(physical.counts, {"accept": 2, "reject": 2})
+        self.assertEqual(chained.counts, {"accept": 1, "reject": 1})
+        self.assertEqual(metadata["base"]["sample_count"], 2)
+        self.assertEqual(metadata["base"]["view"]["kind"], "filtered")
+        self.assertEqual(metadata["base"]["view"]["rule"], {"name": "gte_two"})
+        self.assertEqual(metadata["base"]["view"]["labels"], ["accept"])
+
     def test_filter_rule_exposes_name_contract_only(self):
         rule = FilterRule(
             name="same",
@@ -682,6 +733,12 @@ def _metric_decision(sample):
             "tags": [tag],
         },
     )
+
+
+def _track_even(sample, seen):
+    value = _value(sample)
+    seen.append(value)
+    return value % 2 == 0
 
 
 def _value(sample):

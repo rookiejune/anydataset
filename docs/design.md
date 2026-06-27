@@ -37,6 +37,14 @@ base store -> provider -> delta store -> AnyDataset(store).merge(delta) -> schem
 
 例如 LongCat codes 是 `AudioView.LONGCAT`。Preset 不负责加载 codec，也不应该把 LongCat 逻辑塞进 raw row parse。Preset 只需要产出可被 provider 消费的音频 view，例如 `AudioView.WAVEFORM` 或 `AudioView.FILE`。
 
+## 派生 Modality
+
+同一 role 下缺失的模态应通过 provider 和 `ModalityMaterializer` 生成。provider 只声明输出 view，materializer 用输出 view 推出输出 modality，并在同一 role 中寻找唯一的非输出 modality 作为输入。
+
+如果输出 modality 已经存在，materializer 必须报错；这条路径只负责补缺失模态，不负责覆盖或刷新已有数据。如果同一 role 去掉输出 modality 后还剩多个输入 modality，materializer 也必须报错，调用方应先用 schema 或 transform 明确输入。
+
+`ModalityMaterializer` 生成的新 item 默认不复制 meta。label、language 等跨模态语义继承必须由调用方显式完成，避免库替用户猜测业务规则。
+
 ## 过滤分区
 
 过滤规则直接作用在 dataset 产出的完整 canonical `Sample` 上。predicate 返回 bool、字符串、枚举值或带 metrics 的 `FilterDecision`，库统一归一化为字符串 label，并缓存每个 label 对应的原始样本下标。

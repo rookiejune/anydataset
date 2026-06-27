@@ -36,6 +36,22 @@ class Batch:
     sample: item.Sample
     masks: Mapping[FieldRef, torch.Tensor]
 
+    def lengths(self, field: FieldRef) -> torch.Tensor:
+        return field_lengths(self, field)
+
+
+def field_lengths(batch: Batch, field: FieldRef) -> torch.Tensor:
+    try:
+        mask = batch.masks[field]
+    except KeyError as exc:
+        raise KeyError(f"Batch has no mask for {field!r}.") from exc
+    if mask.ndim < 2:
+        raise ValueError(f"Cannot derive sequence lengths from mask for {field!r}.")
+    if mask.ndim > 2:
+        dims = tuple(range(1, mask.ndim - 1))
+        mask = mask.any(dim=dims)
+    return mask.to(torch.int64).sum(dim=-1)
+
 
 def collate_fn(
     schema: item.Schema,
@@ -278,7 +294,10 @@ def _collate_waveforms(
     values: Sequence[tuple[torch.Tensor, int]],
     field: FieldRef,
 ) -> tuple[tuple[torch.Tensor, torch.Tensor], torch.Tensor]:
-    waveforms = [waveform for waveform, _ in values]
+    waveforms = [
+        waveform if isinstance(waveform, torch.Tensor) else torch.as_tensor(waveform)
+        for waveform, _ in values
+    ]
     batch, mask = _batch_tensors(waveforms, field)
     rates = torch.tensor(
         [sample_rate for _, sample_rate in values],

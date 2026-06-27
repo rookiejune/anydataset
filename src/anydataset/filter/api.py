@@ -6,10 +6,8 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any
 
-from torch.utils.data import Dataset
-
 from .._sharding import validate_shard
-from ..dataset.abc import AnyDataset
+from ..dataset.abc import AnyDataset, SampleDataset
 from ..store.reader import StoreDataset
 from ..types import Spec
 from ..types.item import Sample
@@ -183,7 +181,7 @@ class FilterResult:
         yield from read_metrics(self.metrics_path)
 
 
-class FilteredDataset(Dataset):
+class FilteredDataset(SampleDataset):
     __slots__ = ("_base", "_cache_path", "_indices", "_labels", "_rule")
 
     def __init__(

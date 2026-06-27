@@ -1,5 +1,9 @@
-from .longcat import LongCatViewProvider
+from .longcat import LongCatProvider
+from .moss_tts import MossTTSProvider
+from .whisper import WhisperASRProvider
 
 __all__ = [
-    "LongCatViewProvider",
+    "LongCatProvider",
+    "MossTTSProvider",
+    "WhisperASRProvider",
 ]

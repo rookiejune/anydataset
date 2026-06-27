@@ -1,9 +1,9 @@
 # Cached Filter Partitions
 
 `FilteredDataset(dataset, rule, labels=...)` applies a named rule to a
-map-style `AnyDataset` and caches original dataset indices under the dataset's
+map-style sample dataset and caches base dataset indices under the dataset's
 physical cache path. A rule does not copy sample payloads and does not change
-`Spec` identity.
+physical `Spec` identity.
 The public filter API lives under `anydataset.filter` and is also re-exported
 from `anydataset`.
 
@@ -23,6 +23,18 @@ The predicate receives the full canonical `Sample` produced by the dataset.
 `FilteredDataset` checks whether the named rule has a ready cache for the base
 dataset; if not, it builds one before exposing the requested labels. Callers are
 responsible for passing the labels they want to read.
+
+`FilteredDataset` is itself a map-style sample dataset, so filters can be
+chained:
+
+```python
+clean_text = text_rule.apply(dataset).select("clean", "usable")
+clean_both = speech_rule.apply(clean_text).select("accept")
+```
+
+When a rule is applied to a filtered view, cache metadata records the upstream
+rule and selected labels, and the downstream cache key is separated from the
+same rule applied to the physical dataset.
 
 Predicate return values are normalized to string labels:
 
@@ -57,8 +69,9 @@ cache_path/
       .ready
 ```
 
-`rule.json` stores the base `Spec` id, base sample count, and rule name. When
-those values do not match, the rule is recomputed. `partitions.json` stores
+`rule.json` stores the base physical `Spec` id or filtered-view lineage, base
+sample count, and rule name. When those values do not match, the rule is
+recomputed. `partitions.json` stores
 labels, counts, and shard parquet file names. Each parquet file stores original
 dataset indices for one label shard. `FilterRule.apply(..., max_shard_samples=...)`
 controls the maximum number of indices written to one shard; the default is

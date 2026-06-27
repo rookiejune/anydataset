@@ -243,9 +243,9 @@ uses one spawned worker per visible CUDA device, writes worker logs under
 
 ```python
 def provider_factory(device: str):
-    from anydataset.provider.longcat import LongCatViewProvider
+    from anydataset.provider.longcat import LongCatProvider
 
-    return LongCatViewProvider(device=device)
+    return LongCatProvider(device=device)
 
 
 delta = ViewMaterializer(
@@ -256,6 +256,48 @@ delta = ViewMaterializer(
     devices="auto",
 )
 ```
+
+Providers can opt into model-side batching by implementing `call_batch(batch)`
+and by passing `batch_size` to the materializer. The `batch` argument is the
+same `Batch(sample, masks)` object returned by `collate_fn`; `batch_size=1` or
+providers without `call_batch` keep using the per-sample `__call__` path.
+`Batch.masks` remains the canonical validity signal, and sequence lengths can
+be derived with `batch.lengths(field_ref)`.
+
+`LongCatProvider.call_batch` pads waveform input before encoding. The current
+LongCat encoder does not accept masks, so the provider trims output codes
+proportionally from the input waveform mask before writing samples to the store.
+
+`ModalityMaterializer` adds a missing modality under the same role. The
+provider declares its output view; the materializer infers the output modality
+from that view and uses the role's single remaining modality as input. It raises
+when the output modality already exists or when the input modality is ambiguous.
+Generated items start with empty metadata.
+
+```python
+from anydataset import AudioView, ModalityMaterializer, TextView
+
+
+class ToyTTS:
+    output = AudioView.WAVEFORM
+
+    def __call__(self, views):
+        text = views[TextView.TEXT]
+        return synthesize(text)
+
+
+delta = ModalityMaterializer(
+    output_dir="/data/my_anydataset_tts",
+).write(
+    dataset_factory=dataset_factory,
+    provider_factory=lambda device: ToyTTS(),
+    devices="cpu",
+)
+```
+
+Built-in providers follow the model/backend name, for example
+`MossTTSProvider` for text-to-audio and `WhisperASRProvider` for
+audio-to-text.
 
 ## Development
 
