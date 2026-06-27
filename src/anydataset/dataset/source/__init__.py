@@ -8,6 +8,7 @@ from .huggingface import (
 from .registry import for_source, has_source, register_source
 from .sharded_csv import ShardedCsvDataset, ShardedCsvSource
 from .store import StoreSource
+from .tsv import TsvDataset, TsvSource
 
 __all__ = [
     "DatasetSource",
@@ -16,6 +17,8 @@ __all__ = [
     "ShardedCsvDataset",
     "ShardedCsvSource",
     "StoreSource",
+    "TsvDataset",
+    "TsvSource",
     "for_source",
     "has_source",
     "prepare_hf",

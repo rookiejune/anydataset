@@ -171,6 +171,18 @@ def _collate_values(
     if _is_waveform_field(field):
         return _collate_waveforms(values, field)
 
+    if field.group is FieldGroup.VIEWS and all(
+        isinstance(value, Mapping) for value in values
+    ):
+        mappings = [value for value in values if isinstance(value, Mapping)]
+        return _collate_mappings(mappings, field)
+    if field.group is FieldGroup.VIEWS and any(
+        isinstance(value, Mapping) for value in values
+    ):
+        raise TypeError(
+            f"Cannot collate mixed mapping and non-mapping values for {field!r}."
+        )
+
     if all(isinstance(value, torch.Tensor) for value in values):
         tensors = [value for value in values if isinstance(value, torch.Tensor)]
         return _batch_tensors(tensors, field)
@@ -187,6 +199,79 @@ def _is_waveform_field(field: FieldRef) -> bool:
         and field.ref[1] is item.Modality.AUDIO
         and field.key == item.AudioView.WAVEFORM
     )
+
+
+def _collate_mappings(
+    values: Sequence[Mapping[Any, Any]],
+    field: FieldRef,
+) -> tuple[dict[Any, Any], torch.Tensor | None]:
+    keys = _mapping_keys(values, field)
+    _validate_sample_mapping_lengths(values, field)
+
+    fields: dict[Any, Any] = {}
+    mask: torch.Tensor | None = None
+    for key in keys:
+        value, value_mask = _collate_values(
+            [mapping[key] for mapping in values],
+            field,
+        )
+        fields[key] = value
+        mask = _merge_mapping_mask(mask, value_mask, field)
+    return fields, mask
+
+
+def _mapping_keys(
+    values: Sequence[Mapping[Any, Any]],
+    field: FieldRef,
+) -> tuple[Any, ...]:
+    if not values:
+        raise ValueError(f"Cannot collate field with no mapping values for {field!r}.")
+
+    keys = tuple(values[0])
+    expected = set(keys)
+    for value in values:
+        if set(value) != expected:
+            raise ValueError(f"Cannot collate mappings with different keys for {field!r}.")
+    return keys
+
+
+def _validate_sample_mapping_lengths(
+    values: Sequence[Mapping[Any, Any]],
+    field: FieldRef,
+) -> None:
+    for value in values:
+        lengths = {
+            entry.shape[-1]
+            for entry in value.values()
+            if isinstance(entry, torch.Tensor) and entry.ndim > 0
+        }
+        if len(lengths) > 1:
+            raise ValueError(
+                f"Mapping tensor values in a single sample must share the same "
+                f"last dimension for {field!r}."
+            )
+
+
+def _merge_mapping_mask(
+    current: torch.Tensor | None,
+    value: torch.Tensor | None,
+    field: FieldRef,
+) -> torch.Tensor | None:
+    if value is None:
+        return current
+    mask = _mapping_time_mask(value)
+    if current is None:
+        return mask
+    if not torch.equal(current, mask):
+        raise ValueError(f"Mapping values produced incompatible masks for {field!r}.")
+    return current
+
+
+def _mapping_time_mask(mask: torch.Tensor) -> torch.Tensor:
+    if mask.ndim <= 2:
+        return mask
+    dims = tuple(range(1, mask.ndim - 1))
+    return mask.any(dim=dims)
 
 
 def _collate_waveforms(

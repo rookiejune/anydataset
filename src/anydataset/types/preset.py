@@ -14,6 +14,7 @@ class Preset(StrEnum):
     CIFAR10 = auto()
     FLEURS = auto()
     LIBRISPEECH_ASR = auto()
+    COMMON_VOICE = auto()
     ESC50 = auto()
     NSYNTH = auto()
     FSD50K = auto()

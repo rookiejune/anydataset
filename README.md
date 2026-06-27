@@ -119,38 +119,54 @@ Every dataset exposes `iter_shard(num_shards, shard_id)` for distributed reads.
 ## Cached Filter Partitions
 
 `FilterRule` routes a map-style dataset into cached label partitions. The
-predicate receives only the sample subset selected by `schema`.
+predicate receives the full canonical sample produced by the dataset.
 
 ```python
-from anydataset import AudioMeta, AudioReq, FilterRule, Modality, Role
-
-schema = {
-    (Role.DEFAULT, Modality.AUDIO): AudioReq(
-        meta=frozenset({AudioMeta.LABEL}),
-    )
-}
+from anydataset.filter import FilterDecision, FilterRule, FilteredDataset
 
 rule = FilterRule(
     name="quality_v1_parse_v3_transform_none",
-    schema=schema,
     predicate=lambda sample: "review" if needs_review(sample) else is_good(sample),
 )
 
-result = rule.apply(dataset, num_workers=4)
-train = result.select("accept")
-audit = result.select("reject", "review")
+train = FilteredDataset(dataset, rule, labels="accept", num_workers=4)
+audit = FilteredDataset(dataset, rule, labels=("reject", "review"))
 ```
 
 `True` maps to `"accept"` and `False` maps to `"reject"`. String and enum
-labels are stored as their own partitions. Rule cache identity includes only
-`name` and `schema`; callers should put predicate, parser, and transform
-semantics into `name` when cache reuse should change.
+labels are stored as their own partitions. The rule `name` is the cache
+contract; callers should put predicate, parser, and transform semantics into
+`name` when cache reuse should change.
+
+`FilteredDataset` first checks whether the named rule already has a ready cache
+for the base dataset. If not, it builds the cache, then exposes only the labels
+specified by the caller.
 
 Filter cache construction is single-process by default. Pass `num_workers` to
 parallelize over map-style index ranges. Partition index files are sharded by
 `max_shard_samples` (default: 1,000,000), so large labels do not need one huge
 parquet file. `commit_samples` (default: 100,000) bounds each in-memory label
 batch before it is committed to the shard writer.
+
+Predicates can return `FilterDecision` when a filter should also cache
+per-sample JSON metrics:
+
+```python
+rule = FilterRule(
+    name="quality_v2",
+    predicate=lambda sample: FilterDecision(
+        label=is_good(sample),
+        metrics={"score": quality_score(sample)},
+    ),
+)
+
+result = rule.apply(dataset, metrics=True)
+rows = list(result.iter_metrics())
+```
+
+Metrics are written under the filter cache and include the original sample
+index, normalized label, and metrics payload. Set `metrics=True` explicitly;
+when an older partition cache has no metrics side output, the rule is rebuilt.
 
 ## Store
 
@@ -187,11 +203,11 @@ restored = dataset[0]
 
 Views are stored under `{role}/{modality}/{view}/`; payloads live in that
 view directory's `shards/` files. `ViewMaterializer` adds derived views to a
-delta store, which can be merged into the base store after it is complete.
+delta store. Open the store through `Source.STORE` and call `merge()` on the
+`AnyDataset` when the delta is complete.
 
 ```python
 from anydataset import AnyDataset, AudioView, Source, Spec, ViewMaterializer
-from anydataset.store import read_store_dataset
 
 class ToyLongCat:
     output = AudioView.LONGCAT
@@ -200,17 +216,44 @@ class ToyLongCat:
         waveform, sample_rate = views[AudioView.WAVEFORM]
         return {"semantic_codes": waveform.to(torch.int64)}
 
-dataset = AnyDataset(
-    Spec(source=Source.STORE, path="/data/my_anydataset"),
-)
+def dataset_factory():
+    return AnyDataset(Spec(source=Source.STORE, path="/data/my_anydataset"))
+
+
+def provider_factory(device: str):
+    return ToyLongCat()
+
 
 delta = ViewMaterializer(
     output_dir="/data/my_anydataset_longcat",
-    dataset_id="toy-audio",
-).write(dataset, ToyLongCat())
+).write(
+    dataset_factory=dataset_factory,
+    provider_factory=provider_factory,
+    devices="cpu",
+)
 
-read_store_dataset("/data/my_anydataset").merge(
+AnyDataset(Spec(source=Source.STORE, path="/data/my_anydataset")).merge(
     AnyDataset(Spec(source=Source.STORE, path=str(delta)))
+)
+```
+
+For GPU-backed providers, let `devices` control parallelism. `devices="auto"`
+uses one spawned worker per visible CUDA device, writes worker logs under
+`<output_dir>/logs`, and commits the per-device parts when all workers finish.
+
+```python
+def provider_factory(device: str):
+    from anydataset.provider.longcat import LongCatViewProvider
+
+    return LongCatViewProvider(device=device)
+
+
+delta = ViewMaterializer(
+    output_dir="/data/my_anydataset_longcat",
+).write(
+    dataset_factory=dataset_factory,
+    provider_factory=provider_factory,
+    devices="auto",
 )
 ```
 

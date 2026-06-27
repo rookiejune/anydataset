@@ -3,7 +3,7 @@ from .abc import (
     IterableAnyDataset,
 )
 from .collate import Batch, FieldGroup, FieldRef, collate_fn
-from .filter import FilteredDataset, FilterResult, FilterRule
+from ..filter import FilterDecision, FilteredDataset, FilterResult, FilterRule
 from ..types import Source, Spec, Task
 from ..types.item import (
     AudioItem,
@@ -46,6 +46,7 @@ __all__ = [
     "Batch",
     "FieldGroup",
     "FieldRef",
+    "FilterDecision",
     "FilteredDataset",
     "FilterResult",
     "FilterRule",

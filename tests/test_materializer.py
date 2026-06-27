@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+from dataclasses import dataclass
 from pathlib import Path
 
 import torch
@@ -16,13 +17,32 @@ from anydataset import (
     TextMeta,
     TextView,
 )
-from anydataset.store import DatasetWriter, ViewMaterializer, read_store_dataset
+from anydataset.store import DatasetWriter, ViewMaterializer
+from anydataset.store.jsonio import read_json
 from anydataset.store.materializer import iter_indexed_shard
 from anydataset.store.manifestio import read_samples_manifest, read_view_manifest
 from anydataset.store.paths import view_dir
+from anydataset.store.reader import read_store_dataset
 
 
 class ViewMaterializerTest(unittest.TestCase):
+    def test_materializer_uses_output_dir_name_as_dataset_id(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = root / "longcat-delta"
+            sample = _audio_sample(torch.tensor([[1.0, 2.0]]))
+
+            ViewMaterializer(target, split="train").write(
+                dataset_factory=_DatasetFactory((sample,)),
+                provider_factory=_ProviderFactory(offset=10),
+                devices="cpu",
+            )
+
+            self.assertEqual(
+                read_json(target / "dataset.json")["dataset_id"],
+                "longcat-delta",
+            )
+
     def test_materializer_writes_only_provider_output_by_default(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -31,9 +51,10 @@ class ViewMaterializerTest(unittest.TestCase):
             waveform = torch.tensor([[1.0, 2.0, 3.0]])
             dataset = _source_dataset(source, root, [_audio_sample(waveform)])
 
-            ViewMaterializer(target, dataset_id="toy-audio", split="train").write(
-                dataset,
-                _Provider(offset=10),
+            ViewMaterializer(target, split="train").write(
+                dataset_factory=_DatasetFactory(dataset),
+                provider_factory=_ProviderFactory(offset=10),
+                devices="cpu",
             )
 
             stored = read_store_dataset(target)
@@ -78,9 +99,10 @@ class ViewMaterializerTest(unittest.TestCase):
                 ],
             )
 
-            ViewMaterializer(target, dataset_id="toy-audio").write(
-                dataset,
-                _Provider(offset=10),
+            ViewMaterializer(target).write(
+                dataset_factory=_DatasetFactory(dataset),
+                provider_factory=_ProviderFactory(offset=10),
+                devices="cpu",
             )
 
             stored = read_store_dataset(target)
@@ -129,9 +151,10 @@ class ViewMaterializerTest(unittest.TestCase):
                 ],
             )
 
-            ViewMaterializer(target, dataset_id="toy-audio").write(
-                dataset,
-                _Provider(offset=10),
+            ViewMaterializer(target).write(
+                dataset_factory=_DatasetFactory(dataset),
+                provider_factory=_ProviderFactory(offset=10),
+                devices="cpu",
             )
 
             stored = read_store_dataset(target)
@@ -170,11 +193,12 @@ class ViewMaterializerTest(unittest.TestCase):
                 ]
             )
 
-            ViewMaterializer(target, dataset_id="toy-audio", split="train").write(
-                _store_dataset(source, root),
-                _Provider(offset=10),
+            ViewMaterializer(target, split="train").write(
+                dataset_factory=_StoreDatasetFactory(source, root),
+                provider_factory=_ProviderFactory(offset=10),
+                devices="cpu",
             )
-            merged = read_store_dataset(source).merge(read_store_dataset(target))
+            merged = _store_dataset(source, root).merge(_store_dataset(target, root))
             sample = merged[0]
 
         audio = sample[Role.DEFAULT, Modality.AUDIO]
@@ -223,7 +247,6 @@ class ViewMaterializerTest(unittest.TestCase):
             dataset = _store_dataset(source, root)
             materializer = ViewMaterializer(
                 target,
-                dataset_id="toy-audio",
                 split="train",
             )
 
@@ -260,6 +283,58 @@ class ViewMaterializerTest(unittest.TestCase):
                         .views[AudioView.LONGCAT]["semantic_codes"],
                         torch.tensor([[index + 10]]),
                     )
+                )
+
+    def test_materializer_write_parallel_uses_devices_and_logs(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = root / "target"
+            samples = tuple(
+                _audio_sample(torch.tensor([[float(index)]]))
+                for index in range(4)
+            )
+
+            ViewMaterializer(target, split="train").write(
+                dataset_factory=_DatasetFactory(samples),
+                provider_factory=_ParallelProviderFactory(),
+                devices=("cpu:0", "cpu:1"),
+            )
+
+            stored = read_store_dataset(target)
+            logs = sorted((target / "logs").glob("part-*.log"))
+            self.assertEqual(len(stored), 4)
+            self.assertEqual([path.name for path in logs], ["part-00000.log", "part-00001.log"])
+            self.assertIn("cpu:0", logs[0].read_text(encoding="utf-8"))
+            self.assertIn("cpu:1", logs[1].read_text(encoding="utf-8"))
+            self.assertTrue(
+                torch.equal(
+                    stored[0][Role.DEFAULT, Modality.AUDIO]
+                    .views[AudioView.LONGCAT]["semantic_codes"],
+                    torch.tensor([[0]]),
+                )
+            )
+            self.assertTrue(
+                torch.equal(
+                    stored[1][Role.DEFAULT, Modality.AUDIO]
+                    .views[AudioView.LONGCAT]["semantic_codes"],
+                    torch.tensor([[101]]),
+                )
+            )
+
+    def test_resolve_devices_auto_falls_back_to_cpu(self):
+        from anydataset.store.materializer import resolve_devices
+
+        self.assertTrue(resolve_devices("auto"))
+
+    def test_parallel_materializer_rejects_unpicklable_factory(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+
+            with self.assertRaises(TypeError):
+                ViewMaterializer(root / "target").write_parallel(
+                    dataset_factory=lambda: (),
+                    provider_factory=_ParallelProviderFactory(),
+                    devices=("cpu:0", "cpu:1"),
                 )
 
 
@@ -300,6 +375,37 @@ class _Provider:
     def __call__(self, views):
         waveform, _ = views[AudioView.WAVEFORM]
         return {"semantic_codes": waveform.to(torch.int64) + int(self.offset)}
+
+
+@dataclass(frozen=True)
+class _DatasetFactory:
+    dataset: object
+
+    def __call__(self):
+        return self.dataset
+
+
+@dataclass(frozen=True)
+class _StoreDatasetFactory:
+    path: Path
+    root: Path
+
+    def __call__(self):
+        return _store_dataset(self.path, self.root)
+
+
+@dataclass(frozen=True)
+class _ProviderFactory:
+    offset: int = 0
+
+    def __call__(self, device: str):
+        return _Provider(offset=self.offset)
+
+
+@dataclass(frozen=True)
+class _ParallelProviderFactory:
+    def __call__(self, device: str):
+        return _Provider(offset=100 if device.endswith(":1") else 0)
 
 
 if __name__ == "__main__":

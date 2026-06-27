@@ -56,16 +56,31 @@ class LongCatViewProvider(nn.Module, AudioProvider):
             waveform,
             sample_rate,
         )
-        return {
-            "semantic_codes": self._tensor(semantic_codes)[0],
-            "acoustic_codes": self._tensor(acoustic_codes)[0],
-        }
+        return _align_code_lengths(
+            {
+                "semantic_codes": self._tensor(semantic_codes)[0],
+                "acoustic_codes": self._tensor(acoustic_codes)[0],
+            }
+        )
 
     def _longcat_batch(self, views: Mapping[AudioView, Any]):
         waveform, sample_rate = self._waveform(views)
-        waveform = waveform if isinstance(waveform, torch.Tensor) else torch.as_tensor(waveform)
+        waveform = (
+            waveform if isinstance(waveform, torch.Tensor) else torch.as_tensor(waveform)
+        )
         if waveform.is_floating_point():
             waveform = waveform.float()
         if waveform.ndim == 1:
             waveform = waveform.unsqueeze(0)
         return waveform.unsqueeze(0), sample_rate
+
+
+def _align_code_lengths(codes: Mapping[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+    lengths = []
+    for name, code in codes.items():
+        if code.ndim == 0:
+            raise ValueError(f"LongCat code {name!r} must have a time dimension.")
+        lengths.append(code.shape[-1])
+
+    length = min(lengths)
+    return {name: code[..., :length].contiguous() for name, code in codes.items()}

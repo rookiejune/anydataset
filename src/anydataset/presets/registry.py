@@ -40,6 +40,10 @@ def preset_spec(
                     "streaming": True,
                 },
             )
+        case Preset.COMMON_VOICE:
+            from .common_voice import common_voice_spec
+
+            return common_voice_spec(split=split, **load_options)
         case Preset.ESC50:
             spec = Spec(
                 source=Source.HF,
@@ -100,6 +104,10 @@ def create_preset(
             from .librispeech_asr import LibriSpeechASR
 
             return LibriSpeechASR(split=split, transforms=transforms, **load_options)
+        case Preset.COMMON_VOICE:
+            from .common_voice import create_common_voice
+
+            return create_common_voice(split=split, transforms=transforms, **load_options)
         case Preset.ESC50:
             from .esc50 import ESC50
 

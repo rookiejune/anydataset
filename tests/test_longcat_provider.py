@@ -41,7 +41,7 @@ class FakeLongCatCodec:
         self.calls.append((tuple(audio.shape), sample_rate))
         self.dtypes.append(audio.dtype)
         return (
-            torch.tensor([[1, 2, 3]], device=audio.device),
+            torch.tensor([[1, 2, 3, 10]], device=audio.device),
             torch.tensor([[[4, 5, 6], [7, 8, 9]]], device=audio.device),
         )
 
@@ -76,10 +76,10 @@ class LongCatViewProviderTest(unittest.TestCase):
             )
 
             with _fake_anytrain(FakeLongCatCodecLoader):
-                provider = LongCatViewProvider()
-                ViewMaterializer(target, dataset_id="toy-audio", split="train").write(
-                    _store_dataset(source, root),
-                    provider,
+                ViewMaterializer(target, split="train").write(
+                    dataset_factory=_StoreDatasetFactory(source, root),
+                    provider_factory=_LongCatProviderFactory(),
+                    devices="cpu",
                 )
 
             view = (Role.DEFAULT, Modality.AUDIO, AudioView.LONGCAT)
@@ -122,10 +122,10 @@ class LongCatViewProviderTest(unittest.TestCase):
 
             with patch("anydataset.provider.abc.torchaudio", FakeTorchAudio()):
                 with _fake_anytrain(FakeLongCatCodecLoader):
-                    provider = LongCatViewProvider()
-                    ViewMaterializer(target, dataset_id="toy-audio", split="train").write(
-                        _store_dataset(source, root),
-                        provider,
+                    ViewMaterializer(target, split="train").write(
+                        dataset_factory=_StoreDatasetFactory(source, root),
+                        provider_factory=_LongCatProviderFactory(),
+                        devices="cpu",
                     )
 
             self.assertEqual(FakeLongCatCodecLoader.codec.calls, [((1, 1, 4), 24000)])
@@ -202,6 +202,20 @@ def _store_dataset(path: Path, root: Path):
         Spec(source=Source.STORE, path=str(path), split="train"),
         cache_root=root / "cache-source",
     )
+
+
+class _StoreDatasetFactory:
+    def __init__(self, path: Path, root: Path) -> None:
+        self.path = path
+        self.root = root
+
+    def __call__(self):
+        return _store_dataset(self.path, self.root)
+
+
+class _LongCatProviderFactory:
+    def __call__(self, device: str):
+        return LongCatViewProvider(device=device if device != "cpu" else None)
 
 
 class _fake_anytrain:

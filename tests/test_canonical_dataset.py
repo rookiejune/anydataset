@@ -350,6 +350,88 @@ class CanonicalDatasetTest(unittest.TestCase):
             )
         )
 
+    def test_collate_fn_batches_tensor_mapping_views_by_key(self):
+        ref = (Role.DEFAULT, Modality.AUDIO)
+        schema = {
+            ref: AudioReq(
+                views=frozenset({AudioView.LONGCAT}),
+            )
+        }
+        samples = [
+            {
+                ref: AudioItem(
+                    views={
+                        AudioView.LONGCAT: {
+                            "semantic_codes": torch.tensor([1, 2, 3]),
+                            "acoustic_codes": torch.tensor(
+                                [[4, 5, 6], [7, 8, 9]]
+                            ),
+                        }
+                    },
+                )
+            },
+            {
+                ref: AudioItem(
+                    views={
+                        AudioView.LONGCAT: {
+                            "semantic_codes": torch.tensor([10, 11]),
+                            "acoustic_codes": torch.tensor([[12, 13], [14, 15]]),
+                        }
+                    },
+                )
+            },
+        ]
+
+        batch = collate_fn(schema)(samples)
+
+        longcat = batch.sample[ref].views[AudioView.LONGCAT]
+        self.assertTrue(
+            torch.equal(
+                longcat["semantic_codes"],
+                torch.tensor([[1, 2, 3], [10, 11, 0]]),
+            )
+        )
+        self.assertTrue(
+            torch.equal(
+                longcat["acoustic_codes"],
+                torch.tensor(
+                    [
+                        [[4, 5, 6], [7, 8, 9]],
+                        [[12, 13, 0], [14, 15, 0]],
+                    ]
+                ),
+            )
+        )
+        self.assertTrue(
+            torch.equal(
+                batch.masks[FieldRef(ref, FieldGroup.VIEWS, AudioView.LONGCAT)],
+                torch.tensor([[True, True, True], [True, True, False]]),
+            )
+        )
+
+    def test_collate_fn_requires_mapping_tensors_in_sample_share_length(self):
+        ref = (Role.DEFAULT, Modality.AUDIO)
+        schema = {
+            ref: AudioReq(
+                views=frozenset({AudioView.LONGCAT}),
+            )
+        }
+        samples = [
+            {
+                ref: AudioItem(
+                    views={
+                        AudioView.LONGCAT: {
+                            "semantic_codes": torch.tensor([1, 2, 3]),
+                            "acoustic_codes": torch.tensor([[4, 5], [6, 7]]),
+                        }
+                    },
+                )
+            }
+        ]
+
+        with self.assertRaisesRegex(ValueError, "must share the same last dimension"):
+            collate_fn(schema)(samples)
+
     def test_collate_fn_keeps_non_tensor_meta_as_values(self):
         ref = (Role.DEFAULT, Modality.AUDIO)
         schema = {
@@ -366,6 +448,26 @@ class CanonicalDatasetTest(unittest.TestCase):
 
         audio = batch.sample[ref]
         self.assertEqual(audio.meta[AudioMeta.LABEL], [1, 2])
+        self.assertNotIn(FieldRef(ref, FieldGroup.META, AudioMeta.LABEL), batch.masks)
+
+    def test_collate_fn_keeps_mapping_meta_as_values(self):
+        ref = (Role.DEFAULT, Modality.AUDIO)
+        schema = {
+            ref: AudioReq(
+                meta=frozenset({AudioMeta.LABEL}),
+            )
+        }
+        samples = [
+            {ref: AudioItem(meta={AudioMeta.LABEL: {"score": torch.tensor([1])}})},
+            {ref: AudioItem(meta={AudioMeta.LABEL: {"score": torch.tensor([2])}})},
+        ]
+
+        batch = collate_fn(schema)(samples)
+
+        labels = batch.sample[ref].meta[AudioMeta.LABEL]
+        self.assertEqual(len(labels), 2)
+        self.assertTrue(torch.equal(labels[0]["score"], torch.tensor([1])))
+        self.assertTrue(torch.equal(labels[1]["score"], torch.tensor([2])))
         self.assertNotIn(FieldRef(ref, FieldGroup.META, AudioMeta.LABEL), batch.masks)
 
     def test_collate_fn_requires_declared_meta_fields(self):

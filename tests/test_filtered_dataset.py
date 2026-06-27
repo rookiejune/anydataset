@@ -1,25 +1,30 @@
 from __future__ import annotations
 
 import json
+import math
 import tempfile
 import unittest
 from enum import StrEnum, auto
 from pathlib import Path
 
+import torch
+
 from anydataset import (
     AnyDataset,
     AudioItem,
     AudioMeta,
-    AudioReq,
     AudioView,
+    FilterDecision,
+    FilteredDataset,
     FilterRule,
-    ImageReq,
-    ImageView,
     Modality,
     Role,
     Spec,
+    TextItem,
+    TextView,
     register_source,
 )
+from anydataset.store import DatasetWriter
 
 
 class FilteredDatasetTest(unittest.TestCase):
@@ -30,7 +35,6 @@ class FilteredDatasetTest(unittest.TestCase):
             dataset = _dataset("unit_test_filter_bool", root, [0, 1, 2, 3])
             rule = FilterRule(
                 name="even",
-                schema=_label_schema(),
                 predicate=lambda sample: _value(sample) % 2 == 0,
             )
 
@@ -52,7 +56,6 @@ class FilteredDatasetTest(unittest.TestCase):
             dataset = _dataset("unit_test_filter_labels", root, [0, 1, 2, 3])
             rule = FilterRule(
                 name="route",
-                schema=_label_schema(),
                 predicate=_route,
             )
 
@@ -71,7 +74,6 @@ class FilteredDatasetTest(unittest.TestCase):
             dataset = _dataset("unit_test_filter_unknown", Path(tmpdir), [0])
             result = FilterRule(
                 name="all",
-                schema=_label_schema(),
                 predicate=lambda sample: True,
             ).apply(dataset)
 
@@ -86,7 +88,6 @@ class FilteredDatasetTest(unittest.TestCase):
             dataset = _dataset("unit_test_filter_deduplicate", Path(tmpdir), [0, 1])
             result = FilterRule(
                 name="all",
-                schema=_label_schema(),
                 predicate=lambda sample: True,
             ).apply(dataset)
 
@@ -95,14 +96,13 @@ class FilteredDatasetTest(unittest.TestCase):
         self.assertEqual(selected.labels, ("accept",))
         self.assertEqual(selected.indices, (0, 1))
 
-    def test_rule_predicate_receives_schema_resolved_sample(self):
-        _register_rows_source("unit_test_filter_schema_sample")
+    def test_rule_predicate_receives_full_sample(self):
+        _register_rows_source("unit_test_filter_full_sample")
         seen = []
         with tempfile.TemporaryDirectory() as tmpdir:
-            dataset = _dataset("unit_test_filter_schema_sample", Path(tmpdir), [0])
+            dataset = _dataset("unit_test_filter_full_sample", Path(tmpdir), [0])
             rule = FilterRule(
-                name="schema",
-                schema=_label_schema(),
+                name="full",
                 predicate=lambda sample: seen.append(sample) or True,
             )
 
@@ -110,7 +110,7 @@ class FilteredDatasetTest(unittest.TestCase):
 
         sample = seen[0]
         audio = sample[Role.DEFAULT, Modality.AUDIO]
-        self.assertEqual(audio.views, {})
+        self.assertEqual(audio.views, {AudioView.WAVEFORM: 0})
         self.assertEqual(audio.meta, {AudioMeta.LABEL: 0})
 
     def test_rule_apply_reuses_ready_cache(self):
@@ -121,13 +121,11 @@ class FilteredDatasetTest(unittest.TestCase):
             dataset = _dataset("unit_test_filter_reuses", root, [0, 1, 2, 3])
             first_rule = FilterRule(
                 name="gte_two",
-                schema=_label_schema(),
                 predicate=lambda sample: _value(sample) >= 2,
             )
             first_rule.apply(dataset)
             second_rule = FilterRule(
                 name="gte_two",
-                schema=_label_schema(),
                 predicate=lambda sample: calls.append(sample) or False,
             )
 
@@ -143,7 +141,6 @@ class FilteredDatasetTest(unittest.TestCase):
             first = _dataset("unit_test_filter_rebuilds", root, [0, 1, 2])
             rule = FilterRule(
                 name="all",
-                schema=_label_schema(),
                 predicate=lambda sample: True,
             )
             rule.apply(first)
@@ -153,32 +150,65 @@ class FilteredDatasetTest(unittest.TestCase):
 
         self.assertEqual(_values(result.select("accept")), [0, 1, 2, 3])
 
-    def test_rule_apply_rebuilds_when_schema_changes(self):
-        _register_rows_source("unit_test_filter_schema_rebuilds")
+    def test_rule_apply_reuses_same_name_cache(self):
+        _register_rows_source("unit_test_filter_same_name")
+        calls = []
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
-            dataset = _dataset("unit_test_filter_schema_rebuilds", root, [0])
-            label_rule = FilterRule(
+            dataset = _dataset("unit_test_filter_same_name", root, [0])
+            first_rule = FilterRule(
                 name="same_name",
-                schema=_label_schema(),
                 predicate=lambda sample: True,
             )
-            label_result = label_rule.apply(dataset)
-            waveform_rule = FilterRule(
+            first_result = first_rule.apply(dataset)
+            second_rule = FilterRule(
                 name="same_name",
-                schema={
-                    (Role.DEFAULT, Modality.AUDIO): AudioReq(
-                        views=frozenset({AudioView.WAVEFORM}),
-                    )
-                },
-                predicate=lambda sample: False,
+                predicate=lambda sample: calls.append(sample) or False,
             )
 
-            waveform_result = waveform_rule.apply(dataset)
+            second_result = second_rule.apply(dataset)
 
-        self.assertNotEqual(label_result.cache_path, waveform_result.cache_path)
-        self.assertEqual(_values(label_result.select("accept")), [0])
-        self.assertEqual(_values(waveform_result.select("reject")), [0])
+        self.assertEqual(first_result.cache_path, second_result.cache_path)
+        self.assertEqual(calls, [])
+        self.assertEqual(_values(second_result.select("accept")), [0])
+
+    def test_filtered_dataset_builds_cache_when_missing(self):
+        _register_rows_source("unit_test_filter_direct_build")
+        calls = []
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dataset = _dataset("unit_test_filter_direct_build", Path(tmpdir), [0, 1, 2])
+            rule = FilterRule(
+                name="even",
+                predicate=lambda sample: calls.append(_value(sample)) or _value(sample) % 2 == 0,
+            )
+
+            filtered = FilteredDataset(dataset, rule, labels="accept")
+
+        self.assertEqual(calls, [0, 1, 2])
+        self.assertEqual(_values(filtered), [0, 2])
+        self.assertEqual(filtered.indices, (0, 2))
+
+    def test_filtered_dataset_reuses_ready_cache_by_rule_name(self):
+        _register_rows_source("unit_test_filter_direct_reuse")
+        calls = []
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            dataset = _dataset("unit_test_filter_direct_reuse", root, [0, 1, 2])
+            FilterRule(
+                name="same",
+                predicate=lambda sample: _value(sample) >= 1,
+            ).apply(dataset)
+            filtered = FilteredDataset(
+                dataset,
+                FilterRule(
+                    name="same",
+                    predicate=lambda sample: calls.append(sample) or False,
+                ),
+                labels="accept",
+            )
+
+        self.assertEqual(calls, [])
+        self.assertEqual(_values(filtered), [1, 2])
 
     def test_filtered_dataset_shards_after_remap(self):
         _register_rows_source("unit_test_filter_shards")
@@ -187,7 +217,6 @@ class FilteredDatasetTest(unittest.TestCase):
             dataset = _dataset("unit_test_filter_shards", root, [0, 1, 2, 3, 4])
             filtered = FilterRule(
                 name="all",
-                schema=_label_schema(),
                 predicate=lambda sample: True,
             ).apply(dataset).select("accept")
 
@@ -201,7 +230,6 @@ class FilteredDatasetTest(unittest.TestCase):
             dataset = _dataset("unit_test_filter_readonly", Path(tmpdir), [0])
             result = FilterRule(
                 name="all",
-                schema=_label_schema(),
                 predicate=lambda sample: True,
             ).apply(dataset)
             filtered = result.select("accept")
@@ -215,6 +243,20 @@ class FilteredDatasetTest(unittest.TestCase):
         with self.assertRaises(AttributeError):
             filtered.cache_path = Path("/tmp/changed")
 
+    def test_filtered_dataset_repr_uses_count(self):
+        _register_rows_source("unit_test_filter_repr")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dataset = _dataset("unit_test_filter_repr", Path(tmpdir), [0, 1, 2])
+            filtered = FilterRule(
+                name="all",
+                predicate=lambda sample: True,
+            ).apply(dataset).select("accept")
+
+            text = repr(filtered)
+
+        self.assertIn("count=3", text)
+        self.assertNotIn("indices=", text)
+
     def test_rule_metadata_is_written_under_physical_cache_path(self):
         _register_rows_source("unit_test_filter_metadata")
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -222,7 +264,6 @@ class FilteredDatasetTest(unittest.TestCase):
             dataset = _dataset("unit_test_filter_metadata", root, [0, 1])
             rule = FilterRule(
                 name="keep_v1",
-                schema=_label_schema(),
                 predicate=lambda sample: True,
             )
 
@@ -231,21 +272,11 @@ class FilteredDatasetTest(unittest.TestCase):
             manifest = json.loads((result.cache_path / "partitions.json").read_text(encoding="utf-8"))
 
         self.assertEqual(result.cache_path.parent, root / dataset.spec.cache_relpath / "filters")
-        self.assertEqual(metadata["schema_version"], 3)
+        self.assertEqual(metadata["schema_version"], 4)
         self.assertEqual(metadata["base"]["spec_id"], dataset.spec.id)
         self.assertEqual(metadata["base"]["sample_count"], 2)
         self.assertEqual(metadata["rule"]["name"], "keep_v1")
-        self.assertEqual(
-            metadata["rule"]["schema"],
-            [
-                {
-                    "role": "default",
-                    "modality": "audio",
-                    "views": [],
-                    "meta": ["label"],
-                }
-            ],
-        )
+        self.assertEqual(set(metadata["rule"]), {"name"})
         self.assertEqual(manifest["partitions"][0]["label"], "accept")
         self.assertEqual(manifest["partitions"][0]["count"], 2)
         self.assertEqual(len(manifest["partitions"][0]["files"]), 1)
@@ -261,7 +292,6 @@ class FilteredDatasetTest(unittest.TestCase):
             )
             rule = FilterRule(
                 name="all",
-                schema=_label_schema(),
                 predicate=lambda sample: True,
             )
 
@@ -283,7 +313,6 @@ class FilteredDatasetTest(unittest.TestCase):
             )
             rule = FilterRule(
                 name="mod_three",
-                schema=_label_schema(),
                 predicate=_mod_three,
             )
 
@@ -293,13 +322,173 @@ class FilteredDatasetTest(unittest.TestCase):
         self.assertEqual(result.counts, {"zero": 4, "one": 4, "two": 4})
         self.assertEqual(selected.indices, (1, 2, 4, 5, 7, 8, 10, 11))
 
+    def test_rule_apply_writes_metrics_side_output(self):
+        _register_rows_source("unit_test_filter_metrics")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dataset = _dataset("unit_test_filter_metrics", Path(tmpdir), [0, 1, 2])
+            rule = FilterRule(
+                name="with_metrics",
+                predicate=_metric_decision,
+            )
+
+            result = rule.apply(dataset, metrics=True, max_shard_samples=2)
+            rows = list(result.iter_metrics())
+            manifest = json.loads(
+                (result.metrics_path / "metrics.json").read_text(encoding="utf-8")
+            )
+
+        self.assertEqual(result.metrics_path, result.cache_path / "metrics")
+        self.assertEqual(result.counts, {"accept": 2, "reject": 1})
+        self.assertEqual(
+            rows,
+            [
+                {"index": 0, "label": "accept", "metrics": {"score": 0, "tags": ["even"]}},
+                {"index": 1, "label": "reject", "metrics": {"score": 1, "tags": ["odd"]}},
+                {"index": 2, "label": "accept", "metrics": {"score": 2, "tags": ["even"]}},
+            ],
+        )
+        self.assertEqual(manifest["count"], 3)
+        self.assertEqual([file["count"] for file in manifest["files"]], [2, 1])
+
+    def test_rule_apply_reuses_metrics_cache(self):
+        _register_rows_source("unit_test_filter_metrics_reuse")
+        calls = []
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            dataset = _dataset("unit_test_filter_metrics_reuse", root, [0, 1])
+            FilterRule(
+                name="same",
+                predicate=_metric_decision,
+            ).apply(dataset, metrics=True)
+            result = FilterRule(
+                name="same",
+                predicate=lambda sample: calls.append(sample) or FilterDecision(
+                    label=False,
+                    metrics={"score": -1},
+                ),
+            ).apply(dataset, metrics=True)
+            rows = list(result.iter_metrics())
+
+        self.assertEqual(calls, [])
+        self.assertEqual([row["label"] for row in rows], ["accept", "reject"])
+
+    def test_rule_apply_rebuilds_for_metrics_cache(self):
+        _register_rows_source("unit_test_filter_metrics_rebuild")
+        calls = []
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            dataset = _dataset("unit_test_filter_metrics_rebuild", root, [0])
+            FilterRule(
+                name="same",
+                predicate=lambda sample: True,
+            ).apply(dataset)
+            result = FilterRule(
+                name="same",
+                predicate=lambda sample: calls.append(sample) or _metric_decision(sample),
+            ).apply(dataset, metrics=True)
+            rows = list(result.iter_metrics())
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(
+            rows,
+            [{"index": 0, "label": "accept", "metrics": {"score": 0, "tags": ["even"]}}],
+        )
+
+    def test_rule_apply_requires_decisions_when_metrics_enabled(self):
+        _register_rows_source("unit_test_filter_metrics_required")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dataset = _dataset("unit_test_filter_metrics_required", Path(tmpdir), [0])
+            rule = FilterRule(
+                name="bad",
+                predicate=lambda sample: True,
+            )
+
+            with self.assertRaises(TypeError):
+                rule.apply(dataset, metrics=True)
+
+    def test_filter_metrics_must_be_json_serializable(self):
+        _register_rows_source("unit_test_filter_metrics_json")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dataset = _dataset("unit_test_filter_metrics_json", Path(tmpdir), [0])
+            rule = FilterRule(
+                name="bad",
+                predicate=lambda sample: FilterDecision(
+                    label=True,
+                    metrics={"score": math.nan},
+                ),
+            )
+
+            with self.assertRaises(ValueError):
+                rule.apply(dataset, metrics=True)
+
+    def test_filter_metrics_keys_must_be_strings(self):
+        _register_rows_source("unit_test_filter_metrics_keys")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dataset = _dataset("unit_test_filter_metrics_keys", Path(tmpdir), [0])
+            rule = FilterRule(
+                name="bad",
+                predicate=lambda sample: FilterDecision(
+                    label=True,
+                    metrics={1: "bad"},
+                ),
+            )
+
+            with self.assertRaises(TypeError):
+                rule.apply(dataset, metrics=True)
+
+    def test_metrics_are_not_available_without_metrics_option(self):
+        _register_rows_source("unit_test_filter_metrics_disabled")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dataset = _dataset("unit_test_filter_metrics_disabled", Path(tmpdir), [0])
+            result = FilterRule(
+                name="disabled",
+                predicate=_metric_decision,
+            ).apply(dataset)
+
+            with self.assertRaises(ValueError):
+                list(result.iter_metrics())
+
+    def test_rule_apply_writes_metrics_with_workers(self):
+        _register_rows_source("unit_test_filter_metrics_workers")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dataset = _dataset(
+                "unit_test_filter_metrics_workers",
+                Path(tmpdir),
+                list(range(6)),
+            )
+            result = FilterRule(
+                name="with_workers",
+                predicate=_metric_decision,
+            ).apply(dataset, metrics=True, num_workers=2, max_shard_samples=2)
+
+            rows = list(result.iter_metrics())
+
+        self.assertEqual([row["index"] for row in rows], list(range(6)))
+        self.assertEqual([row["label"] for row in rows], ["accept", "reject"] * 3)
+
+    def test_rule_apply_writes_empty_metrics_manifest(self):
+        _register_rows_source("unit_test_filter_metrics_empty")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dataset = _dataset("unit_test_filter_metrics_empty", Path(tmpdir), [])
+            result = FilterRule(
+                name="empty",
+                predicate=_metric_decision,
+            ).apply(dataset, metrics=True)
+            rows = list(result.iter_metrics())
+            manifest = json.loads(
+                (result.metrics_path / "metrics.json").read_text(encoding="utf-8")
+            )
+
+        self.assertEqual(rows, [])
+        self.assertEqual(manifest["count"], 0)
+        self.assertEqual(manifest["files"], [])
+
     def test_rule_apply_rejects_invalid_parallel_options(self):
         _register_rows_source("unit_test_filter_parallel_options")
         with tempfile.TemporaryDirectory() as tmpdir:
             dataset = _dataset("unit_test_filter_parallel_options", Path(tmpdir), [0])
             rule = FilterRule(
                 name="all",
-                schema=_label_schema(),
                 predicate=lambda sample: True,
             )
 
@@ -310,48 +499,96 @@ class FilteredDatasetTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 rule.apply(dataset, max_shard_samples=0)
 
-    def test_filter_rule_identity_sorts_schema_entries(self):
+    def test_filtered_dataset_requires_labels(self):
+        _register_rows_source("unit_test_filter_requires_labels")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dataset = _dataset("unit_test_filter_requires_labels", Path(tmpdir), [0])
+            rule = FilterRule(
+                name="all",
+                predicate=lambda sample: True,
+            )
+
+            with self.assertRaises(ValueError):
+                FilteredDataset(dataset, rule, labels=())
+
+    def test_filtered_dataset_reads_store_merge_result(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            delta = root / "delta"
+            waveform = torch.tensor([[1.0, 2.0]])
+            DatasetWriter(delta, dataset_id="toy", split="train").write(
+                [
+                    {
+                        (Role.DEFAULT, Modality.AUDIO): AudioItem(
+                            views={
+                                AudioView.LONGCAT: {
+                                    "semantic_codes": torch.tensor([1, 2]),
+                                }
+                            },
+                            meta={AudioMeta.LABEL: "speech"},
+                        )
+                    }
+                ]
+            )
+            source = [
+                {
+                    (Role.DEFAULT, Modality.AUDIO): AudioItem(
+                        views={AudioView.WAVEFORM: (waveform, 4)},
+                        meta={AudioMeta.LABEL: "speech"},
+                    ),
+                    (Role.DEFAULT, Modality.TEXT): TextItem(
+                        views={TextView.TEXT: "hello"},
+                    ),
+                }
+            ]
+            merged = AnyDataset(
+                f"store://{delta}:train",
+                cache_root=root / "dataset-cache",
+            ).merge(source)
+            rule = FilterRule(
+                name="has_longcat",
+                predicate=lambda sample: AudioView.LONGCAT
+                in sample[Role.DEFAULT, Modality.AUDIO].views,
+            )
+
+            filtered = FilteredDataset(
+                merged,
+                rule,
+                labels="accept",
+                cache_root=root / "filter-cache",
+            )
+            sample = filtered[0]
+
+        audio = sample[Role.DEFAULT, Modality.AUDIO]
+        self.assertEqual(set(audio.views), {AudioView.WAVEFORM, AudioView.LONGCAT})
+        self.assertEqual(sample[Role.DEFAULT, Modality.TEXT].views[TextView.TEXT], "hello")
+
+    def test_filter_rule_exposes_name_contract_only(self):
+        rule = FilterRule(
+            name="same",
+            predicate=lambda sample: True,
+        )
+
+        self.assertEqual(rule.name, "same")
+        self.assertFalse(hasattr(rule, "identity"))
+        self.assertFalse(hasattr(rule, "id"))
+
+    def test_filter_rule_equality_uses_name(self):
         first = FilterRule(
             name="same",
-            schema={
-                (Role.DEFAULT, Modality.AUDIO): AudioReq(
-                    meta=frozenset({AudioMeta.LABEL}),
-                ),
-                (Role.DEFAULT, Modality.IMAGE): ImageReq(
-                    views=frozenset({ImageView.PIXEL}),
-                ),
-            },
             predicate=lambda sample: True,
         )
         second = FilterRule(
             name="same",
-            schema={
-                (Role.DEFAULT, Modality.IMAGE): ImageReq(
-                    views=frozenset({ImageView.PIXEL}),
-                ),
-                (Role.DEFAULT, Modality.AUDIO): AudioReq(
-                    meta=frozenset({AudioMeta.LABEL}),
-                ),
-            },
-            predicate=lambda sample: True,
+            predicate=lambda sample: False,
         )
 
-        self.assertEqual(first.id, second.id)
-
-    def test_filter_rule_schema_view_is_read_only(self):
-        rule = FilterRule(
-            name="readonly",
-            schema=_label_schema(),
-            predicate=lambda sample: True,
-        )
-
-        with self.assertRaises(TypeError):
-            rule.schema[Role.DEFAULT, Modality.AUDIO] = AudioReq()
+        self.assertEqual(first, second)
+        self.assertEqual(hash(first), hash(second))
 
     def test_filter_rule_attributes_are_read_only(self):
         rule = FilterRule(
             name="readonly",
-            schema=_label_schema(),
             predicate=lambda sample: True,
         )
 
@@ -366,7 +603,6 @@ class FilteredDatasetTest(unittest.TestCase):
             dataset = _dataset("unit_test_filter_predicate_type", Path(tmpdir), [0])
             rule = FilterRule(
                 name="bad",
-                schema=_label_schema(),
                 predicate=lambda sample: 1,
             )
 
@@ -379,7 +615,6 @@ class FilteredDatasetTest(unittest.TestCase):
             dataset = _dataset("unit_test_filter_empty_label", Path(tmpdir), [0])
             rule = FilterRule(
                 name="bad",
-                schema=_label_schema(),
                 predicate=lambda sample: "",
             )
 
@@ -418,14 +653,6 @@ def _parse(row):
     }
 
 
-def _label_schema():
-    return {
-        (Role.DEFAULT, Modality.AUDIO): AudioReq(
-            meta=frozenset({AudioMeta.LABEL}),
-        )
-    }
-
-
 def _route(sample):
     value = _value(sample)
     if value == 0:
@@ -442,6 +669,19 @@ def _mod_three(sample):
     if value % 3 == 1:
         return "one"
     return "two"
+
+
+def _metric_decision(sample):
+    value = _value(sample)
+    label = value % 2 == 0
+    tag = "even" if label else "odd"
+    return FilterDecision(
+        label=label,
+        metrics={
+            "score": value,
+            "tags": [tag],
+        },
+    )
 
 
 def _value(sample):

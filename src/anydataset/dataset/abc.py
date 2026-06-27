@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Callable, Iterable, Iterator
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Iterator
+from typing import TYPE_CHECKING, Any
 
 from torch.utils.data import Dataset, IterableDataset
 
 from .._sharding import runtime_shard, validate_shard
-from ..types import Preset, Spec
+from ..types import Preset, Source, Spec, source_key
 from ..utils import resolve_dataset
 
 if TYPE_CHECKING:
@@ -113,6 +114,15 @@ class AnyDataset(_Base, Dataset):
 
     def __getitem__(self, index: int) -> Sample:
         return self.transform_sample(self.parse_fn(self.dataset[index]))
+
+    def merge(self, dataset: Iterable[Sample]) -> AnyDataset:
+        if source_key(self.spec.source) != Source.STORE.value:
+            raise TypeError("merge requires a store dataset.")
+        merge = getattr(self.dataset, "merge", None)
+        if not callable(merge):
+            raise TypeError("merge requires a store dataset.")
+        self._dataset = merge(dataset)
+        return self
 
     def iter_shard(self, num_shards: int, shard_id: int):
         validate_shard(num_shards, shard_id)

@@ -21,10 +21,12 @@ from .manifestio import (
     read_samples_manifest,
     read_view_manifest,
     samples_manifest_exists,
+    write_samples_manifest,
 )
 from .paths import (
     dataset_json_path,
     dataset_ready_path,
+    samples_parquet_path,
     view_dir,
     view_ready_path,
 )
@@ -38,7 +40,7 @@ class StoreDataset(Dataset):
     root: Path
     manifest: DatasetManifest
     samples: tuple[SampleManifestEntry, ...]
-    views: Mapping[tuple[item.Role, item.Modality, item.View], "StoreView"]
+    views: Mapping[tuple[item.Role, item.Modality, item.View], StoreView]
     _files: dict[str, Path] = field(default_factory=dict, compare=False, repr=False)
 
     def __len__(self) -> int:
@@ -51,7 +53,7 @@ class StoreDataset(Dataset):
     def __getitem__(self, index: int) -> item.Sample:
         return _sample_for_entry(self, self.samples[index])
 
-    def merge(self, dataset: Iterable[item.Sample]) -> "StoreDataset":
+    def merge(self, dataset: Iterable[item.Sample]) -> StoreDataset:
         return _merge_dataset(self, dataset)
 
 
@@ -204,6 +206,8 @@ def _merge_dataset(
     sinks: dict[tuple[item.Role, item.Modality, item.View], ViewWriter] = {}
     expected: dict[tuple[item.Role, item.Modality], frozenset[item.View]] = {}
     seen_base_refs: set[tuple[item.Role, item.Modality]] = set()
+    entries: list[SampleManifestEntry] = []
+    samples_changed = False
     closed = False
 
     try:
@@ -216,7 +220,7 @@ def _merge_dataset(
                     f"Merge dataset ended before sample {entry.sample_index}."
                 ) from exc
 
-            _write_overlay_sample(
+            updated_entry = _write_overlay_sample(
                 tmp,
                 base,
                 entry,
@@ -225,6 +229,8 @@ def _merge_dataset(
                 expected,
                 seen_base_refs,
             )
+            entries.append(updated_entry)
+            samples_changed = samples_changed or updated_entry.items != entry.items
             seen_base_refs.update(ref for ref, _ in entry.items)
 
         try:
@@ -238,11 +244,14 @@ def _merge_dataset(
             sink.close()
         closed = True
 
-        if not sinks:
+        if samples_changed:
+            write_samples_manifest(tmp, entries)
+
+        if not sinks and not samples_changed:
             cleanup_dir(tmp)
             return base
 
-        _publish_views(base.root, tmp, tuple(sinks))
+        _publish_merge(base.root, tmp, tuple(sinks), samples_changed=samples_changed)
         cleanup_dir(tmp)
         return read_store_dataset(base.root)
     except Exception:
@@ -261,7 +270,7 @@ def _write_overlay_sample(
     sinks: dict[tuple[item.Role, item.Modality, item.View], ViewWriter],
     expected: dict[tuple[item.Role, item.Modality], frozenset[item.View]],
     seen_base_refs: set[tuple[item.Role, item.Modality]],
-) -> None:
+) -> SampleManifestEntry:
     if not isinstance(sample, Mapping):
         raise TypeError("StoreDataset.merge expects Sample mappings.")
 
@@ -270,10 +279,10 @@ def _write_overlay_sample(
     for ref, overlay in sample.items():
         base_meta = base_items.get(ref)
         if base_meta is None:
-            raise ValueError(
-                f"Merge sample {entry.sample_index} has unknown item {_sample_ref_path(ref)}."
-            )
-        _validate_overlay_item(entry, ref, base_meta, overlay)
+            _validate_overlay_type(ref, overlay)
+            base_items[ref] = string_key_dict(overlay.meta)
+        else:
+            _validate_overlay_item(entry, ref, base_meta, overlay)
         new_views = _new_views(base, entry, ref, overlay)
         previous = expected.get(ref)
         if previous is None:
@@ -306,12 +315,15 @@ def _write_overlay_sample(
             raise ValueError(
                 f"Merge sample {entry.sample_index} is missing item {_sample_ref_path(ref)}."
             )
+    return SampleManifestEntry(
+        sample_id=entry.sample_id,
+        sample_index=entry.sample_index,
+        items=tuple(base_items.items()),
+    )
 
 
-def _validate_overlay_item(
-    entry: SampleManifestEntry,
+def _validate_overlay_type(
     ref: tuple[item.Role, item.Modality],
-    base_meta: Mapping[str, Any],
     overlay: item.Item,
 ) -> None:
     match ref[1]:
@@ -325,6 +337,14 @@ def _validate_overlay_item(
             if not isinstance(overlay, item.TextItem):
                 raise TypeError("text merge items must be TextItem instances.")
 
+
+def _validate_overlay_item(
+    entry: SampleManifestEntry,
+    ref: tuple[item.Role, item.Modality],
+    base_meta: Mapping[str, Any],
+    overlay: item.Item,
+) -> None:
+    _validate_overlay_type(ref, overlay)
     overlay_meta = string_key_dict(overlay.meta)
     for key, value in overlay_meta.items():
         if key not in base_meta:
@@ -378,6 +398,18 @@ def _publish_views(
             raise FileNotFoundError(source)
         target.parent.mkdir(parents=True, exist_ok=True)
         source.rename(target)
+
+
+def _publish_merge(
+    root: Path,
+    tmp: Path,
+    views: tuple[tuple[item.Role, item.Modality, item.View], ...],
+    *,
+    samples_changed: bool,
+) -> None:
+    _publish_views(root, tmp, views)
+    if samples_changed:
+        samples_parquet_path(tmp).replace(samples_parquet_path(root))
 
 
 def _sample_ids_by_item(
@@ -509,3 +541,8 @@ def _entry_view(entry: ViewManifestEntry) -> tuple[item.Role, item.Modality, ite
 def _view_path(view: tuple[item.Role, item.Modality, item.View]) -> tuple[str, str, str]:
     role, modality, key = view
     return role.value, modality.value, key.value
+
+
+def _sample_ref_path(ref: tuple[item.Role, item.Modality]) -> tuple[str, str]:
+    role, modality = ref
+    return role.value, modality.value

@@ -174,6 +174,57 @@ class StoreSourceTest(unittest.TestCase):
         self.assertEqual(audio.meta[AudioMeta.LABEL], "speech")
         self.assertEqual(text.views[TextView.TEXT], "hello")
 
+    def test_anydataset_merge_updates_store_source(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            output = root / "dataset"
+            waveform = torch.tensor([[1.0, 2.0, 3.0]])
+            DatasetWriter(output, dataset_id="toy-audio", split="train").write(
+                [
+                    {
+                        (Role.DEFAULT, Modality.AUDIO): AudioItem(
+                            views={
+                                AudioView.LONGCAT: {
+                                    "semantic_codes": torch.tensor([[1, 2, 3]])
+                                }
+                            },
+                            meta={AudioMeta.LABEL: "speech"},
+                        )
+                    }
+                ]
+            )
+            source = [
+                {
+                    (Role.DEFAULT, Modality.AUDIO): AudioItem(
+                        views={AudioView.WAVEFORM: (waveform, 4)},
+                        meta={AudioMeta.LABEL: "speech"},
+                    ),
+                    (Role.DEFAULT, Modality.TEXT): TextItem(
+                        views={TextView.TEXT: "hello"},
+                    ),
+                }
+            ]
+
+            dataset = AnyDataset(
+                f"store://{output}:train",
+                cache_root=root / "cache",
+            ).merge(source)
+            sample = dataset[0]
+
+        audio = sample[Role.DEFAULT, Modality.AUDIO]
+        self.assertEqual(set(audio.views), {AudioView.WAVEFORM, AudioView.LONGCAT})
+        self.assertTrue(torch.equal(audio.views[AudioView.WAVEFORM][0], waveform))
+        self.assertEqual(sample[Role.DEFAULT, Modality.TEXT].views[TextView.TEXT], "hello")
+
+    def test_anydataset_merge_requires_store_source(self):
+        dataset = AnyDataset(
+            Spec(source=Source.HF, path="unused"),
+            cache_root=Path(tempfile.gettempdir()) / "anydataset-test-cache",
+        )
+
+        with self.assertRaises(TypeError):
+            dataset.merge([])
+
     def test_store_dataset_merge_rejects_view_conflicts(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

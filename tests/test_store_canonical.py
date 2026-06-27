@@ -93,7 +93,11 @@ class StoreCanonicalTest(unittest.TestCase):
                 cache_root=root / "cache-source",
             )
 
-            ViewMaterializer(target, dataset_id="toy").write(dataset, _UpperProvider())
+            ViewMaterializer(target).write(
+                dataset_factory=_DatasetFactory(dataset),
+                provider_factory=_UpperProviderFactory(),
+                devices="cpu",
+            )
 
             sample = AnyDataset(
                 Spec(source=Source.STORE, path=str(target)),
@@ -113,6 +117,19 @@ class _UpperProvider:
 
     def __call__(self, views):
         return views[TextView.TEXT].upper()
+
+
+class _DatasetFactory:
+    def __init__(self, dataset) -> None:
+        self.dataset = dataset
+
+    def __call__(self):
+        return self.dataset
+
+
+class _UpperProviderFactory:
+    def __call__(self, device: str):
+        return _UpperProvider()
 
 
 if __name__ == "__main__":

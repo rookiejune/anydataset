@@ -33,11 +33,13 @@ def _register_builtin_sources() -> None:
     from .huggingface import HuggingFaceDiskSource, HuggingFaceSource
     from .sharded_csv import ShardedCsvSource
     from .store import StoreSource
+    from .tsv import TsvSource
 
     register_source(Source.HF, HuggingFaceSource)
     register_source(Source.HF_DISK, HuggingFaceDiskSource)
     register_source(Source.STORE, StoreSource)
     register_source("sharded_csv", ShardedCsvSource)
+    register_source("tsv", TsvSource)
 
 
 _register_builtin_sources()
