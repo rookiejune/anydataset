@@ -57,6 +57,27 @@ class StoreSourceTest(unittest.TestCase):
         self.assertEqual(audio.meta[AudioMeta.LABEL], "speech")
         self.assertEqual(text.views[TextView.TEXT], "hello")
 
+    def test_anydataset_reads_store_shorthand(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            output = root / "dataset"
+            waveform = torch.tensor([[1.0, 2.0, 3.0]])
+            DatasetWriter(output, dataset_id="toy-audio", split="train").write(
+                [_audio_sample(waveform=waveform)]
+            )
+
+            dataset = AnyDataset(
+                spec=f"store://{output}:train",
+                cache_root=root / "cache",
+            )
+            sample = dataset[0]
+
+        loaded_waveform, sample_rate = sample[Role.DEFAULT, Modality.AUDIO].views[
+            AudioView.WAVEFORM
+        ]
+        self.assertTrue(torch.equal(loaded_waveform, waveform))
+        self.assertEqual(sample_rate, 4)
+
     def test_file_view_is_extracted_to_cache_and_reused(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -108,6 +129,71 @@ class StoreSourceTest(unittest.TestCase):
             },
         )
         self.assertEqual(len(dataset.samples), 1)
+
+    def test_store_dataset_merge_adds_overlay_views(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            output = root / "dataset"
+            waveform = torch.tensor([[1.0, 2.0, 3.0]])
+            DatasetWriter(output, dataset_id="toy-audio", split="train").write(
+                [
+                    _audio_sample(
+                        waveform=waveform,
+                        label="speech",
+                        text="hello",
+                    )
+                ]
+            )
+            store = read_store_dataset(output)
+            overlay = [
+                {
+                    (Role.DEFAULT, Modality.AUDIO): AudioItem(
+                        views={
+                            AudioView.LONGCAT: {
+                                "semantic_codes": torch.tensor([[1, 2, 3]])
+                            }
+                        },
+                        meta={AudioMeta.LABEL: "speech"},
+                    )
+                }
+            ]
+
+            merged = store.merge(overlay)
+            sample = merged[0]
+
+        audio = sample[Role.DEFAULT, Modality.AUDIO]
+        text = sample[Role.DEFAULT, Modality.TEXT]
+        self.assertEqual(set(audio.views), {AudioView.WAVEFORM, AudioView.LONGCAT})
+        self.assertTrue(torch.equal(audio.views[AudioView.WAVEFORM][0], waveform))
+        self.assertTrue(
+            torch.equal(
+                audio.views[AudioView.LONGCAT]["semantic_codes"],
+                torch.tensor([[1, 2, 3]]),
+            )
+        )
+        self.assertEqual(audio.meta[AudioMeta.LABEL], "speech")
+        self.assertEqual(text.views[TextView.TEXT], "hello")
+
+    def test_store_dataset_merge_rejects_view_conflicts(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            output = root / "dataset"
+            waveform = torch.tensor([[1.0, 2.0, 3.0]])
+            DatasetWriter(output, dataset_id="toy-audio", split="train").write(
+                [_audio_sample(waveform=waveform)]
+            )
+            store = read_store_dataset(output)
+            overlay = [_audio_sample(waveform=torch.tensor([[4.0, 5.0, 6.0]]))]
+
+            with self.assertRaises(ValueError):
+                store.merge(overlay)
+
+            stored = read_store_dataset(output)
+
+        self.assertEqual(
+            set(stored.views),
+            {(Role.DEFAULT, Modality.AUDIO, AudioView.WAVEFORM)},
+        )
 
     def test_schema_selects_requested_views(self):
         with tempfile.TemporaryDirectory() as tmpdir:

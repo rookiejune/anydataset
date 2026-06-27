@@ -51,7 +51,7 @@ class LongCatViewProvider(nn.Module, AudioProvider):
 
     @torch.inference_mode()
     def forward(self, views: Mapping[AudioView, Any]):
-        waveform, sample_rate = self._batch(views)
+        waveform, sample_rate = self._longcat_batch(views)
         semantic_codes, acoustic_codes = self.longcat_codec.encode(
             waveform,
             sample_rate,
@@ -60,3 +60,12 @@ class LongCatViewProvider(nn.Module, AudioProvider):
             "semantic_codes": self._tensor(semantic_codes)[0],
             "acoustic_codes": self._tensor(acoustic_codes)[0],
         }
+
+    def _longcat_batch(self, views: Mapping[AudioView, Any]):
+        waveform, sample_rate = self._waveform(views)
+        waveform = waveform if isinstance(waveform, torch.Tensor) else torch.as_tensor(waveform)
+        if waveform.is_floating_point():
+            waveform = waveform.float()
+        if waveform.ndim == 1:
+            waveform = waveform.unsqueeze(0)
+        return waveform.unsqueeze(0), sample_rate

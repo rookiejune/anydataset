@@ -198,6 +198,13 @@ rank_iter = dataset.shard(num_shards=8, shard_id=0)
 
 `Schema` 是从 `(Role, Modality)` 到 requirement 的映射。requirement 指定这个 batch 需要哪些 view 和字段。
 
+这几个概念的分工是：
+
+- `Role` 表达一个 item 在样本里的语义位置，例如 `DEFAULT`、`SOURCE`、`TARGET`。
+- `Modality` 表达数据类型，例如 `AUDIO`、`TEXT`、`IMAGE`。
+- `View` 表达同一份数据的具体表示，例如音频的 waveform、file、LongCat codes。
+- `Meta` 表达标签、语言等旁信息。
+
 ```python
 from anydataset import AudioReq, AudioView, Modality, Role
 
@@ -243,6 +250,65 @@ schema = {
     (Role.TARGET, Modality.TEXT): text,
 }
 ```
+
+语音到语音翻译也可以用同一套结构表达。preset 可以产出 source audio 和 target audio；训练时如果只需要 LongCat codes，用户自己写 schema 即可，不需要为这个组合任务新增内置 `Task`：
+
+```python
+from anydataset import AudioReq, AudioView, Modality, Role
+
+longcat_audio = AudioReq(views=frozenset({AudioView.LONGCAT}))
+schema = {
+    (Role.SOURCE, Modality.AUDIO): longcat_audio,
+    (Role.TARGET, Modality.AUDIO): longcat_audio,
+}
+```
+
+如果数据集同时提供源语言转写和目标语言文本，可以在 preset 里一起产出文本 item。需要辅助 loss、过滤或调试时，再把文本加进 schema：
+
+```python
+from anydataset import TextMeta, TextReq, TextView
+
+text = TextReq(
+    views=frozenset({TextView.TEXT}),
+    meta=frozenset({TextMeta.LANG}),
+)
+schema = {
+    (Role.SOURCE, Modality.AUDIO): longcat_audio,
+    (Role.TARGET, Modality.AUDIO): longcat_audio,
+    (Role.SOURCE, Modality.TEXT): text,
+    (Role.TARGET, Modality.TEXT): text,
+}
+```
+
+一般来说，preset 负责尽量保留数据集天然提供的信息，schema 负责声明本次训练真正需要的字段。内置 `Task` 只适合非常稳定、跨数据集一致的默认 schema；组合型或研究型任务建议由用户显式写 schema。
+
+## 缓存过滤分区
+
+`FilterRule` 可以把 map-style `AnyDataset` 按规则分成多个 label，并把每个 label 对应的原始样本下标缓存在物理 `Spec` 的 cache 目录下。predicate 只会看到 `schema` 裁剪后的 `Sample`。
+
+```python
+from anydataset import AudioMeta, AudioReq, FilterRule, Modality, Role
+
+schema = {
+    (Role.DEFAULT, Modality.AUDIO): AudioReq(
+        meta=frozenset({AudioMeta.LABEL}),
+    )
+}
+
+rule = FilterRule(
+    name="quality_v1_parse_v3_transform_none",
+    schema=schema,
+    predicate=lambda sample: "review" if needs_review(sample) else is_good(sample),
+)
+
+result = rule.apply(dataset, num_workers=4)
+train = result.select("accept")
+audit = result.select("reject", "review")
+```
+
+predicate 返回 `True` 会归为 `"accept"`，返回 `False` 会归为 `"reject"`；也可以直接返回字符串或枚举值。`FilterRule` 的缓存身份只包含 `name` 和 `schema`。predicate、parse function 和 transforms 的语义版本由调用方写进 `name`。
+
+filter 构建默认单进程；传入 `num_workers` 后会按 map-style 下标范围并行扫描。`commit_samples` 控制扫描多少条样本后提交一次内存里的 label batch，默认 100,000；`max_shard_samples` 控制每个 parquet shard 最多多少个下标，默认 1,000,000。这样不会单样本写入，也不会先把几百万个下标全塞进一个 Python 对象或单个 parquet 文件。
 
 ## 从 Batch 里取数据
 
@@ -332,12 +398,13 @@ schema = {
 
 ## 生成新的 View
 
-store 的 view 目录直接使用 `{role}/{modality}/{view}`，真实 payload 放在该 view 目录下的 `shards/` 里。`ViewMaterializer` 会读取已有 dataset，把每个 item 的全部 views 交给 provider，由 provider 决定如何生成自己的输出 view。
+store 的 view 目录直接使用 `{role}/{modality}/{view}`，真实 payload 放在该 view 目录下的 `shards/` 里。`ViewMaterializer` 会读取已有 dataset，把每个 item 的全部 views 交给 provider，由 provider 决定如何生成自己的输出 view。它写出的是 delta store：保留样本和轻量 meta，只写 provider 的输出 view，不复制原来的 view payload。
 
 ```python
 import torch
 
 from anydataset import AnyDataset, AudioView, Source, Spec, ViewMaterializer
+from anydataset.store import read_store_dataset
 
 class ToyLongCat:
     output = AudioView.LONGCAT
@@ -353,25 +420,18 @@ dataset = AnyDataset(
     cache_root="/data/my_anydataset_cache",
 )
 
-ViewMaterializer(
+delta = ViewMaterializer(
     output_dir="/data/my_anydataset_longcat",
     dataset_id="my-audio",
     split="train",
 ).write(dataset, ToyLongCat())
+
+read_store_dataset("/data/my_anydataset").merge(
+    AnyDataset(Spec(source=Source.STORE, path=str(delta), split="train"))
+)
 ```
 
-默认情况下，`ViewMaterializer` 会写出一个 view-only 数据集：它保留样本和轻量 meta，只写 provider 的输出 view，不复制原来的 view payload。不同 provider、参数或实验版本由调用方通过 `output_dir`、provider 输出 view、目录命名和实验文档区分。
-
-如果希望输出目录是完整独立的数据集，同时带有原 view 和新 view，使用 `copy_inputs=True`：
-
-```python
-ViewMaterializer(
-    output_dir="/data/my_anydataset_with_longcat",
-    dataset_id="my-audio",
-    split="train",
-    copy_inputs=True,
-).write(dataset, ToyLongCat())
-```
+`merge()` 会把 delta store 里的新 view 原地合入 base store；如果 view 或 metadata 已经存在且发生冲突，会直接报错。
 
 生成的新 view 也通过 schema 选择：
 
@@ -387,14 +447,26 @@ schema = {
 
 LongCat 可以作为可选 provider 使用。provider 会加载 `anytrain.codec.longcat.LongCatAudioCodec`。输出 view 只保存 codes；waveform 输入的采样率来自 `AudioView.WAVEFORM` 的 `(waveform, sample_rate)` value，file 输入的采样率来自 `torchaudio.load()`。
 
-```python
-from anydataset.provider.longcat import LongCatViewProvider
+典型流程是先用 preset 或 source 读出 waveform store，再 materialize 成 LongCat delta store，合并后在训练 schema 里选择 `AudioView.LONGCAT`：
 
-ViewMaterializer(
+```text
+base waveform store -> ViewMaterializer + LongCatViewProvider -> delta store -> base.merge(delta) -> schema selects LONGCAT
+```
+
+```python
+from anydataset import AnyDataset, Source, Spec
+from anydataset.provider.longcat import LongCatViewProvider
+from anydataset.store import read_store_dataset
+
+delta = ViewMaterializer(
     output_dir="/data/my_anydataset_longcat",
     dataset_id="my-audio",
     split="train",
 ).write(dataset, LongCatViewProvider())
+
+read_store_dataset("/data/my_anydataset").merge(
+    AnyDataset(Spec(source=Source.STORE, path=str(delta), split="train"))
+)
 ```
 
 ## 开发

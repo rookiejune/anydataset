@@ -7,7 +7,8 @@ from typing import TYPE_CHECKING, Any, Callable, Iterator
 from torch.utils.data import Dataset, IterableDataset
 
 from .._sharding import runtime_shard, validate_shard
-from ..types import Spec
+from ..types import Preset, Spec
+from ..utils import resolve_dataset
 
 if TYPE_CHECKING:
     from ..cache import CacheManager
@@ -18,12 +19,12 @@ if TYPE_CHECKING:
 class _Base(ABC):
     def __init__(
         self,
-        spec: Spec,
+        spec: str | Preset | Spec,
         parse_fn: Callable[[Any], Sample] | None = None,
         cache_root: str | Path | None = None,
         transforms: Transforms | None = None,
     ) -> None:
-        self.spec = spec
+        self.spec = resolve_dataset(spec)
         self._cache_manager = None
         if cache_root is not None:
             from ..cache import CacheManager

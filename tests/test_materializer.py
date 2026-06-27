@@ -12,6 +12,9 @@ from anydataset import (
     Role,
     Source,
     Spec,
+    TextItem,
+    TextMeta,
+    TextView,
 )
 from anydataset.store import DatasetWriter, ViewMaterializer, read_store_dataset
 from anydataset.store.materializer import iter_indexed_shard
@@ -54,29 +57,6 @@ class ViewMaterializerTest(unittest.TestCase):
                     torch.tensor([[11, 12, 13]]),
                 )
             )
-
-    def test_materializer_can_copy_inputs(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            root = Path(tmpdir)
-            source = root / "source"
-            target = root / "target"
-            waveform = torch.tensor([[1.0, 2.0, 3.0]])
-            dataset = _source_dataset(source, root, [_audio_sample(waveform)])
-
-            ViewMaterializer(
-                target,
-                dataset_id="toy-audio",
-                split="train",
-                copy_inputs=True,
-            ).write(dataset, _Provider())
-
-            sample = _read_sample(target, root)
-            audio = sample[Role.DEFAULT, Modality.AUDIO]
-
-            self.assertEqual(set(audio.views), {AudioView.WAVEFORM, AudioView.LONGCAT})
-            loaded_waveform, sample_rate = audio.views[AudioView.WAVEFORM]
-            self.assertTrue(torch.equal(loaded_waveform, waveform))
-            self.assertEqual(sample_rate, 4)
 
     def test_materializer_processes_multiple_roles(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -127,6 +107,88 @@ class ViewMaterializerTest(unittest.TestCase):
                     torch.tensor([[13, 14]]),
                 )
             )
+
+    def test_materializer_skips_items_from_other_modalities(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            source = root / "source"
+            target = root / "target"
+            dataset = _source_dataset(
+                source,
+                root,
+                [
+                    {
+                        (Role.DEFAULT, Modality.AUDIO): AudioItem(
+                            views={AudioView.WAVEFORM: (torch.tensor([[1.0, 2.0]]), 4)}
+                        ),
+                        (Role.DEFAULT, Modality.TEXT): TextItem(
+                            views={TextView.TEXT: "hello"},
+                            meta={TextMeta.LANG: "en_us"},
+                        ),
+                    }
+                ],
+            )
+
+            ViewMaterializer(target, dataset_id="toy-audio").write(
+                dataset,
+                _Provider(offset=10),
+            )
+
+            stored = read_store_dataset(target)
+            sample = _read_sample(target, root)
+
+            self.assertEqual(
+                set(stored.views),
+                {(Role.DEFAULT, Modality.AUDIO, AudioView.LONGCAT)},
+            )
+            self.assertEqual(set(sample), {(Role.DEFAULT, Modality.AUDIO)})
+            self.assertTrue(
+                torch.equal(
+                    sample[Role.DEFAULT, Modality.AUDIO]
+                    .views[AudioView.LONGCAT]["semantic_codes"],
+                    torch.tensor([[11, 12]]),
+                )
+            )
+
+    def test_materialized_delta_merges_into_base_store(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            source = root / "source"
+            target = root / "target"
+            waveform = torch.tensor([[1.0, 2.0]])
+            DatasetWriter(source, dataset_id="toy-audio", split="train").write(
+                [
+                    {
+                        (Role.DEFAULT, Modality.AUDIO): AudioItem(
+                            views={AudioView.WAVEFORM: (waveform, 4)}
+                        ),
+                        (Role.DEFAULT, Modality.TEXT): TextItem(
+                            views={TextView.TEXT: "hello"},
+                            meta={TextMeta.LANG: "en_us"},
+                        ),
+                    }
+                ]
+            )
+
+            ViewMaterializer(target, dataset_id="toy-audio", split="train").write(
+                _store_dataset(source, root),
+                _Provider(offset=10),
+            )
+            merged = read_store_dataset(source).merge(read_store_dataset(target))
+            sample = merged[0]
+
+        audio = sample[Role.DEFAULT, Modality.AUDIO]
+        text = sample[Role.DEFAULT, Modality.TEXT]
+        self.assertEqual(set(audio.views), {AudioView.WAVEFORM, AudioView.LONGCAT})
+        self.assertTrue(torch.equal(audio.views[AudioView.WAVEFORM][0], waveform))
+        self.assertTrue(
+            torch.equal(
+                audio.views[AudioView.LONGCAT]["semantic_codes"],
+                torch.tensor([[11, 12]]),
+            )
+        )
+        self.assertEqual(text.views[TextView.TEXT], "hello")
+        self.assertEqual(text.meta[TextMeta.LANG], "en_us")
 
     def test_iter_indexed_shard_uses_map_style_indexes(self):
         dataset = [_audio_sample(torch.tensor([[float(index)]])) for index in range(5)]

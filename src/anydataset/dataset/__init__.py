@@ -3,7 +3,7 @@ from .abc import (
     IterableAnyDataset,
 )
 from .collate import Batch, FieldGroup, FieldRef, collate_fn
-from .filter import FilteredDataset, FilterRule, cached_filter
+from .filter import FilteredDataset, FilterResult, FilterRule
 from ..types import Source, Spec, Task
 from ..types.item import (
     AudioItem,
@@ -47,6 +47,7 @@ __all__ = [
     "FieldGroup",
     "FieldRef",
     "FilteredDataset",
+    "FilterResult",
     "FilterRule",
     "ImageItem",
     "ImageMeta",
@@ -75,6 +76,5 @@ __all__ = [
     "Transforms",
     "View",
     "WeightedRandomStrategy",
-    "cached_filter",
     "collate_fn",
 ]

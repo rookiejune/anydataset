@@ -116,6 +116,42 @@ dataset = MultipleAnyDataset(
 
 Every dataset exposes `iter_shard(num_shards, shard_id)` for distributed reads.
 
+## Cached Filter Partitions
+
+`FilterRule` routes a map-style dataset into cached label partitions. The
+predicate receives only the sample subset selected by `schema`.
+
+```python
+from anydataset import AudioMeta, AudioReq, FilterRule, Modality, Role
+
+schema = {
+    (Role.DEFAULT, Modality.AUDIO): AudioReq(
+        meta=frozenset({AudioMeta.LABEL}),
+    )
+}
+
+rule = FilterRule(
+    name="quality_v1_parse_v3_transform_none",
+    schema=schema,
+    predicate=lambda sample: "review" if needs_review(sample) else is_good(sample),
+)
+
+result = rule.apply(dataset, num_workers=4)
+train = result.select("accept")
+audit = result.select("reject", "review")
+```
+
+`True` maps to `"accept"` and `False` maps to `"reject"`. String and enum
+labels are stored as their own partitions. Rule cache identity includes only
+`name` and `schema`; callers should put predicate, parser, and transform
+semantics into `name` when cache reuse should change.
+
+Filter cache construction is single-process by default. Pass `num_workers` to
+parallelize over map-style index ranges. Partition index files are sharded by
+`max_shard_samples` (default: 1,000,000), so large labels do not need one huge
+parquet file. `commit_samples` (default: 100,000) bounds each in-memory label
+batch before it is committed to the shard writer.
+
 ## Store
 
 `DatasetWriter` writes canonical samples to a self-describing store. The same
@@ -151,10 +187,11 @@ restored = dataset[0]
 
 Views are stored under `{role}/{modality}/{view}/`; payloads live in that
 view directory's `shards/` files. `ViewMaterializer` adds derived views to a
-new store.
+delta store, which can be merged into the base store after it is complete.
 
 ```python
 from anydataset import AnyDataset, AudioView, Source, Spec, ViewMaterializer
+from anydataset.store import read_store_dataset
 
 class ToyLongCat:
     output = AudioView.LONGCAT
@@ -167,13 +204,15 @@ dataset = AnyDataset(
     Spec(source=Source.STORE, path="/data/my_anydataset"),
 )
 
-ViewMaterializer(
+delta = ViewMaterializer(
     output_dir="/data/my_anydataset_longcat",
     dataset_id="toy-audio",
 ).write(dataset, ToyLongCat())
-```
 
-Set `copy_inputs=True` to include existing views in the output dataset.
+read_store_dataset("/data/my_anydataset").merge(
+    AnyDataset(Spec(source=Source.STORE, path=str(delta)))
+)
+```
 
 ## Development
 

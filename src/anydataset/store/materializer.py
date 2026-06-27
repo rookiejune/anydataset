@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Iterable, Iterator, Mapping
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
@@ -12,6 +12,7 @@ from ..types.item import (
     ImageItem,
     ImageView,
     Item,
+    Modality,
     Sample,
     TextItem,
     TextView,
@@ -27,7 +28,6 @@ class ViewMaterializer:
     output_dir: str | Path
     dataset_id: str
     split: str | None = None
-    copy_inputs: bool = False
     max_shard_samples: int = DEFAULT_MAX_SHARD_SAMPLES
 
     def write(self, dataset: Iterable[Sample], provider: Provider) -> Path:
@@ -56,7 +56,7 @@ class ViewMaterializer:
             max_shard_samples=self.max_shard_samples,
         ).write(
             (
-                (index, _with_providers(sample, provider, copy_inputs=self.copy_inputs))
+                (index, _with_providers(sample, provider))
                 for index, sample in iter_indexed_shard(dataset, num_shards, shard_id)
             )
         )
@@ -71,7 +71,7 @@ class ViewMaterializer:
 
     def _samples(self, dataset: Iterable[Sample], provider: Provider):
         for sample in dataset:
-            yield _with_providers(sample, provider, copy_inputs=self.copy_inputs)
+            yield _with_providers(sample, provider)
 
 
 def iter_indexed_shard(
@@ -112,20 +112,18 @@ def iter_indexed_shard(
 def _with_providers(
     sample: Sample,
     provider: Provider,
-    *,
-    copy_inputs: bool,
 ) -> Sample:
+    modality = _output_modality(provider.output)
     return {
-        ref: _with_provider(item, provider, copy_inputs=copy_inputs)
+        ref: _with_provider(item, provider)
         for ref, item in sample.items()
+        if ref[1] is modality
     }
 
 
 def _with_provider(
     item: Item,
     provider: Provider,
-    *,
-    copy_inputs: bool,
 ) -> Item:
     match item:
         case AudioItem():
@@ -134,7 +132,6 @@ def _with_provider(
                 item,
                 provider.output,
                 provider(item.views),
-                copy_inputs=copy_inputs,
             )
         case ImageItem():
             provider = _image_provider(provider)
@@ -142,7 +139,6 @@ def _with_provider(
                 item,
                 provider.output,
                 provider(item.views),
-                copy_inputs=copy_inputs,
             )
         case TextItem():
             provider = _text_provider(provider)
@@ -150,7 +146,6 @@ def _with_provider(
                 item,
                 provider.output,
                 provider(item.views),
-                copy_inputs=copy_inputs,
             )
     raise TypeError(f"Unsupported materializer item: {type(item).__name__}.")
 
@@ -159,29 +154,27 @@ def _with_view(
     item: Item,
     view: View,
     value: Any,
-    *,
-    copy_inputs: bool,
 ) -> Item:
     match item:
         case AudioItem():
             if not isinstance(view, AudioView):
                 raise TypeError("audio item materializer output must be an AudioView.")
             return AudioItem(
-                views=_views(item.views, view, value, copy_inputs=copy_inputs),
+                views=_views(view, value),
                 meta=item.meta,
             )
         case ImageItem():
             if not isinstance(view, ImageView):
                 raise TypeError("image item materializer output must be an ImageView.")
             return ImageItem(
-                views=_views(item.views, view, value, copy_inputs=copy_inputs),
+                views=_views(view, value),
                 meta=item.meta,
             )
         case TextItem():
             if not isinstance(view, TextView):
                 raise TypeError("text item materializer output must be a TextView.")
             return TextItem(
-                views=_views(item.views, view, value, copy_inputs=copy_inputs),
+                views=_views(view, value),
                 meta=item.meta,
             )
     raise TypeError(f"Unsupported materializer item: {type(item).__name__}.")
@@ -205,13 +198,15 @@ def _text_provider(provider: Provider) -> ViewProvider[TextView]:
     return cast(ViewProvider[TextView], provider)
 
 
-def _views[ViewT](
-    original: Mapping[ViewT, Any],
-    view: ViewT,
-    value: Any,
-    *,
-    copy_inputs: bool,
-) -> dict[ViewT, Any]:
-    values = dict(original) if copy_inputs else {}
-    values[view] = value
-    return values
+def _output_modality(view: View) -> Modality:
+    if isinstance(view, AudioView):
+        return Modality.AUDIO
+    if isinstance(view, ImageView):
+        return Modality.IMAGE
+    if isinstance(view, TextView):
+        return Modality.TEXT
+    raise TypeError("materializer output must be an AudioView, ImageView, or TextView.")
+
+
+def _views[ViewT](view: ViewT, value: Any) -> dict[ViewT, Any]:
+    return {view: value}

@@ -6,6 +6,7 @@ from io import BytesIO
 from pathlib import Path
 from unittest.mock import patch
 
+import numpy as np
 import torch
 from torch import Tensor
 
@@ -27,6 +28,7 @@ from anydataset.store.paths import view_shard_path
 class FakeLongCatCodec:
     def __init__(self) -> None:
         self.calls: list[tuple[tuple[int, ...], int]] = []
+        self.dtypes: list[torch.dtype] = []
 
     def eval(self) -> None:
         return None
@@ -37,6 +39,7 @@ class FakeLongCatCodec:
         sample_rate: int,
     ) -> tuple[Tensor, Tensor]:
         self.calls.append((tuple(audio.shape), sample_rate))
+        self.dtypes.append(audio.dtype)
         return (
             torch.tensor([[1, 2, 3]], device=audio.device),
             torch.tensor([[[4, 5, 6], [7, 8, 9]]], device=audio.device),
@@ -141,6 +144,15 @@ class LongCatViewProviderTest(unittest.TestCase):
                 ((1, 2, 4), 16000),
             ],
         )
+
+    def test_provider_accepts_numpy_waveform(self):
+        with _fake_anytrain(FakeLongCatCodecLoader):
+            provider = LongCatViewProvider()
+
+        provider({AudioView.WAVEFORM: (np.array([0.1, 0.2, 0.3, 0.4]), 16000)})
+
+        self.assertEqual(FakeLongCatCodecLoader.codec.calls, [((1, 1, 4), 16000)])
+        self.assertEqual(FakeLongCatCodecLoader.codec.dtypes, [torch.float32])
 
     def test_loads_anytrain_codec_with_decoder_config(self):
         with _fake_anytrain(FakeLongCatCodecLoader):

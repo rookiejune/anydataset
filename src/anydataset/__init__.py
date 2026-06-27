@@ -5,6 +5,7 @@ from .dataset import (
     FieldGroup,
     FieldRef,
     FilteredDataset,
+    FilterResult,
     FilterRule,
     IterableAnyDataset,
     IterationStrategy,
@@ -12,7 +13,6 @@ from .dataset import (
     RoundRobinStrategy,
     SequentialStrategy,
     WeightedRandomStrategy,
-    cached_filter,
     collate_fn,
 )
 from .types import Preset, Source, Spec, Task
@@ -63,6 +63,7 @@ __all__ = [
     "FieldGroup",
     "FieldRef",
     "FilteredDataset",
+    "FilterResult",
     "FilterRule",
     "FunctionViewProvider",
     "ImageItem",
@@ -97,7 +98,6 @@ __all__ = [
     "ViewProvider",
     "ViewTransform",
     "WeightedRandomStrategy",
-    "cached_filter",
     "collate_fn",
     "default_cache_root",
     "for_source",
