@@ -3,10 +3,12 @@ from __future__ import annotations
 import multiprocessing
 import os
 import pickle
+import queue
 import socket
+import traceback
 from array import array
-from collections.abc import Iterable
-from concurrent.futures import ProcessPoolExecutor
+from collections import deque
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 
 from ..dataset.abc import AnyDataset
@@ -17,14 +19,13 @@ from .types import (
     FilterFactory,
     FilterPredicate,
     FilterOutput,
+    JsonValue,
     _FilterChunk,
     _FilterDecision,
     _FilterMetricsRow,
 )
 
-_WORKER_DATASET: AnyDataset | None = None
-_WORKER_PREDICATE: FilterPredicate | None = None
-_WORKER_METRICS = False
+_DONE = "__done__"
 
 
 @dataclass(frozen=True)
@@ -34,6 +35,19 @@ class _WorkerConfig:
     master_port: str
     rank: int
     world_size: int
+
+
+@dataclass(frozen=True)
+class _FilterRow:
+    index: int
+    label: str
+    metrics: Mapping[str, JsonValue] | None
+
+
+@dataclass(frozen=True)
+class _IndexedFilterChunk:
+    rank: int
+    rows: Sequence[_FilterRow]
 
 
 def collect_ranges(
@@ -61,30 +75,58 @@ def collect_ranges_parallel(
 ) -> Iterable[_FilterChunk]:
     sample_count = len(dataset)
     workers = min(len(devices), sample_count)
-    chunk_samples = min(commit_samples, (sample_count + workers - 1) // workers)
     master_addr = "127.0.0.1"
     master_port = _free_port()
     _validate_spawn_value("dataset", dataset)
     _validate_spawn_value("factory", factory)
     context = _multiprocessing_context()
-    with ProcessPoolExecutor(
-        max_workers=workers,
-        mp_context=context,
-        initializer=_init_filter_worker,
-        initargs=(
-            dataset,
-            factory,
-            metrics,
-            tuple(devices[:workers]),
-            master_addr,
-            master_port,
-        ),
-    ) as executor:
-        yield from _map_range_chunks(
-            executor,
-            range_chunks(sample_count, chunk_samples),
-            max_pending=workers * 2,
+    output = context.Queue()
+    processes = [
+        context.Process(
+            target=_filter_worker,
+            args=(
+                dataset,
+                factory,
+                metrics,
+                commit_samples,
+                _WorkerConfig(
+                    device=device,
+                    master_addr=master_addr,
+                    master_port=master_port,
+                    rank=rank,
+                    world_size=workers,
+                ),
+                output,
+            ),
+            name=f"anydataset-filter-{rank}",
         )
+        for rank, device in enumerate(devices[:workers])
+    ]
+    for process in processes:
+        process.start()
+    completed = False
+    try:
+        yield from _ordered_worker_chunks(
+            output,
+            processes,
+            workers=workers,
+            sample_count=sample_count,
+            commit_samples=commit_samples,
+        )
+        completed = True
+    finally:
+        if not completed:
+            for process in processes:
+                if process.is_alive():
+                    process.terminate()
+        for process in processes:
+            process.join()
+    failed = [process for process in processes if process.exitcode != 0]
+    if failed:
+        details = ", ".join(
+            f"{process.name} exited with {process.exitcode}" for process in failed
+        )
+        raise RuntimeError(f"Filter workers failed: {details}.")
 
 
 def collect_range(
@@ -128,72 +170,149 @@ def range_chunks(sample_count: int, chunk_samples: int) -> Iterable[tuple[int, i
         yield start, min(start + chunk_samples, sample_count)
 
 
-def _map_range_chunks(
-    executor: ProcessPoolExecutor,
-    chunks: Iterable[tuple[int, int]],
-    *,
-    max_pending: int,
-) -> Iterable[_FilterChunk]:
-    chunk_iter = iter(chunks)
-    pending = {}
-    next_submit = 0
-    next_yield = 0
-
-    def submit_next() -> None:
-        nonlocal next_submit
-        try:
-            chunk = next(chunk_iter)
-        except StopIteration:
-            return
-        pending[next_submit] = executor.submit(_collect_worker_range, chunk)
-        next_submit += 1
-
-    for _ in range(max_pending):
-        submit_next()
-
-    while pending:
-        future = pending.pop(next_yield)
-        yield future.result()
-        next_yield += 1
-        submit_next()
-
-
-def _init_filter_worker(
+def _filter_worker(
     dataset: AnyDataset,
     factory: FilterFactory,
     metrics: bool,
-    devices: tuple[str, ...],
-    master_addr: str,
-    master_port: str,
+    commit_samples: int,
+    config: _WorkerConfig,
+    output: multiprocessing.Queue,
 ) -> None:
-    global _WORKER_DATASET, _WORKER_PREDICATE, _WORKER_METRICS
-    _WORKER_DATASET = dataset
-    process = multiprocessing.current_process()
-    rank = process._identity[0] - 1 if process._identity else 0
-    rank = rank % len(devices)
-    _set_worker_environment(
-        _WorkerConfig(
-            device=devices[rank],
-            master_addr=master_addr,
-            master_port=master_port,
-            rank=rank,
-            world_size=len(devices),
+    env = _set_worker_environment(config)
+    try:
+        predicate = factory()
+        for chunk in collect_indexed_shard(
+            dataset,
+            predicate,
+            metrics,
+            commit_samples,
+            num_shards=config.world_size,
+            shard_id=config.rank,
+        ):
+            output.put(chunk)
+        output.put((_DONE, config.rank, None))
+    except Exception:
+        output.put((_DONE, config.rank, traceback.format_exc()))
+    finally:
+        _restore_environment(env)
+
+
+def collect_indexed_shard(
+    dataset: AnyDataset,
+    predicate: FilterPredicate,
+    write_metrics: bool,
+    commit_samples: int,
+    *,
+    num_shards: int,
+    shard_id: int,
+) -> Iterable[_IndexedFilterChunk]:
+    rows: list[_FilterRow] = []
+    for index in range(shard_id, len(dataset), num_shards):
+        output = decision(predicate(dataset[index]), metrics=write_metrics)
+        if write_metrics and output.metrics is None:
+            raise TypeError("filter predicate must return FilterDecision when metrics=True.")
+        rows.append(
+            _FilterRow(
+                index=index,
+                label=output.label,
+                metrics=output.metrics,
+            )
         )
-    )
-    _WORKER_PREDICATE = factory()
-    _WORKER_METRICS = metrics
+        if len(rows) == commit_samples:
+            yield _IndexedFilterChunk(rank=shard_id, rows=tuple(rows))
+            rows = []
+    if rows:
+        yield _IndexedFilterChunk(rank=shard_id, rows=tuple(rows))
 
 
-def _collect_worker_range(bounds: tuple[int, int]) -> _FilterChunk:
-    if _WORKER_DATASET is None or _WORKER_PREDICATE is None:
-        raise RuntimeError("filter worker was not initialized.")
-    start, stop = bounds
-    return collect_range(
-        _WORKER_DATASET,
-        _WORKER_PREDICATE,
-        _WORKER_METRICS,
-        start,
-        stop,
+def _ordered_worker_chunks(
+    output: multiprocessing.Queue,
+    processes: list[multiprocessing.Process],
+    *,
+    workers: int,
+    sample_count: int,
+    commit_samples: int,
+) -> Iterable[_FilterChunk]:
+    buffers = [deque() for _ in range(workers)]
+    done: set[int] = set()
+    next_index = 0
+    rows: list[_FilterRow] = []
+
+    while next_index < sample_count:
+        rank = next_index % workers
+        while not buffers[rank] or buffers[rank][0].index != next_index:
+            if rank in done:
+                raise RuntimeError(
+                    f"Filter worker {rank} finished before emitting sample {next_index}."
+                )
+            _read_worker_message(output, processes, buffers, done)
+        rows.append(buffers[rank].popleft())
+        next_index += 1
+        if len(rows) == commit_samples:
+            yield _chunk_from_rows(rows)
+            rows = []
+
+    if rows:
+        yield _chunk_from_rows(rows)
+
+    while len(done) < workers:
+        _read_worker_message(output, processes, buffers, done)
+
+
+def _read_worker_message(
+    output: multiprocessing.Queue,
+    processes: list[multiprocessing.Process],
+    buffers: Sequence[deque],
+    done: set[int],
+) -> None:
+    try:
+        message = output.get(timeout=0.2)
+    except queue.Empty:
+        dead = [
+            process
+            for process in processes
+            if process.exitcode not in (None, 0)
+        ]
+        if dead:
+            details = ", ".join(
+                f"{process.name} exited with {process.exitcode}" for process in dead
+            )
+            raise RuntimeError(f"Filter worker exited early: {details}.")
+        return
+    if isinstance(message, _IndexedFilterChunk):
+        buffers[message.rank].extend(message.rows)
+        return
+    if not _done_message(message):
+        return
+    _, rank, error = message
+    done.add(rank)
+    if error is not None:
+        raise RuntimeError(f"Filter worker {rank} failed.\n{error}")
+
+
+def _chunk_from_rows(rows: Sequence[_FilterRow]) -> _FilterChunk:
+    partitions: dict[str, array[int]] = {}
+    metric_rows: list[_FilterMetricsRow] = []
+    for row in rows:
+        if row.label not in partitions:
+            partitions[row.label] = array("q")
+        partitions[row.label].append(row.index)
+        if row.metrics is not None:
+            metric_rows.append(
+                _FilterMetricsRow(
+                    index=row.index,
+                    label=row.label,
+                    metrics=row.metrics,
+                )
+            )
+    return _FilterChunk(partitions=partitions, metrics=metric_rows)
+
+
+def _done_message(message: object) -> bool:
+    return (
+        isinstance(message, tuple)
+        and len(message) == 3
+        and message[0] == _DONE
     )
 
 

@@ -316,9 +316,12 @@ predicate 返回 `True` 会归为 `"accept"`，返回 `False` 会归为 `"reject
 predicate。`device="auto"` 会在有可见 CUDA 时每张卡启动一个 spawn 进程，没有
 CUDA 时退回 CPU 单进程。传 `device="cpu"` 可以明确使用 CPU 单进程；传
 `("cpu", "cpu")` 或 `("cuda:0", "cuda:1")` 这样的 iterable 可以显式指定多个
-worker。多设备过滤会在调用 factory 前设置 DDP 常用的 `RANK`、`LOCAL_RANK`、
-`WORLD_SIZE`、`MASTER_ADDR` 和 `MASTER_PORT` 环境变量。多设备过滤使用 Python
-`spawn`，factory 应该是模块顶层的可 pickle callable。
+worker。多设备过滤会为每个 device 启动一个固定 worker，在调用 factory 前设置
+DDP 常用的 `RANK`、`LOCAL_RANK`、`WORLD_SIZE`、`MASTER_ADDR` 和
+`MASTER_PORT` 环境变量，并用 exhaustive 的 runtime 风格 index shard 覆盖每条
+base sample。多设备过滤会自己管理这些环境变量，应作为离线预处理运行，不要放进
+已经存在的 DDP 训练进程里。它使用 Python `spawn`，factory 应该是模块顶层的可
+pickle callable。
 
 `commit_samples` 控制扫描多少条样本后提交一次内存里的 label batch，默认
 100,000；`max_shard_samples` 控制每个 parquet shard 最多多少个下标，默认
@@ -528,6 +531,8 @@ AnyDataset(
 如果 provider 需要 GPU，可以用 `devices` 控制并行设备。`devices="auto"` 会
 检测当前可见 CUDA 设备，每张卡启动一个 spawn worker；每个 worker 写自己的
 part 和 `<output_dir>/logs/part-xxxxx.log`，全部完成后主进程合并 store。
+和过滤一样，多设备 materialize 拥有自己的离线 worker，不应放进已经存在的 DDP
+训练进程里运行。
 
 ```python
 def provider_factory(device: str):

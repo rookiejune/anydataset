@@ -340,6 +340,22 @@ class FilteredDatasetTest(unittest.TestCase):
         self.assertEqual(result.counts, {"zero": 4, "one": 4, "two": 4})
         self.assertEqual(selected.indices, (1, 2, 4, 5, 7, 8, 10, 11))
 
+    def test_rule_apply_workers_cover_tail_samples(self):
+        _register_rows_source("unit_test_filter_worker_tail")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dataset = _dataset(
+                "unit_test_filter_worker_tail",
+                Path(tmpdir),
+                list(range(5)),
+            )
+            result = FilterRule(
+                name="all",
+                factory=_true_factory,
+            ).apply(dataset, device=("cpu:0", "cpu:1"))
+
+        self.assertEqual(result.counts, {"accept": 5})
+        self.assertEqual(result.select("accept").indices, (0, 1, 2, 3, 4))
+
     def test_rule_apply_writes_metrics_side_output(self):
         _register_rows_source("unit_test_filter_metrics")
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -768,6 +784,14 @@ def _mod_three(sample):
 
 def _mod_three_factory():
     return _mod_three
+
+
+def _true_decision(sample):
+    return True
+
+
+def _true_factory():
+    return _true_decision
 
 
 def _metric_decision(sample):

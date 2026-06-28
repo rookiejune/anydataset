@@ -160,10 +160,13 @@ predicate inside the process that will execute it. `device="auto"` uses one
 spawned process per visible CUDA device and falls back to CPU single-process
 execution. Pass `device="cpu"` for explicit single-process CPU filtering, or an
 iterable such as `("cpu", "cpu")` or `("cuda:0", "cuda:1")` for explicit
-parallel workers. Multi-device filtering sets DDP-style `RANK`, `LOCAL_RANK`,
-`WORLD_SIZE`, `MASTER_ADDR`, and `MASTER_PORT` environment variables before
-calling the factory. Multi-device filtering uses Python `spawn`, so factories
-should be module-level picklable callables.
+parallel workers. Multi-device filtering launches one fixed worker per device,
+sets DDP-style `RANK`, `LOCAL_RANK`, `WORLD_SIZE`, `MASTER_ADDR`, and
+`MASTER_PORT` before calling the factory, and scans an exhaustive runtime-style
+index shard so every base sample is covered. Multi-device filtering manages
+these environment variables itself; run it as an offline preprocessing step
+rather than from inside an existing DDP training process. It uses Python
+`spawn`, so factories should be module-level picklable callables.
 
 Partition index files are sharded by `max_shard_samples` (default: 1,000,000),
 so large labels do not need one huge parquet file. `commit_samples` (default:
@@ -314,7 +317,9 @@ For GPU-backed providers, let `devices` control parallelism. `devices="auto"`
 uses one spawned worker per visible CUDA device, writes worker logs under
 `<output_dir>/logs`, and commits the per-device parts when all workers finish.
 Multi-device materialization uses Python `spawn`, so `dataset_factory` and
-`provider_factory` must be picklable, module-level callables.
+`provider_factory` must be picklable, module-level callables. Like filtering,
+multi-device materialization owns its offline worker processes and should not
+be launched from inside an existing DDP training process.
 
 ```python
 def provider_factory(device: str):
