@@ -14,6 +14,8 @@ from queue import Empty
 from tempfile import TemporaryDirectory
 from typing import Any, Literal, cast
 
+import torch
+
 from .._devices import Devices, resolve_devices
 from .._sharding import validate_shard
 from ..dataset.collate import Batch, collate_fn
@@ -168,7 +170,7 @@ class ViewMaterializer:
             return
 
         for batch in _sample_batches(dataset, self.batch_size):
-            yield from self._samples_with_batch_provider(batch, provider)
+            yield from self._resilient_samples_with_batch_provider(batch, provider)
 
     def _samples_with_progress(
         self,
@@ -303,7 +305,9 @@ class ViewMaterializer:
 
         for batch in _indexed_sample_batches(indexed, self.batch_size):
             indexes, samples = zip(*batch, strict=True)
-            outputs = tuple(self._samples_with_batch_provider(samples, provider))
+            outputs = tuple(
+                self._resilient_samples_with_batch_provider(samples, provider)
+            )
             _validate_batch_outputs(outputs, len(samples))
             yield from zip(indexes, outputs, strict=True)
 
@@ -313,6 +317,16 @@ class ViewMaterializer:
         provider: MaterializerProvider,
     ) -> Iterator[Sample]:
         return _with_batch_view_provider(samples, cast(Provider, provider))
+
+    def _resilient_samples_with_batch_provider(
+        self,
+        samples: Sequence[Sample],
+        provider: MaterializerProvider,
+    ) -> Iterator[Sample]:
+        yield from _with_resilient_batch_provider(
+            samples,
+            lambda batch: tuple(self._samples_with_batch_provider(batch, provider)),
+        )
 
     def _uses_batch_provider(self, provider: MaterializerProvider) -> bool:
         return self.batch_size > 1 and _has_batch_provider(provider)
@@ -538,6 +552,21 @@ def _indexed_sample_batches(
         yield tuple(batch)
 
 
+def _with_resilient_batch_provider(
+    samples: Sequence[Sample],
+    call: Callable[[Sequence[Sample]], Sequence[Sample]],
+) -> Iterator[Sample]:
+    try:
+        yield from call(samples)
+    except Exception as exc:
+        if len(samples) <= 1 or not _is_oom_error(exc):
+            raise
+        _clear_cuda_cache()
+        midpoint = len(samples) // 2
+        yield from _with_resilient_batch_provider(samples[:midpoint], call)
+        yield from _with_resilient_batch_provider(samples[midpoint:], call)
+
+
 def _with_batch_view_provider(
     samples: Sequence[Sample],
     provider: Provider,
@@ -755,6 +784,20 @@ def _validate_batch_outputs(values: Sequence[Any], expected: int) -> None:
         raise ValueError(
             f"Batch provider returned {len(values)} outputs for {expected} samples."
         )
+
+
+def _is_oom_error(error: BaseException) -> bool:
+    if isinstance(error, torch.OutOfMemoryError):
+        return True
+    if not isinstance(error, RuntimeError):
+        return False
+    message = str(error).lower()
+    return "out of memory" in message or "cuda error: out of memory" in message
+
+
+def _clear_cuda_cache() -> None:
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
 
 def iter_indexed_shard(

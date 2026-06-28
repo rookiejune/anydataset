@@ -206,6 +206,72 @@ class ViewMaterializerTest(unittest.TestCase):
                     devices="cpu",
                 )
 
+    def test_materializer_splits_oom_batch_and_recaptures_padding(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            source = root / "source"
+            target = root / "target"
+            dataset = _source_dataset(
+                source,
+                root,
+                [
+                    _audio_sample(torch.tensor([[1.0, 2.0, 3.0, 4.0]])),
+                    _audio_sample(torch.tensor([[5.0, 6.0, 7.0]])),
+                    _audio_sample(torch.tensor([[8.0, 9.0]])),
+                    _audio_sample(torch.tensor([[10.0]])),
+                ],
+            )
+            provider = _SplitOnOomBatchProvider()
+
+            ViewMaterializer(target, batch_size=4).write(
+                dataset_factory=_DatasetFactory(dataset),
+                provider_factory=_StaticProviderFactory(provider),
+                devices="cpu",
+            )
+
+            stored = read_store_dataset(target)
+            codes = [
+                stored[index][Role.DEFAULT, Modality.AUDIO]
+                .views[AudioView.LONGCAT]["semantic_codes"]
+                for index in range(4)
+            ]
+
+        self.assertEqual(
+            provider.batch_shapes,
+            [
+                (4, 1, 4),
+                (2, 1, 4),
+                (1, 1, 4),
+                (1, 1, 3),
+                (2, 1, 2),
+                (1, 1, 2),
+                (1, 1, 1),
+            ],
+        )
+        self.assertTrue(torch.equal(codes[0], torch.tensor([[1, 2, 3, 4]])))
+        self.assertTrue(torch.equal(codes[1], torch.tensor([[5, 6, 7]])))
+        self.assertTrue(torch.equal(codes[2], torch.tensor([[8, 9]])))
+        self.assertTrue(torch.equal(codes[3], torch.tensor([[10]])))
+
+    def test_materializer_does_not_split_non_oom_batch_errors(self):
+        provider = _NonOomBatchProvider()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            with self.assertRaisesRegex(RuntimeError, "bad batch"):
+                ViewMaterializer(root / "target", batch_size=2).write(
+                    dataset_factory=_DatasetFactory(
+                        (
+                            _audio_sample(torch.tensor([[1.0]])),
+                            _audio_sample(torch.tensor([[2.0]])),
+                        )
+                    ),
+                    provider_factory=_StaticProviderFactory(provider),
+                    devices="cpu",
+                )
+
+        self.assertEqual(provider.batch_shapes, [(2, 1, 1)])
+
     def test_materializer_processes_multiple_roles(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -740,6 +806,30 @@ class _MultiRoleBatchProvider(_Provider):
 class _BadBatchProvider(_Provider):
     def call_batch(self, batch):
         return [{"semantic_codes": torch.tensor([[1]])}]
+
+
+class _SplitOnOomBatchProvider(_BatchProvider):
+    def call_batch(self, batch):
+        ref = (Role.DEFAULT, Modality.AUDIO)
+        waveform, _ = batch.sample[ref].views[AudioView.WAVEFORM]
+        self.batch_shapes.append(tuple(waveform.shape))
+        if waveform.shape[0] > 1:
+            raise torch.OutOfMemoryError("CUDA out of memory")
+        lengths = batch.lengths(
+            FieldRef(ref, FieldGroup.VIEWS, AudioView.WAVEFORM)
+        )
+        return [
+            {"semantic_codes": waveform[index, :, : int(length.item())].to(torch.int64)}
+            for index, length in enumerate(lengths)
+        ]
+
+
+class _NonOomBatchProvider(_BatchProvider):
+    def call_batch(self, batch):
+        ref = (Role.DEFAULT, Modality.AUDIO)
+        waveform, _ = batch.sample[ref].views[AudioView.WAVEFORM]
+        self.batch_shapes.append(tuple(waveform.shape))
+        raise RuntimeError("bad batch")
 
 
 def _batch_codes(batch, ref):
