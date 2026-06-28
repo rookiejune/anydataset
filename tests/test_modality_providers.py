@@ -5,7 +5,17 @@ from dataclasses import dataclass
 
 import torch
 
-from anydataset import AudioView, TextView
+from anydataset import (
+    AudioItem,
+    AudioReq,
+    AudioView,
+    Modality,
+    Role,
+    TextItem,
+    TextReq,
+    TextView,
+    collate_fn,
+)
 from anydataset.provider.moss_tts import MossTTSProvider
 from anydataset.provider.whisper import WhisperASRProvider
 
@@ -62,6 +72,42 @@ class ModalityProviderTest(unittest.TestCase):
             ],
         )
 
+    def test_moss_tts_provider_synthesizes_text_batch(self):
+        FakeMossTTS.calls = []
+        FakeMossTTS.loaded = None
+        options = object()
+        with _fake_anytrain_tts():
+            provider = MossTTSProvider(options=options, device="cpu")
+
+        outputs = provider.call_batch(
+            collate_fn(
+                {
+                    (Role.DEFAULT, Modality.TEXT): TextReq(
+                        views=frozenset({TextView.TEXT})
+                    )
+                }
+            )(
+                [
+                    {
+                        (Role.DEFAULT, Modality.TEXT): TextItem(
+                            views={TextView.TEXT: "hello"}
+                        )
+                    },
+                    {
+                        (Role.DEFAULT, Modality.TEXT): TextItem(
+                            views={TextView.TEXT: "world"}
+                        )
+                    },
+                ]
+            )
+        )
+
+        self.assertEqual(FakeMossTTS.loaded.synthesize_calls, [(["hello", "world"], options)])
+        self.assertEqual(len(outputs), 2)
+        self.assertTrue(torch.equal(outputs[0][0], torch.tensor([[0.0, 1.0]])))
+        self.assertTrue(torch.equal(outputs[1][0], torch.tensor([[2.0, 3.0]])))
+        self.assertEqual([sample_rate for _, sample_rate in outputs], [16000, 16000])
+
     def test_whisper_asr_provider_loads_preset_and_transcribes(self):
         FakeWhisperASREvaluator.calls = []
         FakeWhisperASREvaluator.loaded = None
@@ -94,6 +140,80 @@ class ModalityProviderTest(unittest.TestCase):
         self.assertTrue(torch.equal(waveform, torch.tensor([[1.0, 2.0]])))
         self.assertEqual(sample_rate, 16000)
 
+    def test_whisper_asr_provider_transcribes_waveform_batch(self):
+        FakeWhisperASREvaluator.calls = []
+        FakeWhisperASREvaluator.loaded = None
+        with _fake_anytrain_asr():
+            provider = WhisperASRProvider(device="cpu")
+
+        outputs = provider.call_batch(
+            collate_fn(
+                {
+                    (Role.DEFAULT, Modality.AUDIO): AudioReq(
+                        views=frozenset({AudioView.WAVEFORM})
+                    )
+                }
+            )(
+                [
+                    {
+                        (Role.DEFAULT, Modality.AUDIO): AudioItem(
+                            views={
+                                AudioView.WAVEFORM: (
+                                    torch.tensor([[1.0, 2.0, 3.0]]),
+                                    16000,
+                                )
+                            }
+                        )
+                    },
+                    {
+                        (Role.DEFAULT, Modality.AUDIO): AudioItem(
+                            views={
+                                AudioView.WAVEFORM: (
+                                    torch.tensor([[4.0]]),
+                                    16000,
+                                )
+                            }
+                        )
+                    },
+                ]
+            )
+        )
+
+        self.assertEqual(outputs, ["hello-0", "hello-1"])
+        self.assertEqual(len(FakeWhisperASREvaluator.loaded.transcribe_calls), 1)
+        waveform, sample_rate = FakeWhisperASREvaluator.loaded.transcribe_calls[0]
+        self.assertEqual(tuple(waveform.shape), (2, 1, 3))
+        self.assertTrue(torch.equal(waveform[1], torch.tensor([[4.0, 0.0, 0.0]])))
+        self.assertEqual(sample_rate, 16000)
+
+    def test_whisper_asr_provider_requires_one_sample_rate_per_batch(self):
+        with _fake_anytrain_asr():
+            provider = WhisperASRProvider(device="cpu")
+
+        batch = collate_fn(
+            {
+                (Role.DEFAULT, Modality.AUDIO): AudioReq(
+                    views=frozenset({AudioView.WAVEFORM})
+                )
+            }
+        )(
+            [
+                {
+                    (Role.DEFAULT, Modality.AUDIO): AudioItem(
+                        views={AudioView.WAVEFORM: (torch.tensor([[1.0]]), 16000)}
+                    )
+                },
+                {
+                    (Role.DEFAULT, Modality.AUDIO): AudioItem(
+                        views={AudioView.WAVEFORM: (torch.tensor([[2.0]]), 24000)}
+                    )
+                },
+            ]
+        )
+
+        with self.assertRaisesRegex(ValueError, "one sample rate"):
+            provider.call_batch(batch)
+
 
 @dataclass
 class _TTSOutput:
@@ -116,6 +236,14 @@ class FakeMossTTS:
 
     def synthesize(self, text, options):
         self.synthesize_calls.append((text, options))
+        if not isinstance(text, str):
+            return [
+                _TTSOutput(
+                    torch.tensor([[float(index * 2), float(index * 2 + 1)]]),
+                    16000,
+                )
+                for index, _ in enumerate(text)
+            ]
         return _TTSOutput(torch.tensor([[1.0, 2.0]]), 16000)
 
 
@@ -130,6 +258,8 @@ class FakeWhisperASREvaluator:
 
     def transcribe(self, waveform, sample_rate):
         self.transcribe_calls.append((waveform, sample_rate))
+        if isinstance(waveform, torch.Tensor) and waveform.ndim > 2:
+            return [f"hello-{index}" for index in range(waveform.shape[0])]
         return "hello"
 
 
