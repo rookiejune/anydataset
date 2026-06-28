@@ -553,11 +553,14 @@ lambda 或局部函数。
 provider 上实现 `call_batch(batch)`。`batch` 是 `collate_fn` 返回的
 `Batch(sample, masks)`；`batch_size=1` 或 provider 没有 batch 方法时会继续走
 单条 `__call__` 路径。`Batch.masks` 是通用有效位置表达，序列长度可以用
-`batch.lengths(field_ref)` 从 mask 派生。
+`batch.lengths(field_ref)` 从 mask 派生。materializer 只 batch 单个输入引用时，
+`call_batch` 可以直接返回一组输出；同一个 batch 里有多个输入引用时，
+`call_batch` 必须返回从 `(role, modality)` 引用到该引用输出序列的映射。
 
 LongCat provider 的 batch 路径会把 waveform padding 后交给 LongCat encoder。
-当前 LongCat encoder 不接收 mask，所以 provider 会根据输入 waveform 的有效长度
-按比例裁剪输出 codes，避免把 padding 对应的 codes 写入 store。
+同一个 batch 里有多个 audio role 时，它会在同一个 collated batch 里按 role 分别
+encode。当前 LongCat encoder 不接收 mask，所以 provider 会根据每个输入 waveform
+的有效长度按比例裁剪输出 codes，避免把 padding 对应的 codes 写入 store。
 
 `merge()` 会把右侧 dataset 里的新 view 或新 item 原地合入左侧 store；如果 view 或 metadata 已经存在且发生冲突，会直接报错。也可以把 delta store 当作目标 store，执行 `AnyDataset(Spec(source=Source.STORE, path=str(delta), split="train")).merge(dataset)`，避免先复制一份 source。
 

@@ -67,8 +67,24 @@ class LongCatProvider(nn.Module, AudioProvider):
         )
 
     @torch.inference_mode()
-    def call_batch(self, batch: Batch) -> Sequence[dict[str, torch.Tensor]]:
-        ref = _audio_ref(batch)
+    def call_batch(
+        self,
+        batch: Batch,
+    ) -> (
+        Sequence[dict[str, torch.Tensor]]
+        | Mapping[tuple[Role, Modality], Sequence[dict[str, torch.Tensor]]]
+    ):
+        refs = _audio_refs(batch)
+        outputs = {ref: self._encode_ref_batch(batch, ref) for ref in refs}
+        if len(refs) == 1:
+            return outputs[refs[0]]
+        return outputs
+
+    def _encode_ref_batch(
+        self,
+        batch: Batch,
+        ref: tuple[Role, Modality],
+    ) -> Sequence[dict[str, torch.Tensor]]:
         audio = batch.sample[ref]
         waveform, sample_rates = audio.views[AudioView.WAVEFORM]
         if waveform.is_floating_point():
@@ -115,18 +131,18 @@ class LongCatProvider(nn.Module, AudioProvider):
         )
 
 
-def _audio_ref(batch: Batch) -> tuple[Role, Modality]:
+def _audio_refs(batch: Batch) -> tuple[tuple[Role, Modality], ...]:
     refs = tuple(
         ref
         for ref in batch.sample
         if ref[1] is Modality.AUDIO
         and AudioView.WAVEFORM in batch.sample[ref].views
     )
-    if len(refs) != 1:
+    if not refs:
         raise ValueError(
-            "LongCatProvider.call_batch expects exactly one audio waveform input."
+            "LongCatProvider.call_batch expects at least one audio waveform input."
         )
-    return refs[0]
+    return refs
 
 
 def _single_sample_rate(sample_rates: torch.Tensor) -> int:

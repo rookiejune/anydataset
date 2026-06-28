@@ -548,9 +548,17 @@ def _with_batch_view_provider(
     outputs: list[dict[tuple[Role, Modality], Item]] = [
         {} for _ in samples
     ]
-    for ref in refs:
-        batch = collate_fn({ref: _input_requirement(samples, ref)})(samples)
-        values = _call_batch(provider, batch)
+    if refs:
+        schema = {ref: _input_requirement(samples, ref) for ref in refs}
+        batch = collate_fn(schema)(samples)
+        values_by_ref = _view_batch_outputs(
+            _call_batch(provider, batch),
+            refs,
+            len(samples),
+        )
+    else:
+        values_by_ref = {}
+    for ref, values in values_by_ref.items():
         _validate_batch_outputs(values, len(samples))
         for index, (sample, value) in enumerate(zip(samples, values, strict=True)):
             outputs[index][ref] = _with_view(sample[ref], output, value)
@@ -660,11 +668,57 @@ def _sorted_refs(
     return tuple(sorted(refs, key=lambda ref: (ref[0].value, ref[1].value)))
 
 
-def _call_batch(provider: Any, batch: Batch) -> Sequence[Any]:
+def _call_batch(
+    provider: Any,
+    batch: Batch,
+) -> Sequence[Any] | Mapping[tuple[Role, Modality], Sequence[Any]]:
     call_batch = getattr(provider, "call_batch", None)
     if not callable(call_batch):
         raise TypeError("batch provider must define call_batch().")
     return call_batch(batch)
+
+
+def _view_batch_outputs(
+    values: Sequence[Any] | Mapping[tuple[Role, Modality], Sequence[Any]],
+    refs: Sequence[tuple[Role, Modality]],
+    sample_count: int,
+) -> Mapping[tuple[Role, Modality], Sequence[Any]]:
+    if len(refs) == 1 and not isinstance(values, Mapping):
+        _validate_batch_outputs(values, sample_count)
+        return {refs[0]: values}
+    if not isinstance(values, Mapping):
+        raise TypeError(
+            "Batch view providers with multiple input references must return "
+            "a mapping from reference to outputs."
+        )
+
+    expected = set(refs)
+    actual = set(values)
+    if actual != expected:
+        missing = ", ".join(_ref_name(ref) for ref in sorted(expected - actual))
+        extra = ", ".join(_ref_name(ref) for ref in sorted(actual - expected))
+        details = []
+        if missing:
+            details.append(f"missing {missing}")
+        if extra:
+            details.append(f"unexpected {extra}")
+        raise ValueError(
+            "Batch view provider returned outputs for the wrong references"
+            f" ({'; '.join(details)})."
+        )
+
+    for ref, outputs in values.items():
+        if isinstance(outputs, Mapping) or not isinstance(outputs, Sequence):
+            raise TypeError(
+                f"Batch view provider outputs for {_ref_name(ref)} must be a sequence."
+            )
+        _validate_batch_outputs(outputs, sample_count)
+    return values
+
+
+def _ref_name(ref: tuple[Role, Modality]) -> str:
+    role, modality = ref
+    return f"({role.value}, {modality.value})"
 
 
 def _has_batch_provider(provider: Any) -> bool:

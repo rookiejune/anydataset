@@ -337,11 +337,16 @@ and by passing `batch_size` to the materializer. The `batch` argument is the
 same `Batch(sample, masks)` object returned by `collate_fn`; `batch_size=1` or
 providers without `call_batch` keep using the per-sample `__call__` path.
 `Batch.masks` remains the canonical validity signal, and sequence lengths can
-be derived with `batch.lengths(field_ref)`.
+be derived with `batch.lengths(field_ref)`. When the materializer batches a
+single input reference, `call_batch` may return one output sequence. When the
+same batch contains multiple input references, `call_batch` must return a
+mapping from `(role, modality)` reference to that reference's output sequence.
 
-`LongCatProvider.call_batch` pads waveform input before encoding. The current
-LongCat encoder does not accept masks, so the provider trims output codes
-proportionally from the input waveform mask before writing samples to the store.
+`LongCatProvider.call_batch` pads waveform input before encoding. If a batch has
+multiple audio roles, it encodes each role separately from the same collated
+batch. The current LongCat encoder does not accept masks, so the provider trims
+output codes proportionally from each input waveform mask before writing samples
+to the store.
 
 `ModalityMaterializer` adds a missing modality under the same role. The
 provider declares its output view; the materializer infers the output modality

@@ -123,6 +123,72 @@ class ViewMaterializerTest(unittest.TestCase):
                 )
             )
 
+    def test_materializer_collates_multiple_roles_for_one_batch_provider_call(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            source = root / "source"
+            target = root / "target"
+            dataset = _source_dataset(
+                source,
+                root,
+                [
+                    _role_audio_sample(
+                        source_waveform=torch.tensor([[1.0, 2.0, 3.0]]),
+                        target_waveform=torch.tensor([[4.0]]),
+                    ),
+                    _role_audio_sample(
+                        source_waveform=torch.tensor([[5.0]]),
+                        target_waveform=torch.tensor([[6.0, 7.0]]),
+                    ),
+                ],
+            )
+            provider = _MultiRoleBatchProvider()
+
+            ViewMaterializer(target, batch_size=2).write(
+                dataset_factory=_DatasetFactory(dataset),
+                provider_factory=_StaticProviderFactory(provider),
+                devices="cpu",
+            )
+
+            stored = read_store_dataset(target)
+            self.assertEqual(
+                provider.batch_refs,
+                [
+                    (
+                        (Role.SOURCE, Modality.AUDIO),
+                        (Role.TARGET, Modality.AUDIO),
+                    )
+                ],
+            )
+            self.assertTrue(
+                torch.equal(
+                    stored[0][Role.SOURCE, Modality.AUDIO]
+                    .views[AudioView.LONGCAT]["semantic_codes"],
+                    torch.tensor([[1, 2, 3]]),
+                )
+            )
+            self.assertTrue(
+                torch.equal(
+                    stored[0][Role.TARGET, Modality.AUDIO]
+                    .views[AudioView.LONGCAT]["semantic_codes"],
+                    torch.tensor([[4]]),
+                )
+            )
+            self.assertTrue(
+                torch.equal(
+                    stored[1][Role.SOURCE, Modality.AUDIO]
+                    .views[AudioView.LONGCAT]["semantic_codes"],
+                    torch.tensor([[5]]),
+                )
+            )
+            self.assertTrue(
+                torch.equal(
+                    stored[1][Role.TARGET, Modality.AUDIO]
+                    .views[AudioView.LONGCAT]["semantic_codes"],
+                    torch.tensor([[6, 7]]),
+                )
+            )
+
     def test_materializer_rejects_wrong_batch_provider_output_count(self):
         provider = _BadBatchProvider()
 
@@ -558,6 +624,21 @@ def _audio_sample(waveform: torch.Tensor):
     }
 
 
+def _role_audio_sample(
+    *,
+    source_waveform: torch.Tensor,
+    target_waveform: torch.Tensor,
+):
+    return {
+        (Role.SOURCE, Modality.AUDIO): AudioItem(
+            views={AudioView.WAVEFORM: (source_waveform, 4)},
+        ),
+        (Role.TARGET, Modality.AUDIO): AudioItem(
+            views={AudioView.WAVEFORM: (target_waveform, 4)},
+        ),
+    }
+
+
 class _Provider:
     output = AudioView.LONGCAT
 
@@ -592,9 +673,29 @@ class _BatchProvider(_Provider):
         ]
 
 
+class _MultiRoleBatchProvider(_Provider):
+    def __init__(self):
+        super().__init__()
+        self.batch_refs: list[tuple[tuple[Role, Modality], ...]] = []
+
+    def call_batch(self, batch):
+        refs = tuple(batch.sample)
+        self.batch_refs.append(refs)
+        return {ref: _batch_codes(batch, ref) for ref in refs}
+
+
 class _BadBatchProvider(_Provider):
     def call_batch(self, batch):
         return [{"semantic_codes": torch.tensor([[1]])}]
+
+
+def _batch_codes(batch, ref):
+    waveform, _ = batch.sample[ref].views[AudioView.WAVEFORM]
+    lengths = batch.lengths(FieldRef(ref, FieldGroup.VIEWS, AudioView.WAVEFORM))
+    return [
+        {"semantic_codes": waveform[index, :, : int(length.item())].to(torch.int64)}
+        for index, length in enumerate(lengths)
+    ]
 
 
 class _TTSProvider:

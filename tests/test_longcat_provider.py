@@ -283,6 +283,48 @@ class LongCatProviderTest(unittest.TestCase):
             [((2, 1, 4), 16000)],
         )
 
+    def test_call_batch_encodes_multiple_audio_roles(self):
+        with _fake_anytrain(FakeBatchedLongCatCodecLoader):
+            provider = LongCatProvider()
+
+        outputs = provider.call_batch(
+            _provider_batch(
+                _role_audio_sample(
+                    source_waveform=torch.tensor([[1.0, 2.0, 3.0, 4.0]]),
+                    target_waveform=torch.tensor([[5.0, 6.0]]),
+                    sample_rate=16000,
+                ),
+                _role_audio_sample(
+                    source_waveform=torch.tensor([[7.0, 8.0]]),
+                    target_waveform=torch.tensor([[9.0, 10.0, 11.0, 12.0]]),
+                    sample_rate=16000,
+                ),
+            )
+        )
+
+        self.assertEqual(
+            FakeBatchedLongCatCodecLoader.codec.calls,
+            [
+                ((2, 1, 4), 16000),
+                ((2, 1, 4), 16000),
+            ],
+        )
+        self.assertIsInstance(outputs, dict)
+        source = outputs[(Role.SOURCE, Modality.AUDIO)]
+        target = outputs[(Role.TARGET, Modality.AUDIO)]
+        self.assertTrue(
+            torch.equal(source[0]["semantic_codes"], torch.tensor([10, 11, 12, 13]))
+        )
+        self.assertTrue(
+            torch.equal(source[1]["semantic_codes"], torch.tensor([20, 21]))
+        )
+        self.assertTrue(
+            torch.equal(target[0]["semantic_codes"], torch.tensor([10, 11]))
+        )
+        self.assertTrue(
+            torch.equal(target[1]["semantic_codes"], torch.tensor([20, 21, 22, 23]))
+        )
+
     def test_materializer_batches_longcat_and_trims_codes_from_waveform_mask(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -335,6 +377,80 @@ class LongCatProviderTest(unittest.TestCase):
                 )
             )
 
+    def test_materializer_batches_longcat_for_multiple_audio_roles(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            source = root / "source"
+            target = root / "target"
+            DatasetWriter(source, dataset_id="toy-audio", split="train").write(
+                [
+                    _role_audio_sample(
+                        source_waveform=torch.tensor([[1.0, 2.0, 3.0, 4.0]]),
+                        target_waveform=torch.tensor([[5.0, 6.0]]),
+                        sample_rate=16000,
+                    ),
+                    _role_audio_sample(
+                        source_waveform=torch.tensor([[7.0, 8.0]]),
+                        target_waveform=torch.tensor([[9.0, 10.0, 11.0, 12.0]]),
+                        sample_rate=16000,
+                    ),
+                ]
+            )
+
+            with _fake_anytrain(FakeBatchedLongCatCodecLoader):
+                ViewMaterializer(target, split="train", batch_size=2).write(
+                    dataset_factory=_StoreDatasetFactory(source, root),
+                    provider_factory=_LongCatProviderFactory(),
+                    devices="cpu",
+                )
+
+            self.assertEqual(
+                FakeBatchedLongCatCodecLoader.codec.calls,
+                [
+                    ((2, 1, 4), 16000),
+                    ((2, 1, 4), 16000),
+                ],
+            )
+
+            dataset = _store_dataset(target, root)
+            first_source = dataset[0][(Role.SOURCE, Modality.AUDIO)].views[
+                AudioView.LONGCAT
+            ]
+            first_target = dataset[0][(Role.TARGET, Modality.AUDIO)].views[
+                AudioView.LONGCAT
+            ]
+            second_source = dataset[1][(Role.SOURCE, Modality.AUDIO)].views[
+                AudioView.LONGCAT
+            ]
+            second_target = dataset[1][(Role.TARGET, Modality.AUDIO)].views[
+                AudioView.LONGCAT
+            ]
+
+            self.assertTrue(
+                torch.equal(
+                    first_source["semantic_codes"],
+                    torch.tensor([10, 11, 12, 13]),
+                )
+            )
+            self.assertTrue(
+                torch.equal(
+                    first_target["semantic_codes"],
+                    torch.tensor([10, 11]),
+                )
+            )
+            self.assertTrue(
+                torch.equal(
+                    second_source["semantic_codes"],
+                    torch.tensor([20, 21]),
+                )
+            )
+            self.assertTrue(
+                torch.equal(
+                    second_target["semantic_codes"],
+                    torch.tensor([20, 21, 22, 23]),
+                )
+            )
+
     def test_loads_anytrain_codec_with_decoder_config(self):
         with _fake_anytrain(FakeLongCatCodecLoader):
             provider = LongCatProvider(
@@ -378,6 +494,22 @@ def _audio_sample(
     }
 
 
+def _role_audio_sample(
+    *,
+    source_waveform,
+    target_waveform,
+    sample_rate: int,
+):
+    return {
+        (Role.SOURCE, Modality.AUDIO): AudioItem(
+            views={AudioView.WAVEFORM: (source_waveform, sample_rate)},
+        ),
+        (Role.TARGET, Modality.AUDIO): AudioItem(
+            views={AudioView.WAVEFORM: (target_waveform, sample_rate)},
+        ),
+    }
+
+
 def _store_dataset(path: Path, root: Path):
     return AnyDataset(
         Spec(source=Source.STORE, path=str(path), split="train"),
@@ -386,11 +518,11 @@ def _store_dataset(path: Path, root: Path):
 
 
 def _provider_batch(*samples):
+    refs = tuple(ref for ref in samples[0] if ref[1] is Modality.AUDIO)
     return collate_fn(
         {
-            (Role.DEFAULT, Modality.AUDIO): AudioReq(
-                views=frozenset({AudioView.WAVEFORM}),
-            )
+            ref: AudioReq(views=frozenset({AudioView.WAVEFORM}))
+            for ref in refs
         }
     )(samples)
 

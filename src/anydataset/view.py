@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 from .dataset.collate import Batch
-from .types.item import AudioView, ImageView, TextView, View
+from .types.item import AudioView, ImageView, Reference, TextView, View
 
 type ViewMap = (
     Mapping[AudioView, Any]
@@ -15,7 +15,8 @@ type ViewMap = (
 
 
 type ViewTransform[ViewT: View] = Callable[[Mapping[ViewT, Any]], Any]
-type BatchViewTransform = Callable[[Batch], Sequence[Any]]
+type BatchViewOutput = Sequence[Any] | Mapping[Reference, Sequence[Any]]
+type BatchViewTransform = Callable[[Batch], BatchViewOutput]
 type ModalityTransform = Callable[[ViewMap], Any]
 type BatchModalityTransform = Callable[[Batch], Sequence[Any]]
 
@@ -31,7 +32,7 @@ class BatchViewProvider[ViewT: View](Protocol):
 
     def __call__(self, views: Mapping[ViewT, Any]) -> Any: ...
 
-    def call_batch(self, batch: Batch) -> Sequence[Any]: ...
+    def call_batch(self, batch: Batch) -> BatchViewOutput: ...
 
 
 class ModalityProvider[ViewT: View](Protocol):
@@ -70,7 +71,7 @@ class FunctionViewProvider[ViewT: View]:
     def __call__(self, views: Mapping[ViewT, Any]) -> Any:
         return self.transform_fn(views)
 
-    def call_batch(self, batch: Batch) -> Sequence[Any]:
+    def call_batch(self, batch: Batch) -> BatchViewOutput:
         if self.batch_transform_fn is None:
             raise TypeError("batch_transform_fn is not configured.")
         return self.batch_transform_fn(batch)
