@@ -342,6 +342,44 @@ class ViewMaterializerTest(unittest.TestCase):
             )
             self.assertEqual(merged[Role.DEFAULT, Modality.AUDIO].meta, {})
 
+    def test_modality_materializer_collates_multiple_roles_for_one_batch_provider_call(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            source = root / "source"
+            target = root / "target"
+            DatasetWriter(source, dataset_id="toy-text", split="train").write(
+                [
+                    _role_text_sample(source_text="hello", target_text="hi"),
+                    _role_text_sample(source_text="world", target_text="ok"),
+                ]
+            )
+            provider = _MultiRoleTTSProvider()
+
+            ModalityMaterializer(target, split="train", batch_size=2).write(
+                dataset_factory=_StoreDatasetFactory(source, root),
+                provider_factory=_StaticProviderFactory(provider),
+                devices="cpu",
+            )
+
+            stored = read_store_dataset(target)
+            self.assertEqual(
+                provider.batch_refs,
+                [
+                    (
+                        (Role.SOURCE, Modality.TEXT),
+                        (Role.TARGET, Modality.TEXT),
+                    )
+                ],
+            )
+            source_waveform, _ = stored[0][Role.SOURCE, Modality.AUDIO].views[
+                AudioView.WAVEFORM
+            ]
+            target_waveform, _ = stored[0][Role.TARGET, Modality.AUDIO].views[
+                AudioView.WAVEFORM
+            ]
+            self.assertTrue(torch.equal(source_waveform, torch.tensor([[5.0]])))
+            self.assertTrue(torch.equal(target_waveform, torch.tensor([[2.0]])))
+
     def test_modality_materializer_can_add_text_from_audio(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -639,6 +677,21 @@ def _role_audio_sample(
     }
 
 
+def _role_text_sample(
+    *,
+    source_text: str,
+    target_text: str,
+):
+    return {
+        (Role.SOURCE, Modality.TEXT): TextItem(
+            views={TextView.TEXT: source_text},
+        ),
+        (Role.TARGET, Modality.TEXT): TextItem(
+            views={TextView.TEXT: target_text},
+        ),
+    }
+
+
 class _Provider:
     output = AudioView.LONGCAT
 
@@ -706,6 +759,23 @@ class _TTSProvider:
 
     def __call__(self, views):
         return torch.tensor([[float(len(views[TextView.TEXT]) + self.offset)]]), 16000
+
+
+class _MultiRoleTTSProvider(_TTSProvider):
+    def __init__(self):
+        super().__init__()
+        self.batch_refs: list[tuple[tuple[Role, Modality], ...]] = []
+
+    def call_batch(self, batch):
+        refs = tuple(batch.sample)
+        self.batch_refs.append(refs)
+        return {
+            ref: [
+                (torch.tensor([[float(len(text))]]), 16000)
+                for text in batch.sample[ref].views[TextView.TEXT]
+            ]
+            for ref in refs
+        }
 
 
 class _ASRProvider:

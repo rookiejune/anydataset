@@ -108,6 +108,46 @@ class ModalityProviderTest(unittest.TestCase):
         self.assertTrue(torch.equal(outputs[1][0], torch.tensor([[2.0, 3.0]])))
         self.assertEqual([sample_rate for _, sample_rate in outputs], [16000, 16000])
 
+    def test_moss_tts_provider_synthesizes_multiple_text_roles(self):
+        FakeMossTTS.calls = []
+        FakeMossTTS.loaded = None
+        options = object()
+        with _fake_anytrain_tts():
+            provider = MossTTSProvider(options=options, device="cpu")
+
+        outputs = provider.call_batch(
+            collate_fn(
+                {
+                    (Role.SOURCE, Modality.TEXT): TextReq(
+                        views=frozenset({TextView.TEXT})
+                    ),
+                    (Role.TARGET, Modality.TEXT): TextReq(
+                        views=frozenset({TextView.TEXT})
+                    ),
+                }
+            )(
+                [
+                    _text_pair("hello", "hi"),
+                    _text_pair("world", "ok"),
+                ]
+            )
+        )
+
+        self.assertEqual(
+            FakeMossTTS.loaded.synthesize_calls,
+            [
+                (["hello", "world"], options),
+                (["hi", "ok"], options),
+            ],
+        )
+        self.assertIsInstance(outputs, dict)
+        source = outputs[(Role.SOURCE, Modality.TEXT)]
+        target = outputs[(Role.TARGET, Modality.TEXT)]
+        self.assertTrue(torch.equal(source[0][0], torch.tensor([[0.0, 1.0]])))
+        self.assertTrue(torch.equal(target[0][0], torch.tensor([[0.0, 1.0]])))
+        self.assertEqual([sample_rate for _, sample_rate in source], [16000, 16000])
+        self.assertEqual([sample_rate for _, sample_rate in target], [16000, 16000])
+
     def test_whisper_asr_provider_loads_preset_and_transcribes(self):
         FakeWhisperASREvaluator.calls = []
         FakeWhisperASREvaluator.loaded = None
@@ -186,6 +226,49 @@ class ModalityProviderTest(unittest.TestCase):
         self.assertTrue(torch.equal(waveform[1], torch.tensor([[4.0, 0.0, 0.0]])))
         self.assertEqual(sample_rate, 16000)
 
+    def test_whisper_asr_provider_transcribes_multiple_audio_roles(self):
+        FakeWhisperASREvaluator.calls = []
+        FakeWhisperASREvaluator.loaded = None
+        with _fake_anytrain_asr():
+            provider = WhisperASRProvider(device="cpu")
+
+        outputs = provider.call_batch(
+            collate_fn(
+                {
+                    (Role.SOURCE, Modality.AUDIO): AudioReq(
+                        views=frozenset({AudioView.WAVEFORM})
+                    ),
+                    (Role.TARGET, Modality.AUDIO): AudioReq(
+                        views=frozenset({AudioView.WAVEFORM})
+                    ),
+                }
+            )(
+                [
+                    _audio_pair(
+                        source=torch.tensor([[1.0, 2.0, 3.0]]),
+                        target=torch.tensor([[4.0]]),
+                    ),
+                    _audio_pair(
+                        source=torch.tensor([[5.0]]),
+                        target=torch.tensor([[6.0, 7.0]]),
+                    ),
+                ]
+            )
+        )
+
+        self.assertEqual(
+            outputs,
+            {
+                (Role.SOURCE, Modality.AUDIO): ["hello-0", "hello-1"],
+                (Role.TARGET, Modality.AUDIO): ["hello-0", "hello-1"],
+            },
+        )
+        self.assertEqual(len(FakeWhisperASREvaluator.loaded.transcribe_calls), 2)
+        source_waveform, _ = FakeWhisperASREvaluator.loaded.transcribe_calls[0]
+        target_waveform, _ = FakeWhisperASREvaluator.loaded.transcribe_calls[1]
+        self.assertEqual(tuple(source_waveform.shape), (2, 1, 3))
+        self.assertEqual(tuple(target_waveform.shape), (2, 1, 2))
+
     def test_whisper_asr_provider_requires_one_sample_rate_per_batch(self):
         with _fake_anytrain_asr():
             provider = WhisperASRProvider(device="cpu")
@@ -261,6 +344,24 @@ class FakeWhisperASREvaluator:
         if isinstance(waveform, torch.Tensor) and waveform.ndim > 2:
             return [f"hello-{index}" for index in range(waveform.shape[0])]
         return "hello"
+
+
+def _text_pair(source: str, target: str):
+    return {
+        (Role.SOURCE, Modality.TEXT): TextItem(views={TextView.TEXT: source}),
+        (Role.TARGET, Modality.TEXT): TextItem(views={TextView.TEXT: target}),
+    }
+
+
+def _audio_pair(*, source: torch.Tensor, target: torch.Tensor):
+    return {
+        (Role.SOURCE, Modality.AUDIO): AudioItem(
+            views={AudioView.WAVEFORM: (source, 16000)}
+        ),
+        (Role.TARGET, Modality.AUDIO): AudioItem(
+            views={AudioView.WAVEFORM: (target, 16000)}
+        ),
+    }
 
 
 class _fake_anytrain_tts:

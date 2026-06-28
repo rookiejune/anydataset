@@ -553,9 +553,9 @@ lambda 或局部函数。
 provider 上实现 `call_batch(batch)`。`batch` 是 `collate_fn` 返回的
 `Batch(sample, masks)`；`batch_size=1` 或 provider 没有 batch 方法时会继续走
 单条 `__call__` 路径。`Batch.masks` 是通用有效位置表达，序列长度可以用
-`batch.lengths(field_ref)` 从 mask 派生。materializer 只 batch 单个输入引用时，
-`call_batch` 可以直接返回一组输出；同一个 batch 里有多个输入引用时，
-`call_batch` 必须返回从 `(role, modality)` 引用到该引用输出序列的映射。
+`batch.lengths(field_ref)` 从 mask 派生。view 或 modality materializer 只 batch
+单个输入引用时，`call_batch` 可以直接返回一组输出；同一个 batch 里有多个输入
+引用时，`call_batch` 必须返回从 `(role, modality)` 引用到该引用输出序列的映射。
 
 LongCat provider 的 batch 路径会把 waveform padding 后交给 LongCat encoder。
 同一个 batch 里有多个 audio role 时，它会在同一个 collated batch 里按 role 分别

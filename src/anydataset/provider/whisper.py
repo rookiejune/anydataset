@@ -34,26 +34,39 @@ class WhisperASRProvider(AudioProvider):
         waveform, sample_rate = self._waveform(views)
         return self.asr.transcribe(waveform, sample_rate)
 
-    def call_batch(self, batch: Batch) -> Sequence[str]:
-        ref = _audio_ref(batch)
+    def call_batch(
+        self,
+        batch: Batch,
+    ) -> Sequence[str] | Mapping[tuple[Role, Modality], Sequence[str]]:
+        refs = _audio_refs(batch)
+        outputs = {ref: self._transcribe_ref_batch(batch, ref) for ref in refs}
+        if len(refs) == 1:
+            return outputs[refs[0]]
+        return outputs
+
+    def _transcribe_ref_batch(
+        self,
+        batch: Batch,
+        ref: tuple[Role, Modality],
+    ) -> Sequence[str]:
         audio = batch.sample[ref]
         waveform, sample_rates = audio.views[AudioView.WAVEFORM]
         sample_rate = _single_sample_rate(sample_rates)
         return _text_outputs(self.asr.transcribe(waveform, sample_rate))
 
 
-def _audio_ref(batch: Batch) -> tuple[Role, Modality]:
+def _audio_refs(batch: Batch) -> tuple[tuple[Role, Modality], ...]:
     refs = tuple(
         ref
         for ref in batch.sample
         if ref[1] is Modality.AUDIO
         and AudioView.WAVEFORM in batch.sample[ref].views
     )
-    if len(refs) != 1:
+    if not refs:
         raise ValueError(
-            "WhisperASRProvider.call_batch expects exactly one audio waveform input."
+            "WhisperASRProvider.call_batch expects at least one audio waveform input."
         )
-    return refs[0]
+    return refs
 
 
 def _single_sample_rate(sample_rates: torch.Tensor) -> int:

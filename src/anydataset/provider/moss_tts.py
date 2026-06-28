@@ -40,8 +40,21 @@ class MossTTSProvider:
         output = self.tts.synthesize(text, self.options)
         return _audio_output(output)
 
-    def call_batch(self, batch: Batch) -> Sequence[Any]:
-        ref = _text_ref(batch)
+    def call_batch(
+        self,
+        batch: Batch,
+    ) -> Sequence[Any] | Mapping[tuple[Role, Modality], Sequence[Any]]:
+        refs = _text_refs(batch)
+        outputs = {ref: self._synthesize_ref_batch(batch, ref) for ref in refs}
+        if len(refs) == 1:
+            return outputs[refs[0]]
+        return outputs
+
+    def _synthesize_ref_batch(
+        self,
+        batch: Batch,
+        ref: tuple[Role, Modality],
+    ) -> Sequence[Any]:
         texts = _text_batch(batch.sample[ref].views[TextView.TEXT])
         outputs = self.tts.synthesize(texts, self.options)
         if not isinstance(outputs, Sequence):
@@ -49,16 +62,16 @@ class MossTTSProvider:
         return [_audio_output(output) for output in outputs]
 
 
-def _text_ref(batch: Batch) -> tuple[Role, Modality]:
+def _text_refs(batch: Batch) -> tuple[tuple[Role, Modality], ...]:
     refs = tuple(
         ref
         for ref in batch.sample
         if ref[1] is Modality.TEXT
         and TextView.TEXT in batch.sample[ref].views
     )
-    if len(refs) != 1:
-        raise ValueError("MossTTSProvider.call_batch expects exactly one text input.")
-    return refs[0]
+    if not refs:
+        raise ValueError("MossTTSProvider.call_batch expects at least one text input.")
+    return refs
 
 
 def _text_batch(value: Any) -> list[str]:

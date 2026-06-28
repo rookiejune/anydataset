@@ -551,10 +551,11 @@ def _with_batch_view_provider(
     if refs:
         schema = {ref: _input_requirement(samples, ref) for ref in refs}
         batch = collate_fn(schema)(samples)
-        values_by_ref = _view_batch_outputs(
+        values_by_ref = _ref_batch_outputs(
             _call_batch(provider, batch),
             refs,
             len(samples),
+            provider_kind="view",
         )
     else:
         values_by_ref = {}
@@ -575,11 +576,26 @@ def _with_batch_modality_provider(
     outputs: list[dict[tuple[Role, Modality], Item]] = [
         {} for _ in samples
     ]
-    for role in roles:
-        input_ref = _batch_modality_input_ref(samples, role, output_modality)
-        batch = collate_fn({input_ref: _input_requirement(samples, input_ref)})(samples)
-        values = _call_batch(provider, batch)
-        _validate_batch_outputs(values, len(samples))
+    input_refs = {
+        role: _batch_modality_input_ref(samples, role, output_modality)
+        for role in roles
+    }
+    if input_refs:
+        schema = {
+            ref: _input_requirement(samples, ref)
+            for ref in input_refs.values()
+        }
+        batch = collate_fn(schema)(samples)
+        values_by_ref = _ref_batch_outputs(
+            _call_batch(provider, batch),
+            tuple(input_refs.values()),
+            len(samples),
+            provider_kind="modality",
+        )
+    else:
+        values_by_ref = {}
+    for role, input_ref in input_refs.items():
+        values = values_by_ref[input_ref]
         ref = (role, output_modality)
         for index, value in enumerate(values):
             outputs[index][ref] = _with_modality_view(output, value)
@@ -678,17 +694,19 @@ def _call_batch(
     return call_batch(batch)
 
 
-def _view_batch_outputs(
+def _ref_batch_outputs(
     values: Sequence[Any] | Mapping[tuple[Role, Modality], Sequence[Any]],
     refs: Sequence[tuple[Role, Modality]],
     sample_count: int,
+    *,
+    provider_kind: str,
 ) -> Mapping[tuple[Role, Modality], Sequence[Any]]:
     if len(refs) == 1 and not isinstance(values, Mapping):
         _validate_batch_outputs(values, sample_count)
         return {refs[0]: values}
     if not isinstance(values, Mapping):
         raise TypeError(
-            "Batch view providers with multiple input references must return "
+            f"Batch {provider_kind} providers with multiple input references must return "
             "a mapping from reference to outputs."
         )
 
@@ -710,7 +728,8 @@ def _view_batch_outputs(
     for ref, outputs in values.items():
         if isinstance(outputs, Mapping) or not isinstance(outputs, Sequence):
             raise TypeError(
-                f"Batch view provider outputs for {_ref_name(ref)} must be a sequence."
+                f"Batch {provider_kind} provider outputs for {_ref_name(ref)} "
+                "must be a sequence."
             )
         _validate_batch_outputs(outputs, sample_count)
     return values

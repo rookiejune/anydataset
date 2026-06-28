@@ -15,10 +15,10 @@ type ViewMap = (
 
 
 type ViewTransform[ViewT: View] = Callable[[Mapping[ViewT, Any]], Any]
-type BatchViewOutput = Sequence[Any] | Mapping[Reference, Sequence[Any]]
-type BatchViewTransform = Callable[[Batch], BatchViewOutput]
+type BatchOutput = Sequence[Any] | Mapping[Reference, Sequence[Any]]
+type BatchViewTransform = Callable[[Batch], BatchOutput]
 type ModalityTransform = Callable[[ViewMap], Any]
-type BatchModalityTransform = Callable[[Batch], Sequence[Any]]
+type BatchModalityTransform = Callable[[Batch], BatchOutput]
 
 
 class ViewProvider[ViewT: View](Protocol):
@@ -32,7 +32,7 @@ class BatchViewProvider[ViewT: View](Protocol):
 
     def __call__(self, views: Mapping[ViewT, Any]) -> Any: ...
 
-    def call_batch(self, batch: Batch) -> BatchViewOutput: ...
+    def call_batch(self, batch: Batch) -> BatchOutput: ...
 
 
 class ModalityProvider[ViewT: View](Protocol):
@@ -46,7 +46,7 @@ class BatchModalityProvider[ViewT: View](Protocol):
 
     def __call__(self, views: ViewMap) -> Any: ...
 
-    def call_batch(self, batch: Batch) -> Sequence[Any]: ...
+    def call_batch(self, batch: Batch) -> BatchOutput: ...
 
 
 type Provider = (
@@ -71,7 +71,7 @@ class FunctionViewProvider[ViewT: View]:
     def __call__(self, views: Mapping[ViewT, Any]) -> Any:
         return self.transform_fn(views)
 
-    def call_batch(self, batch: Batch) -> BatchViewOutput:
+    def call_batch(self, batch: Batch) -> BatchOutput:
         if self.batch_transform_fn is None:
             raise TypeError("batch_transform_fn is not configured.")
         return self.batch_transform_fn(batch)
@@ -92,7 +92,7 @@ class FunctionModalityProvider[ViewT: View]:
     def __call__(self, views: ViewMap) -> Any:
         return self.transform_fn(views)
 
-    def call_batch(self, batch: Batch) -> Sequence[Any]:
+    def call_batch(self, batch: Batch) -> BatchOutput:
         if self.batch_transform_fn is None:
             raise TypeError("batch_transform_fn is not configured.")
         return self.batch_transform_fn(batch)
