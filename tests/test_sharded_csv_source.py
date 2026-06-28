@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-from anydataset import IterableAnyDataset, Spec, has_source, resolve_dataset
+from anydataset import AnyDataset, IterableAnyDataset, Spec, has_source, resolve_dataset
 
 
 class ShardedCsvSourceTest(unittest.TestCase):
@@ -68,6 +68,91 @@ class ShardedCsvSourceTest(unittest.TestCase):
             )
 
             self.assertEqual(list(dataset), ["two", "ten"])
+
+    def test_supports_map_style_indexing(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            shard_0 = root / "shard_0"
+            shard_1 = root / "shard_1"
+            shard_0.mkdir()
+            shard_1.mkdir()
+            (shard_0 / "0.csv").write_text(
+                "src_text\n"
+                "zero\n"
+                "one\n",
+                encoding="utf-8",
+            )
+            (shard_1 / "0.csv").write_text(
+                "src_text\n"
+                "two\n",
+                encoding="utf-8",
+            )
+
+            dataset = AnyDataset(
+                Spec(source="sharded_csv", path=tmpdir),
+                parse_fn=lambda row: row["src_text"],
+                cache_root=root / "cache",
+            )
+
+            self.assertEqual(len(dataset), 3)
+            self.assertEqual(dataset[0], "zero")
+            self.assertEqual(dataset[2], "two")
+            self.assertEqual(dataset[-1], "two")
+            self.assertEqual(list(dataset.iter_shard(2, 1)), ["one"])
+
+    def test_reuses_cached_row_counts(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            cache = root / "cache"
+            shard_dir = root / "shard_0"
+            shard_dir.mkdir()
+            (shard_dir / "0.csv").write_text(
+                "src_text\n"
+                "zero\n"
+                "one\n",
+                encoding="utf-8",
+            )
+
+            dataset = AnyDataset(
+                Spec(source="sharded_csv", path=tmpdir),
+                parse_fn=lambda row: row["src_text"],
+                cache_root=cache,
+            )
+            self.assertEqual(len(dataset), 2)
+            index_files = list(cache.rglob("sharded_csv_index.json"))
+            self.assertEqual(len(index_files), 1)
+
+            second = AnyDataset(
+                Spec(source="sharded_csv", path=tmpdir),
+                parse_fn=lambda row: row["src_text"],
+                cache_root=cache,
+            )
+            with mock.patch.object(second.dataset, "_row_count") as row_count:
+                self.assertEqual(len(second), 2)
+
+            row_count.assert_not_called()
+
+    def test_map_style_indexed_iteration_keeps_global_indices(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            shard_dir = root / "shard_0"
+            shard_dir.mkdir()
+            (shard_dir / "0.csv").write_text(
+                "src_text\n"
+                "zero\n"
+                "one\n"
+                "two\n",
+                encoding="utf-8",
+            )
+
+            dataset = AnyDataset(
+                Spec(source="sharded_csv", path=tmpdir),
+                parse_fn=lambda row: row["src_text"],
+                cache_root=root / "cache",
+            )
+
+            self.assertEqual(list(dataset.iter_indexed_range(1, 3)), [(1, "one"), (2, "two")])
+            self.assertEqual(list(dataset.iter_indexed_shard(2, 1)), [(1, "one")])
 
     def test_reads_split_physical_shard_csv(self):
         with tempfile.TemporaryDirectory() as tmpdir:

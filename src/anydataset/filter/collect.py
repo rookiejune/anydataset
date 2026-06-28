@@ -10,6 +10,7 @@ from array import array
 from collections import deque
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
+from typing import Any
 
 from ..dataset.abc import AnyDataset
 from .rules import label
@@ -60,10 +61,43 @@ def collect_ranges(
     env = _set_worker_environment(_single_worker_config(device))
     try:
         predicate = factory()
-        for start, stop in range_chunks(len(dataset), commit_samples):
-            yield collect_range(dataset, predicate, metrics, start, stop)
+        yield from collect_ranges_sequential(dataset, predicate, metrics, commit_samples)
     finally:
         _restore_environment(env)
+
+
+def collect_ranges_sequential(
+    dataset: AnyDataset,
+    predicate: FilterPredicate,
+    write_metrics: bool,
+    commit_samples: int,
+) -> Iterable[_FilterChunk]:
+    partitions: dict[str, array[int]] = {}
+    metric_rows: list[_FilterMetricsRow] = []
+    sample_count = 0
+    for index, sample in _iter_indexed_range(dataset, 0, len(dataset)):
+        output = decision(predicate(sample), metrics=write_metrics)
+        if output.label not in partitions:
+            partitions[output.label] = array("q")
+        partitions[output.label].append(index)
+        sample_count += 1
+        if write_metrics and output.metrics is None:
+            raise TypeError("filter predicate must return FilterDecision when metrics=True.")
+        if output.metrics is not None:
+            metric_rows.append(
+                _FilterMetricsRow(
+                    index=index,
+                    label=output.label,
+                    metrics=output.metrics,
+                )
+            )
+        if sample_count == commit_samples:
+            yield _FilterChunk(partitions=partitions, metrics=metric_rows)
+            partitions = {}
+            metric_rows = []
+            sample_count = 0
+    if partitions or metric_rows:
+        yield _FilterChunk(partitions=partitions, metrics=metric_rows)
 
 
 def collect_ranges_parallel(
@@ -138,8 +172,8 @@ def collect_range(
 ) -> _FilterChunk:
     partitions: dict[str, array[int]] = {}
     metric_rows: list[_FilterMetricsRow] = []
-    for index in range(start, stop):
-        output = decision(predicate(dataset[index]), metrics=write_metrics)
+    for index, sample in _iter_indexed_range(dataset, start, stop):
+        output = decision(predicate(sample), metrics=write_metrics)
         if output.label not in partitions:
             partitions[output.label] = array("q")
         partitions[output.label].append(index)
@@ -207,8 +241,8 @@ def collect_indexed_shard(
     shard_id: int,
 ) -> Iterable[_IndexedFilterChunk]:
     rows: list[_FilterRow] = []
-    for index in range(shard_id, len(dataset), num_shards):
-        output = decision(predicate(dataset[index]), metrics=write_metrics)
+    for index, sample in _iter_indexed_shard(dataset, num_shards, shard_id):
+        output = decision(predicate(sample), metrics=write_metrics)
         if write_metrics and output.metrics is None:
             raise TypeError("filter predicate must return FilterDecision when metrics=True.")
         rows.append(
@@ -223,6 +257,34 @@ def collect_indexed_shard(
             rows = []
     if rows:
         yield _IndexedFilterChunk(rank=shard_id, rows=tuple(rows))
+
+
+def _iter_indexed_range(
+    dataset: AnyDataset,
+    start: int,
+    stop: int,
+) -> Iterable[tuple[int, Any]]:
+    iter_indexed = getattr(dataset, "iter_indexed_range", None)
+    if callable(iter_indexed):
+        yield from iter_indexed(start, stop)
+        return
+
+    for index in range(start, stop):
+        yield index, dataset[index]
+
+
+def _iter_indexed_shard(
+    dataset: AnyDataset,
+    num_shards: int,
+    shard_id: int,
+) -> Iterable[tuple[int, Any]]:
+    iter_indexed = getattr(dataset, "iter_indexed_shard", None)
+    if callable(iter_indexed):
+        yield from iter_indexed(num_shards, shard_id)
+        return
+
+    for index in range(shard_id, len(dataset), num_shards):
+        yield index, dataset[index]
 
 
 def _ordered_worker_chunks(

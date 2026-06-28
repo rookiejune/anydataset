@@ -162,18 +162,51 @@ class AnyDataset(_Base, SampleDataset):
 
     def iter_shard(self, num_shards: int, shard_id: int):
         validate_shard(num_shards, shard_id)
+        iter_indexed = getattr(self.dataset, "iter_indexed_shard", None)
+        if callable(iter_indexed):
+            for _index, row in iter_indexed(num_shards, shard_id):
+                yield self.transform_sample(self.parse_fn(row))
+            return
+
         for index in range(shard_id, len(self), num_shards):
             yield self[index]
 
+    def iter_indexed_range(self, start: int, stop: int):
+        if start < 0 or stop < start or stop > len(self):
+            raise ValueError("range must satisfy 0 <= start <= stop <= len(dataset).")
+
+        dataset = self.dataset
+        iter_indexed = getattr(dataset, "iter_indexed_range", None)
+        if callable(iter_indexed):
+            for index, row in iter_indexed(start, stop):
+                yield index, self.transform_sample(self.parse_fn(row))
+            return
+
+        for index in range(start, stop):
+            yield index, self[index]
+
+    def iter_indexed_shard(self, num_shards: int, shard_id: int):
+        validate_shard(num_shards, shard_id)
+        dataset = self.dataset
+        iter_indexed = getattr(dataset, "iter_indexed_shard", None)
+        if callable(iter_indexed):
+            for index, row in iter_indexed(num_shards, shard_id):
+                yield index, self.transform_sample(self.parse_fn(row))
+            return
+
+        for index in range(shard_id, len(self), num_shards):
+            yield index, self[index]
+
     def iter_runtime_shard(self, shard: Shard):
         usable = len(self) // shard.rank_count * shard.rank_count
-        samples_per_rank = usable // shard.rank_count
-        for rank_offset in range(
-            shard.worker_index,
-            samples_per_rank,
-            shard.worker_count,
-        ):
-            yield self[shard.rank_index + rank_offset * shard.rank_count]
+        if shard.flat_count > 1:
+            for index, sample in self.iter_indexed_shard(shard.flat_count, shard.flat_index):
+                if index < usable:
+                    yield sample
+            return
+
+        for index, sample in self.iter_indexed_range(0, usable):
+            yield sample
 
 
 def _identity_sample(row: Any) -> Sample:
