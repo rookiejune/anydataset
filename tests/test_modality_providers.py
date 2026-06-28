@@ -2,6 +2,7 @@ import sys
 import types
 import unittest
 from dataclasses import dataclass
+from unittest.mock import patch
 
 import torch
 
@@ -218,6 +219,53 @@ class ModalityProviderTest(unittest.TestCase):
                 ]
             )
         )
+
+        self.assertEqual(outputs, ["hello-0", "hello-1"])
+        self.assertEqual(len(FakeWhisperASREvaluator.loaded.transcribe_calls), 1)
+        waveform, sample_rate = FakeWhisperASREvaluator.loaded.transcribe_calls[0]
+        self.assertEqual(tuple(waveform.shape), (2, 1, 3))
+        self.assertTrue(torch.equal(waveform[1], torch.tensor([[4.0, 0.0, 0.0]])))
+        self.assertEqual(sample_rate, 16000)
+
+    def test_whisper_asr_provider_transcribes_file_batch(self):
+        FakeWhisperASREvaluator.calls = []
+        FakeWhisperASREvaluator.loaded = None
+        with _fake_anytrain_asr():
+            provider = WhisperASRProvider(device="cpu")
+
+        batch = collate_fn(
+            {
+                (Role.DEFAULT, Modality.AUDIO): AudioReq(
+                    views=frozenset({AudioView.FILE})
+                )
+            }
+        )(
+            [
+                {
+                    (Role.DEFAULT, Modality.AUDIO): AudioItem(
+                        views={AudioView.FILE: b"first"}
+                    )
+                },
+                {
+                    (Role.DEFAULT, Modality.AUDIO): AudioItem(
+                        views={AudioView.FILE: b"second"}
+                    )
+                },
+            ]
+        )
+
+        class FakeTorchAudio:
+            @staticmethod
+            def load(source):
+                payload = source.getvalue()
+                if payload == b"first":
+                    return torch.tensor([[1.0, 2.0, 3.0]]), 16000
+                if payload == b"second":
+                    return torch.tensor([[4.0]]), 16000
+                raise AssertionError(source)
+
+        with patch("anydataset.provider.abc.torchaudio", FakeTorchAudio()):
+            outputs = provider.call_batch(batch)
 
         self.assertEqual(outputs, ["hello-0", "hello-1"])
         self.assertEqual(len(FakeWhisperASREvaluator.loaded.transcribe_calls), 1)

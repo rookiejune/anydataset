@@ -557,10 +557,12 @@ provider 上实现 `call_batch(batch)`。`batch` 是 `collate_fn` 返回的
 单个输入引用时，`call_batch` 可以直接返回一组输出；同一个 batch 里有多个输入
 引用时，`call_batch` 必须返回从 `(role, modality)` 引用到该引用输出序列的映射。
 
-LongCat provider 的 batch 路径会把 waveform padding 后交给 LongCat encoder。
-同一个 batch 里有多个 audio role 时，它会在同一个 collated batch 里按 role 分别
-encode。当前 LongCat encoder 不接收 mask，所以 provider 会根据每个输入 waveform
-的有效长度按比例裁剪输出 codes，避免把 padding 对应的 codes 写入 store。
+LongCat provider 的 batch 路径会把 waveform 或 file 输入 padding 后交给 LongCat
+encoder。同一个 batch 里有多个 audio role 时，它会在同一个 collated batch 里按
+role 分别 encode。file batch 会先在 audio provider 层加载成 waveform；因为 file
+view 没有 mask，有效长度来自加载后的 waveform。当前 LongCat encoder 不接收 mask，
+所以 provider 会根据每个输入 waveform 的有效长度按比例裁剪输出 codes，避免把
+padding 对应的 codes 写入 store。
 
 `merge()` 会把右侧 dataset 里的新 view 或新 item 原地合入左侧 store；如果 view 或 metadata 已经存在且发生冲突，会直接报错。也可以把 delta store 当作目标 store，执行 `AnyDataset(Spec(source=Source.STORE, path=str(delta), split="train")).merge(dataset)`，避免先复制一份 source。
 

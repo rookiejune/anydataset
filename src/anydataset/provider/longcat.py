@@ -7,7 +7,7 @@ from typing import Any, Literal
 import torch
 from torch import nn
 
-from ..dataset.collate import Batch, FieldGroup, FieldRef
+from ..dataset.collate import Batch
 from ..types.item import Modality, Role
 from ..types.item import AudioView
 from .abc import AudioProvider
@@ -85,8 +85,7 @@ class LongCatProvider(nn.Module, AudioProvider):
         batch: Batch,
         ref: tuple[Role, Modality],
     ) -> Sequence[dict[str, torch.Tensor]]:
-        audio = batch.sample[ref]
-        waveform, sample_rates = audio.views[AudioView.WAVEFORM]
+        waveform, sample_rates, lengths = self._waveform_batch(batch, ref)
         if waveform.is_floating_point():
             waveform = waveform.float()
         if waveform.ndim == 2:
@@ -96,7 +95,6 @@ class LongCatProvider(nn.Module, AudioProvider):
             waveform,
             sample_rate,
         )
-        lengths = batch.lengths(FieldRef(ref, FieldGroup.VIEWS, AudioView.WAVEFORM))
         return _split_codes(
             {
                 "semantic_codes": self._tensor(semantic_codes),
@@ -136,7 +134,10 @@ def _audio_refs(batch: Batch) -> tuple[tuple[Role, Modality], ...]:
         ref
         for ref in batch.sample
         if ref[1] is Modality.AUDIO
-        and AudioView.WAVEFORM in batch.sample[ref].views
+        and (
+            AudioView.WAVEFORM in batch.sample[ref].views
+            or AudioView.FILE in batch.sample[ref].views
+        )
     )
     if not refs:
         raise ValueError(

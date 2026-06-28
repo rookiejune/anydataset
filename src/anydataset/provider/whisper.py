@@ -49,8 +49,7 @@ class WhisperASRProvider(AudioProvider):
         batch: Batch,
         ref: tuple[Role, Modality],
     ) -> Sequence[str]:
-        audio = batch.sample[ref]
-        waveform, sample_rates = audio.views[AudioView.WAVEFORM]
+        waveform, sample_rates, _ = self._waveform_batch(batch, ref)
         sample_rate = _single_sample_rate(sample_rates)
         return _text_outputs(self.asr.transcribe(waveform, sample_rate))
 
@@ -60,7 +59,10 @@ def _audio_refs(batch: Batch) -> tuple[tuple[Role, Modality], ...]:
         ref
         for ref in batch.sample
         if ref[1] is Modality.AUDIO
-        and AudioView.WAVEFORM in batch.sample[ref].views
+        and (
+            AudioView.WAVEFORM in batch.sample[ref].views
+            or AudioView.FILE in batch.sample[ref].views
+        )
     )
     if not refs:
         raise ValueError(

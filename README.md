@@ -342,11 +342,13 @@ batches a single input reference, `call_batch` may return one output sequence.
 When the same batch contains multiple input references, `call_batch` must return
 a mapping from `(role, modality)` reference to that reference's output sequence.
 
-`LongCatProvider.call_batch` pads waveform input before encoding. If a batch has
-multiple audio roles, it encodes each role separately from the same collated
-batch. The current LongCat encoder does not accept masks, so the provider trims
-output codes proportionally from each input waveform mask before writing samples
-to the store.
+`LongCatProvider.call_batch` pads waveform or file input before encoding. If a
+batch has multiple audio roles, it encodes each role separately from the same
+collated batch. File batches are loaded by the audio provider before padding,
+and their effective lengths come from the loaded waveforms because file views do
+not carry masks. The current LongCat encoder does not accept masks, so the
+provider trims output codes proportionally from each input waveform length
+before writing samples to the store.
 
 `ModalityMaterializer` adds a missing modality under the same role. The
 provider declares its output view; the materializer infers the output modality
