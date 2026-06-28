@@ -5,6 +5,7 @@ import multiprocessing
 import os
 import pickle
 import shutil
+import socket
 import time
 import traceback
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
@@ -15,9 +16,11 @@ from tempfile import TemporaryDirectory
 from typing import Any, Literal, cast
 
 import torch
+from torch import distributed as dist
+from torch.utils.data import DataLoader, IterableDataset
 
 from .._devices import Devices, resolve_devices
-from .._sharding import validate_shard
+from .._sharding import runtime_shard, validate_shard
 from ..dataset.collate import Batch, collate_fn
 from ..types.item import (
     AudioItem,
@@ -38,7 +41,12 @@ from ..types.item import (
 )
 from ..view import ModalityProvider, Provider, ViewProvider
 from .parts import DatasetPartWriter, commit_store_parts
-from .writer import DEFAULT_MAX_SHARD_SAMPLES, DatasetWriter, _positive_int
+from .writer import (
+    DEFAULT_MAX_SHARD_SAMPLES,
+    DatasetWriter,
+    _optional_positive_int,
+    _positive_int,
+)
 
 type DatasetFactory = Callable[[], Any]
 type ModalityProviderLike = (
@@ -51,6 +59,7 @@ type ProviderFactory = Callable[[str], MaterializerProvider]
 type _MaterializerMode = Literal["view", "modality"]
 
 _PROGRESS_INTERVAL = 1.0
+_DEFAULT_LOADER_PREFETCH_FACTOR = 2
 
 
 @dataclass
@@ -59,6 +68,8 @@ class ViewMaterializer:
     split: str | None = None
     max_shard_samples: int = DEFAULT_MAX_SHARD_SAMPLES
     batch_size: int = 1
+    num_workers: int = 0
+    prefetch_factor: int | None = None
 
     def __post_init__(self) -> None:
         self.max_shard_samples = _positive_int(
@@ -66,6 +77,11 @@ class ViewMaterializer:
             self.max_shard_samples,
         )
         self.batch_size = _positive_int("batch_size", self.batch_size)
+        self.num_workers = _non_negative_int("num_workers", self.num_workers)
+        self.prefetch_factor = _optional_positive_int(
+            "prefetch_factor",
+            self.prefetch_factor,
+        )
 
     @property
     def dataset_id(self) -> str:
@@ -80,7 +96,13 @@ class ViewMaterializer:
     ) -> Path:
         resolved = resolve_devices(devices)
         if len(resolved) == 1:
-            return self._write_single(dataset_factory(), provider_factory(resolved[0]))
+            device = resolved[0]
+            _set_torch_device(device)
+            return self._write_single(
+                dataset_factory(),
+                provider_factory(device),
+                device=device,
+            )
         return self._write_devices(
             dataset_factory=dataset_factory,
             provider_factory=provider_factory,
@@ -122,13 +144,45 @@ class ViewMaterializer:
         self,
         dataset: Iterable[Sample],
         provider: MaterializerProvider,
+        *,
+        device: str,
     ) -> Path:
+        if self.num_workers > 0:
+            return self._write_single_part(dataset, provider, device=device)
         return DatasetWriter(
             self.output_dir,
             dataset_id=self.dataset_id,
             split=self.split,
             max_shard_samples=self.max_shard_samples,
         ).write(self._samples(dataset, provider))
+
+    def _write_single_part(
+        self,
+        dataset: Iterable[Sample],
+        provider: MaterializerProvider,
+        *,
+        device: str,
+    ) -> Path:
+        output_dir = Path(self.output_dir).expanduser()
+        output_dir.parent.mkdir(parents=True, exist_ok=True)
+        env = _set_single_loader_environment(device)
+        with TemporaryDirectory(
+            prefix=f".{output_dir.name}-parts-",
+            dir=str(output_dir.parent),
+        ) as tmpdir:
+            try:
+                parts_dir = Path(tmpdir)
+                DatasetPartWriter(
+                    parts_dir / "part-00000",
+                    dataset_id=self.dataset_id,
+                    split=self.split,
+                    shard_id=0,
+                    num_shards=1,
+                    max_shard_samples=self.max_shard_samples,
+                ).write(self._loader_indexed_samples(dataset, provider))
+                return self.commit_parts(parts_dir)
+            finally:
+                _restore_environment(env)
 
     def write_part(
         self,
@@ -201,6 +255,60 @@ class ViewMaterializer:
             if pending:
                 _put_progress(progress, _Progress(shard_id, pending, False, None))
 
+    def _loader_indexed_samples(
+        self,
+        dataset: Any,
+        provider: MaterializerProvider,
+    ) -> Iterator[tuple[int, Sample]]:
+        for batch in self._loader(dataset):
+            if not self._uses_batch_provider(provider):
+                for index, sample in batch:
+                    yield index, self._sample_with_provider(sample, provider)
+                continue
+
+            indexes, samples = zip(*batch, strict=True)
+            outputs = tuple(
+                self._resilient_samples_with_batch_provider(samples, provider)
+            )
+            _validate_batch_outputs(outputs, len(samples))
+            yield from zip(indexes, outputs, strict=True)
+
+    def _loader_samples_with_progress(
+        self,
+        dataset: Any,
+        provider: MaterializerProvider,
+        *,
+        shard_id: int,
+        progress: multiprocessing.Queue,
+    ) -> Iterator[tuple[int, Sample]]:
+        pending = 0
+        last_flush = time.monotonic()
+        try:
+            for index, sample in self._loader_indexed_samples(dataset, provider):
+                yield index, sample
+                pending += 1
+                now = time.monotonic()
+                if now - last_flush >= _PROGRESS_INTERVAL:
+                    _put_progress(progress, _Progress(shard_id, pending, False, None))
+                    pending = 0
+                    last_flush = now
+        finally:
+            if pending:
+                _put_progress(progress, _Progress(shard_id, pending, False, None))
+
+    def _loader(self, dataset: Any) -> DataLoader:
+        kwargs: dict[str, Any] = {
+            "batch_size": self.batch_size,
+            "collate_fn": _loader_collate,
+            "num_workers": self.num_workers,
+        }
+        if self.num_workers > 0:
+            kwargs["multiprocessing_context"] = multiprocessing.get_context("spawn")
+            kwargs["prefetch_factor"] = (
+                self.prefetch_factor or _DEFAULT_LOADER_PREFETCH_FACTOR
+            )
+        return DataLoader(_RuntimeIndexedDataset(dataset), **kwargs)
+
     def _run_parallel_parts(
         self,
         *,
@@ -213,6 +321,8 @@ class ViewMaterializer:
         context = multiprocessing.get_context("spawn")
         progress = context.Queue()
         total = None
+        master_addr = os.environ.get("MASTER_ADDR", "127.0.0.1")
+        master_port = os.environ.get("MASTER_PORT", _free_port())
         workers = [
             context.Process(
                 target=_materialize_worker,
@@ -223,12 +333,16 @@ class ViewMaterializer:
                         split=self.split,
                         max_shard_samples=self.max_shard_samples,
                         batch_size=self.batch_size,
+                        num_workers=self.num_workers,
+                        prefetch_factor=self.prefetch_factor,
                         mode=self._materializer_mode,
                         parts_dir=parts_dir,
                         logs_dir=logs_dir,
                         device=device,
                         num_shards=len(devices),
                         shard_id=shard_id,
+                        master_addr=master_addr,
+                        master_port=master_port,
                     ),
                     dataset_factory,
                     provider_factory,
@@ -360,12 +474,16 @@ class _WorkerConfig:
     split: str | None
     max_shard_samples: int
     batch_size: int
+    num_workers: int
+    prefetch_factor: int | None
     mode: _MaterializerMode
     parts_dir: Path
     logs_dir: Path
     device: str
     num_shards: int
     shard_id: int
+    master_addr: str
+    master_port: str
 
 
 @dataclass(frozen=True)
@@ -376,6 +494,36 @@ class _Progress:
     error: str | None
 
 
+class _RuntimeIndexedDataset(IterableDataset):
+    def __init__(self, dataset: Any) -> None:
+        self.dataset = dataset
+
+    def __iter__(self) -> Iterator[tuple[int, Sample]]:
+        iter_indexed = getattr(self.dataset, "iter_indexed_runtime_shard", None)
+        if callable(iter_indexed):
+            yield from iter_indexed()
+            return
+
+        shard = runtime_shard()
+        iter_indexed_shard = getattr(self.dataset, "iter_indexed_shard", None)
+        if callable(iter_indexed_shard):
+            yield from iter_indexed_shard(shard.flat_count, shard.flat_index)
+            return
+
+        if hasattr(self.dataset, "__len__") and hasattr(self.dataset, "__getitem__"):
+            for index in range(shard.flat_index, len(self.dataset), shard.flat_count):
+                yield index, self.dataset[index]
+            return
+
+        for index, sample in enumerate(self.dataset):
+            if index % shard.flat_count == shard.flat_index:
+                yield index, sample
+
+
+def _loader_collate(batch: Sequence[tuple[int, Sample]]) -> tuple[tuple[int, Sample], ...]:
+    return tuple(batch)
+
+
 def _validate_spawn_factory(name: str, factory: Callable[..., Any]) -> None:
     try:
         pickle.dumps(factory)
@@ -383,6 +531,122 @@ def _validate_spawn_factory(name: str, factory: Callable[..., Any]) -> None:
         raise TypeError(
             f"{name} must be picklable for multi-device materialization."
         ) from exc
+
+
+def _non_negative_int(name: str, value: int) -> int:
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise TypeError(f"{name} must be an integer.")
+    if value < 0:
+        raise ValueError(f"{name} must be non-negative.")
+    return value
+
+
+def _set_worker_environment(config: _WorkerConfig) -> dict[str, str | None]:
+    previous = {
+        name: os.environ.get(name)
+        for name in (
+            "RANK",
+            "LOCAL_RANK",
+            "WORLD_SIZE",
+            "LOCAL_WORLD_SIZE",
+            "MASTER_ADDR",
+            "MASTER_PORT",
+            "ANYDATASET_MATERIALIZE_DEVICE",
+        )
+    }
+    os.environ["RANK"] = str(config.shard_id)
+    os.environ["LOCAL_RANK"] = _local_rank(config.device, config.shard_id)
+    os.environ["WORLD_SIZE"] = str(config.num_shards)
+    os.environ["LOCAL_WORLD_SIZE"] = str(config.num_shards)
+    os.environ["MASTER_ADDR"] = config.master_addr
+    os.environ["MASTER_PORT"] = config.master_port
+    os.environ["ANYDATASET_MATERIALIZE_DEVICE"] = config.device
+    return previous
+
+
+def _set_single_loader_environment(device: str) -> dict[str, str | None]:
+    previous = {
+        name: os.environ.get(name)
+        for name in (
+            "RANK",
+            "LOCAL_RANK",
+            "WORLD_SIZE",
+            "LOCAL_WORLD_SIZE",
+            "ANYDATASET_MATERIALIZE_DEVICE",
+        )
+    }
+    os.environ["RANK"] = "0"
+    os.environ["LOCAL_RANK"] = _local_rank(device, 0)
+    os.environ["WORLD_SIZE"] = "1"
+    os.environ["LOCAL_WORLD_SIZE"] = "1"
+    os.environ["ANYDATASET_MATERIALIZE_DEVICE"] = device
+    return previous
+
+
+def _restore_environment(previous: Mapping[str, str | None]) -> None:
+    for name, value in previous.items():
+        if value is None:
+            os.environ.pop(name, None)
+        else:
+            os.environ[name] = value
+
+
+def _init_worker_process_group(config: _WorkerConfig) -> bool:
+    if config.num_shards <= 1:
+        return False
+    if not dist.is_available() or dist.is_initialized():
+        return False
+    dist.init_process_group(
+        backend=os.environ.get(
+            "ANYDATASET_MATERIALIZE_BACKEND",
+            _distributed_backend(config.device),
+        ),
+        init_method=f"tcp://{config.master_addr}:{config.master_port}",
+        rank=config.shard_id,
+        world_size=config.num_shards,
+    )
+    return True
+
+
+def _destroy_worker_process_group() -> None:
+    if dist.is_available() and dist.is_initialized():
+        dist.destroy_process_group()
+
+
+def _local_rank(device: str, fallback: int) -> str:
+    prefix = "cuda:"
+    if device.startswith(prefix):
+        return device.removeprefix(prefix)
+    return str(fallback)
+
+
+def _distributed_backend(device: str) -> str:
+    return "nccl" if _cuda_device(device) is not None and dist.is_nccl_available() else "gloo"
+
+
+def _set_torch_device(device: str) -> None:
+    cuda = _cuda_device(device)
+    if cuda is None:
+        return
+    if not torch.cuda.is_available():
+        raise RuntimeError(f"CUDA device requested but CUDA is unavailable: {device}")
+    torch.cuda.set_device(cuda)
+
+
+def _cuda_device(device: str) -> int | None:
+    prefix = "cuda:"
+    if not device.startswith(prefix):
+        return None
+    index = device.removeprefix(prefix)
+    if not index.isdecimal():
+        raise ValueError(f"CUDA device must use cuda:<index>: {device}")
+    return int(index)
+
+
+def _free_port() -> str:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return str(sock.getsockname()[1])
 
 
 def _prepare_parallel_output_dir(output_dir: Path) -> Path:
@@ -413,7 +677,11 @@ def _materialize_worker(
         config.num_shards,
         config.device,
     )
+    env = _set_worker_environment(config)
+    process_group_created = False
     try:
+        _set_torch_device(config.device)
+        process_group_created = _init_worker_process_group(config)
         dataset = dataset_factory()
         provider = provider_factory(config.device)
         materializer = _worker_materializer(config)
@@ -425,10 +693,9 @@ def _materialize_worker(
             num_shards=config.num_shards,
             max_shard_samples=config.max_shard_samples,
         ).write(
-            materializer._samples_with_progress(
+            materializer._loader_samples_with_progress(
                 dataset,
                 provider,
-                num_shards=config.num_shards,
                 shard_id=config.shard_id,
                 progress=progress,
             )
@@ -438,6 +705,10 @@ def _materialize_worker(
         logger.error("worker failed\n%s", error)
         _put_progress(progress, _Progress(config.shard_id, 0, True, error))
         raise
+    finally:
+        if process_group_created:
+            _destroy_worker_process_group()
+        _restore_environment(env)
     logger.info("finished shard %s", config.shard_id)
     _put_progress(progress, _Progress(config.shard_id, 0, True, None))
 
@@ -449,6 +720,8 @@ def _worker_materializer(config: _WorkerConfig) -> ViewMaterializer:
         split=config.split,
         max_shard_samples=config.max_shard_samples,
         batch_size=config.batch_size,
+        num_workers=config.num_workers,
+        prefetch_factor=config.prefetch_factor,
     )
 
 

@@ -647,6 +647,61 @@ class ViewMaterializerTest(unittest.TestCase):
                 )
             )
 
+    def test_materializer_single_device_loader_workers_cover_all_samples(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = root / "target"
+            samples = tuple(
+                _audio_sample(torch.tensor([[float(index)]]))
+                for index in range(6)
+            )
+
+            ViewMaterializer(target, split="train", num_workers=2).write(
+                dataset_factory=_DatasetFactory(samples),
+                provider_factory=_ProviderFactory(offset=10),
+                devices="cpu",
+            )
+
+            stored = read_store_dataset(target)
+            self.assertEqual(len(stored), 6)
+            for index in range(6):
+                self.assertTrue(
+                    torch.equal(
+                        stored[index][Role.DEFAULT, Modality.AUDIO]
+                        .views[AudioView.LONGCAT]["semantic_codes"],
+                        torch.tensor([[index + 10]]),
+                    )
+                )
+
+    def test_materializer_parallel_loader_workers_cover_all_samples(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = root / "target"
+            samples = tuple(
+                _audio_sample(torch.tensor([[float(index)]]))
+                for index in range(8)
+            )
+
+            ViewMaterializer(target, split="train", num_workers=2).write(
+                dataset_factory=_DatasetFactory(samples),
+                provider_factory=_ParallelProviderFactory(),
+                devices=("cpu:0", "cpu:1"),
+            )
+
+            stored = read_store_dataset(target)
+            logs = sorted((target / "logs").glob("part-*.log"))
+            self.assertEqual(len(stored), 8)
+            self.assertEqual([path.name for path in logs], ["part-00000.log", "part-00001.log"])
+            for index in range(8):
+                expected = index + (100 if index % 2 else 0)
+                self.assertTrue(
+                    torch.equal(
+                        stored[index][Role.DEFAULT, Modality.AUDIO]
+                        .views[AudioView.LONGCAT]["semantic_codes"],
+                        torch.tensor([[expected]]),
+                    )
+                )
+
     def test_modality_materializer_parallel_write_uses_modality_mode(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

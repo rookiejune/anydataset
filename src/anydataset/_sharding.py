@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 
 from torch import distributed as dist
@@ -48,12 +49,7 @@ class Shard:
 
 
 def runtime_shard() -> Shard:
-    rank_count = 1
-    rank_index = 0
-
-    if dist.is_available() and dist.is_initialized():
-        rank_count = dist.get_world_size()
-        rank_index = dist.get_rank()
+    rank_count, rank_index = _runtime_rank()
 
     worker_count = 1
     worker_index = 0
@@ -71,3 +67,26 @@ def runtime_shard() -> Shard:
         worker_count=worker_count,
         worker_index=worker_index,
     )
+
+
+def _runtime_rank() -> tuple[int, int]:
+    if dist.is_available() and dist.is_initialized():
+        return dist.get_world_size(), dist.get_rank()
+
+    world_size = _optional_env_int("WORLD_SIZE")
+    rank = _optional_env_int("RANK")
+    if world_size is None and rank is None:
+        return 1, 0
+    if world_size is None or rank is None:
+        raise ValueError("RANK and WORLD_SIZE must be set together.")
+    return world_size, rank
+
+
+def _optional_env_int(name: str) -> int | None:
+    value = os.environ.get(name)
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be an integer.") from exc

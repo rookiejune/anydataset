@@ -311,6 +311,14 @@ class CanonicalDatasetTest(unittest.TestCase):
 
         self.assertEqual(values_by_rank, [[0], [1], [2], [3]])
 
+    def test_map_dataset_runtime_indexed_shard_uses_rank_environment(self):
+        dataset = _map_dataset(range(8))
+
+        with mock.patch.dict("os.environ", {"WORLD_SIZE": "2", "RANK": "1"}):
+            values = list(dataset.iter_indexed_runtime_shard())
+
+        self.assertEqual(values, [(1, 1), (3, 3), (5, 5), (7, 7)])
+
     def test_multiple_dataset_splits_pytorch_workers(self):
         dataset = MultipleAnyDataset([_map_dataset(range(6))])
         worker = _WorkerInfo(num_workers=2, id=1)

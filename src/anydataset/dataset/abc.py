@@ -133,6 +133,27 @@ class IterableAnyDataset(_Base, IterableDataset):
 
         yield from _iter_modulo(self.iter_rows(), num_shards, shard_id)
 
+    def iter_indexed_shard(
+        self,
+        num_shards: int,
+        shard_id: int,
+    ) -> Iterator[tuple[int, Sample]]:
+        validate_shard(num_shards, shard_id)
+        dataset = self.dataset
+        iter_indexed = getattr(dataset, "iter_indexed_shard", None)
+        if callable(iter_indexed):
+            for index, row in iter_indexed(num_shards, shard_id):
+                yield index, self.transform_sample(self.parse_fn(row))
+            return
+
+        for index, row in enumerate(self.iter_rows()):
+            if index % num_shards == shard_id:
+                yield index, self.transform_sample(self.parse_fn(row))
+
+    def iter_indexed_runtime_shard(self) -> Iterator[tuple[int, Sample]]:
+        shard = runtime_shard()
+        yield from self.iter_indexed_shard(shard.flat_count, shard.flat_index)
+
 
 class SampleDataset(Dataset, ABC):
     @abstractmethod
@@ -196,6 +217,10 @@ class AnyDataset(_Base, SampleDataset):
 
         for index in range(shard_id, len(self), num_shards):
             yield index, self[index]
+
+    def iter_indexed_runtime_shard(self):
+        shard = runtime_shard()
+        yield from self.iter_indexed_shard(shard.flat_count, shard.flat_index)
 
     def iter_runtime_shard(self, shard: Shard):
         usable = len(self) // shard.rank_count * shard.rank_count

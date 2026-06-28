@@ -327,6 +327,11 @@ Multi-device materialization uses Python `spawn`, so `dataset_factory` and
 `provider_factory` must be picklable, module-level callables. Like filtering,
 multi-device materialization owns its offline worker processes and should not
 be launched from inside an existing DDP training process.
+Pass `num_workers` to let each materializer process read samples through a
+PyTorch `DataLoader`; this is useful when `parse_fn` does CPU-heavy work such
+as file-to-waveform decoding. The materializer sets rank environment variables
+for its device workers, and datasets combine rank and DataLoader worker state
+inside their runtime shard logic so each sample is covered once.
 
 ```python
 def provider_factory(device: str):
@@ -337,6 +342,8 @@ def provider_factory(device: str):
 
 delta = ViewMaterializer(
     output_dir="/data/my_anydataset_longcat",
+    batch_size=8,
+    num_workers=4,
 ).write(
     dataset_factory=dataset_factory,
     provider_factory=provider_factory,

@@ -533,6 +533,10 @@ AnyDataset(
 part 和 `<output_dir>/logs/part-xxxxx.log`，全部完成后主进程合并 store。
 和过滤一样，多设备 materialize 拥有自己的离线 worker，不应放进已经存在的 DDP
 训练进程里运行。
+如果 `parse_fn` 里有 file 到 waveform 这类 CPU 重活，可以给 materializer 传
+`num_workers`，让每个设备 worker 内部通过 PyTorch `DataLoader` 做读取、
+解码和预取。materializer 会为设备 worker 设置 rank 环境，dataset 的 runtime
+shard 会把 rank 和 DataLoader worker 组合起来，保证样本只覆盖一次。
 
 ```python
 def provider_factory(device: str):
@@ -544,6 +548,8 @@ def provider_factory(device: str):
 delta = ViewMaterializer(
     output_dir="/data/my_anydataset_longcat",
     split="train",
+    batch_size=8,
+    num_workers=4,
 ).write(
     dataset_factory=dataset_factory,
     provider_factory=provider_factory,
