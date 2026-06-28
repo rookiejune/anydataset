@@ -378,7 +378,7 @@ train = result.select("clean", "usable")
 
 语音质量过滤在 `anydataset.quality.speech` 中。predicate 会检查 canonical
 `Sample` 里的每个 audio item，并寻找同 role 的文本作为参考；默认根据 UTMOS、
-WER、chrF 和可选 BLEU 阈值输出 `accept` 或 `reject`：
+chrF、秒/文本单位、峰值振幅以及可选 WER/BLEU 阈值输出 `accept` 或 `reject`：
 
 ```python
 from anydataset import FilterRule
@@ -570,6 +570,12 @@ view 没有 mask，有效长度来自加载后的 waveform。当前 LongCat enco
 padding 对应的 codes 写入 store。
 
 `merge()` 会把右侧 dataset 里的新 view 或新 item 原地合入左侧 store；如果 view 或 metadata 已经存在且发生冲突，会直接报错。也可以把 delta store 当作目标 store，执行 `AnyDataset(Spec(source=Source.STORE, path=str(delta), split="train")).merge(dataset)`，避免先复制一份 source。
+
+`merge()` 按迭代顺序对齐样本，不按 `sample_id` join。右侧 dataset 在本次 merge
+迭代中必须和左侧 store 保持同一稳定顺序；不要传入 shuffle 过的 loader、runtime
+shard 后的 iterable，或已经处在 DDP/DataLoader worker 上下文里的迭代器。
+`ViewMaterializer` 写出的 delta store 可以安全用于这条路径，因为 part commit 会在
+merge 前恢复 `sample_index` 顺序。
 
 生成的新 view 也通过 schema 选择：
 

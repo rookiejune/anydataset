@@ -223,8 +223,8 @@ train = result.select("clean", "usable")
 other language pairs should pass an explicit `Profile`.
 
 `anydataset.quality.speech.Predicate` scans audio items with same-role text and
-labels samples as `accept` or `reject` based on UTMOS, WER, chrF, and optional
-BLEU thresholds:
+labels samples as `accept` or `reject` based on UTMOS, chrF, duration-per-text
+unit, peak amplitude, and optional WER/BLEU thresholds:
 
 ```python
 from anydataset import FilterRule
@@ -312,6 +312,13 @@ AnyDataset(Spec(source=Source.STORE, path="/data/my_anydataset")).merge(
     AnyDataset(Spec(source=Source.STORE, path=str(delta)))
 )
 ```
+
+`merge()` matches samples by iteration order, not by `sample_id`. The right-hand
+dataset must yield samples in the same stable order as the target store for that
+merge pass. Do not pass shuffled loaders, runtime-sharded iterables, or
+iterators from an active DDP/DataLoader worker context. Delta stores written by
+`ViewMaterializer` are safe for this path because part commit restores
+`sample_index` order before merge.
 
 For GPU-backed providers, let `devices` control parallelism. `devices="auto"`
 uses one spawned worker per visible CUDA device, writes worker logs under

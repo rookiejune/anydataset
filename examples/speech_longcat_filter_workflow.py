@@ -12,6 +12,7 @@ import time
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, cast
+import unicodedata
 
 import torch
 from anydataset.provider.longcat import LongCatProvider
@@ -46,8 +47,9 @@ COMPARE_LIMIT: int | None = None
 
 DEVICE = "cuda:0"
 MIN_UTMOS = 3.0
-MAX_WER = 0.4
 MIN_CHRF = 50.0
+MAX_SECONDS_PER_TEXT_UNIT = 4.0
+MIN_PEAK_AMPLITUDE = 0.05
 
 
 class Quality:
@@ -72,8 +74,19 @@ class Quality:
         prediction = self.asr.transcribe(waveform, sample_rate)
         metrics = self.text.evaluate(prediction, reference)
         score = float(self.utmos.evaluate(waveform, sample_rate)["utmos"])
-        bad_text = metrics["wer"] > MAX_WER or metrics["chrf"] < MIN_CHRF
-        reject = score < MIN_UTMOS and bad_text
+        wave = torch.as_tensor(waveform)
+        duration_seconds = float(wave.shape[-1]) / float(sample_rate)
+        peak_amplitude = (
+            float(wave.detach().abs().max().cpu().item()) if wave.numel() else 0.0
+        )
+        text_units = _text_units(str(reference))
+        seconds_per_text_unit = duration_seconds / float(text_units)
+        reject = (
+            score < MIN_UTMOS
+            or metrics["chrf"] < MIN_CHRF
+            or seconds_per_text_unit > MAX_SECONDS_PER_TEXT_UNIT
+            or peak_amplitude < MIN_PEAK_AMPLITUDE
+        )
         return FilterDecision(
             label="reject" if reject else "accept",
             metrics={
@@ -83,6 +96,10 @@ class Quality:
                 "wer": float(metrics["wer"]),
                 "chrf": float(metrics["chrf"]),
                 "bleu": float(metrics["bleu"]),
+                "duration_seconds": duration_seconds,
+                "peak_amplitude": peak_amplitude,
+                "text_units": text_units,
+                "seconds_per_text_unit": seconds_per_text_unit,
             },
         )
 
@@ -97,7 +114,41 @@ def _filter_device() -> str:
     return os.environ.get("ANYDATASET_FILTER_DEVICE", DEVICE)
 
 
-rule = FilterRule("reject_utmos_lt_3_and_bad_asr_text_v1", quality_factory)
+def _text_units(text: str) -> int:
+    count = 0
+    in_word = False
+    for char in text:
+        if _is_cjk(char):
+            count += 1
+            in_word = False
+        elif char.isalnum():
+            if not in_word:
+                count += 1
+                in_word = True
+        elif unicodedata.category(char).startswith("M"):
+            continue
+        else:
+            in_word = False
+    return max(count, 1)
+
+
+def _is_cjk(char: str) -> bool:
+    codepoint = ord(char)
+    return (
+        0x3400 <= codepoint <= 0x4DBF
+        or 0x4E00 <= codepoint <= 0x9FFF
+        or 0xF900 <= codepoint <= 0xFAFF
+        or 0x20000 <= codepoint <= 0x2A6DF
+        or 0x2A700 <= codepoint <= 0x2B73F
+        or 0x2B740 <= codepoint <= 0x2B81F
+        or 0x2B820 <= codepoint <= 0x2CEAF
+        or 0x2CEB0 <= codepoint <= 0x2EBEF
+        or 0x30000 <= codepoint <= 0x3134F
+        or 0x31350 <= codepoint <= 0x323AF
+    )
+
+
+rule = FilterRule("speech_quality_v2_utmos3_chrf50_len4_peak005", quality_factory)
 
 
 def fleurs_dataset():

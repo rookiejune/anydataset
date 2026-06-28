@@ -14,8 +14,10 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum, auto
 from math import isfinite
+import unicodedata
 from typing import Any, Protocol
 
+import torch
 from torch import Tensor
 
 from ..filter import FilterDecision
@@ -42,14 +44,24 @@ class SpeechEvaluatorProtocol(Protocol):
 @dataclass(frozen=True)
 class Profile:
     min_utmos: float = 3.0
-    max_wer: float = 0.4
+    max_wer: float | None = None
     min_chrf: float = 50.0
+    max_seconds_per_text_unit: float | None = 4.0
+    min_peak_amplitude: float | None = 0.05
     min_bleu: float | None = None
 
     def __post_init__(self) -> None:
         _finite_threshold(self.min_utmos, name="min_utmos")
-        _finite_threshold(self.max_wer, name="max_wer")
+        if self.max_wer is not None:
+            _finite_threshold(self.max_wer, name="max_wer")
         _finite_threshold(self.min_chrf, name="min_chrf")
+        if self.max_seconds_per_text_unit is not None:
+            _finite_threshold(
+                self.max_seconds_per_text_unit,
+                name="max_seconds_per_text_unit",
+            )
+        if self.min_peak_amplitude is not None:
+            _finite_threshold(self.min_peak_amplitude, name="min_peak_amplitude")
         if self.min_bleu is not None:
             _finite_threshold(self.min_bleu, name="min_bleu")
 
@@ -90,6 +102,7 @@ class Predicate:
                 **self.decode_options,
             )
             values = _metrics(metrics)
+            values.update(_audio_metrics(audio, sample_rate, reference_text))
             item_flags = _flags(values, self.profile)
             flags.extend(_role_key(role, flag) for flag in item_flags)
             checked_count += 1
@@ -178,6 +191,59 @@ def _metrics(metrics: Mapping[str, object]) -> dict[str, float]:
     }
 
 
+def _audio_metrics(audio: Any, sample_rate: int, reference_text: str) -> dict[str, float]:
+    wave = torch.as_tensor(audio)
+    if wave.numel() == 0:
+        duration_seconds = 0.0
+        peak_amplitude = 0.0
+    else:
+        duration_seconds = float(wave.shape[-1]) / float(sample_rate)
+        peak_amplitude = float(wave.detach().abs().max().cpu().item())
+
+    text_units = _text_units(reference_text)
+    seconds_per_text_unit = duration_seconds / float(text_units)
+    return {
+        "duration_seconds": duration_seconds,
+        "peak_amplitude": peak_amplitude,
+        "text_units": float(text_units),
+        "seconds_per_text_unit": seconds_per_text_unit,
+    }
+
+
+def _text_units(text: str) -> int:
+    count = 0
+    in_word = False
+    for char in text:
+        if _is_cjk(char):
+            count += 1
+            in_word = False
+        elif char.isalnum():
+            if not in_word:
+                count += 1
+                in_word = True
+        elif unicodedata.category(char).startswith("M"):
+            continue
+        else:
+            in_word = False
+    return max(count, 1)
+
+
+def _is_cjk(char: str) -> bool:
+    codepoint = ord(char)
+    return (
+        0x3400 <= codepoint <= 0x4DBF
+        or 0x4E00 <= codepoint <= 0x9FFF
+        or 0xF900 <= codepoint <= 0xFAFF
+        or 0x20000 <= codepoint <= 0x2A6DF
+        or 0x2A700 <= codepoint <= 0x2B73F
+        or 0x2B740 <= codepoint <= 0x2B81F
+        or 0x2B820 <= codepoint <= 0x2CEAF
+        or 0x2CEB0 <= codepoint <= 0x2EBEF
+        or 0x30000 <= codepoint <= 0x3134F
+        or 0x31350 <= codepoint <= 0x323AF
+    )
+
+
 def _metric(metrics: Mapping[str, object], name: str) -> float:
     if name not in metrics:
         raise ValueError(f"speech evaluator must return metric {name!r}.")
@@ -202,10 +268,20 @@ def _flags(metrics: Mapping[str, float], profile: Profile) -> list[str]:
     flags: list[str] = []
     if metrics["utmos"] < profile.min_utmos:
         flags.append("utmos_low")
-    if metrics["wer"] > profile.max_wer:
+    if profile.max_wer is not None and metrics["wer"] > profile.max_wer:
         flags.append("wer_high")
     if metrics["chrf"] < profile.min_chrf:
         flags.append("chrf_low")
+    if (
+        profile.max_seconds_per_text_unit is not None
+        and metrics["seconds_per_text_unit"] > profile.max_seconds_per_text_unit
+    ):
+        flags.append("duration_per_text_unit_high")
+    if (
+        profile.min_peak_amplitude is not None
+        and metrics["peak_amplitude"] < profile.min_peak_amplitude
+    ):
+        flags.append("peak_amplitude_low")
     if profile.min_bleu is not None and metrics["bleu"] < profile.min_bleu:
         flags.append("bleu_low")
     return flags
@@ -244,6 +320,10 @@ def _item_log(
         "wer": round(metrics["wer"], 6),
         "chrf": round(metrics["chrf"], 6),
         "bleu": round(metrics["bleu"], 6),
+        "duration_seconds": round(metrics["duration_seconds"], 6),
+        "peak_amplitude": round(metrics["peak_amplitude"], 6),
+        "text_units": int(metrics["text_units"]),
+        "seconds_per_text_unit": round(metrics["seconds_per_text_unit"], 6),
         "flags": flags,
     }
 

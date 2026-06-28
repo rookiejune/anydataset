@@ -24,11 +24,16 @@ The predicate returns two labels:
 The default thresholds are:
 
 - `min_utmos=3.0`
-- `max_wer=0.4`
+- `max_wer=None`
 - `min_chrf=50.0`
+- `max_seconds_per_text_unit=4.0`
+- `min_peak_amplitude=0.05`
 - `min_bleu=None`
 
-Enable BLEU rejection by setting `Profile(min_bleu=...)`.
+WER is still recorded for audit, but is not a rejection threshold by default
+because ASR output may omit word separators in languages such as Chinese. Enable
+WER rejection by setting `Profile(max_wer=...)`. Enable BLEU rejection by
+setting `Profile(min_bleu=...)`.
 
 ## Metrics
 
@@ -41,7 +46,7 @@ from anydataset.quality.speech import Predicate, Profile
 
 def factory():
     return Predicate(
-        profile=Profile(min_utmos=3.2, max_wer=0.35),
+        profile=Profile(min_utmos=3.2, min_chrf=55.0),
         decode_options={"language": "en", "temperature": 0.0},
     )
 
@@ -61,7 +66,8 @@ Each metrics payload includes:
 - `audio_count`: number of audio items in the sample.
 - `checked_count`: number of audio items evaluated by the speech evaluator.
 - `items`: per-audio audit rows with reference text, UTMOS, WER, chrF, BLEU,
-  and unprefixed item flags.
+  duration, peak amplitude, text units, seconds per text unit, and unprefixed
+  item flags.
 
 ## Evaluator
 

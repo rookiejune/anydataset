@@ -21,7 +21,7 @@ class FakeSpeechEvaluator:
 
 class SpeechQualityTest(unittest.TestCase):
     def test_accepts_every_checked_audio_when_metrics_pass(self):
-        source_wave = torch.zeros(1, 16000)
+        source_wave = torch.full((1, 16000), 0.1)
         target_wave = torch.ones(1, 8000)
         evaluator = FakeSpeechEvaluator(
             [
@@ -67,6 +67,10 @@ class SpeechQualityTest(unittest.TestCase):
                     "wer": 0.1,
                     "chrf": 80.0,
                     "bleu": 70.0,
+                    "duration_seconds": 1.0,
+                    "peak_amplitude": 0.1,
+                    "text_units": 2,
+                    "seconds_per_text_unit": 0.5,
                     "flags": [],
                 },
                 {
@@ -76,6 +80,10 @@ class SpeechQualityTest(unittest.TestCase):
                     "wer": 0.2,
                     "chrf": 75.0,
                     "bleu": 60.0,
+                    "duration_seconds": 1.0,
+                    "peak_amplitude": 1.0,
+                    "text_units": 2,
+                    "seconds_per_text_unit": 0.5,
                     "flags": [],
                 },
             ],
@@ -112,12 +120,28 @@ class SpeechQualityTest(unittest.TestCase):
         self.assertEqual(decision.label, Label.REJECT)
         self.assertEqual(
             decision.metrics["flags"],
-            ["default_utmos_low", "default_wer_high", "default_chrf_low"],
+            ["default_utmos_low", "default_chrf_low", "default_peak_amplitude_low"],
         )
         self.assertEqual(
             decision.metrics["items"][0]["flags"],
-            ["utmos_low", "wer_high", "chrf_low"],
+            ["utmos_low", "chrf_low", "peak_amplitude_low"],
         )
+
+    def test_wer_rejection_is_only_enabled_when_threshold_is_set(self):
+        predicate = Predicate(
+            profile=Profile(max_wer=0.4),
+            evaluator=FakeSpeechEvaluator(
+                [
+                    {"utmos": 4.0, "wer": 0.41, "chrf": 80.0, "bleu": 70.0},
+                ]
+            ),
+        )
+
+        decision = predicate(_sample(torch.ones(1, 16000), 16000, "hello"))
+
+        self.assertEqual(decision.label, Label.REJECT)
+        self.assertEqual(decision.metrics["flags"], ["default_wer_high"])
+        self.assertEqual(decision.metrics["items"][0]["flags"], ["wer_high"])
 
     def test_rejects_below_bleu_when_threshold_is_enabled(self):
         predicate = Predicate(
@@ -129,10 +153,61 @@ class SpeechQualityTest(unittest.TestCase):
             ),
         )
 
-        decision = predicate(_sample(torch.zeros(1, 16000), 16000, "hello"))
+        decision = predicate(_sample(torch.ones(1, 16000), 16000, "hello"))
 
         self.assertEqual(decision.label, Label.REJECT)
         self.assertEqual(decision.metrics["flags"], ["default_bleu_low"])
+
+    def test_rejects_long_audio_per_text_unit_and_low_peak(self):
+        predicate = Predicate(
+            evaluator=FakeSpeechEvaluator(
+                [
+                    {"utmos": 4.0, "wer": 0.1, "chrf": 80.0, "bleu": 70.0},
+                ]
+            )
+        )
+
+        decision = predicate(_sample(torch.zeros(1, 80000), 16000, "啊"))
+
+        self.assertEqual(decision.label, Label.REJECT)
+        self.assertEqual(
+            decision.metrics["flags"],
+            [
+                "default_duration_per_text_unit_high",
+                "default_peak_amplitude_low",
+            ],
+        )
+        self.assertEqual(
+            decision.metrics["items"][0],
+            {
+                "role": "default",
+                "reference_text": "啊",
+                "utmos": 4.0,
+                "wer": 0.1,
+                "chrf": 80.0,
+                "bleu": 70.0,
+                "duration_seconds": 5.0,
+                "peak_amplitude": 0.0,
+                "text_units": 1,
+                "seconds_per_text_unit": 5.0,
+                "flags": ["duration_per_text_unit_high", "peak_amplitude_low"],
+            },
+        )
+
+    def test_counts_cjk_characters_and_latin_words_as_text_units(self):
+        predicate = Predicate(
+            evaluator=FakeSpeechEvaluator(
+                [
+                    {"utmos": 4.0, "wer": 0.1, "chrf": 80.0, "bleu": 70.0},
+                ]
+            )
+        )
+
+        decision = predicate(_sample(torch.ones(1, 16000), 16000, "你好 ABC 123"))
+
+        self.assertEqual(decision.label, Label.ACCEPT)
+        self.assertEqual(decision.metrics["items"][0]["text_units"], 4)
+        self.assertEqual(decision.metrics["items"][0]["seconds_per_text_unit"], 0.25)
 
     def test_skips_audio_without_waveform_and_records_warning(self):
         evaluator = FakeSpeechEvaluator([])
