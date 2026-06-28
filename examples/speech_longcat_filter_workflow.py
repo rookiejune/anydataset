@@ -46,7 +46,7 @@ DATASET_CACHE = ROOT / "dataset-cache"
 COMPARE_LIMIT: int | None = None
 
 DEVICE = "cuda:0"
-MIN_UTMOS = 3.0
+MIN_UTMOS = 2.8
 MIN_CHRF = 50.0
 MAX_SECONDS_PER_TEXT_UNIT = 4.0
 MIN_PEAK_AMPLITUDE = 0.05
@@ -148,7 +148,7 @@ def _is_cjk(char: str) -> bool:
     )
 
 
-rule = FilterRule("speech_quality_v2_utmos3_chrf50_len4_peak005", quality_factory)
+rule = FilterRule("speech_quality_v2_utmos28_chrf50_len4_peak005", quality_factory)
 
 
 def fleurs_dataset():

@@ -43,7 +43,7 @@ class SpeechEvaluatorProtocol(Protocol):
 
 @dataclass(frozen=True)
 class Profile:
-    min_utmos: float = 3.0
+    min_utmos: float = 2.8
     max_wer: float | None = None
     min_chrf: float = 50.0
     max_seconds_per_text_unit: float | None = 4.0

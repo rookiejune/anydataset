@@ -23,7 +23,7 @@ The predicate returns two labels:
 
 The default thresholds are:
 
-- `min_utmos=3.0`
+- `min_utmos=2.8`
 - `max_wer=None`
 - `min_chrf=50.0`
 - `max_seconds_per_text_unit=4.0`

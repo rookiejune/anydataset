@@ -110,7 +110,7 @@ class SpeechQualityTest(unittest.TestCase):
         predicate = Predicate(
             evaluator=FakeSpeechEvaluator(
                 [
-                    {"utmos": 2.99, "wer": 0.41, "chrf": 49.9, "bleu": 70.0},
+                    {"utmos": 2.79, "wer": 0.41, "chrf": 49.9, "bleu": 70.0},
                 ]
             )
         )
