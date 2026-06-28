@@ -19,6 +19,7 @@ class FilterDecision:
 
 type FilterOutput = FilterLabel | FilterDecision
 type FilterPredicate = Callable[[Sample], FilterOutput]
+type FilterFactory = Callable[[], FilterPredicate]
 
 
 @dataclass(frozen=True)

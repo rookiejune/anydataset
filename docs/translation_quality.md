@@ -116,8 +116,8 @@
 
 推荐只对 `usable`、`review`、模型分歧样本和每个语种/领域/长度桶的抽样数据使用
 神经网络。
-如果要在复旦服务器上跑模型，按仓库根目录 `docs/fdu-remote.md` 的约定使用
-`ssh 121`，并把 Hugging Face 缓存显式放到 `/mnt/pami202/zhuyin/huggingface`。
+如果要在远程 GPU 机器上跑模型，把 Hugging Face 缓存、模型版本、阈值和推理参数
+显式写进调用方配置，并把会影响 label 的部分同步写进 `FilterRule.name`。
 
 神经网络分数不能直接把样本升回 `clean`。以下情况应由规则优先处理：
 
@@ -137,13 +137,15 @@
 from anydataset import FilterRule, Preset
 from anydataset.quality.translation import Predicate
 
-predicate = Predicate.from_preset(
-    Preset.WMT19,
-    source_lang="zh",
-    target_lang="en",
-    bicleaner=bicleaner_score,
-)
-rule = FilterRule("mt_quality_rules_v1_wmt19_zh_en", predicate)
+def factory():
+    return Predicate.from_preset(
+        Preset.WMT19,
+        source_lang="zh",
+        target_lang="en",
+        bicleaner=bicleaner_score,
+    )
+
+rule = FilterRule("mt_quality_rules_v1_wmt19_zh_en", factory)
 ```
 
 内部 label 是有序枚举：`reject < review < usable < clean`。每个私有子规则返回

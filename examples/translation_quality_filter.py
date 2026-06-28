@@ -134,11 +134,14 @@ def main() -> None:
         min_script_ratio=args.min_script_ratio,
         reject_script_ratio=args.reject_script_ratio,
     )
-    rule = FilterRule(args.rule_name, Predicate(profile))
+    def factory():
+        return Predicate(profile)
+
+    rule = FilterRule(args.rule_name, factory)
     result = rule.apply(
         dataset,
         metrics=True,
-        num_workers=args.num_workers,
+        device=args.device,
         cache_root=args.cache_root,
     )
     summary: dict[str, Any] = {
@@ -169,7 +172,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--rule-name", default="mt_quality_rules_v1")
     parser.add_argument("--cache-root", type=Path)
     parser.add_argument("--dataset-cache-root", type=Path)
-    parser.add_argument("--num-workers", type=int, default=1)
+    parser.add_argument("--device", default="cpu")
     parser.add_argument("--preview", type=int, default=5)
     parser.add_argument("--review-min-ratio", type=float, default=0.2)
     parser.add_argument("--review-max-ratio", type=float, default=6.0)

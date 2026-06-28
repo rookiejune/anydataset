@@ -49,40 +49,55 @@ MIN_UTMOS = 3.0
 MAX_WER = 0.4
 MIN_CHRF = 50.0
 
-# Evaluators used by the filter predicate.
-asr = WhisperASREvaluator(
-    model_name="large-v3",
-    device=DEVICE,
-    decode_options={"language": "en", "temperature": 0.0},
-)
-text = TextComparisonEvaluator()
-utmos = UTMOSEvaluator(device=DEVICE, backend_load_options={"trust_repo": True})
+
+class Quality:
+    def __init__(self) -> None:
+        device = _filter_device()
+        self.asr = WhisperASREvaluator(
+            model_name="large-v3",
+            device=device,
+            decode_options={"language": "en", "temperature": 0.0},
+        )
+        self.text = TextComparisonEvaluator()
+        self.utmos = UTMOSEvaluator(
+            device=device,
+            backend_load_options={"trust_repo": True},
+        )
+
+    def __call__(self, sample: Sample) -> FilterDecision:
+        audio = cast(AudioItem, sample[Role.DEFAULT, Modality.AUDIO])
+        transcript = cast(TextItem, sample[Role.DEFAULT, Modality.TEXT])
+        waveform, sample_rate = audio.views[AudioView.WAVEFORM]
+        reference = transcript.views[TextView.TEXT]
+        prediction = self.asr.transcribe(waveform, sample_rate)
+        metrics = self.text.evaluate(prediction, reference)
+        score = float(self.utmos.evaluate(waveform, sample_rate)["utmos"])
+        bad_text = metrics["wer"] > MAX_WER or metrics["chrf"] < MIN_CHRF
+        reject = score < MIN_UTMOS and bad_text
+        return FilterDecision(
+            label="reject" if reject else "accept",
+            metrics={
+                "utmos": score,
+                "asr_text": str(prediction),
+                "reference_text": reference,
+                "wer": float(metrics["wer"]),
+                "chrf": float(metrics["chrf"]),
+                "bleu": float(metrics["bleu"]),
+            },
+        )
 
 
-def quality(sample: Sample) -> FilterDecision:
-    audio = cast(AudioItem, sample[Role.DEFAULT, Modality.AUDIO])
-    transcript = cast(TextItem, sample[Role.DEFAULT, Modality.TEXT])
-    waveform, sample_rate = audio.views[AudioView.WAVEFORM]
-    reference = transcript.views[TextView.TEXT]
-    prediction = asr.transcribe(waveform, sample_rate)
-    metrics = text.evaluate(prediction, reference)
-    score = float(utmos.evaluate(waveform, sample_rate)["utmos"])
-    bad_text = metrics["wer"] > MAX_WER or metrics["chrf"] < MIN_CHRF
-    reject = score < MIN_UTMOS and bad_text
-    return FilterDecision(
-        label="reject" if reject else "accept",
-        metrics={
-            "utmos": score,
-            "asr_text": str(prediction),
-            "reference_text": reference,
-            "wer": float(metrics["wer"]),
-            "chrf": float(metrics["chrf"]),
-            "bleu": float(metrics["bleu"]),
-        },
-    )
+def quality_factory():
+    return Quality()
 
 
-rule = FilterRule("reject_utmos_lt_3_and_bad_asr_text_v1", quality)
+def _filter_device() -> str:
+    import os
+
+    return os.environ.get("ANYDATASET_FILTER_DEVICE", DEVICE)
+
+
+rule = FilterRule("reject_utmos_lt_3_and_bad_asr_text_v1", quality_factory)
 
 
 def fleurs_dataset():
@@ -208,7 +223,7 @@ if AudioView.WAVEFORM not in audio.views or (
     )
 
 # Apply the named quality rule and select the accepted partition.
-result = rule.apply(merged, metrics=True, cache_root=FILTER_CACHE)
+result = rule.apply(merged, metrics=True, device="auto", cache_root=FILTER_CACHE)
 filtered = result.select("accept")
 sample = filtered[0]
 audio = cast(AudioItem, sample[Role.DEFAULT, Modality.AUDIO])

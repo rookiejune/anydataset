@@ -88,6 +88,18 @@ class Spec:
         payload = _identity_payload(self)
         return {"id": self.id, **payload}
 
+    def __reduce__(self):
+        return (
+            type(self),
+            (
+                self.source,
+                self.path,
+                self.split,
+                self.version,
+                dict(self.load_options),
+            ),
+        )
+
 
 class Task(StrEnum):
     IMAGE_CLASSIFICATION = auto()

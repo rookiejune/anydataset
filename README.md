@@ -25,6 +25,8 @@ pip install -e '.[huggingface,audio]'
 ## Presets
 
 Use `Preset` when a built-in dataset already knows both its source and parser.
+Built-in presets currently include `MNIST`, `CIFAR10`, `FLEURS`,
+`LIBRISPEECH_ASR`, `COMMON_VOICE`, `ESC50`, `NSYNTH`, `FSD50K`, and `WMT19`.
 
 ```python
 from anydataset import AudioView, Modality, Preset, Role
@@ -51,7 +53,10 @@ from anydataset import resolve_dataset
 
 spec = resolve_dataset("mnist:train")
 hf = resolve_dataset("hf://ylecun/mnist:train")
+disk = resolve_dataset("hf-disk:///data/mnist_saved:validation")
 store = resolve_dataset("store:///data/my_anydataset:train")
+tsv = resolve_dataset("tsv:///data/common_voice/en:train")
+csv = resolve_dataset("sharded_csv:///data/bitext:train")
 ```
 
 ## Custom Sources
@@ -79,6 +84,13 @@ dataset = AnyDataset(
 For local JSON, image, or audio files, use `Source.HF` with Hugging Face
 `load_dataset(...)` options such as `data_files` or `data_dir`. For structured
 local datasets with canonical samples, use `Source.STORE`.
+
+Built-in enum sources are `Source.HF`, `Source.HF_DISK`, and `Source.STORE`.
+The registry also includes string source keys `tsv` and `sharded_csv`; because
+they are registered, they can be used in `Spec(source=...)` and in
+`resolve_dataset("<source>://...")` shorthands. `tsv` reads a file path or
+`<path>/<split>.tsv`; `sharded_csv` reads `shard_<index>/*.csv`, optionally
+under `<path>/<split>/`.
 
 New physical source types can be registered with a small factory:
 
@@ -124,12 +136,13 @@ predicate receives the full canonical sample produced by the dataset.
 ```python
 from anydataset.filter import FilterDecision, FilterRule, FilteredDataset
 
-rule = FilterRule(
-    name="quality_v1_parse_v3_transform_none",
-    predicate=lambda sample: "review" if needs_review(sample) else is_good(sample),
-)
+def quality_factory():
+    return lambda sample: "review" if needs_review(sample) else is_good(sample)
 
-train = FilteredDataset(dataset, rule, labels="accept", num_workers=4)
+
+rule = FilterRule("quality_v1_parse_v3_transform_none", quality_factory)
+
+train = FilteredDataset(dataset, rule, labels="accept", device="auto")
 audit = FilteredDataset(dataset, rule, labels=("reject", "review"))
 ```
 
@@ -142,31 +155,91 @@ contract; callers should put predicate, parser, and transform semantics into
 for the base dataset. If not, it builds the cache, then exposes only the labels
 specified by the caller.
 
-Filter cache construction is single-process by default. Pass `num_workers` to
-parallelize over map-style index ranges. Partition index files are sharded by
-`max_shard_samples` (default: 1,000,000), so large labels do not need one huge
-parquet file. `commit_samples` (default: 100,000) bounds each in-memory label
-batch before it is committed to the shard writer.
+`FilterRule` stores a zero-argument factory, and the factory builds the
+predicate inside the process that will execute it. `device="auto"` uses one
+spawned process per visible CUDA device and falls back to CPU single-process
+execution. Pass `device="cpu"` for explicit single-process CPU filtering, or an
+iterable such as `("cpu", "cpu")` or `("cuda:0", "cuda:1")` for explicit
+parallel workers. Multi-device filtering sets DDP-style `RANK`, `LOCAL_RANK`,
+`WORLD_SIZE`, `MASTER_ADDR`, and `MASTER_PORT` environment variables before
+calling the factory. Multi-device filtering uses Python `spawn`, so factories
+should be module-level picklable callables.
+
+Partition index files are sharded by `max_shard_samples` (default: 1,000,000),
+so large labels do not need one huge parquet file. `commit_samples` (default:
+100,000) bounds each in-memory label batch before it is committed to the shard
+writer.
 
 Predicates can return `FilterDecision` when a filter should also cache
 per-sample JSON metrics:
 
 ```python
-rule = FilterRule(
-    name="quality_v2",
-    predicate=lambda sample: FilterDecision(
+def metric_factory():
+    return lambda sample: FilterDecision(
         label=is_good(sample),
         metrics={"score": quality_score(sample)},
-    ),
-)
+    )
 
-result = rule.apply(dataset, metrics=True)
+
+rule = FilterRule("quality_v2", metric_factory)
+
+result = rule.apply(dataset, metrics=True, device="cpu")
 rows = list(result.iter_metrics())
 ```
 
 Metrics are written under the filter cache and include the original sample
 index, normalized label, and metrics payload. Set `metrics=True` explicitly;
 when an older partition cache has no metrics side output, the rule is rebuilt.
+
+## Quality Predicates
+
+Quality modules provide reusable predicates for `FilterRule`; they do not own
+dataset loading or cache naming.
+
+```python
+from anydataset import FilterRule, Preset
+from anydataset.quality.translation import Predicate as TranslationQuality
+
+dataset = Preset.WMT19.create(source_lang="zh", target_lang="en")
+def translation_factory():
+    return TranslationQuality.from_preset(
+        Preset.WMT19,
+        source_lang="zh",
+        target_lang="en",
+    )
+
+result = FilterRule("mt_quality_rules_v1_zh_en", translation_factory).apply(
+    dataset,
+    metrics=True,
+)
+train = result.select("clean", "usable")
+```
+
+`anydataset.quality.translation.Predicate` labels text pairs as `clean`,
+`usable`, `review`, or `reject`. The first built-in profile is WMT19 `zh-en`;
+other language pairs should pass an explicit `Profile`.
+
+`anydataset.quality.speech.Predicate` scans audio items with same-role text and
+labels samples as `accept` or `reject` based on UTMOS, WER, chrF, and optional
+BLEU thresholds:
+
+```python
+from anydataset import FilterRule
+from anydataset.quality.speech import Predicate as SpeechQuality
+
+def speech_factory():
+    return SpeechQuality()
+
+result = FilterRule("speech_quality_v1", speech_factory).apply(
+    dataset,
+    metrics=True,
+)
+accepted = result.select("accept")
+```
+
+Speech quality warnings such as missing waveform or missing same-role text are
+audit signals in the metrics payload; the current predicate rejects only when a
+checked audio item fails a configured threshold.
 
 ## Store
 
@@ -240,6 +313,8 @@ AnyDataset(Spec(source=Source.STORE, path="/data/my_anydataset")).merge(
 For GPU-backed providers, let `devices` control parallelism. `devices="auto"`
 uses one spawned worker per visible CUDA device, writes worker logs under
 `<output_dir>/logs`, and commits the per-device parts when all workers finish.
+Multi-device materialization uses Python `spawn`, so `dataset_factory` and
+`provider_factory` must be picklable, module-level callables.
 
 ```python
 def provider_factory(device: str):
@@ -304,3 +379,7 @@ audio-to-text.
 ```bash
 /Users/zhuyin/miniconda3/envs/torch2.12/bin/python -m pytest -q
 ```
+
+Additional design notes live in `docs/design.md`, filter cache details in
+`docs/filter_cache.md`, and quality-filter notes in
+`docs/translation_quality.md` and `docs/speech_quality.md`.

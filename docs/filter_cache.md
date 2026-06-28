@@ -10,16 +10,18 @@ from `anydataset`.
 ```python
 from anydataset.filter import FilterDecision, FilterRule, FilteredDataset
 
-rule = FilterRule(
-    name="quality_v1_parse_v3_transform_none",
-    predicate=lambda sample: "review" if needs_review(sample) else is_good(sample),
-)
+def quality_factory():
+    return lambda sample: "review" if needs_review(sample) else is_good(sample)
 
-train = FilteredDataset(dataset, rule, labels="accept", num_workers=4)
+
+rule = FilterRule("quality_v1_parse_v3_transform_none", quality_factory)
+
+train = FilteredDataset(dataset, rule, labels="accept", device="auto")
 audit = FilteredDataset(dataset, rule, labels=("reject", "review"))
 ```
 
-The predicate receives the full canonical `Sample` produced by the dataset.
+The rule factory is called inside the process that executes the predicate. The
+predicate receives the full canonical `Sample` produced by the dataset.
 `FilteredDataset` checks whether the named rule has a ready cache for the base
 dataset; if not, it builds one before exposing the requested labels. Callers are
 responsible for passing the labels they want to read.
@@ -45,10 +47,10 @@ Predicate return values are normalized to string labels:
   string.
 - `FilterDecision` carries a label plus optional per-sample metrics.
 
-`FilterRule` uses `name` as its cache contract. The callable `predicate`,
-dataset `parse_fn`, and dataset transforms are deliberately not inspected by
-the library. Callers should include those semantic versions in `name` when
-cache reuse must change.
+`FilterRule` uses `name` as its cache contract. The factory, predicate, dataset
+`parse_fn`, and dataset transforms are deliberately not inspected by the
+library. Callers should include those semantic versions in `name` when cache
+reuse must change.
 
 Cache layout:
 
@@ -81,9 +83,14 @@ writer; the default is 100,000. Cache construction writes those bounded batches
 incrementally, so it does not need to hold every accepted index in one Python
 object before writing.
 
-`FilterRule.apply(..., num_workers=...)` parallelizes cache construction across
-map-style index ranges. Keep the default `num_workers=1` when the dataset or
-predicate is not safe to use from worker processes.
+`FilterRule.apply(..., device="auto")` uses one spawned process per visible CUDA
+device, or CPU single-process execution when CUDA is unavailable. Pass
+`device="cpu"` to force single-process CPU execution. Pass an iterable such as
+`("cpu", "cpu")` or `("cuda:0", "cuda:1")` to explicitly parallelize cache
+construction across map-style index ranges. Multi-device filtering sets
+DDP-style `RANK`, `LOCAL_RANK`, `WORLD_SIZE`, `MASTER_ADDR`, and `MASTER_PORT`
+environment variables before calling the factory. Multi-device filtering uses
+Python `spawn`, so factories should be module-level picklable callables.
 
 ## Metrics Side Output
 
@@ -91,15 +98,16 @@ When the predicate should produce audit scores or other lightweight diagnostics,
 return `FilterDecision` and pass `metrics=True`:
 
 ```python
-rule = FilterRule(
-    name="quality_v2",
-    predicate=lambda sample: FilterDecision(
+def metric_factory():
+    return lambda sample: FilterDecision(
         label=is_good(sample),
         metrics={"score": quality_score(sample)},
-    ),
-)
+    )
 
-result = rule.apply(dataset, metrics=True)
+
+rule = FilterRule("quality_v2", metric_factory)
+
+result = rule.apply(dataset, metrics=True, device="cpu")
 for row in result.iter_metrics():
     ...
 ```

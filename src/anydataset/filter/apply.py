@@ -9,6 +9,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from .._devices import Devices, resolve_devices
 from ..cache import CacheManager, CacheManifest, FileLock
 from ..dataset.abc import AnyDataset, SampleDataset
 from ..store.jsonio import read_json, write_json
@@ -40,7 +41,7 @@ def apply_filter(
     rule: FilterRule,
     *,
     metrics: bool,
-    num_workers: int,
+    device: Devices,
     commit_samples: int,
     max_shard_samples: int | None,
     cache_root: str | Path | None,
@@ -51,7 +52,7 @@ def apply_filter(
         dataset,
         rule,
         metrics=metrics,
-        num_workers=num_workers,
+        device=device,
         commit_samples=commit_samples,
         max_shard_samples=max_shard_samples,
         cache_root=cache_root,
@@ -70,7 +71,7 @@ def ensure_filter(
     rule: FilterRule,
     *,
     metrics: bool,
-    num_workers: int,
+    device: Devices,
     commit_samples: int,
     max_shard_samples: int | None,
     cache_root: str | Path | None,
@@ -82,7 +83,7 @@ def ensure_filter(
         raise TypeError("rule must be a FilterRule.")
     if not isinstance(metrics, bool):
         raise TypeError("metrics must be a bool.")
-    num_workers = positive_int("num_workers", num_workers)
+    devices = resolve_devices(device)
     commit_samples = positive_int("commit_samples", commit_samples)
     max_shard_samples = optional_positive_int(
         "max_shard_samples",
@@ -110,7 +111,7 @@ def ensure_filter(
             dataset,
             rule,
             metrics=metrics,
-            num_workers=num_workers,
+            devices=devices,
             commit_samples=commit_samples,
             max_shard_samples=max_shard_samples,
         )
@@ -249,7 +250,7 @@ def write_cache(
     rule: FilterRule,
     *,
     metrics: bool,
-    num_workers: int,
+    devices: tuple[str, ...],
     commit_samples: int,
     max_shard_samples: int | None,
 ) -> None:
@@ -265,7 +266,7 @@ def write_cache(
             dataset,
             rule,
             metrics=metrics,
-            num_workers=num_workers,
+            devices=devices,
             commit_samples=commit_samples,
             max_shard_samples=max_shard_samples,
         )
@@ -285,7 +286,7 @@ def write_partitions(
     rule: FilterRule,
     *,
     metrics: bool,
-    num_workers: int,
+    devices: tuple[str, ...],
     commit_samples: int,
     max_shard_samples: int | None,
 ) -> None:
@@ -296,10 +297,11 @@ def write_partitions(
         else None
     )
     try:
-        if num_workers == 1 or len(dataset) == 0:
+        if len(devices) == 1 or len(dataset) == 0:
             for chunk in collect_ranges(
                 dataset,
-                rule.predicate,
+                rule.factory,
+                devices[0],
                 metrics,
                 commit_samples,
             ):
@@ -307,8 +309,8 @@ def write_partitions(
         else:
             for chunk in collect_ranges_parallel(
                 dataset,
-                rule.predicate,
-                num_workers,
+                rule.factory,
+                devices,
                 metrics,
                 commit_samples,
             ):

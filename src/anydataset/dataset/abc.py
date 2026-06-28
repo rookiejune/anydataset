@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any
 
 from torch.utils.data import Dataset, IterableDataset
 
-from .._sharding import runtime_shard, validate_shard
+from .._sharding import Shard, runtime_shard, validate_shard
 from ..types import Preset, Source, Spec, source_key
 from ..utils import resolve_dataset
 
@@ -64,8 +64,34 @@ class _Base(ABC):
             self._source = for_source(self.spec.source)
         return self._source
 
+    def __getstate__(self) -> dict[str, Any]:
+        return {
+            "spec": self.spec,
+            "cache_root": None if self._cache_manager is None else self._cache_manager.root,
+            "parse_fn": self.parse_fn,
+            "transforms": self.transforms,
+            "source": self.source,
+        }
+
+    def __setstate__(self, state: dict[str, Any]) -> None:
+        self.spec = state["spec"]
+        self._cache_manager = None
+        cache_root = state["cache_root"]
+        if cache_root is not None:
+            from ..cache import CacheManager
+
+            self._cache_manager = CacheManager(cache_root)
+        self._dataset = None
+        self._source = state["source"]
+        self.parse_fn = state["parse_fn"]
+        transforms = state["transforms"]
+        self.transforms = None if transforms is None else dict(transforms)
+
     def __iter__(self) -> Iterator[Sample]:
         shard = runtime_shard()
+        yield from self.iter_runtime_shard(shard)
+
+    def iter_runtime_shard(self, shard: Shard) -> Iterator[Sample]:
         yield from self.iter_shard(shard.count, shard.index)
 
     def transform_sample(self, sample: Sample) -> Sample:
@@ -138,6 +164,16 @@ class AnyDataset(_Base, SampleDataset):
         validate_shard(num_shards, shard_id)
         for index in range(shard_id, len(self), num_shards):
             yield self[index]
+
+    def iter_runtime_shard(self, shard: Shard):
+        usable = len(self) // shard.rank_count * shard.rank_count
+        samples_per_rank = usable // shard.rank_count
+        for rank_offset in range(
+            shard.worker_index,
+            samples_per_rank,
+            shard.worker_count,
+        ):
+            yield self[shard.rank_index + rank_offset * shard.rank_count]
 
 
 def _identity_sample(row: Any) -> Sample:

@@ -25,7 +25,26 @@
 
 Preset 应该尽量保留数据集天然提供的信息。例如语音到语音翻译数据集可以同时产出 source audio、target audio、source text 和 target text。是否把这些字段用于训练，由用户 schema 决定。
 
+当前内置 preset 是 `MNIST`、`CIFAR10`、`FLEURS`、`LIBRISPEECH_ASR`、
+`COMMON_VOICE`、`ESC50`、`NSYNTH`、`FSD50K` 和 `WMT19`。新增 preset 时只把
+物理 `Spec` 和 raw row 到 canonical `Sample` 的映射放进 preset；过滤、模型编码、
+训练采样权重等业务规则留在调用方或更高层模块。
+
 `Task` 只适合非常稳定、跨数据集一致的默认 schema，例如图像分类、基础 audio codec 或机器翻译文本对。组合型、研究型或仍在快速变化的任务不应急着进入 `Task` 枚举，用户显式写 schema 更清楚。
+
+## Source 注册
+
+`Source` 枚举只表达核心内置物理来源：`HF`、`HF_DISK` 和 `STORE`。source 注册器还
+可以挂载字符串 key；当前内置字符串 key 有 `tsv` 和 `sharded_csv`。
+
+- `tsv` 面向本地表格调试和 Common Voice 本地包，读取文件路径或
+  `<path>/<split>.tsv`。
+- `sharded_csv` 面向已经物理分片的 CSV 目录，读取 `shard_<index>/*.csv`，
+  设置 split 时读取 `<path>/<split>/shard_<index>/*.csv`。
+
+这些字符串 source 可以直接写在 `Spec(source=...)` 里，也可以通过
+`resolve_dataset("tsv://...")` 或 `resolve_dataset("sharded_csv://...")`
+解析。新 source 只应负责 prepare 和 raw row iteration，不把字段语义塞进 source。
 
 ## 派生 View
 
@@ -47,6 +66,25 @@ base store -> provider -> delta store -> AnyDataset(store).merge(delta) -> schem
 
 ## 过滤分区
 
-过滤规则直接作用在 dataset 产出的完整 canonical `Sample` 上。predicate 返回 bool、字符串、枚举值或带 metrics 的 `FilterDecision`，库统一归一化为字符串 label，并缓存每个 label 对应的原始样本下标。
+过滤规则通过零参数 factory 创建 predicate；factory 在实际执行过滤的进程里调用。
+predicate 直接作用在 dataset 产出的完整 canonical `Sample` 上，返回 bool、字符串、
+枚举值或带 metrics 的 `FilterDecision`。库统一归一化为字符串 label，并缓存每个
+label 对应的原始样本下标。
 
-`FilterRule` 的缓存契约只包含 `name`。predicate、parse function 和 transforms 的语义版本不由库检查，调用方应把这些约定写进 `name`。这样 filter 只负责可验证的数据结构和缓存机制，不把用户业务规则伪装成库能自动理解的东西。
+`FilterRule` 的缓存契约只包含 `name`。factory、predicate、parse function 和
+transforms 的语义版本不由库检查，调用方应把这些约定写进 `name`。这样 filter
+只负责可验证的数据结构、执行设备规划和缓存机制，不把用户业务规则伪装成库能自动
+理解的东西。
+
+## 质量 Predicate
+
+`anydataset.quality` 下的模块只提供可传给 `FilterRule` 的 predicate 和 profile。
+它们不拥有 source、preset、cache root 或训练采样策略。
+
+- `quality.translation` 读取 source/target text，输出 `clean`、`usable`、
+  `review`、`reject`，第一版内置 profile 只覆盖 WMT19 `zh-en`。
+- `quality.speech` 读取 audio item 和同 role text，输出 `accept` 或 `reject`，
+  并把阈值命中、缺字段等审计信息放进 `FilterDecision.metrics`。
+
+如果接入神经网络评估器，模型路径、阈值和版本仍应体现在 `FilterRule.name` 或调用方
+配置里；filter cache 不会自动识别这些语义变化。

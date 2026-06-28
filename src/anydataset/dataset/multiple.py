@@ -93,7 +93,8 @@ class MultipleAnyDataset(IterableDataset):
 
     def __iter__(self) -> Iterator[Sample]:
         shard = runtime_shard()
-        yield from self.iter_shard(shard.count, shard.index)
+        datasets = tuple(dataset.iter_runtime_shard(shard) for dataset in self.datasets)
+        yield from self.strategy.iter(datasets)
 
     def iter_shard(self, num_shards: int, shard_id: int) -> Iterator[Sample]:
         validate_shard(num_shards, shard_id)

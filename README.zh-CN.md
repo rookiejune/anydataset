@@ -67,6 +67,9 @@ mnist = Preset.MNIST.create(split="train")
 fleurs = Preset.FLEURS.create(split="train", config_name="en_us")
 ```
 
+当前内置 preset 包括 `MNIST`、`CIFAR10`、`FLEURS`、`LIBRISPEECH_ASR`、
+`COMMON_VOICE`、`ESC50`、`NSYNTH`、`FSD50K` 和 `WMT19`。
+
 需要显式指定来源时，使用 `Spec`：
 
 ```python
@@ -127,6 +130,10 @@ dataset = IterableAnyDataset(
 - `Source.HF`：通过 `datasets.load_dataset(...)` 读取。
 - `Source.HF_DISK`：通过 `datasets.load_from_disk(...)` 读取。
 - `Source.STORE`：读取 `anydataset` 的 store。
+- 字符串 source `"tsv"`：读取单个 TSV 文件，或读取目录下的
+  `<split>.tsv`。
+- 字符串 source `"sharded_csv"`：读取 `shard_<index>/*.csv`，设置 split
+  时读取 `<path>/<split>/shard_<index>/*.csv`。
 
 准备数据源时的缓存根目录默认是 `~/.cache/anydataset`。如果希望缓存放到项目自己的 `storage/`、`outputs/` 或其它目录，可以设置 `ANYDATASET_CACHE_ROOT`，也可以在 dataset 构造函数里传 `cache_root`。
 
@@ -138,6 +145,8 @@ from anydataset import resolve_dataset
 spec = resolve_dataset("hf://ylecun/mnist:train")
 disk_spec = resolve_dataset("hf-disk:///data/mnist_saved:train")
 store_spec = resolve_dataset("store:///data/my_anydataset:train")
+tsv_spec = resolve_dataset("tsv:///data/common_voice/en:train")
+csv_spec = resolve_dataset("sharded_csv:///data/bitext:train")
 ```
 
 新增物理 source 类型时，注册一个工厂即可；`AnyDataset` 会按 `Spec.source` 从注册器取 source：
@@ -289,12 +298,13 @@ schema = {
 ```python
 from anydataset.filter import FilterDecision, FilterRule, FilteredDataset
 
-rule = FilterRule(
-    name="quality_v1_parse_v3_transform_none",
-    predicate=lambda sample: "review" if needs_review(sample) else is_good(sample),
-)
+def quality_factory():
+    return lambda sample: "review" if needs_review(sample) else is_good(sample)
 
-train = FilteredDataset(dataset, rule, labels="accept", num_workers=4)
+
+rule = FilterRule("quality_v1_parse_v3_transform_none", quality_factory)
+
+train = FilteredDataset(dataset, rule, labels="accept", device="auto")
 audit = FilteredDataset(dataset, rule, labels=("reject", "review"))
 ```
 
@@ -302,27 +312,87 @@ predicate 返回 `True` 会归为 `"accept"`，返回 `False` 会归为 `"reject
 
 `FilteredDataset` 会先检查当前 base dataset 和 rule name 是否已经有可用缓存；没有就先构建，再只暴露调用方在 `labels` 里指定的分区。
 
-filter 构建默认单进程；传入 `num_workers` 后会按 map-style 下标范围并行扫描。`commit_samples` 控制扫描多少条样本后提交一次内存里的 label batch，默认 100,000；`max_shard_samples` 控制每个 parquet shard 最多多少个下标，默认 1,000,000。这样不会单样本写入，也不会先把几百万个下标全塞进一个 Python 对象或单个 parquet 文件。
+`FilterRule` 保存的是零参数 factory，factory 会在实际执行 predicate 的进程里创建
+predicate。`device="auto"` 会在有可见 CUDA 时每张卡启动一个 spawn 进程，没有
+CUDA 时退回 CPU 单进程。传 `device="cpu"` 可以明确使用 CPU 单进程；传
+`("cpu", "cpu")` 或 `("cuda:0", "cuda:1")` 这样的 iterable 可以显式指定多个
+worker。多设备过滤会在调用 factory 前设置 DDP 常用的 `RANK`、`LOCAL_RANK`、
+`WORLD_SIZE`、`MASTER_ADDR` 和 `MASTER_PORT` 环境变量。多设备过滤使用 Python
+`spawn`，factory 应该是模块顶层的可 pickle callable。
+
+`commit_samples` 控制扫描多少条样本后提交一次内存里的 label batch，默认
+100,000；`max_shard_samples` 控制每个 parquet shard 最多多少个下标，默认
+1,000,000。这样不会单样本写入，也不会先把几百万个下标全塞进一个 Python 对象或
+单个 parquet 文件。
 
 如果 predicate 需要顺手记录逐样本指标，可以返回 `FilterDecision`，并在
 `apply` 时显式打开 `metrics=True`：
 
 ```python
-rule = FilterRule(
-    name="quality_v2",
-    predicate=lambda sample: FilterDecision(
+def metric_factory():
+    return lambda sample: FilterDecision(
         label=is_good(sample),
         metrics={"score": quality_score(sample)},
-    ),
-)
+    )
 
-result = rule.apply(dataset, metrics=True)
+
+rule = FilterRule("quality_v2", metric_factory)
+
+result = rule.apply(dataset, metrics=True, device="cpu")
 rows = list(result.iter_metrics())
 ```
 
 metrics 会写在 filter cache 下面，每行包含原始样本下标、归一化后的 label
 和 JSON 指标 payload。如果旧的分区缓存没有 metrics side output，再次以
 `metrics=True` 应用规则时会重建缓存。
+
+## 质量过滤 Predicate
+
+质量模块提供可复用的 `FilterRule` predicate；它们不负责加载数据集，也不替调用方
+决定缓存 `rule.name`。
+
+文本翻译质量过滤在 `anydataset.quality.translation` 中。内置第一版 profile 面向
+WMT19 `zh-en`，输出 `clean`、`usable`、`review`、`reject` 四类 label：
+
+```python
+from anydataset import FilterRule, Preset
+from anydataset.quality.translation import Predicate as TranslationQuality
+
+dataset = Preset.WMT19.create(source_lang="zh", target_lang="en")
+def translation_factory():
+    return TranslationQuality.from_preset(
+        Preset.WMT19,
+        source_lang="zh",
+        target_lang="en",
+    )
+
+result = FilterRule("mt_quality_rules_v1_zh_en", translation_factory).apply(
+    dataset,
+    metrics=True,
+)
+train = result.select("clean", "usable")
+```
+
+语音质量过滤在 `anydataset.quality.speech` 中。predicate 会检查 canonical
+`Sample` 里的每个 audio item，并寻找同 role 的文本作为参考；默认根据 UTMOS、
+WER、chrF 和可选 BLEU 阈值输出 `accept` 或 `reject`：
+
+```python
+from anydataset import FilterRule
+from anydataset.quality.speech import Predicate as SpeechQuality
+
+def speech_factory():
+    return SpeechQuality()
+
+result = FilterRule("speech_quality_v1", speech_factory).apply(
+    dataset,
+    metrics=True,
+)
+accepted = result.select("accept")
+```
+
+缺少 waveform、同 role 文本等情况会写进 metrics 的 warnings；当前规则只在已经
+检查到的音频低于阈值时 reject。
 
 ## 从 Batch 里取数据
 
@@ -538,4 +608,7 @@ python -m compileall -q src tests examples
 python -m pytest -q
 ```
 
-设计说明在 [docs/design.md](docs/design.md)，待办事项在 [todo.md](todo.md)。
+设计说明在 [docs/design.md](docs/design.md)，filter cache 细节在
+[docs/filter_cache.md](docs/filter_cache.md)，质量过滤说明在
+[docs/translation_quality.md](docs/translation_quality.md) 和
+[docs/speech_quality.md](docs/speech_quality.md)，待办事项在 [todo.md](todo.md)。

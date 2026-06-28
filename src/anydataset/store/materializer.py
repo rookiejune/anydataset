@@ -14,6 +14,7 @@ from queue import Empty
 from tempfile import TemporaryDirectory
 from typing import Any, Literal, cast
 
+from .._devices import Devices, resolve_devices
 from .._sharding import validate_shard
 from ..dataset.collate import Batch, collate_fn
 from ..types.item import (
@@ -38,7 +39,6 @@ from .parts import DatasetPartWriter, commit_store_parts
 from .writer import DEFAULT_MAX_SHARD_SAMPLES, DatasetWriter, _positive_int
 
 type DatasetFactory = Callable[[], Any]
-type Devices = Literal["auto"] | str | Iterable[str]
 type ModalityProviderLike = (
     ModalityProvider[AudioView]
     | ModalityProvider[ImageView]
@@ -360,31 +360,6 @@ class _Progress:
     samples: int
     done: bool
     error: str | None
-
-
-def resolve_devices(devices: Devices) -> tuple[str, ...]:
-    if devices == "auto":
-        count = _cuda_device_count()
-        if count > 0:
-            return tuple(f"cuda:{index}" for index in range(count))
-        return ("cpu",)
-    if isinstance(devices, str):
-        resolved = (devices,)
-    else:
-        resolved = tuple(devices)
-    if not resolved:
-        raise ValueError("devices must not be empty.")
-    return resolved
-
-
-def _cuda_device_count() -> int:
-    try:
-        import torch
-    except ImportError:
-        return 0
-    if not torch.cuda.is_available():
-        return 0
-    return torch.cuda.device_count()
 
 
 def _validate_spawn_factory(name: str, factory: Callable[..., Any]) -> None:

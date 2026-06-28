@@ -6,6 +6,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any
 
+from .._devices import Devices
 from .._sharding import validate_shard
 from ..dataset.abc import AnyDataset, SampleDataset
 from ..store.reader import StoreDataset
@@ -25,28 +26,28 @@ from .rules import (
     validate_string,
 )
 from .storage import index_sequence, merged_index, read_metrics, read_partitions
-from .types import FilterDecision, FilterLabel, FilterPredicate, _Index
+from .types import FilterDecision, FilterFactory, FilterLabel, FilterPredicate, _Index
 
 
 class FilterRule:
-    __slots__ = ("_name", "_predicate")
+    __slots__ = ("_factory", "_name")
 
     def __init__(
         self,
         name: str,
-        predicate: FilterPredicate,
+        factory: FilterFactory,
     ) -> None:
         validate_string("name", name)
-        if not callable(predicate):
-            raise TypeError("predicate must be callable.")
+        if not callable(factory):
+            raise TypeError("factory must be callable.")
         self._name = name
-        self._predicate = predicate
+        self._factory = factory
 
     def __repr__(self) -> str:
         return (
             "FilterRule("
             f"name={self.name!r}, "
-            f"predicate={self.predicate!r}"
+            f"factory={self.factory!r}"
             ")"
         )
 
@@ -63,15 +64,15 @@ class FilterRule:
         return self._name
 
     @property
-    def predicate(self) -> FilterPredicate:
-        return self._predicate
+    def factory(self) -> FilterFactory:
+        return self._factory
 
     def apply(
         self,
         dataset: AnyDataset | StoreDataset,
         *,
         metrics: bool = False,
-        num_workers: int = 1,
+        device: Devices = "auto",
         commit_samples: int = _DEFAULT_COMMIT_SAMPLES,
         max_shard_samples: int | None = _DEFAULT_MAX_SHARD_SAMPLES,
         cache_root: str | Path | None = None,
@@ -80,7 +81,7 @@ class FilterRule:
             dataset,
             self,
             metrics=metrics,
-            num_workers=num_workers,
+            device=device,
             commit_samples=commit_samples,
             max_shard_samples=max_shard_samples,
             cache_root=cache_root,
@@ -190,7 +191,7 @@ class FilteredDataset(SampleDataset):
         rule: FilterRule,
         *,
         labels: FilterLabel | Sequence[FilterLabel],
-        num_workers: int = 1,
+        device: Devices = "auto",
         commit_samples: int = _DEFAULT_COMMIT_SAMPLES,
         max_shard_samples: int | None = _DEFAULT_MAX_SHARD_SAMPLES,
         cache_root: str | Path | None = None,
@@ -203,7 +204,7 @@ class FilteredDataset(SampleDataset):
             base,
             rule,
             metrics=False,
-            num_workers=num_workers,
+            device=device,
             commit_samples=commit_samples,
             max_shard_samples=max_shard_samples,
             cache_root=cache_root,
@@ -299,6 +300,7 @@ def selected_index(
 
 __all__ = [
     "FilterDecision",
+    "FilterFactory",
     "FilteredDataset",
     "FilterLabel",
     "FilterPredicate",
