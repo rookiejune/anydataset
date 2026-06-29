@@ -6,6 +6,7 @@ The module batches samples, validates batched provider outputs, and retries
 CUDA out-of-memory batches by splitting them into smaller calls.
 """
 
+import gc
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from typing import Any
 
@@ -62,8 +63,10 @@ def with_resilient_batch_provider(
     try:
         yield from call(samples)
     except Exception as exc:
-        if len(samples) <= 1 or not _is_oom_error(exc):
+        oom = _is_oom_error(exc)
+        if len(samples) <= 1 or not oom:
             raise
+        _release_exception(exc)
         _clear_cuda_cache()
         midpoint = len(samples) // 2
         yield from with_resilient_batch_provider(samples[:midpoint], call)
@@ -318,6 +321,25 @@ def _is_oom_error(error: BaseException) -> bool:
     return "out of memory" in message or "cuda error: out of memory" in message
 
 
+def _release_exception(error: BaseException) -> None:
+    pending: list[BaseException] = [error]
+    seen: set[int] = set()
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        if current.__cause__ is not None:
+            pending.append(current.__cause__)
+        if current.__context__ is not None:
+            pending.append(current.__context__)
+        current.__traceback__ = None
+        current.__cause__ = None
+        current.__context__ = None
+
+
 def _clear_cuda_cache() -> None:
+    gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
+        torch.cuda.ipc_collect()

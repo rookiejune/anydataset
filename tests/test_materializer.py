@@ -255,6 +255,31 @@ class ViewMaterializerTest(unittest.TestCase):
         self.assertTrue(torch.equal(codes[2], torch.tensor([[8, 9]])))
         self.assertTrue(torch.equal(codes[3], torch.tensor([[10]])))
 
+    def test_materializer_clears_cuda_cache_before_splitting_oom_batch(self):
+        provider = _SplitOnOomBatchProvider()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            source = root / "source"
+            target = root / "target"
+            dataset = _source_dataset(
+                source,
+                root,
+                [
+                    _audio_sample(torch.tensor([[1.0]])),
+                    _audio_sample(torch.tensor([[2.0]])),
+                ],
+            )
+
+            with mock.patch("anydataset.store._batch._clear_cuda_cache") as clear:
+                ViewMaterializer(target, batch_size=2).write(
+                    dataset_factory=_DatasetFactory(dataset),
+                    provider_factory=_StaticProviderFactory(provider),
+                    devices="cpu",
+                )
+
+        clear.assert_called_once_with()
+
     def test_materializer_does_not_split_non_oom_batch_errors(self):
         provider = _NonOomBatchProvider()
 
