@@ -130,8 +130,8 @@ dataset = IterableAnyDataset(
 - `Source.HF`：通过 `datasets.load_dataset(...)` 读取。
 - `Source.HF_DISK`：通过 `datasets.load_from_disk(...)` 读取。
 - `Source.STORE`：读取 `anydataset` 的 store。
-- 字符串 source `"tsv"`：读取单个 TSV 文件，或读取目录下的
-  `<split>.tsv`。
+- 字符串 source `"tsv"`：读取单个 TSV 文件、目录下的 `<split>.tsv`，或按
+  `subdirs` load option 的顺序读取各子目录下的同名 split。
 - 字符串 source `"sharded_csv"`：读取 `shard_<index>/<number>.csv` 数字文件名，
   设置 split 时读取 `<path>/<split>/shard_<index>/<number>.csv`；非数字 CSV 文件名
   会被忽略并写 warning。

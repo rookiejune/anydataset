@@ -31,13 +31,18 @@ def with_modality_provider(
 ) -> Sample:
     output = provider.output
     out_modality = output_modality(output)
+    reference_role = getattr(provider, "reference_role", None)
     roles = role_items(sample)
     return {
         (role, out_modality): with_modality_view(
             output,
-            provider(input_item.views),
+            provider(input_views(roles, role, input_item, out_modality, reference_role)),
         )
-        for role, input_item in modality_inputs(roles, out_modality)
+        for role, input_item in modality_inputs(
+            roles,
+            out_modality,
+            reference_role,
+        )
     }
 
 
@@ -54,9 +59,20 @@ def role_items(
 def modality_inputs(
     roles: Mapping[Role, Mapping[Modality, Item]],
     output: Modality,
+    reference_role: Role | None = None,
 ) -> Iterator[tuple[Role, Item]]:
+    if reference_role is not None:
+        reference_items = roles.get(reference_role)
+        if reference_items is None or output not in reference_items:
+            raise ValueError(
+                f"Reference role {reference_role.value!r} must already have "
+                f"output modality {output.value!r}."
+            )
+
     for role, items in roles.items():
         if output in items:
+            if role is reference_role:
+                continue
             raise ValueError(
                 f"Role {role.value!r} already has output modality {output.value!r}."
             )
@@ -68,6 +84,19 @@ def modality_inputs(
                 f"materializing {output.value!r}; got {names or 'none'}."
             )
         yield role, inputs[0][1]
+
+
+def input_views(
+    roles: Mapping[Role, Mapping[Modality, Item]],
+    role: Role,
+    input_item: Item,
+    output: Modality,
+    reference_role: Role | None,
+) -> Mapping[View, Any]:
+    if reference_role is None:
+        return input_item.views
+    reference_item = roles[reference_role][output]
+    return {**input_item.views, **reference_item.views}
 
 
 def with_modality_view(

@@ -448,6 +448,39 @@ class ViewMaterializerTest(unittest.TestCase):
             self.assertTrue(torch.equal(source_waveform, torch.tensor([[5.0]])))
             self.assertTrue(torch.equal(target_waveform, torch.tensor([[2.0]])))
 
+    def test_modality_materializer_passes_reference_role_output(self):
+        sample = {
+            (Role.SOURCE, Modality.TEXT): TextItem(views={TextView.TEXT: "source"}),
+            (Role.SOURCE, Modality.AUDIO): AudioItem(
+                views={AudioView.WAVEFORM: (torch.tensor([[1.0, 2.0]]), 16000)}
+            ),
+            (Role.TARGET, Modality.TEXT): TextItem(views={TextView.TEXT: "target"}),
+        }
+        provider = _ReferenceTTSProvider(reference_role=Role.SOURCE)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ModalityMaterializer(Path(tmpdir) / "target").write(
+                dataset_factory=_DatasetFactory((sample,)),
+                provider_factory=_StaticProviderFactory(provider),
+                devices="cpu",
+            )
+
+        self.assertEqual(provider.calls, [("target", 3.0)])
+
+    def test_modality_materializer_requires_reference_output_first(self):
+        sample = {
+            (Role.SOURCE, Modality.TEXT): TextItem(views={TextView.TEXT: "source"}),
+            (Role.TARGET, Modality.TEXT): TextItem(views={TextView.TEXT: "target"}),
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with self.assertRaisesRegex(ValueError, "Reference role"):
+                ModalityMaterializer(Path(tmpdir) / "target").write(
+                    dataset_factory=_DatasetFactory((sample,)),
+                    provider_factory=_StaticProviderFactory(
+                        _ReferenceTTSProvider(reference_role=Role.SOURCE)
+                    ),
+                    devices="cpu",
+                )
+
     def test_modality_materializer_reports_modality_batch_reference_errors(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -960,6 +993,18 @@ class _MultiRoleTTSProvider(_TTSProvider):
             ]
             for ref in refs
         }
+
+
+class _ReferenceTTSProvider(_TTSProvider):
+    def __init__(self, *, reference_role):
+        super().__init__()
+        self.reference_role = reference_role
+        self.calls = []
+
+    def __call__(self, views):
+        waveform, _ = views[AudioView.WAVEFORM]
+        self.calls.append((views[TextView.TEXT], float(waveform.sum().item())))
+        return super().__call__(views)
 
 
 class _BadMultiRoleTTSProvider(_TTSProvider):

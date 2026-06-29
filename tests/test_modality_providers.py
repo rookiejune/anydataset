@@ -2,6 +2,7 @@ import sys
 import types
 import unittest
 from dataclasses import dataclass
+from pathlib import Path
 from unittest.mock import patch
 
 import torch
@@ -50,7 +51,7 @@ class ModalityProviderTest(unittest.TestCase):
                 )
             ],
         )
-        self.assertEqual(FakeMossTTS.loaded.synthesize_calls, [("hello", options)])
+        self.assertEqual(FakeMossTTS.loaded.synthesize_calls, [("hello", options, None)])
         self.assertTrue(torch.equal(waveform, torch.tensor([[1.0, 2.0]])))
         self.assertEqual(sample_rate, 16000)
 
@@ -103,7 +104,10 @@ class ModalityProviderTest(unittest.TestCase):
             )
         )
 
-        self.assertEqual(FakeMossTTS.loaded.synthesize_calls, [(["hello", "world"], options)])
+        self.assertEqual(
+            FakeMossTTS.loaded.synthesize_calls,
+            [(["hello", "world"], options, None)],
+        )
         self.assertEqual(len(outputs), 2)
         self.assertTrue(torch.equal(outputs[0][0], torch.tensor([[0.0, 1.0]])))
         self.assertTrue(torch.equal(outputs[1][0], torch.tensor([[2.0, 3.0]])))
@@ -137,8 +141,8 @@ class ModalityProviderTest(unittest.TestCase):
         self.assertEqual(
             FakeMossTTS.loaded.synthesize_calls,
             [
-                (["hello", "world"], options),
-                (["hi", "ok"], options),
+                (["hello", "world"], options, None),
+                (["hi", "ok"], options, None),
             ],
         )
         self.assertIsInstance(outputs, dict)
@@ -148,6 +152,75 @@ class ModalityProviderTest(unittest.TestCase):
         self.assertTrue(torch.equal(target[0][0], torch.tensor([[0.0, 1.0]])))
         self.assertEqual([sample_rate for _, sample_rate in source], [16000, 16000])
         self.assertEqual([sample_rate for _, sample_rate in target], [16000, 16000])
+
+    def test_moss_tts_provider_uses_reference_audio_role(self):
+        FakeMossTTS.calls = []
+        FakeMossTTS.loaded = None
+        with _fake_anytrain_tts():
+            provider = MossTTSProvider(
+                reference_role=Role.SOURCE,
+                max_reference_files=2,
+                device="cpu",
+            )
+
+        batch = collate_fn(
+            {
+                (Role.TARGET, Modality.TEXT): TextReq(
+                    views=frozenset({TextView.TEXT})
+                ),
+                (Role.SOURCE, Modality.AUDIO): AudioReq(
+                    views=frozenset({AudioView.WAVEFORM})
+                ),
+            }
+        )(
+            [
+                {
+                    (Role.TARGET, Modality.TEXT): TextItem(
+                        views={TextView.TEXT: "hello"}
+                    ),
+                    (Role.SOURCE, Modality.AUDIO): AudioItem(
+                        views={
+                            AudioView.WAVEFORM: (
+                                torch.tensor([[1.0, 2.0, 3.0]]),
+                                16000,
+                            )
+                        }
+                    ),
+                },
+                {
+                    (Role.TARGET, Modality.TEXT): TextItem(
+                        views={TextView.TEXT: "world"}
+                    ),
+                    (Role.SOURCE, Modality.AUDIO): AudioItem(
+                        views={
+                            AudioView.WAVEFORM: (
+                                torch.tensor([[4.0]]),
+                                16000,
+                            )
+                        }
+                    ),
+                },
+            ]
+        )
+
+        saved = []
+
+        class FakeTorchAudio:
+            @staticmethod
+            def save(path, waveform, sample_rate):
+                saved.append((Path(path).name, waveform.clone(), sample_rate))
+                Path(path).write_bytes(b"wav")
+
+        with patch("anydataset.provider.moss_tts.torchaudio", FakeTorchAudio()):
+            outputs = provider.call_batch(batch)
+
+        self.assertEqual(FakeMossTTS.loaded.synthesize_calls[0][0], ["hello", "world"])
+        _, _, reference_audio_paths = FakeMossTTS.loaded.synthesize_calls[0]
+        self.assertEqual(len(reference_audio_paths), 2)
+        self.assertTrue(all(Path(path).is_file() for path in reference_audio_paths))
+        self.assertEqual([name for name, _, _ in saved], ["ref-00000000.wav", "ref-00000001.wav"])
+        self.assertEqual([tuple(wave.shape) for _, wave, _ in saved], [(1, 3), (1, 1)])
+        self.assertEqual(len(outputs), 2)
 
     def test_whisper_asr_provider_loads_preset_and_transcribes(self):
         FakeWhisperASREvaluator.calls = []
@@ -365,8 +438,15 @@ class FakeMossTTS:
         cls.loaded = cls()
         return cls.loaded
 
-    def synthesize(self, text, options):
-        self.synthesize_calls.append((text, options))
+    def synthesize(
+        self,
+        text,
+        options,
+        reference_audio_path=None,
+        reference_audio_paths=None,
+    ):
+        references = reference_audio_path if isinstance(text, str) else reference_audio_paths
+        self.synthesize_calls.append((text, options, references))
         if not isinstance(text, str):
             return [
                 _TTSOutput(

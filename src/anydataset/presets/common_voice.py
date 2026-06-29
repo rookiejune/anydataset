@@ -6,14 +6,14 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from ..dataset import AudioMeta, AudioView, MultipleAnyDataset, TextMeta, TextView
+from ..dataset import AudioMeta, AudioView, TextMeta, TextView
 from ..dataset.abc import IterableAnyDataset
 from ..types import Spec
 from ..types.item import Transforms
 from ..utils import labels, sample_from_row
 
 
-DEFAULT_COMMON_VOICE_LANGUAGE = "en"
+_LANGUAGE_ROOT_FIELD = "__anydataset_root__"
 
 type Languages = str | Sequence[str]
 
@@ -54,11 +54,12 @@ class CommonVoice(IterableAnyDataset):
         transforms: Transforms | None = None,
         **load_options: Any,
     ) -> None:
-        resolved_language = _single_language(language, languages=languages, langs=langs)
         spec = common_voice_spec(
             split=split,
             root=root,
-            language=resolved_language,
+            language=language,
+            languages=languages,
+            langs=langs,
             version=version,
             **load_options,
         )
@@ -74,8 +75,10 @@ class CommonVoiceParser:
         self.language_root = language_root
 
     def __call__(self, row: Mapping[str, Any]):
+        language_root = Path(str(row.get(_LANGUAGE_ROOT_FIELD, self.language_root)))
         enriched = dict(row)
-        enriched["audio_path"] = str(self.language_root / "clips" / str(row["path"]))
+        enriched.pop(_LANGUAGE_ROOT_FIELD, None)
+        enriched["audio_path"] = str(language_root / "clips" / str(row["path"]))
         return sample_from_row(
             enriched,
             audio={
@@ -100,24 +103,31 @@ def common_voice_spec(
     version: str | None = None,
     **load_options: Any,
 ) -> Spec:
-    resolved_language = _single_language(language, languages=languages, langs=langs)
+    requested_languages = _requested_languages(
+        language,
+        languages=languages,
+        langs=langs,
+    )
     resolved_split = split or "train"
     if resolved_split not in _SPLITS:
         valid = ", ".join(sorted(_SPLITS))
         raise ValueError(f"Common Voice split must be one of: {valid}.")
 
-    language_root = _language_root(
+    corpus_root, resolved_languages = _corpus_root_and_languages(
         root,
         version=version,
-        language=resolved_language,
+        languages=requested_languages,
     )
-    resolved_version = _corpus_version(language_root.parent)
+    resolved_version = _corpus_version(corpus_root)
     return Spec(
         source="tsv",
-        path=str(language_root),
+        path=str(corpus_root),
         split=resolved_split,
         version=resolved_version,
-        load_options=load_options,
+        load_options=_load_options(
+            load_options,
+            languages=resolved_languages,
+        ),
     )
 
 
@@ -131,38 +141,41 @@ def create_common_voice(
     version: str | None = None,
     transforms: Transforms | None = None,
     **load_options: Any,
-) -> IterableAnyDataset | MultipleAnyDataset:
-    resolved_languages = _languages(language, languages=languages, langs=langs)
-    datasets = tuple(
-        CommonVoice(
-            split=split,
-            root=root,
-            language=language,
-            version=version,
-            transforms=transforms,
-            **load_options,
-        )
-        for language in resolved_languages
+) -> IterableAnyDataset:
+    return CommonVoice(
+        split=split,
+        root=root,
+        language=language,
+        languages=languages,
+        langs=langs,
+        version=version,
+        transforms=transforms,
+        **load_options,
     )
-    if len(datasets) == 1:
-        return datasets[0]
-    return MultipleAnyDataset(datasets)
 
 
-def _language_root(
+def _corpus_root_and_languages(
     root: str | Path | None,
     *,
     version: str | None,
-    language: str,
-) -> Path:
+    languages: tuple[str, ...] | None,
+) -> tuple[Path, tuple[str, ...]]:
     base = _base_root(root)
-    if base.name == language and base.parent.name.startswith("cv-corpus-"):
-        return base
     if base.name.startswith("cv-corpus-"):
-        return base / language
+        return base, _resolve_languages(base, languages)
+
+    if base.parent.name.startswith("cv-corpus-"):
+        if languages is not None and languages != (base.name,):
+            raise ValueError(
+                "Common Voice language root only supports its own language. "
+                "Use the corpus root to select multiple languages."
+            )
+        return base.parent, (base.name,)
 
     corpus = _versioned_corpus_root(base, version)
-    return corpus / language
+    if languages is None and version is None:
+        _ensure_latest_has_all_languages(base, corpus)
+    return corpus, _resolve_languages(corpus, languages)
 
 
 def _versioned_corpus_root(root: Path, version: str | None) -> Path:
@@ -199,24 +212,65 @@ def _corpus_sort_key(path: Path) -> tuple[int | str, ...]:
     )
 
 
-def _single_language(
-    language: str | None,
-    *,
-    languages: Languages | None,
-    langs: Languages | None,
-) -> str:
-    resolved = _languages(language, languages=languages, langs=langs)
-    if len(resolved) != 1:
-        raise ValueError("Common Voice spec requires exactly one language.")
-    return resolved[0]
-
-
-def _languages(
-    language: str | None,
-    *,
-    languages: Languages | None,
-    langs: Languages | None,
+def _resolve_languages(
+    corpus_root: Path,
+    languages: tuple[str, ...] | None,
 ) -> tuple[str, ...]:
+    available = _language_names(corpus_root)
+    if languages is not None:
+        missing = sorted(set(languages).difference(available))
+        if missing:
+            missing_text = ", ".join(missing)
+            raise FileNotFoundError(
+                f"Common Voice corpus {corpus_root} does not contain languages: "
+                f"{missing_text}"
+            )
+        return tuple(sorted(languages))
+    names = tuple(sorted(available))
+    if not names:
+        raise FileNotFoundError(f"No Common Voice language directories found under: {corpus_root}")
+    return names
+
+
+def _language_names(corpus_root: Path) -> set[str]:
+    return {
+        path.name
+        for path in corpus_root.iterdir()
+        if _is_language_root(path)
+    }
+
+
+def _is_language_root(path: Path) -> bool:
+    return path.is_dir() and not path.name.startswith(".")
+
+
+def _ensure_latest_has_all_languages(root: Path, latest: Path) -> None:
+    latest_languages = _language_names(latest)
+    missing = sorted(
+        {
+            language
+            for corpus in root.iterdir()
+            if _is_corpus_root(corpus) and corpus != latest
+            for language in _language_names(corpus)
+            if language not in latest_languages
+        }
+    )
+    if missing:
+        missing_text = ", ".join(missing)
+        raise ValueError(
+            f"Latest Common Voice corpus {latest.name} is missing languages "
+            f"found in older corpora: {missing_text}. "
+            "Symlink or move those language directories into the latest corpus, "
+            "or pass languages explicitly."
+        )
+
+
+def _requested_languages(
+    language: str | None,
+    *,
+    languages: Languages | None,
+    langs: Languages | None,
+) -> tuple[str, ...] | None:
     provided = [
         value
         for value in (language, languages, langs)
@@ -225,7 +279,7 @@ def _languages(
     if len(provided) > 1:
         raise ValueError("Use only one of language, languages or langs.")
     if not provided:
-        return (DEFAULT_COMMON_VOICE_LANGUAGE,)
+        return None
 
     value = provided[0]
     if isinstance(value, str):
@@ -235,6 +289,23 @@ def _languages(
     if not result:
         raise ValueError("Common Voice languages must not be empty.")
     return result
+
+
+def _load_options(
+    load_options: Mapping[str, Any],
+    *,
+    languages: tuple[str, ...],
+) -> dict[str, Any]:
+    reserved = {"subdirs", "root_field"}
+    overlap = reserved.intersection(load_options)
+    if overlap:
+        names = ", ".join(sorted(overlap))
+        raise ValueError(f"Common Voice load options reserve: {names}.")
+    return {
+        **load_options,
+        "subdirs": languages,
+        "root_field": _LANGUAGE_ROOT_FIELD,
+    }
 
 
 def _base_root(root: str | Path | None) -> Path:

@@ -102,14 +102,19 @@ def with_batch_modality_provider(
 ) -> Iterator[Sample]:
     output = provider.output
     out_modality = output_modality(output)
-    roles = _batch_modality_input_roles(samples, out_modality)
+    reference_role = getattr(provider, "reference_role", None)
+    roles = _batch_modality_input_roles(samples, out_modality, reference_role)
     outputs: list[dict[tuple[Role, Modality], Item]] = [{} for _ in samples]
     input_refs = {
         role: _batch_modality_input_ref(samples, role, out_modality)
         for role in roles
     }
     if input_refs:
-        schema = {ref: _input_requirement(samples, ref) for ref in input_refs.values()}
+        schema_refs = tuple(input_refs.values()) + _reference_refs(
+            reference_role,
+            out_modality,
+        )
+        schema = {ref: _input_requirement(samples, ref) for ref in schema_refs}
         batch = collate_fn(schema)(samples)
         values_by_ref = _ref_batch_outputs(
             _call_batch(provider, batch),
@@ -143,19 +148,34 @@ def _batch_view_refs(
 def _batch_modality_input_roles(
     samples: Sequence[Sample],
     output: Modality,
+    reference_role: Role | None,
 ) -> tuple[Role, ...]:
     if not samples:
         return ()
     roles = tuple(
         sorted(
-            (role for role, _ in modality_inputs(role_items(samples[0]), output)),
+            (
+                role
+                for role, _ in modality_inputs(
+                    role_items(samples[0]),
+                    output,
+                    reference_role,
+                )
+            ),
             key=lambda role: role.value,
         )
     )
     for sample in samples:
         sample_roles = tuple(
             sorted(
-                (role for role, _ in modality_inputs(role_items(sample), output)),
+                (
+                    role
+                    for role, _ in modality_inputs(
+                        role_items(sample),
+                        output,
+                        reference_role,
+                    )
+                ),
                 key=lambda role: role.value,
             )
         )
@@ -187,6 +207,15 @@ def _batch_modality_input_ref(
     if any(value != ref for value in refs):
         raise ValueError("Batch samples must share modality provider input references.")
     return ref
+
+
+def _reference_refs(
+    reference_role: Role | None,
+    output: Modality,
+) -> tuple[tuple[Role, Modality], ...]:
+    if reference_role is None:
+        return ()
+    return ((reference_role, output),)
 
 
 def _input_requirement(

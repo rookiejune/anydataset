@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 from .dataset.collate import Batch
-from .types.item import AudioView, ImageView, Reference, TextView, View
+from .types.item import AudioView, ImageView, Reference, Role, TextView, View
 
 type ViewMap = (
     Mapping[AudioView, Any]
@@ -37,12 +37,14 @@ class BatchViewProvider[ViewT: View](Protocol):
 
 class ModalityProvider[ViewT: View](Protocol):
     output: ViewT
+    reference_role: Role | None
 
     def __call__(self, views: ViewMap) -> Any: ...
 
 
 class BatchModalityProvider[ViewT: View](Protocol):
     output: ViewT
+    reference_role: Role | None
 
     def __call__(self, views: ViewMap) -> Any: ...
 

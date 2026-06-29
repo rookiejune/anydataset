@@ -88,8 +88,9 @@ local datasets with canonical samples, use `Source.STORE`.
 Built-in enum sources are `Source.HF`, `Source.HF_DISK`, and `Source.STORE`.
 The registry also includes string source keys `tsv` and `sharded_csv`; because
 they are registered, they can be used in `Spec(source=...)` and in
-`resolve_dataset("<source>://...")` shorthands. `tsv` reads a file path or
-`<path>/<split>.tsv`; `sharded_csv` reads numeric CSV files under
+`resolve_dataset("<source>://...")` shorthands. `tsv` reads a file path,
+`<path>/<split>.tsv`, or the same split under ordered `subdirs` load options;
+`sharded_csv` reads numeric CSV files under
 `shard_<index>/<number>.csv`, optionally under `<path>/<split>/`. Non-numeric
 CSV file names are ignored and logged as warnings.
 
