@@ -70,6 +70,12 @@ base store -> provider -> delta store -> logical merge -> schema selects derived
 写进程内部的 DataLoader workers；并行写入时调用方应提供可 pickle 的
 `dataset_factory`。
 
+`ViewMaterializer.write(..., resume=True)` 和 `ModalityMaterializer` 的同名参数用于
+长时间 provider 物化任务。开启后，库会把每个完成的 provider batch 写成独立 ready
+fragment，并按全局 `sample_index` 跳过已完成样本；所有样本覆盖后再原子提交最终
+store 并清理 resume 目录。fragment 仍使用普通 store 校验，损坏或语义不匹配时显式
+报错，不静默丢弃。
+
 ## 派生 Modality
 
 同一 role 下缺失的模态应通过 provider 和 `ModalityMaterializer` 生成。provider 只声明输出 view，materializer 用输出 view 推出输出 modality，并在同一 role 中寻找唯一的非输出 modality 作为输入。

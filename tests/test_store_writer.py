@@ -16,6 +16,11 @@ from anydataset import (
     TextView,
 )
 from anydataset.store import DatasetWriter
+from anydataset.store.parts import (
+    DatasetFragmentWriter,
+    commit_store_fragments,
+    completed_fragment_indexes,
+)
 from anydataset.store.writer import DEFAULT_MAX_SHARD_SAMPLES
 from anydataset.store.jsonio import read_json
 from anydataset.store.manifest import DatasetManifest
@@ -171,6 +176,53 @@ class DatasetWriterTest(unittest.TestCase):
                 )
 
             self.assertFalse(output.exists())
+
+    def test_fragment_writer_commits_batch_fragments(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            fragments = root / "fragments"
+            output = root / "dataset"
+            samples = [
+                audio_sample(
+                    waveform=torch.tensor([[float(index)]]),
+                    sample_rate=4,
+                )
+                for index in range(3)
+            ]
+
+            DatasetFragmentWriter(
+                fragments / "batch-000000000000-000000000001-a",
+                dataset_id="toy-audio",
+                split="train",
+                fragment_id="batch-000000000000-000000000001-a",
+            ).write([(0, samples[0]), (1, samples[1])])
+            DatasetFragmentWriter(
+                fragments / "batch-000000000002-000000000002-b",
+                dataset_id="toy-audio",
+                split="train",
+                fragment_id="batch-000000000002-000000000002-b",
+            ).write([(2, samples[2])])
+
+            self.assertEqual(
+                completed_fragment_indexes(
+                    fragments,
+                    dataset_id="toy-audio",
+                    split="train",
+                ),
+                frozenset({0, 1, 2}),
+            )
+
+            commit_store_fragments(
+                output,
+                fragments,
+                dataset_id="toy-audio",
+                split="train",
+                expected_sample_count=3,
+            )
+
+            indexes = [entry.sample_index for entry in read_samples_manifest(output)]
+            self.assertEqual(indexes, [0, 1, 2])
+            self.assertTrue(dataset_ready_path(output).exists())
 
 
 def audio_sample(

@@ -828,6 +828,93 @@ class ViewMaterializerTest(unittest.TestCase):
                     devices=("cpu:0", "cpu:1"),
                 )
 
+    def test_materializer_resume_continues_from_completed_batches(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = root / "target"
+            calls = root / "calls.txt"
+            samples = tuple(
+                _audio_sample(torch.tensor([[float(index)]]))
+                for index in range(4)
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "stop after first batch"):
+                ViewMaterializer(target, split="train", batch_size=2).write(
+                    dataset_factory=_DatasetFactory(samples),
+                    provider_factory=_FailOnceBatchProviderFactory(calls),
+                    devices="cpu",
+                    resume=True,
+                )
+
+            self.assertFalse(target.exists())
+            self.assertEqual(
+                calls.read_text(encoding="utf-8").splitlines(),
+                ["0,1", "2,3"],
+            )
+
+            ViewMaterializer(target, split="train", batch_size=2).write(
+                dataset_factory=_DatasetFactory(samples),
+                provider_factory=_FailOnceBatchProviderFactory(calls),
+                devices="cpu",
+                resume=True,
+            )
+
+            stored = read_store_dataset(target)
+            self.assertEqual(
+                calls.read_text(encoding="utf-8").splitlines(),
+                ["0,1", "2,3", "2,3"],
+            )
+            self.assertFalse((root / ".target.resume").exists())
+            for index in range(4):
+                self.assertTrue(
+                    torch.equal(
+                        stored[index][Role.DEFAULT, Modality.AUDIO]
+                        .views[AudioView.LONGCAT]["semantic_codes"],
+                        torch.tensor([[index]]),
+                    )
+                )
+
+    def test_modality_materializer_resume_continues_from_completed_batches(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = root / "target"
+            calls = root / "tts-calls.txt"
+            samples = tuple(
+                {
+                    (Role.DEFAULT, Modality.TEXT): TextItem(
+                        views={TextView.TEXT: "x" * (index + 1)}
+                    )
+                }
+                for index in range(3)
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "stop after first batch"):
+                ModalityMaterializer(target, split="train", batch_size=2).write(
+                    dataset_factory=_DatasetFactory(samples),
+                    provider_factory=_FailOnceTTSBatchProviderFactory(calls),
+                    devices="cpu",
+                    resume=True,
+                )
+
+            ModalityMaterializer(target, split="train", batch_size=2).write(
+                dataset_factory=_DatasetFactory(samples),
+                provider_factory=_FailOnceTTSBatchProviderFactory(calls),
+                devices="cpu",
+                resume=True,
+            )
+
+            stored = read_store_dataset(target)
+            self.assertEqual(
+                calls.read_text(encoding="utf-8").splitlines(),
+                ["1,2", "3", "3"],
+            )
+            for index in range(3):
+                waveform, sample_rate = stored[index][
+                    Role.DEFAULT, Modality.AUDIO
+                ].views[AudioView.WAVEFORM]
+                self.assertTrue(torch.equal(waveform, torch.tensor([[float(index + 1)]])))
+                self.assertEqual(sample_rate, 16000)
+
 
 def _source_dataset(path: Path, root: Path, samples):
     DatasetWriter(path, dataset_id="toy-audio", split="train").write(samples)
@@ -1102,6 +1189,57 @@ class _ParallelProviderFactory:
 class _ParallelTTSProviderFactory:
     def __call__(self, device: str):
         return _TTSProvider(offset=100 if device.endswith(":1") else 0)
+
+
+class _FailOnceBatchProvider(_BatchProvider):
+    def __init__(self, calls: Path):
+        super().__init__()
+        self.calls = calls
+
+    def call_batch(self, batch):
+        ref = (Role.DEFAULT, Modality.AUDIO)
+        waveform, _ = batch.sample[ref].views[AudioView.WAVEFORM]
+        indexes = [str(int(value.item())) for value in waveform[:, 0, 0]]
+        _append_call(self.calls, ",".join(indexes))
+        if len(self.calls.read_text(encoding="utf-8").splitlines()) == 2:
+            raise RuntimeError("stop after first batch")
+        return super().call_batch(batch)
+
+
+@dataclass(frozen=True)
+class _FailOnceBatchProviderFactory:
+    calls: Path
+
+    def __call__(self, device: str):
+        return _FailOnceBatchProvider(self.calls)
+
+
+class _FailOnceTTSBatchProvider(_TTSProvider):
+    def __init__(self, calls: Path):
+        super().__init__()
+        self.calls = calls
+
+    def call_batch(self, batch):
+        ref = (Role.DEFAULT, Modality.TEXT)
+        values = [len(text) for text in batch.sample[ref].views[TextView.TEXT]]
+        _append_call(self.calls, ",".join(str(value) for value in values))
+        outputs = [(torch.tensor([[float(value)]]), 16000) for value in values]
+        if len(self.calls.read_text(encoding="utf-8").splitlines()) == 2:
+            raise RuntimeError("stop after first batch")
+        return outputs
+
+
+@dataclass(frozen=True)
+class _FailOnceTTSBatchProviderFactory:
+    calls: Path
+
+    def __call__(self, device: str):
+        return _FailOnceTTSBatchProvider(self.calls)
+
+
+def _append_call(path: Path, text: str) -> None:
+    existing = path.read_text(encoding="utf-8") if path.exists() else ""
+    path.write_text(existing + text + "\n", encoding="utf-8")
 
 
 def _materializer_logs(home: Path) -> list[Path]:

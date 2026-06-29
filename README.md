@@ -360,6 +360,10 @@ For GPU-backed providers, let `devices` control parallelism. `devices="auto"`
 uses one spawned worker per visible CUDA device, writes worker logs under
 `$ANYDATASET_HOME/logs/<timestamp>-<pid>/materializer`, and commits the
 per-device parts when all workers finish.
+Pass `resume=True` to materializer `write()` calls for long-running provider
+jobs. Completed provider batches are kept as ready store fragments under a
+hidden sibling resume directory, and reruns skip completed global sample
+indexes before atomically committing the final store.
 Multi-device materialization uses Python `spawn`, so `dataset_factory` and
 `provider_factory` must be picklable, module-level callables. Like filtering,
 multi-device materialization owns its offline worker processes and should not

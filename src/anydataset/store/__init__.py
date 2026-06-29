@@ -13,13 +13,20 @@ from .materializer import (
     ModalityMaterializer,
     ViewMaterializer,
 )
-from .parts import DatasetPartWriter, commit_store_parts
+from .parts import (
+    DatasetFragmentWriter,
+    DatasetPartWriter,
+    commit_store_fragments,
+    commit_store_parts,
+    completed_fragment_indexes,
+)
 from .writer import DatasetWriter
 
 __all__ = [
     "DatasetWriter",
     "BatchModalityProvider",
     "BatchViewProvider",
+    "DatasetFragmentWriter",
     "DatasetPartWriter",
     "FunctionModalityProvider",
     "FunctionViewProvider",
@@ -30,5 +37,7 @@ __all__ = [
     "ViewMaterializer",
     "ViewProvider",
     "ViewTransform",
+    "commit_store_fragments",
     "commit_store_parts",
+    "completed_fragment_indexes",
 ]
