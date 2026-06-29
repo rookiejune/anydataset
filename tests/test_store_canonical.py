@@ -49,7 +49,6 @@ class StoreCanonicalTest(unittest.TestCase):
 
             dataset = AnyDataset(
                 Spec(source=Source.STORE, path=str(output)),
-                cache_root=root / "cache",
             )
             sample = dataset[0]
             stored = read_store_dataset(output)
@@ -90,7 +89,6 @@ class StoreCanonicalTest(unittest.TestCase):
             )
             dataset = AnyDataset(
                 Spec(source=Source.STORE, path=str(source)),
-                cache_root=root / "cache-source",
             )
 
             ViewMaterializer(target).write(
@@ -101,7 +99,6 @@ class StoreCanonicalTest(unittest.TestCase):
 
             sample = AnyDataset(
                 Spec(source=Source.STORE, path=str(target)),
-                cache_root=root / "cache-target",
             )[0]
             stored = read_store_dataset(target)
 

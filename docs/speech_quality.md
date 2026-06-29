@@ -51,10 +51,10 @@ def factory():
     )
 
 result = FilterRule("speech_quality_v1_en", factory).apply(
-    dataset,
+    dataset_factory=dataset_factory,
     metrics=True,
 )
-accepted = result.select("accept")
+accepted = result.select_by("accept")
 ```
 
 Each metrics payload includes:

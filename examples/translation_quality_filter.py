@@ -119,7 +119,6 @@ def main() -> None:
             source_lang=args.source_lang,
             target_lang=args.target_lang,
         ),
-        cache_root=args.dataset_cache_root,
     )
     if args.source_lang is None or args.target_lang is None:
         raise ValueError("source_lang and target_lang are required.")
@@ -142,7 +141,6 @@ def main() -> None:
         dataset,
         metrics=True,
         device=args.device,
-        cache_root=args.cache_root,
     )
     summary: dict[str, Any] = {
         "cache_path": str(result.cache_path),
@@ -170,8 +168,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--encoding", default="utf-8")
     parser.add_argument("--limit", type=int)
     parser.add_argument("--rule-name", default="mt_quality_rules_v1")
-    parser.add_argument("--cache-root", type=Path)
-    parser.add_argument("--dataset-cache-root", type=Path)
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--preview", type=int, default=5)
     parser.add_argument("--review-min-ratio", type=float, default=0.2)

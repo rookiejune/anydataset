@@ -104,7 +104,7 @@ class CommonVoicePresetTest(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            dataset = CommonVoice(root=root, cache_root=root / "cache")
+            dataset = CommonVoice(root=root)
             sample = next(iter(dataset))
 
         audio = sample[Role.DEFAULT, Modality.AUDIO]
@@ -113,7 +113,8 @@ class CommonVoicePresetTest(unittest.TestCase):
             audio.views[AudioView.FILE],
             str(language_root / "clips" / "sample.mp3"),
         )
-        self.assertEqual(audio.meta[AudioMeta.LABELS]["client_id"], "speaker-1")
+        self.assertEqual(audio.meta[AudioMeta.SPEAKER_ID], "speaker-1")
+        self.assertNotIn("client_id", audio.meta[AudioMeta.LABELS])
         self.assertEqual(text.views[TextView.TEXT], "Hello there.")
         self.assertEqual(text.meta[TextMeta.LANG], "en")
 

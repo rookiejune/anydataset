@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -40,7 +41,6 @@ class ShardedCsvSourceTest(unittest.TestCase):
             dataset = IterableAnyDataset(
                 Spec(source="sharded_csv", path=tmpdir),
                 parse_fn=lambda row: row["src_text"],
-                cache_root=root / "cache",
             )
 
             self.assertEqual(list(dataset.iter_shard(2, 1)), ["tea"])
@@ -64,10 +64,62 @@ class ShardedCsvSourceTest(unittest.TestCase):
             dataset = IterableAnyDataset(
                 Spec(source="sharded_csv", path=tmpdir),
                 parse_fn=lambda row: row["src_text"],
-                cache_root=root / "cache",
             )
 
             self.assertEqual(list(dataset), ["two", "ten"])
+
+    def test_ignores_non_numeric_csv_file_names(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            home = root / "home"
+            shard_dir = root / "shard_0"
+            shard_dir.mkdir()
+            (shard_dir / "0.csv").write_text(
+                "src_text\n"
+                "zero\n",
+                encoding="utf-8",
+            )
+            (shard_dir / "metadata.csv").write_text(
+                "src_text\n"
+                "ignored\n",
+                encoding="utf-8",
+            )
+
+            dataset = AnyDataset(
+                Spec(source="sharded_csv", path=tmpdir),
+                parse_fn=lambda row: row["src_text"],
+            )
+
+            with mock.patch.dict(os.environ, {"ANYDATASET_HOME": str(home)}):
+                self.assertEqual(len(dataset), 1)
+                self.assertEqual(list(dataset), ["zero"])
+
+            log = _single_log(home, "sharded_csv.log")
+            self.assertIn(
+                f"Ignored non-numeric CSV files under {shard_dir}: metadata.csv.",
+                log.read_text(encoding="utf-8"),
+            )
+
+    def test_warns_once_for_ignored_non_numeric_csv_file_names(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            home = root / "home"
+            shard_dir = root / "shard_0"
+            shard_dir.mkdir()
+            (shard_dir / "0.csv").write_text("src_text\nzero\n", encoding="utf-8")
+            (shard_dir / "notes.csv").write_text("src_text\nignored\n", encoding="utf-8")
+
+            dataset = IterableAnyDataset(
+                Spec(source="sharded_csv", path=tmpdir),
+                parse_fn=lambda row: row["src_text"],
+            )
+
+            with mock.patch.dict(os.environ, {"ANYDATASET_HOME": str(home)}):
+                self.assertEqual(list(dataset), ["zero"])
+                self.assertEqual(list(dataset), ["zero"])
+
+            log = _single_log(home, "sharded_csv.log")
+            self.assertEqual(log.read_text(encoding="utf-8").count("WARNING"), 1)
 
     def test_supports_map_style_indexing(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -91,7 +143,6 @@ class ShardedCsvSourceTest(unittest.TestCase):
             dataset = AnyDataset(
                 Spec(source="sharded_csv", path=tmpdir),
                 parse_fn=lambda row: row["src_text"],
-                cache_root=root / "cache",
             )
 
             self.assertEqual(len(dataset), 3)
@@ -103,7 +154,6 @@ class ShardedCsvSourceTest(unittest.TestCase):
     def test_reuses_cached_row_counts(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
-            cache = root / "cache"
             shard_dir = root / "shard_0"
             shard_dir.mkdir()
             (shard_dir / "0.csv").write_text(
@@ -116,16 +166,14 @@ class ShardedCsvSourceTest(unittest.TestCase):
             dataset = AnyDataset(
                 Spec(source="sharded_csv", path=tmpdir),
                 parse_fn=lambda row: row["src_text"],
-                cache_root=cache,
             )
             self.assertEqual(len(dataset), 2)
-            index_files = list(cache.rglob("sharded_csv_index.json"))
+            index_files = list(dataset.cache_manager.root.rglob("sharded_csv_index.json"))
             self.assertEqual(len(index_files), 1)
 
             second = AnyDataset(
                 Spec(source="sharded_csv", path=tmpdir),
                 parse_fn=lambda row: row["src_text"],
-                cache_root=cache,
             )
             with mock.patch.object(second.dataset, "_row_count") as row_count:
                 self.assertEqual(len(second), 2)
@@ -148,7 +196,6 @@ class ShardedCsvSourceTest(unittest.TestCase):
             dataset = AnyDataset(
                 Spec(source="sharded_csv", path=tmpdir),
                 parse_fn=lambda row: row["src_text"],
-                cache_root=root / "cache",
             )
 
             self.assertEqual(list(dataset.iter_indexed_range(1, 3)), [(1, "one"), (2, "two")])
@@ -168,7 +215,6 @@ class ShardedCsvSourceTest(unittest.TestCase):
             dataset = IterableAnyDataset(
                 Spec(source="sharded_csv", path=tmpdir, split="train"),
                 parse_fn=lambda row: row["target_text"],
-                cache_root=root / "cache",
             )
 
             self.assertEqual(list(dataset), ["nihao"])
@@ -187,16 +233,12 @@ class ShardedCsvSourceTest(unittest.TestCase):
             dataset = IterableAnyDataset(
                 Spec(source="sharded_csv", path=tmpdir),
                 parse_fn=lambda row: row["src_text"],
-                cache_root=root / "cache",
             )
 
-            with mock.patch(
-                "anydataset.dataset.source.sharded_csv.Path.home",
-                return_value=home,
-            ):
+            with mock.patch.dict(os.environ, {"ANYDATASET_HOME": str(home)}):
                 self.assertEqual(list(dataset), ["zero", "two"])
 
-            log = home / ".anydataset" / "logs" / "sharded_csv.log"
+            log = _single_log(home, "sharded_csv.log")
             self.assertIn(
                 f"Missing sharded CSV directories under {root}: shard_1.",
                 log.read_text(encoding="utf-8"),
@@ -216,18 +258,21 @@ class ShardedCsvSourceTest(unittest.TestCase):
             dataset = IterableAnyDataset(
                 Spec(source="sharded_csv", path=tmpdir),
                 parse_fn=lambda row: row["src_text"],
-                cache_root=root / "cache",
             )
 
-            with mock.patch(
-                "anydataset.dataset.source.sharded_csv.Path.home",
-                return_value=home,
-            ):
+            with mock.patch.dict(os.environ, {"ANYDATASET_HOME": str(home)}):
                 self.assertEqual(list(dataset), ["zero", "two"])
                 self.assertEqual(list(dataset), ["zero", "two"])
 
-            log = home / ".anydataset" / "logs" / "sharded_csv.log"
+            log = _single_log(home, "sharded_csv.log")
             self.assertEqual(log.read_text(encoding="utf-8").count("WARNING"), 1)
+
+
+def _single_log(home: Path, name: str) -> Path:
+    logs = list((home / "logs").glob(f"*/{name}"))
+    if len(logs) != 1:
+        raise AssertionError(f"expected one {name}, found: {logs}")
+    return logs[0]
 
 
 if __name__ == "__main__":

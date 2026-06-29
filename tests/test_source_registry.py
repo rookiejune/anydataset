@@ -23,8 +23,8 @@ class SourceRegistryTest(unittest.TestCase):
         register_source("unit_test_list", ListSource)
         with tempfile.TemporaryDirectory() as tmpdir:
             spec = Spec(source="unit_test_list", path="/tmp/custom")
-            dataset = AnyDataset(spec, cache_root=tmpdir)
-            metadata_path = Path(tmpdir) / spec.cache_relpath / "metadata.json"
+            dataset = AnyDataset(spec)
+            metadata_path = dataset.cache_manager.root / "sources" / spec.cache_relpath / "metadata.json"
 
             self.assertEqual(dataset[0]["path"], "/tmp/custom")
             metadata = json.loads(metadata_path.read_text(encoding="utf-8"))

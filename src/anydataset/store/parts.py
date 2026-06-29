@@ -6,6 +6,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from .._sharding import validate_shard
+from .._validation import positive_int
 from ..types.item import Modality, Role, Sample, View
 from .atomic import replace_dir
 from .jsonio import read_json, write_json
@@ -33,7 +34,6 @@ from .reader import read_store_dataset
 from .viewwriter import ViewWriter
 from .writer import (
     DEFAULT_MAX_SHARD_SAMPLES,
-    _positive_int,
     _sample_id,
     _sample_view_refs,
     _sample_view_value,
@@ -58,7 +58,7 @@ class DatasetPartWriter:
     def __post_init__(self) -> None:
         self.output_dir = Path(self.output_dir)
         validate_shard(self.num_shards, self.shard_id)
-        self.max_shard_samples = _positive_int(
+        self.max_shard_samples = positive_int(
             "max_shard_samples",
             self.max_shard_samples,
         )
@@ -177,7 +177,6 @@ def _commit_to_tmp(
         for view in dataset.views:
             entries = view_entries.setdefault(view, [])
             entries.extend(read_view_manifest(part, view))
-            _copy_view_shards(part, root, view)
 
     ordered = _ordered_samples(sample_entries)
     write_samples_manifest(root, _renumber_samples(ordered))
@@ -185,6 +184,8 @@ def _commit_to_tmp(
         view_entries.items(), key=lambda item: _view_path(item[0])
     ):
         write_view_manifest(root, view, _ordered_view_entries(entries, ordered))
+        for part in parts:
+            _copy_view_shards(part, root, view)
         view_ready_path(root, view).touch()
 
     write_json(
@@ -270,7 +271,7 @@ def _copy_view_shards(
 ) -> None:
     source_dir = view_shards_dir(source_root, view)
     if not source_dir.is_dir():
-        raise FileNotFoundError(source_dir)
+        return
     for source in sorted(source_dir.iterdir()):
         if not source.is_file():
             continue
@@ -278,9 +279,11 @@ def _copy_view_shards(
         if target.exists():
             raise ValueError(
                 f"Duplicate view shard {source.name!r} for {_view_path(view)}."
-            )
+        )
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, target)
+        if not target.is_file():
+            raise FileNotFoundError(target)
 
 
 def _ordered_samples(

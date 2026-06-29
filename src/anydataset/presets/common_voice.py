@@ -6,7 +6,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from ..dataset import AudioView, MultipleAnyDataset, TextMeta, TextView
+from ..dataset import AudioMeta, AudioView, MultipleAnyDataset, TextMeta, TextView
 from ..dataset.abc import IterableAnyDataset
 from ..types import Spec
 from ..types.item import Transforms
@@ -29,7 +29,6 @@ _SPLITS = frozenset(
 )
 
 _AUDIO_LABEL_FIELDS = (
-    "client_id",
     "sentence_id",
     "sentence_domain",
     "up_votes",
@@ -52,7 +51,6 @@ class CommonVoice(IterableAnyDataset):
         languages: Languages | None = None,
         langs: Languages | None = None,
         version: str | None = None,
-        cache_root: str | Path | None = None,
         transforms: Transforms | None = None,
         **load_options: Any,
     ) -> None:
@@ -67,7 +65,6 @@ class CommonVoice(IterableAnyDataset):
         super().__init__(
             spec=spec,
             parse_fn=CommonVoiceParser(Path(spec.path)),
-            cache_root=cache_root,
             transforms=transforms,
         )
 
@@ -83,6 +80,7 @@ class CommonVoiceParser:
             enriched,
             audio={
                 "audio_path": AudioView.FILE,
+                "client_id": AudioMeta.SPEAKER_ID,
                 **{field: labels(field) for field in _AUDIO_LABEL_FIELDS},
             },
             text={
@@ -131,7 +129,6 @@ def create_common_voice(
     languages: Languages | None = None,
     langs: Languages | None = None,
     version: str | None = None,
-    cache_root: str | Path | None = None,
     transforms: Transforms | None = None,
     **load_options: Any,
 ) -> IterableAnyDataset | MultipleAnyDataset:
@@ -142,7 +139,6 @@ def create_common_voice(
             root=root,
             language=language,
             version=version,
-            cache_root=cache_root,
             transforms=transforms,
             **load_options,
         )

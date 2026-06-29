@@ -31,7 +31,6 @@ class TsvSourceTest(unittest.TestCase):
             dataset = IterableAnyDataset(
                 Spec(source="tsv", path=tmpdir, split="train"),
                 parse_fn=lambda row: row["sentence"],
-                cache_root=root / "cache",
             )
 
             self.assertEqual(list(dataset), ["hello", "tea"])
@@ -50,7 +49,6 @@ class TsvSourceTest(unittest.TestCase):
             dataset = IterableAnyDataset(
                 Spec(source="tsv", path=tmpdir, split="train"),
                 parse_fn=lambda row: row["sentence"],
-                cache_root=root / "cache",
             )
 
             self.assertEqual(list(dataset.iter_shard(2, 1)), ["one"])

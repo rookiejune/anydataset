@@ -9,7 +9,7 @@ from torch.utils.data import IterableDataset
 
 from .._sharding import runtime_shard, validate_shard
 from ..types.item import Sample
-from .abc import AnyDataset, IterableAnyDataset
+from .abc import IterableAnyDataset, MapStyleABC
 
 
 class IterationStrategy(Protocol):
@@ -82,7 +82,7 @@ class WeightedRandomStrategy:
 
 @dataclass
 class MultipleAnyDataset(IterableDataset):
-    datasets: Sequence[AnyDataset | IterableAnyDataset]
+    datasets: Sequence[MapStyleABC | IterableAnyDataset]
     strategy: IterationStrategy = field(default_factory=SequentialStrategy)
 
     def __post_init__(self) -> None:

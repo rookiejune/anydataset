@@ -98,7 +98,7 @@
 - `flags`
 
 `FilterRule.apply(..., metrics=True)` 会把这些 audit row 缓存在 filter cache 下。
-后续可以从 `FilterResult.iter_metrics()` 抽样查看，也可以按 flags 做人工复核。
+后续可以从 `FilteredDataset.iter_metrics()` 抽样查看，也可以按 flags 做人工复核。
 规则内部仍有一个继承文本对的 `_Metrics` 上下文；具体指标用 `cached_property`
 按需计算并在子规则之间共享，但默认不写入日志。
 规则层不输出泛化的 `quality_score`。如果接入 Bicleaner 或其他模型，分数应按来源
@@ -179,13 +179,13 @@ mt_quality_cometkiwi_wmt22_v1_en_zh_rules_v1
 本地调试可以从 TSV/CSV 文本对开始：
 
 ```bash
+ANYDATASET_HOME=storage/anydataset-home \
 python examples/translation_quality_filter.py \
   --input storage/translation_pairs.tsv \
   --source-column source \
   --target-column target \
   --source-lang zh \
   --target-lang en \
-  --cache-root storage/translation-quality-cache \
   --rule-name mt_quality_rules_v1_zh_en
 ```
 

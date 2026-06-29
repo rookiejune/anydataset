@@ -49,6 +49,7 @@ class AudioMeta(StrEnum):
     # DURATION = auto()  # derived from waveform.size(-1) / sample_rate
     LABEL = auto()
     LABELS = auto()
+    SPEAKER_ID = auto()
 
 
 class AudioView(StrEnum):

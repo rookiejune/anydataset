@@ -8,6 +8,7 @@ LongCat weights and anytrain evaluators available.
 from __future__ import annotations
 
 import json
+import os
 import time
 from collections.abc import Mapping
 from pathlib import Path
@@ -41,8 +42,7 @@ ROOT = Path("/mnt/pami202/zhuyin/datasets/anydataset/speech-longcat-filter")
 DELTA = ROOT / "fleurs-longcat-delta"
 BATCH_SIZE = 8
 BATCH_DELTA = ROOT / f"fleurs-longcat-delta-bs{BATCH_SIZE}"
-FILTER_CACHE = ROOT / "filter-cache"
-DATASET_CACHE = ROOT / "dataset-cache"
+ANYDATASET_HOME = ROOT / "home"
 COMPARE_LIMIT: int | None = None
 
 DEVICE = "cuda:0"
@@ -50,6 +50,8 @@ MIN_UTMOS = 2.8
 MIN_CHRF = 50.0
 MAX_SECONDS_PER_TEXT_UNIT = 4.0
 MIN_PEAK_AMPLITUDE = 0.05
+
+os.environ.setdefault("ANYDATASET_HOME", str(ANYDATASET_HOME))
 
 
 class Quality:
@@ -192,8 +194,8 @@ def compare_longcat_deltas(
     *,
     limit: int | None,
 ) -> dict[str, Any]:
-    baseline = AnyDataset(f"store://{baseline_dir}:{SPLIT}", cache_root=DATASET_CACHE)
-    batched = AnyDataset(f"store://{batch_dir}:{SPLIT}", cache_root=DATASET_CACHE)
+    baseline = AnyDataset(f"store://{baseline_dir}:{SPLIT}")
+    batched = AnyDataset(f"store://{batch_dir}:{SPLIT}")
     if len(baseline) != len(batched):
         raise ValueError(
             f"LongCat delta sample counts differ: {len(baseline)} != {len(batched)}."
@@ -262,7 +264,7 @@ longcat_comparison = compare_longcat_deltas(
 )
 
 # Merge the original FLEURS waveform/text views with the generated LongCat view.
-merged = AnyDataset(f"store://{BATCH_DELTA}:{SPLIT}", cache_root=DATASET_CACHE)
+merged = AnyDataset(f"store://{BATCH_DELTA}:{SPLIT}")
 sample = merged[0]
 audio = cast(AudioItem, sample[Role.DEFAULT, Modality.AUDIO])
 transcript = cast(TextItem | None, sample.get((Role.DEFAULT, Modality.TEXT)))
@@ -274,14 +276,14 @@ if AudioView.WAVEFORM not in audio.views or (
     )
 
 # Apply the named quality rule and select the accepted partition.
-result = rule.apply(merged, metrics=True, device="auto", cache_root=FILTER_CACHE)
+result = rule.apply(merged, metrics=True, device="cpu")
 filtered = result.select("accept")
 sample = filtered[0]
 audio = cast(AudioItem, sample[Role.DEFAULT, Modality.AUDIO])
 
 summary = {
     "delta": str(BATCH_DELTA),
-    "filter_cache": str(FILTER_CACHE),
+    "filter_cache": str(result.cache_path),
     "longcat_batch": batch_timing,
     "longcat_baseline": baseline_timing,
     "longcat_comparison": longcat_comparison,

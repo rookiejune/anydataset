@@ -6,6 +6,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
+from .._validation import positive_int
 from ..types.item import (
     AudioItem,
     ImageItem,
@@ -45,7 +46,7 @@ class DatasetWriter:
 
     def __post_init__(self) -> None:
         self.output_dir = Path(self.output_dir)
-        self.max_shard_samples = _positive_int(
+        self.max_shard_samples = positive_int(
             "max_shard_samples",
             self.max_shard_samples,
         )
@@ -183,20 +184,6 @@ def _validate_sample(sample: Sample) -> None:
         if not isinstance(modality, Modality):
             raise TypeError("sample modality keys must be Modality instances.")
         _validate_item(modality, item)
-
-
-def _optional_positive_int(name: str, value: int | None) -> int | None:
-    if value is None:
-        return None
-    return _positive_int(name, value)
-
-
-def _positive_int(name: str, value: int) -> int:
-    if not isinstance(value, int) or isinstance(value, bool):
-        raise TypeError(f"{name} must be an integer.")
-    if value <= 0:
-        raise ValueError(f"{name} must be positive.")
-    return value
 
 
 def _sample_id(dataset_id: str, index: int) -> str:

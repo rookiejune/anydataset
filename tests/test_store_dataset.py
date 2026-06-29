@@ -12,6 +12,7 @@ from anydataset import (
     AudioMeta,
     AudioReq,
     AudioView,
+    DatasetStoreWriter,
     Modality,
     Role,
     Source,
@@ -45,7 +46,6 @@ class StoreSourceTest(unittest.TestCase):
 
             dataset = AnyDataset(
                 Spec(source=Source.STORE, path=str(output), split="train"),
-                cache_root=root / "cache",
             )
             sample = dataset[0]
 
@@ -68,7 +68,6 @@ class StoreSourceTest(unittest.TestCase):
 
             dataset = AnyDataset(
                 spec=f"store://{output}:train",
-                cache_root=root / "cache",
             )
             sample = dataset[0]
 
@@ -89,7 +88,6 @@ class StoreSourceTest(unittest.TestCase):
             )
             dataset = AnyDataset(
                 Spec(source=Source.STORE, path=str(output)),
-                cache_root=root / "cache",
             )
 
             file_view = Path(dataset[0][Role.DEFAULT, Modality.AUDIO].views[AudioView.FILE])
@@ -102,6 +100,54 @@ class StoreSourceTest(unittest.TestCase):
             self.assertTrue(file_view.is_file())
             self.assertEqual(file_view.read_bytes(), b"RIFF-data")
             self.assertEqual(cached, file_view)
+
+    def test_reader_reuses_open_payload_shard(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            output = root / "dataset"
+            DatasetWriter(output, dataset_id="toy-audio").write(
+                [
+                    _audio_sample(waveform=torch.tensor([[1.0]])),
+                    _audio_sample(waveform=torch.tensor([[2.0]])),
+                ]
+            )
+            dataset = read_store_dataset(output)
+
+            with mock.patch(
+                "anydataset.store.payload.tarfile.open",
+                wraps=__import__("tarfile").open,
+            ) as open_tar:
+                dataset[1]
+                dataset[0]
+
+            self.assertEqual(open_tar.call_count, 1)
+
+    def test_reader_evicts_old_payload_shards(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            output = root / "dataset"
+            DatasetWriter(
+                output,
+                dataset_id="toy-audio",
+                max_shard_samples=1,
+            ).write(
+                [
+                    _audio_sample(waveform=torch.tensor([[1.0]])),
+                    _audio_sample(waveform=torch.tensor([[2.0]])),
+                ]
+            )
+            dataset = read_store_dataset(output)
+            dataset._payloads.max_open_shards = 1
+
+            with mock.patch(
+                "anydataset.store.payload.tarfile.open",
+                wraps=__import__("tarfile").open,
+            ) as open_tar:
+                dataset[0]
+                dataset[1]
+                dataset[0]
+
+            self.assertEqual(open_tar.call_count, 3)
 
     def test_reader_loads_all_view_indexes(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -130,7 +176,7 @@ class StoreSourceTest(unittest.TestCase):
         )
         self.assertEqual(len(dataset.samples), 1)
 
-    def test_store_dataset_merge_adds_overlay_views(self):
+    def test_store_dataset_merge_adds_overlay_views_logically(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             output = root / "dataset"
@@ -160,6 +206,7 @@ class StoreSourceTest(unittest.TestCase):
 
             merged = store.merge(overlay)
             sample = merged[0]
+            stored = read_store_dataset(output)
 
         audio = sample[Role.DEFAULT, Modality.AUDIO]
         text = sample[Role.DEFAULT, Modality.TEXT]
@@ -173,8 +220,15 @@ class StoreSourceTest(unittest.TestCase):
         )
         self.assertEqual(audio.meta[AudioMeta.LABEL], "speech")
         self.assertEqual(text.views[TextView.TEXT], "hello")
+        self.assertEqual(
+            set(stored.views),
+            {
+                (Role.DEFAULT, Modality.AUDIO, AudioView.WAVEFORM),
+                (Role.DEFAULT, Modality.TEXT, TextView.TEXT),
+            },
+        )
 
-    def test_anydataset_merge_updates_store_source(self):
+    def test_anydataset_merge_returns_logical_dataset(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             output = root / "dataset"
@@ -207,7 +261,6 @@ class StoreSourceTest(unittest.TestCase):
 
             dataset = AnyDataset(
                 f"store://{output}:train",
-                cache_root=root / "cache",
             ).merge(source)
             sample = dataset[0]
 
@@ -216,14 +269,16 @@ class StoreSourceTest(unittest.TestCase):
         self.assertTrue(torch.equal(audio.views[AudioView.WAVEFORM][0], waveform))
         self.assertEqual(sample[Role.DEFAULT, Modality.TEXT].views[TextView.TEXT], "hello")
 
-    def test_anydataset_merge_requires_store_source(self):
-        dataset = AnyDataset(
-            Spec(source=Source.HF, path="unused"),
-            cache_root=Path(tempfile.gettempdir()) / "anydataset-test-cache",
-        )
+    def test_merge_requires_map_style_dataset(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output = Path(tmpdir) / "dataset"
+            DatasetWriter(output, dataset_id="toy-audio", split="train").write(
+                [_audio_sample(waveform=torch.tensor([[1.0]]))]
+            )
+            dataset = read_store_dataset(output)
 
-        with self.assertRaises(TypeError):
-            dataset.merge([])
+            with self.assertRaises(TypeError):
+                dataset.merge(iter([]))
 
     def test_store_dataset_merge_rejects_view_conflicts(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -236,15 +291,87 @@ class StoreSourceTest(unittest.TestCase):
             store = read_store_dataset(output)
             overlay = [_audio_sample(waveform=torch.tensor([[4.0, 5.0, 6.0]]))]
 
-            with self.assertRaises(ValueError):
-                store.merge(overlay)
+            merged = store.merge(overlay)
 
+            with self.assertRaises(ValueError):
+                merged[0]
             stored = read_store_dataset(output)
 
         self.assertEqual(
             set(stored.views),
             {(Role.DEFAULT, Modality.AUDIO, AudioView.WAVEFORM)},
         )
+
+    def test_merged_dataset_write_materializes_full_store(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            source = root / "source"
+            delta = root / "delta"
+            output = root / "merged"
+            waveform = torch.tensor([[1.0, 2.0, 3.0]])
+            DatasetWriter(source, dataset_id="source", split="train").write(
+                [
+                    {
+                        (Role.DEFAULT, Modality.AUDIO): AudioItem(
+                            views={AudioView.WAVEFORM: (waveform, 4)},
+                            meta={AudioMeta.LABEL: "speech"},
+                        ),
+                        (Role.DEFAULT, Modality.TEXT): TextItem(
+                            views={TextView.TEXT: "hello"},
+                        ),
+                    }
+                ]
+            )
+            DatasetWriter(delta, dataset_id="delta", split="train").write(
+                [
+                    {
+                        (Role.DEFAULT, Modality.AUDIO): AudioItem(
+                            views={
+                                AudioView.LONGCAT: {
+                                    "semantic_codes": torch.tensor([[1, 2, 3]])
+                                }
+                            },
+                            meta={AudioMeta.LABEL: "speech"},
+                        )
+                    }
+                ]
+            )
+
+            read_store_dataset(source).merge(read_store_dataset(delta)).write(
+                output,
+                dataset_id="merged",
+                split="train",
+            )
+            sample = read_store_dataset(output)[0]
+
+        audio = sample[Role.DEFAULT, Modality.AUDIO]
+        self.assertEqual(set(audio.views), {AudioView.WAVEFORM, AudioView.LONGCAT})
+        self.assertTrue(torch.equal(audio.views[AudioView.WAVEFORM][0], waveform))
+        self.assertEqual(sample[Role.DEFAULT, Modality.TEXT].views[TextView.TEXT], "hello")
+
+    def test_dataset_write_supports_parallel_parts_and_workers(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            output = root / "parallel"
+            DatasetStoreWriter(
+                output,
+                dataset_id="parallel",
+                split="train",
+                num_shards=2,
+                num_workers=2,
+            ).write(
+                dataset_factory=_RangeAudioFactory(5),
+            )
+            dataset = read_store_dataset(output)
+            self.assertEqual(len(dataset), 5)
+            values = [
+                float(
+                    dataset[index][Role.DEFAULT, Modality.AUDIO]
+                    .views[AudioView.WAVEFORM][0][0, 0]
+                )
+                for index in range(len(dataset))
+            ]
+            self.assertEqual(values, [0.0, 1.0, 2.0, 3.0, 4.0])
 
     def test_schema_selects_requested_views(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -257,7 +384,6 @@ class StoreSourceTest(unittest.TestCase):
             )
             dataset = AnyDataset(
                 Spec(source=Source.STORE, path=str(output)),
-                cache_root=root / "cache",
             )
             schema = {
                 (Role.DEFAULT, Modality.AUDIO): AudioReq(
@@ -369,6 +495,25 @@ def _write_empty_dataset(path: Path) -> None:
     )
     write_samples_manifest(path, [])
     dataset_ready_path(path).touch()
+
+
+class _RangeAudioDataset:
+    def __init__(self, count: int) -> None:
+        self.count = count
+
+    def __len__(self) -> int:
+        return self.count
+
+    def __getitem__(self, index: int):
+        return _audio_sample(waveform=[[float(index)]])
+
+
+class _RangeAudioFactory:
+    def __init__(self, count: int) -> None:
+        self.count = count
+
+    def __call__(self):
+        return _RangeAudioDataset(self.count)
 
 
 def _drop_last_parquet_row(path: Path) -> None:

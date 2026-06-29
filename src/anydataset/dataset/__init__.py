@@ -1,10 +1,19 @@
 from .abc import (
     AnyDataset,
     IterableAnyDataset,
-    SampleDataset,
+    MapStyleABC,
+    MergedDataset,
 )
 from .collate import Batch, FieldGroup, FieldRef, collate_fn, field_lengths
-from ..filter import FilterDecision, FilterFactory, FilteredDataset, FilterResult, FilterRule
+from .write import DatasetStoreWriter
+from ..filter import (
+    DatasetFactory,
+    FilterApplyKwargs,
+    FilterDecision,
+    FilterFactory,
+    FilteredDataset,
+    FilterRule,
+)
 from ..types import Source, Spec, Task
 from ..types.item import (
     AudioItem,
@@ -45,12 +54,14 @@ __all__ = [
     "AudioReq",
     "AudioView",
     "Batch",
+    "DatasetFactory",
+    "DatasetStoreWriter",
     "FieldGroup",
     "FieldRef",
+    "FilterApplyKwargs",
     "FilterDecision",
     "FilterFactory",
     "FilteredDataset",
-    "FilterResult",
     "FilterRule",
     "ImageItem",
     "ImageMeta",
@@ -60,6 +71,8 @@ __all__ = [
     "IterationStrategy",
     "Item",
     "ItemTransform",
+    "MapStyleABC",
+    "MergedDataset",
     "Modality",
     "MultipleAnyDataset",
     "Meta",
@@ -67,7 +80,6 @@ __all__ = [
     "Role",
     "RoundRobinStrategy",
     "Sample",
-    "SampleDataset",
     "Schema",
     "SequentialStrategy",
     "Source",

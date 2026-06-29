@@ -129,9 +129,10 @@ def _json_text(value: Any) -> str:
 
 def _read_parquet_rows(path: Path) -> Iterator[dict[str, Any]]:
     _, pq = _pyarrow()
-    table = pq.read_table(path)
-    for row in table.to_pylist():
-        yield _decode_row(row)
+    parquet = pq.ParquetFile(path)
+    for batch in parquet.iter_batches(batch_size=4096):
+        for row in batch.to_pylist():
+            yield _decode_row(row)
 
 
 class _ParquetRowWriter:

@@ -7,10 +7,10 @@ import tempfile
 from bisect import bisect_right
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime
 from pathlib import Path
 from typing import Any, Protocol
 
+from ..._logging import write_warning
 from ...types import Spec
 
 
@@ -57,6 +57,7 @@ class ShardedCsvDataset:
         self._shards_cache: tuple[CsvShard, ...] | None = None
         self._files_cache: tuple[CsvFile, ...] | None = None
         self._file_stops_cache: tuple[int, ...] | None = None
+        self._ignored_csv_warning_paths: set[Path] = set()
 
     def __iter__(self) -> Iterator[CsvRow]:
         yield from self.shard(num_shards=1, index=0)
@@ -143,7 +144,7 @@ class ShardedCsvDataset:
         return ordered
 
     def _read_shard(self, shard: CsvShard) -> Iterator[CsvRow]:
-        paths = sorted(shard.path.glob("*.csv"), key=_csv_path_key)
+        paths = self._csv_files(shard.path)
         if not paths:
             raise FileNotFoundError(f"No CSV files found under: {shard.path}")
         for path in paths:
@@ -179,11 +180,21 @@ class ShardedCsvDataset:
     def _csv_paths(self) -> tuple[Path, ...]:
         paths = []
         for shard in self._shards():
-            shard_paths = sorted(shard.path.glob("*.csv"), key=_csv_path_key)
+            shard_paths = self._csv_files(shard.path)
             if not shard_paths:
                 raise FileNotFoundError(f"No CSV files found under: {shard.path}")
             paths.extend(shard_paths)
         return tuple(paths)
+
+    def _csv_files(self, path: Path) -> tuple[Path, ...]:
+        paths, ignored = _split_csv_paths(path)
+        if ignored and path not in self._ignored_csv_warning_paths:
+            self._ignored_csv_warning_paths.add(path)
+            ignored_names = ", ".join(file.name for file in ignored)
+            _write_warning(
+                f"Ignored non-numeric CSV files under {path}: {ignored_names}."
+            )
+        return paths
 
     def _file_stops(self) -> tuple[int, ...]:
         if self._file_stops_cache is None:
@@ -270,10 +281,24 @@ def _shard_index(path: Path) -> int | None:
     return int(suffix)
 
 
-def _csv_path_key(path: Path) -> tuple[int, int | str]:
-    if path.stem.isdecimal():
-        return (0, int(path.stem))
-    return (1, path.name)
+def _split_csv_paths(path: Path) -> tuple[tuple[Path, ...], tuple[Path, ...]]:
+    paths = []
+    ignored = []
+    for child in path.glob("*.csv"):
+        if not child.is_file():
+            continue
+        if child.stem.isdecimal():
+            paths.append(child)
+        else:
+            ignored.append(child)
+    return (
+        tuple(sorted(paths, key=_csv_path_key)),
+        tuple(sorted(ignored, key=lambda child: child.name)),
+    )
+
+
+def _csv_path_key(path: Path) -> int:
+    return int(path.stem)
 
 
 def _file_record(path: Path, row_count: int) -> dict[str, Any]:
@@ -350,8 +375,4 @@ def _warn_missing_shards(base: Path, shards: Sequence[CsvShard]) -> None:
 
 
 def _write_warning(message: str) -> None:
-    log_dir = Path.home() / ".anydataset" / "logs"
-    log_dir.mkdir(parents=True, exist_ok=True)
-    timestamp = datetime.now().isoformat(timespec="seconds")
-    with (log_dir / "sharded_csv.log").open("a", encoding="utf-8") as f:
-        f.write(f"{timestamp} WARNING {message}\n")
+    write_warning("sharded_csv", message)

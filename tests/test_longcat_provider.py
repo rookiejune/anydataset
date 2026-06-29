@@ -562,7 +562,6 @@ def _role_audio_sample(
 def _store_dataset(path: Path, root: Path):
     return AnyDataset(
         Spec(source=Source.STORE, path=str(path), split="train"),
-        cache_root=root / "cache-source",
     )
 
 

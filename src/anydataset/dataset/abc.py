@@ -1,20 +1,26 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Iterator, Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from torch.utils.data import Dataset, IterableDataset
 
+from .._parallel import iter_indexed_shard as iter_source_indexed_shard
 from .._sharding import Shard, runtime_shard, validate_shard
-from ..types import Preset, Source, Spec, source_key
+from ..types import Preset, Spec
+from ..types.item import Modality, Role, View
 from ..utils import resolve_dataset
 
 if TYPE_CHECKING:
     from ..cache import CacheManager
-    from ..types.item import Sample, Schema, Transforms
+    from ..types.item import Item, Sample, Schema, Transforms
     from .source import DatasetSource
+
+
+_DEFAULT_MAX_SHARD_SAMPLES = 100_000
 
 
 class _Base(ABC):
@@ -22,15 +28,10 @@ class _Base(ABC):
         self,
         spec: str | Preset | Spec,
         parse_fn: Callable[[Any], Sample] | None = None,
-        cache_root: str | Path | None = None,
         transforms: Transforms | None = None,
     ) -> None:
         self.spec = resolve_dataset(spec)
         self._cache_manager = None
-        if cache_root is not None:
-            from ..cache import CacheManager
-
-            self._cache_manager = CacheManager(cache_root)
         self._dataset = None
         self._source: DatasetSource | None = None
         self.parse_fn = parse_fn or _identity_sample
@@ -67,7 +68,6 @@ class _Base(ABC):
     def __getstate__(self) -> dict[str, Any]:
         return {
             "spec": self.spec,
-            "cache_root": None if self._cache_manager is None else self._cache_manager.root,
             "parse_fn": self.parse_fn,
             "transforms": self.transforms,
             "source": self.source,
@@ -76,11 +76,6 @@ class _Base(ABC):
     def __setstate__(self, state: dict[str, Any]) -> None:
         self.spec = state["spec"]
         self._cache_manager = None
-        cache_root = state["cache_root"]
-        if cache_root is not None:
-            from ..cache import CacheManager
-
-            self._cache_manager = CacheManager(cache_root)
         self._dataset = None
         self._source = state["source"]
         self.parse_fn = state["parse_fn"]
@@ -91,9 +86,6 @@ class _Base(ABC):
         shard = runtime_shard()
         yield from self.iter_runtime_shard(shard)
 
-    def iter_runtime_shard(self, shard: Shard) -> Iterator[Sample]:
-        yield from self.iter_shard(shard.count, shard.index)
-
     def transform_sample(self, sample: Sample) -> Sample:
         if self.transforms is None:
             return sample
@@ -102,9 +94,31 @@ class _Base(ABC):
             transformed[reference] = transform(sample[reference])
         return transformed
 
-    @abstractmethod
-    def iter_shard(self, num_shards: int, shard_id: int) -> Iterator[Sample]:
-        raise NotImplementedError
+    def write(
+        self,
+        output_dir: str | Path,
+        *,
+        dataset_id: str | None = None,
+        split: str | None = None,
+        views: tuple[tuple[Role, Modality, View], ...] | None = None,
+        max_shard_samples: int = _DEFAULT_MAX_SHARD_SAMPLES,
+        num_shards: int = 1,
+        num_workers: int = 0,
+        prefetch_factor: int | None = None,
+        dataset_factory: Callable[[], Any] | None = None,
+    ) -> Path:
+        return _write_dataset(
+            self,
+            output_dir,
+            dataset_id=dataset_id,
+            split=self.spec.split if split is None else split,
+            views=views,
+            max_shard_samples=max_shard_samples,
+            num_shards=num_shards,
+            num_workers=num_workers,
+            prefetch_factor=prefetch_factor,
+            dataset_factory=dataset_factory,
+        )
 
     @staticmethod
     def resolve_sample(sample: Sample, schema: Schema) -> Sample:
@@ -117,6 +131,9 @@ class _Base(ABC):
 class IterableAnyDataset(_Base, IterableDataset):
     def iter_rows(self) -> Iterator[Any]:
         yield from self.dataset
+
+    def iter_runtime_shard(self, shard: Shard) -> Iterator[Sample]:
+        yield from self.iter_shard(shard.count, shard.index)
 
     def iter_shard(self, num_shards: int, shard_id: int) -> Iterator[Sample]:
         validate_shard(num_shards, shard_id)
@@ -155,7 +172,7 @@ class IterableAnyDataset(_Base, IterableDataset):
         yield from self.iter_indexed_shard(shard.flat_count, shard.flat_index)
 
 
-class SampleDataset(Dataset, ABC):
+class MapStyleABC(Dataset, ABC):
     @abstractmethod
     def __len__(self) -> int:
         raise NotImplementedError
@@ -164,33 +181,105 @@ class SampleDataset(Dataset, ABC):
     def __getitem__(self, index: int) -> Sample:
         raise NotImplementedError
 
+    def __iter__(self) -> Iterator[Sample]:
+        shard = runtime_shard()
+        yield from self.iter_runtime_shard(shard)
 
-class AnyDataset(_Base, SampleDataset):
+    def merge(self, dataset: Any) -> MergedDataset:
+        _validate_map_style_dataset("merge dataset", dataset)
+        return MergedDataset(self, dataset)
+
+    def iter_shard(self, num_shards: int, shard_id: int) -> Iterator[Sample]:
+        for _index, sample in self.iter_indexed_shard(num_shards, shard_id):
+            yield sample
+
+    def iter_indexed_range(
+        self,
+        start: int,
+        stop: int,
+    ) -> Iterator[tuple[int, Sample]]:
+        if start < 0 or stop < start or stop > len(self):
+            raise ValueError("range must satisfy 0 <= start <= stop <= len(dataset).")
+        for index in range(start, stop):
+            yield index, self[index]
+
+    def iter_indexed_shard(
+        self,
+        num_shards: int,
+        shard_id: int,
+    ) -> Iterator[tuple[int, Sample]]:
+        validate_shard(num_shards, shard_id)
+        for index in range(shard_id, len(self), num_shards):
+            yield index, self[index]
+
+    def iter_indexed_runtime_shard(self) -> Iterator[tuple[int, Sample]]:
+        shard = runtime_shard()
+        yield from self.iter_indexed_shard(shard.flat_count, shard.flat_index)
+
+    def iter_runtime_shard(self, shard: Shard) -> Iterator[Sample]:
+        usable = len(self) // shard.rank_count * shard.rank_count
+        if shard.flat_count > 1:
+            for index, sample in self.iter_indexed_shard(
+                shard.flat_count,
+                shard.flat_index,
+            ):
+                if index < usable:
+                    yield sample
+            return
+
+        for _index, sample in self.iter_indexed_range(0, usable):
+            yield sample
+
+    def write(
+        self,
+        output_dir: str | Path,
+        *,
+        dataset_id: str | None = None,
+        split: str | None = None,
+        views: tuple[tuple[Role, Modality, View], ...] | None = None,
+        max_shard_samples: int = _DEFAULT_MAX_SHARD_SAMPLES,
+        num_shards: int = 1,
+        num_workers: int = 0,
+        prefetch_factor: int | None = None,
+        dataset_factory: Callable[[], Any] | None = None,
+    ) -> Path:
+        return _write_dataset(
+            self,
+            output_dir,
+            dataset_id=dataset_id,
+            split=split,
+            views=views,
+            max_shard_samples=max_shard_samples,
+            num_shards=num_shards,
+            num_workers=num_workers,
+            prefetch_factor=prefetch_factor,
+            dataset_factory=dataset_factory,
+        )
+
+
+@dataclass(frozen=True)
+class MergedDataset(MapStyleABC):
+    left: Any
+    right: Any
+
+    def __post_init__(self) -> None:
+        _validate_map_style_dataset("left dataset", self.left)
+        _validate_map_style_dataset("right dataset", self.right)
+        _validate_lengths(self.left, self.right)
+
+    def __len__(self) -> int:
+        return _validate_lengths(self.left, self.right)
+
+    def __getitem__(self, index: int) -> Sample:
+        return _merge_samples(self.left[index], self.right[index], index)
+
+
+class AnyDataset(_Base, MapStyleABC):
     def __len__(self) -> int:
         return len(self.dataset)
 
     def __getitem__(self, index: int) -> Sample:
         return self.transform_sample(self.parse_fn(self.dataset[index]))
-
-    def merge(self, dataset: Iterable[Sample]) -> AnyDataset:
-        if source_key(self.spec.source) != Source.STORE.value:
-            raise TypeError("merge requires a store dataset.")
-        merge = getattr(self.dataset, "merge", None)
-        if not callable(merge):
-            raise TypeError("merge requires a store dataset.")
-        self._dataset = merge(dataset)
-        return self
-
-    def iter_shard(self, num_shards: int, shard_id: int):
-        validate_shard(num_shards, shard_id)
-        iter_indexed = getattr(self.dataset, "iter_indexed_shard", None)
-        if callable(iter_indexed):
-            for _index, row in iter_indexed(num_shards, shard_id):
-                yield self.transform_sample(self.parse_fn(row))
-            return
-
-        for index in range(shard_id, len(self), num_shards):
-            yield self[index]
 
     def iter_indexed_range(self, start: int, stop: int):
         if start < 0 or stop < start or stop > len(self):
@@ -207,31 +296,12 @@ class AnyDataset(_Base, SampleDataset):
             yield index, self[index]
 
     def iter_indexed_shard(self, num_shards: int, shard_id: int):
-        validate_shard(num_shards, shard_id)
-        dataset = self.dataset
-        iter_indexed = getattr(dataset, "iter_indexed_shard", None)
-        if callable(iter_indexed):
-            for index, row in iter_indexed(num_shards, shard_id):
-                yield index, self.transform_sample(self.parse_fn(row))
-            return
-
-        for index in range(shard_id, len(self), num_shards):
-            yield index, self[index]
-
-    def iter_indexed_runtime_shard(self):
-        shard = runtime_shard()
-        yield from self.iter_indexed_shard(shard.flat_count, shard.flat_index)
-
-    def iter_runtime_shard(self, shard: Shard):
-        usable = len(self) // shard.rank_count * shard.rank_count
-        if shard.flat_count > 1:
-            for index, sample in self.iter_indexed_shard(shard.flat_count, shard.flat_index):
-                if index < usable:
-                    yield sample
-            return
-
-        for index, sample in self.iter_indexed_range(0, usable):
-            yield sample
+        for index, row in iter_source_indexed_shard(
+            self.dataset,
+            num_shards,
+            shard_id,
+        ):
+            yield index, self.transform_sample(self.parse_fn(row))
 
 
 def _identity_sample(row: Any) -> Sample:
@@ -246,3 +316,103 @@ def _iter_modulo(
     for index, row in enumerate(rows):
         if index % num_shards == shard_id:
             yield row
+
+
+def _write_dataset(
+    dataset: Any,
+    output_dir: str | Path,
+    *,
+    dataset_id: str | None,
+    split: str | None,
+    views: tuple[tuple[Role, Modality, View], ...] | None,
+    max_shard_samples: int,
+    num_shards: int,
+    num_workers: int,
+    prefetch_factor: int | None,
+    dataset_factory: Callable[[], Any] | None,
+) -> Path:
+    from .write import DatasetStoreWriter
+
+    writer = DatasetStoreWriter(
+        output_dir,
+        dataset_id=dataset_id,
+        split=split,
+        views=views,
+        max_shard_samples=max_shard_samples,
+        num_shards=num_shards,
+        num_workers=num_workers,
+        prefetch_factor=prefetch_factor,
+    )
+    if dataset_factory is not None:
+        return writer.write(dataset_factory=dataset_factory)
+    return writer.write(dataset)
+
+
+def _validate_map_style_dataset(name: str, dataset: Any) -> None:
+    if not hasattr(dataset, "__len__") or not hasattr(dataset, "__getitem__"):
+        raise TypeError(f"{name} must be a map-style dataset.")
+
+
+def _validate_lengths(left: Any, right: Any) -> int:
+    left_len = len(left)
+    right_len = len(right)
+    if left_len != right_len:
+        raise ValueError(
+            f"merge datasets must have the same length: {left_len} != {right_len}."
+        )
+    return left_len
+
+
+def _merge_samples(left: Any, right: Any, index: int) -> Sample:
+    if not isinstance(left, Mapping) or not isinstance(right, Mapping):
+        raise TypeError("merge samples must be mappings.")
+
+    result = dict(left)
+    for ref, item in right.items():
+        current = result.get(ref)
+        if current is None:
+            result[ref] = item
+            continue
+        result[ref] = _merge_items(current, item, ref=ref, index=index)
+    return result
+
+
+def _merge_items(left: Item, right: Item, *, ref: Any, index: int) -> Item:
+    if type(left) is not type(right):
+        raise TypeError(
+            f"Merge sample {index} item {ref!r} has incompatible item types."
+        )
+    view_conflicts = set(left.views) & set(right.views)
+    if view_conflicts:
+        view = _first_sorted_view(view_conflicts)
+        raise ValueError(
+            f"Merge sample {index} item {ref!r} view conflict for {view!r}."
+        )
+
+    meta = dict(left.meta)
+    for key, value in right.meta.items():
+        current = meta.get(key)
+        if key in meta and not _values_equal(current, value):
+            raise ValueError(
+                f"Merge sample {index} item {ref!r} metadata conflict for {key!r}."
+            )
+        meta[key] = value
+
+    return type(left)(
+        views={**left.views, **right.views},
+        meta=meta,
+    )
+
+
+def _first_sorted_view(views: set[View]) -> View:
+    return sorted(views, key=lambda view: view.value)[0]
+
+
+def _values_equal(left: Any, right: Any) -> bool:
+    equal = left == right
+    if isinstance(equal, bool):
+        return equal
+    try:
+        return bool(equal)
+    except (TypeError, ValueError, RuntimeError):
+        return left is right

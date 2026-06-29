@@ -163,10 +163,6 @@ class MetricsWriter:
         self._buffer = []
 
 
-def index_sequence(indices: Sequence[int]) -> _Index:
-    return array("q", indices)
-
-
 def merged_index(indexes: Sequence[_Index]) -> _Index:
     if len(indexes) == 0:
         return ()

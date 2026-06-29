@@ -1,65 +1,53 @@
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
-from ..dataset.abc import SampleDataset
+from ..dataset.abc import MapStyleABC
 from ..types import item
-from .atomic import cleanup_dir, tmp_dir
 from .jsonio import read_json
 from .manifest import (
     DatasetManifest,
     SampleManifestEntry,
     ViewManifestEntry,
-    string_key_dict,
     view_from_dict,
 )
-from .manifestio import (
-    read_samples_manifest,
-    read_view_manifest,
-    samples_manifest_exists,
-    write_samples_manifest,
-)
+from .manifestio import read_samples_manifest, read_view_manifest, samples_manifest_exists
 from .paths import (
     dataset_json_path,
     dataset_ready_path,
-    samples_parquet_path,
-    view_dir,
     view_ready_path,
 )
-from .payload import payload_value, read_payload_bytes
-from .viewwriter import ViewWriter
-from .writer import DEFAULT_MAX_SHARD_SAMPLES
+from .payload import PayloadCache, payload_value, read_payload_bytes
 
 
 @dataclass(frozen=True)
-class StoreDataset(SampleDataset):
+class StoreDataset(MapStyleABC):
     root: Path
     manifest: DatasetManifest
     samples: tuple[SampleManifestEntry, ...]
     views: Mapping[tuple[item.Role, item.Modality, item.View], StoreView]
     _files: dict[str, Path] = field(default_factory=dict, compare=False, repr=False)
+    _payloads: PayloadCache = field(
+        default_factory=PayloadCache,
+        compare=False,
+        repr=False,
+    )
 
     def __len__(self) -> int:
         return len(self.samples)
 
-    def __iter__(self) -> Iterator[item.Sample]:
-        for index in range(len(self)):
-            yield self[index]
-
     def __getitem__(self, index: int) -> item.Sample:
-        return _sample_for_entry(self, self.samples[index])
-
-    def merge(self, dataset: Iterable[item.Sample]) -> StoreDataset:
-        return _merge_dataset(self, dataset)
+        return _sample_for_entry(self, index, self.samples[index])
 
 
 @dataclass(frozen=True)
 class StoreView:
     view: tuple[item.Role, item.Modality, item.View]
     entries: Mapping[str, ViewManifestEntry]
+    entries_by_index: tuple[ViewManifestEntry | None, ...]
 
 
 def read_store_dataset(
@@ -75,8 +63,9 @@ def read_store_dataset(
         )
     _validate_samples(samples)
 
+    sample_indexes = {sample.sample_id: index for index, sample in enumerate(samples)}
     indexes = {
-        view: _load_view(root, view)
+        view: _load_view(root, view, sample_indexes)
         for view in _discover_views(root)
     }
     _validate_view_coverage(samples, indexes)
@@ -99,17 +88,29 @@ def _validate_dataset_root(root: Path) -> None:
         raise FileNotFoundError(root / "samples.parquet")
 
 
-def _load_view(root: Path, view: tuple[item.Role, item.Modality, item.View]) -> StoreView:
+def _load_view(
+    root: Path,
+    view: tuple[item.Role, item.Modality, item.View],
+    sample_indexes: Mapping[str, int],
+) -> StoreView:
     if not view_ready_path(root, view).exists():
         raise ValueError(f"Store dataset view is not ready: {_view_path(view)}.")
     entries: dict[str, ViewManifestEntry] = {}
+    entries_by_index: list[ViewManifestEntry | None] = [None] * len(sample_indexes)
     for entry in read_view_manifest(root, view):
         if _entry_view(entry) != view:
             raise ValueError("View manifest entry ref must match its path.")
         if entry.sample_id in entries:
             raise ValueError(f"Duplicate view entry for sample_id {entry.sample_id!r}.")
         entries[entry.sample_id] = entry
-    return StoreView(view=view, entries=entries)
+        index = sample_indexes.get(entry.sample_id)
+        if index is not None:
+            entries_by_index[index] = entry
+    return StoreView(
+        view=view,
+        entries=entries,
+        entries_by_index=tuple(entries_by_index),
+    )
 
 
 def _discover_views(root: Path) -> tuple[tuple[item.Role, item.Modality, item.View], ...]:
@@ -196,221 +197,6 @@ def _validate_view_coverage(
         raise ValueError(f"View {_view_path(view)} sample coverage mismatch: {detail}.")
 
 
-def _merge_dataset(
-    base: StoreDataset,
-    dataset: Iterable[item.Sample],
-) -> StoreDataset:
-    tmp = tmp_dir(base.root / "merge")
-    tmp.mkdir(parents=True)
-    sinks: dict[tuple[item.Role, item.Modality, item.View], ViewWriter] = {}
-    expected: dict[tuple[item.Role, item.Modality], frozenset[item.View]] = {}
-    seen_base_refs: set[tuple[item.Role, item.Modality]] = set()
-    entries: list[SampleManifestEntry] = []
-    samples_changed = False
-    closed = False
-
-    try:
-        iterator = iter(dataset)
-        for entry in base.samples:
-            try:
-                sample = next(iterator)
-            except StopIteration as exc:
-                raise ValueError(
-                    f"Merge dataset ended before sample {entry.sample_index}."
-                ) from exc
-
-            updated_entry = _write_overlay_sample(
-                tmp,
-                base,
-                entry,
-                sample,
-                sinks,
-                expected,
-                seen_base_refs,
-            )
-            entries.append(updated_entry)
-            samples_changed = samples_changed or updated_entry.items != entry.items
-            seen_base_refs.update(ref for ref, _ in entry.items)
-
-        try:
-            next(iterator)
-        except StopIteration:
-            pass
-        else:
-            raise ValueError("Merge dataset has more samples than the store.")
-
-        for sink in sinks.values():
-            sink.close()
-        closed = True
-
-        if samples_changed:
-            write_samples_manifest(tmp, entries)
-
-        if not sinks and not samples_changed:
-            cleanup_dir(tmp)
-            return base
-
-        _publish_merge(base.root, tmp, tuple(sinks), samples_changed=samples_changed)
-        cleanup_dir(tmp)
-        return read_store_dataset(base.root)
-    except Exception:
-        if not closed:
-            for sink in sinks.values():
-                sink.abort()
-        cleanup_dir(tmp)
-        raise
-
-
-def _write_overlay_sample(
-    tmp: Path,
-    base: StoreDataset,
-    entry: SampleManifestEntry,
-    sample: item.Sample,
-    sinks: dict[tuple[item.Role, item.Modality, item.View], ViewWriter],
-    expected: dict[tuple[item.Role, item.Modality], frozenset[item.View]],
-    seen_base_refs: set[tuple[item.Role, item.Modality]],
-) -> SampleManifestEntry:
-    if not isinstance(sample, Mapping):
-        raise TypeError("StoreDataset.merge expects Sample mappings.")
-
-    base_items = dict(entry.items)
-    overlay_refs = set(sample)
-    for ref, overlay in sample.items():
-        base_meta = base_items.get(ref)
-        if base_meta is None:
-            _validate_overlay_type(ref, overlay)
-            base_items[ref] = string_key_dict(overlay.meta)
-        else:
-            _validate_overlay_item(entry, ref, base_meta, overlay)
-        new_views = _new_views(base, entry, ref, overlay)
-        previous = expected.get(ref)
-        if previous is None:
-            if ref in seen_base_refs:
-                raise ValueError(
-                    f"Merge item {_sample_ref_path(ref)} starts after earlier samples."
-                )
-            expected[ref] = frozenset(new_views)
-        elif previous != frozenset(new_views):
-            raise ValueError(
-                f"Merge sample {entry.sample_index} view set for "
-                f"{_sample_ref_path(ref)} does not match earlier samples."
-            )
-
-        role, modality = ref
-        for view, value in new_views.items():
-            view_ref = (role, modality, view)
-            sink = sinks.get(view_ref)
-            if sink is None:
-                sink = ViewWriter(
-                    root=tmp,
-                    view=view_ref,
-                    max_shard_samples=DEFAULT_MAX_SHARD_SAMPLES,
-                )
-                sinks[view_ref] = sink
-            sink.write(entry.sample_id, value)
-
-    for ref in expected:
-        if ref in base_items and ref not in overlay_refs:
-            raise ValueError(
-                f"Merge sample {entry.sample_index} is missing item {_sample_ref_path(ref)}."
-            )
-    return SampleManifestEntry(
-        sample_id=entry.sample_id,
-        sample_index=entry.sample_index,
-        items=tuple(base_items.items()),
-    )
-
-
-def _validate_overlay_type(
-    ref: tuple[item.Role, item.Modality],
-    overlay: item.Item,
-) -> None:
-    match ref[1]:
-        case item.Modality.AUDIO:
-            if not isinstance(overlay, item.AudioItem):
-                raise TypeError("audio merge items must be AudioItem instances.")
-        case item.Modality.IMAGE:
-            if not isinstance(overlay, item.ImageItem):
-                raise TypeError("image merge items must be ImageItem instances.")
-        case item.Modality.TEXT:
-            if not isinstance(overlay, item.TextItem):
-                raise TypeError("text merge items must be TextItem instances.")
-
-
-def _validate_overlay_item(
-    entry: SampleManifestEntry,
-    ref: tuple[item.Role, item.Modality],
-    base_meta: Mapping[str, Any],
-    overlay: item.Item,
-) -> None:
-    _validate_overlay_type(ref, overlay)
-    overlay_meta = string_key_dict(overlay.meta)
-    for key, value in overlay_meta.items():
-        if key not in base_meta:
-            raise ValueError(
-                f"Merge sample {entry.sample_index} cannot add metadata {key!r} "
-                f"to {_sample_ref_path(ref)}."
-            )
-        if base_meta[key] != value:
-            raise ValueError(
-                f"Merge sample {entry.sample_index} metadata conflict for "
-                f"{_sample_ref_path(ref)} key {key!r}."
-            )
-
-
-def _new_views(
-    base: StoreDataset,
-    entry: SampleManifestEntry,
-    ref: tuple[item.Role, item.Modality],
-    overlay: item.Item,
-) -> Mapping[item.View, Any]:
-    existing = {view for role, modality, view in base.views if (role, modality) == ref}
-    values = {}
-    for view, value in overlay.views.items():
-        if view in existing:
-            raise ValueError(
-                f"Merge sample {entry.sample_index} view conflict for "
-                f"{_view_path((ref[0], ref[1], view))}."
-            )
-        values[view] = value
-    if not values:
-        raise ValueError(
-            f"Merge sample {entry.sample_index} item {_sample_ref_path(ref)} has no new views."
-        )
-    return values
-
-
-def _publish_views(
-    root: Path,
-    tmp: Path,
-    views: tuple[tuple[item.Role, item.Modality, item.View], ...],
-) -> None:
-    for view in views:
-        target = view_dir(root, view)
-        if target.exists():
-            raise ValueError(f"Store view already exists: {_view_path(view)}.")
-
-    for view in sorted(views, key=_view_path):
-        source = view_dir(tmp, view)
-        target = view_dir(root, view)
-        if not source.is_dir():
-            raise FileNotFoundError(source)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        source.rename(target)
-
-
-def _publish_merge(
-    root: Path,
-    tmp: Path,
-    views: tuple[tuple[item.Role, item.Modality, item.View], ...],
-    *,
-    samples_changed: bool,
-) -> None:
-    _publish_views(root, tmp, views)
-    if samples_changed:
-        samples_parquet_path(tmp).replace(samples_parquet_path(root))
-
-
 def _sample_ids_by_item(
     samples: tuple[SampleManifestEntry, ...],
 ) -> dict[tuple[item.Role, item.Modality], set[str]]:
@@ -432,6 +218,7 @@ def _coverage_detail(missing: list[str], extra: list[str]) -> str:
 
 def _sample_for_entry(
     dataset: StoreDataset,
+    index: int,
     sample: SampleManifestEntry,
 ) -> item.Sample:
     views_by_ref: dict[tuple[item.Role, item.Modality], dict[Any, Any]] = {}
@@ -440,7 +227,7 @@ def _sample_for_entry(
         sample_ref = view_entry[:2]
         if sample_ref not in item_entries:
             continue
-        entry = view.entries.get(sample.sample_id)
+        entry = view.entries_by_index[index]
         if entry is None:
             raise ValueError(
                 f"View {_view_path(view_entry)} is missing sample_id {sample.sample_id!r}."
@@ -493,7 +280,7 @@ def _view_value(
     if view.view[1] is item.Modality.AUDIO and view.view[2] == item.AudioView.FILE:
         return str(_cached_file_payload(dataset, entry, view))
 
-    data = read_payload_bytes(dataset.root, view.view, entry)
+    data = read_payload_bytes(dataset.root, view.view, entry, cache=dataset._payloads)
     return payload_value(view.view, data)
 
 
@@ -506,7 +293,7 @@ def _cached_file_payload(
     if cached is not None:
         return cached
 
-    data = read_payload_bytes(dataset.root, view.view, entry)
+    data = read_payload_bytes(dataset.root, view.view, entry, cache=dataset._payloads)
     return _cache_file_payload(dataset, entry, data)
 
 

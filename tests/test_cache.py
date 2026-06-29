@@ -5,25 +5,30 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from anydataset import Source, Spec, default_cache_root
+from anydataset import Source, Spec, anydataset_home
+from anydataset._logging import run_logs_dir, write_warning
 from anydataset.cache import CacheManager
 
 
 class CacheManagerTest(unittest.TestCase):
     def test_prepare_creates_stable_metadata(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            manager = CacheManager(tmpdir)
-            spec = Spec(
-                source=Source.HF,
-                path="ylecun/mnist",
-                split="train",
-            )
+            with mock.patch.dict(os.environ, {"ANYDATASET_HOME": tmpdir}):
+                manager = CacheManager()
+                spec = Spec(
+                    source=Source.HF,
+                    path="ylecun/mnist",
+                    split="train",
+                )
 
-            first = manager.prepare(spec)
-            second = manager.prepare(spec)
+                first = manager.prepare(spec)
+                second = manager.prepare(spec)
 
             self.assertEqual(first.cache_path, second.cache_path)
-            self.assertEqual(first.cache_path, Path(tmpdir) / spec.cache_relpath)
+            self.assertEqual(
+                first.cache_path,
+                Path(tmpdir) / "cache" / "sources" / spec.cache_relpath,
+            )
             self.assertTrue(first.metadata_path.exists())
             metadata = json.loads(Path(first.metadata_path).read_text(encoding="utf-8"))
             self.assertEqual(metadata["source"], "hf")
@@ -33,29 +38,51 @@ class CacheManagerTest(unittest.TestCase):
 
     def test_cache_path_uses_physical_spec_identity(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            manager = CacheManager(tmpdir)
-            first = Spec(
-                source=Source.HF,
-                path="google/fleurs",
-                split="train",
-                load_options={"config_name": "en_us", "streaming": True},
-            )
-            second = Spec(
-                source=Source.HF,
-                path="google/fleurs",
-                split="train",
-                load_options={"config_name": "en_us", "streaming": True},
-            )
+            with mock.patch.dict(os.environ, {"ANYDATASET_HOME": tmpdir}):
+                manager = CacheManager()
+                first = Spec(
+                    source=Source.HF,
+                    path="google/fleurs",
+                    split="train",
+                    load_options={"config_name": "en_us", "streaming": True},
+                )
+                second = Spec(
+                    source=Source.HF,
+                    path="google/fleurs",
+                    split="train",
+                    load_options={"config_name": "en_us", "streaming": True},
+                )
 
-            self.assertEqual(manager.prepare(first).cache_path, manager.prepare(second).cache_path)
+                self.assertEqual(manager.prepare(first).cache_path, manager.prepare(second).cache_path)
 
-    def test_default_cache_root_uses_environment_at_call_time(self):
+    def test_anydataset_home_uses_environment_at_call_time(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             with mock.patch.dict(
                 os.environ,
-                {"ANYDATASET_CACHE_ROOT": tmpdir},
+                {"ANYDATASET_HOME": tmpdir},
             ):
-                self.assertEqual(default_cache_root(), Path(tmpdir))
+                self.assertEqual(anydataset_home(), Path(tmpdir))
+
+    def test_run_logs_dir_uses_anydataset_home(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home = Path(tmpdir)
+            with mock.patch.dict(os.environ, {"ANYDATASET_HOME": str(home)}):
+                first = run_logs_dir()
+                second = run_logs_dir()
+
+            self.assertEqual(first, second)
+            self.assertEqual(first.parent, home / "logs")
+            self.assertRegex(first.name, r"^\d{8}-\d{6}-\d+$")
+
+    def test_write_warning_writes_source_log_in_run_dir(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home = Path(tmpdir)
+            with mock.patch.dict(os.environ, {"ANYDATASET_HOME": str(home)}):
+                write_warning("source", "careful")
+
+            logs = list((home / "logs").glob("*/source.log"))
+            self.assertEqual(len(logs), 1)
+            self.assertIn("WARNING careful", logs[0].read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

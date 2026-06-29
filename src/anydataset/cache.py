@@ -13,10 +13,14 @@ if TYPE_CHECKING:
     from .types import Spec
 
 
-def default_cache_root() -> Path:
-    if os.environ.get("ANYDATASET_CACHE_ROOT"):
-        return Path(os.environ["ANYDATASET_CACHE_ROOT"]).expanduser()
+def anydataset_home() -> Path:
+    if os.environ.get("ANYDATASET_HOME"):
+        return Path(os.environ["ANYDATASET_HOME"]).expanduser()
     return Path("~/.cache/anydataset").expanduser()
+
+
+def _cache_dir() -> Path:
+    return anydataset_home() / "cache"
 
 
 @dataclass(frozen=True)
@@ -28,9 +32,8 @@ class CacheManifest:
 
 
 class CacheManager:
-    def __init__(self, cache_root: str | Path | None = None):
-        root = cache_root if cache_root is not None else default_cache_root()
-        self.root = Path(root).expanduser()
+    def __init__(self) -> None:
+        self.root = _cache_dir()
 
     def prepare(self, spec: Spec) -> CacheManifest:
         cache_path = self._cache_path(spec)
@@ -59,7 +62,7 @@ class CacheManager:
             yield
 
     def _cache_path(self, spec: Spec) -> Path:
-        return self.root / spec.cache_relpath
+        return self.root / "sources" / spec.cache_relpath
 
 
 _LOCKS: dict[str, threading.Lock] = {}

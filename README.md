@@ -89,8 +89,9 @@ Built-in enum sources are `Source.HF`, `Source.HF_DISK`, and `Source.STORE`.
 The registry also includes string source keys `tsv` and `sharded_csv`; because
 they are registered, they can be used in `Spec(source=...)` and in
 `resolve_dataset("<source>://...")` shorthands. `tsv` reads a file path or
-`<path>/<split>.tsv`; `sharded_csv` reads `shard_<index>/*.csv`, optionally
-under `<path>/<split>/`.
+`<path>/<split>.tsv`; `sharded_csv` reads numeric CSV files under
+`shard_<index>/<number>.csv`, optionally under `<path>/<split>/`. Non-numeric
+CSV file names are ignored and logged as warnings.
 
 New physical source types can be registered with a small factory:
 
@@ -110,6 +111,13 @@ dataset = IterableAnyDataset(
 )
 ```
 
+Caches are rooted at `ANYDATASET_HOME`, or `~/.cache/anydataset` when the
+environment variable is unset. Source prepare caches live under
+`$ANYDATASET_HOME/cache/sources/<spec_id>`, and filter partitions live under
+`$ANYDATASET_HOME/cache/filters/<dataset_id>/<rule_id>`.
+Runtime warnings and worker logs live under
+`$ANYDATASET_HOME/logs/<timestamp>-<pid>/`.
+
 ## Multiple Datasets
 
 Combine already-created datasets with `MultipleAnyDataset`.
@@ -127,6 +135,8 @@ dataset = MultipleAnyDataset(
 ```
 
 Every dataset exposes `iter_shard(num_shards, shard_id)` for distributed reads.
+`MultipleAnyDataset` itself is not a filter cache identity; filter or cache the
+child datasets before combining them.
 
 ## Cached Filter Partitions
 
@@ -134,16 +144,27 @@ Every dataset exposes `iter_shard(num_shards, shard_id)` for distributed reads.
 predicate receives the full canonical sample produced by the dataset.
 
 ```python
-from anydataset.filter import FilterDecision, FilterRule, FilteredDataset
+from anydataset.filter import FilterDecision, FilteredDataset, FilterRule
 
 def quality_factory():
     return lambda sample: "review" if needs_review(sample) else is_good(sample)
 
 
-rule = FilterRule("quality_v1_parse_v3_transform_none", quality_factory)
+def dataset_factory():
+    return build_dataset()
 
-train = FilteredDataset(dataset, rule, labels="accept", device="auto")
-audit = FilteredDataset(dataset, rule, labels=("reject", "review"))
+
+filtered = FilteredDataset(
+    "quality_v1_parse_v3_transform_none",
+    quality_factory,
+    dataset_factory=dataset_factory,
+    device="cpu",
+)
+train = filtered.select_by("accept")
+audit = filtered.select_by("reject", "review")
+
+rule = FilterRule("quality_v1_parse_v3_transform_none", quality_factory)
+again = rule.apply(dataset_factory=dataset_factory, labels="accept", device="cpu")
 ```
 
 `True` maps to `"accept"` and `False` maps to `"reject"`. String and enum
@@ -151,9 +172,11 @@ labels are stored as their own partitions. The rule `name` is the cache
 contract; callers should put predicate, parser, and transform semantics into
 `name` when cache reuse should change.
 
-`FilteredDataset` first checks whether the named rule already has a ready cache
-for the base dataset. If not, it builds the cache, then exposes only the labels
-specified by the caller.
+`FilteredDataset(...)` checks whether the named rule already has a ready cache
+for the base dataset. If not, it builds the cache. It selects every available
+label by default. Use `select_by(...)` to derive a label view over the same
+cache. `FilterRule.apply(...)` is a convenience wrapper that forwards its
+`name` and `factory` to `FilteredDataset`.
 
 `FilterRule` stores a zero-argument factory, and the factory builds the
 predicate inside the process that will execute it. `device="auto"` uses one
@@ -162,11 +185,15 @@ execution. Pass `device="cpu"` for explicit single-process CPU filtering, or an
 iterable such as `("cpu", "cpu")` or `("cuda:0", "cuda:1")` for explicit
 parallel workers. Multi-device filtering launches one fixed worker per device,
 sets DDP-style `RANK`, `LOCAL_RANK`, `WORLD_SIZE`, `MASTER_ADDR`, and
-`MASTER_PORT` before calling the factory, and scans an exhaustive runtime-style
+`MASTER_PORT` before calling factories, and scans an exhaustive runtime-style
 index shard so every base sample is covered. Multi-device filtering manages
 these environment variables itself; run it as an offline preprocessing step
 rather than from inside an existing DDP training process. It uses Python
-`spawn`, so factories should be module-level picklable callables.
+`spawn`, so the dataset entry point is always `dataset_factory=...`. Both the
+dataset factory and predicate factory should be module-level picklable
+callables.
+Pass `num_workers` to let each device process read samples through a PyTorch
+`DataLoader`; `batch_size` controls the loader batch size.
 
 Partition index files are sharded by `max_shard_samples` (default: 1,000,000),
 so large labels do not need one huge parquet file. `commit_samples` (default:
@@ -186,8 +213,8 @@ def metric_factory():
 
 rule = FilterRule("quality_v2", metric_factory)
 
-result = rule.apply(dataset, metrics=True, device="cpu")
-rows = list(result.iter_metrics())
+filtered = rule.apply(dataset_factory=dataset_factory, metrics=True, device="cpu")
+rows = list(filtered.iter_metrics())
 ```
 
 Metrics are written under the filter cache and include the original sample
@@ -211,11 +238,11 @@ def translation_factory():
         target_lang="en",
     )
 
-result = FilterRule("mt_quality_rules_v1_zh_en", translation_factory).apply(
-    dataset,
+filtered = FilterRule("mt_quality_rules_v1_zh_en", translation_factory).apply(
+    dataset_factory=dataset_factory,
     metrics=True,
 )
-train = result.select("clean", "usable")
+train = filtered.select_by("clean", "usable")
 ```
 
 `anydataset.quality.translation.Predicate` labels text pairs as `clean`,
@@ -233,11 +260,11 @@ from anydataset.quality.speech import Predicate as SpeechQuality
 def speech_factory():
     return SpeechQuality()
 
-result = FilterRule("speech_quality_v1", speech_factory).apply(
-    dataset,
+filtered = FilterRule("speech_quality_v1", speech_factory).apply(
+    dataset_factory=dataset_factory,
     metrics=True,
 )
-accepted = result.select("accept")
+accepted = filtered.select_by("accept")
 ```
 
 Speech quality warnings such as missing waveform or missing same-role text are
@@ -278,9 +305,9 @@ restored = dataset[0]
 ```
 
 Views are stored under `{role}/{modality}/{view}/`; payloads live in that
-view directory's `shards/` files. `ViewMaterializer` adds derived views to a
-delta store. Open the store through `Source.STORE` and call `merge()` on the
-`AnyDataset` when the delta is complete.
+view directory's `shards/` files. `ViewMaterializer` writes derived views to a
+delta store. Open both stores through `Source.STORE`, combine them with logical
+`merge()`, and call `write()` only when you need a self-contained store.
 
 ```python
 from anydataset import AnyDataset, AudioView, Source, Spec, ViewMaterializer
@@ -308,21 +335,30 @@ delta = ViewMaterializer(
     devices="cpu",
 )
 
-AnyDataset(Spec(source=Source.STORE, path="/data/my_anydataset")).merge(
+merged = AnyDataset(Spec(source=Source.STORE, path="/data/my_anydataset")).merge(
     AnyDataset(Spec(source=Source.STORE, path=str(delta)))
 )
+
+merged.write("/data/my_anydataset_with_longcat")
 ```
 
-`merge()` matches samples by iteration order, not by `sample_id`. The right-hand
-dataset must yield samples in the same stable order as the target store for that
-merge pass. Do not pass shuffled loaders, runtime-sharded iterables, or
-iterators from an active DDP/DataLoader worker context. Delta stores written by
-`ViewMaterializer` are safe for this path because part commit restores
-`sample_index` order before merge.
+`merge()` returns a map-style logical dataset and never mutates either physical
+store. It indexes both sides with the same integer index, like `zip(strict=True)`:
+both sides must be map-style datasets with the same length. The right-hand side
+may add new items or new views to an existing item; duplicate views fail, and
+duplicate metadata keys are allowed only when the values are equal. Runtime
+sharding happens on the merged dataset, so both sides share the same global
+index. To publish a complete store, call `write()` on the merged dataset.
+
+`write()` can materialize parts in parallel. `num_shards` controls writer
+processes, while `num_workers` controls the PyTorch `DataLoader` workers inside
+each writer process. For parallel writes, pass a picklable module-level
+`dataset_factory` so spawned workers construct their own dataset.
 
 For GPU-backed providers, let `devices` control parallelism. `devices="auto"`
 uses one spawned worker per visible CUDA device, writes worker logs under
-`<output_dir>/logs`, and commits the per-device parts when all workers finish.
+`$ANYDATASET_HOME/logs/<timestamp>-<pid>/materializer`, and commits the
+per-device parts when all workers finish.
 Multi-device materialization uses Python `spawn`, so `dataset_factory` and
 `provider_factory` must be picklable, module-level callables. Like filtering,
 multi-device materialization owns its offline worker processes and should not

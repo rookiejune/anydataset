@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import os
 import tarfile
+import threading
+from collections import OrderedDict
 from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
@@ -12,11 +15,87 @@ from ..types.item import AudioView, Modality, Role, TextView, View
 from .manifest import ViewManifestEntry
 from .paths import view_shard_path
 
+_DEFAULT_MAX_OPEN_SHARDS = 8
+
 
 @dataclass(frozen=True)
 class Payload:
     key: str
     data: bytes
+
+
+class PayloadCache:
+    def __init__(self, max_open_shards: int = _DEFAULT_MAX_OPEN_SHARDS) -> None:
+        if not isinstance(max_open_shards, int) or isinstance(max_open_shards, bool):
+            raise TypeError("max_open_shards must be an integer.")
+        if max_open_shards <= 0:
+            raise ValueError("max_open_shards must be positive.")
+        self.max_open_shards = max_open_shards
+        self._pid = os.getpid()
+        self._archives: OrderedDict[Path, tarfile.TarFile] = OrderedDict()
+        self._lock = threading.RLock()
+
+    def read(
+        self,
+        root: str | Path,
+        view: tuple[Role, Modality, View],
+        entry: ViewManifestEntry,
+    ) -> bytes:
+        shard_path = _payload_shard_path(root, view, entry)
+        self._reset_after_fork()
+        with self._lock:
+            archive = self._archive(shard_path)
+            payload = archive.extractfile(entry.key)
+            if payload is None:
+                raise KeyError(
+                    f"View shard {entry.shard!r} is missing payload {entry.key!r}."
+                )
+            return payload.read()
+
+    def close(self) -> None:
+        with self._lock:
+            archives = tuple(self._archives.values())
+            self._archives.clear()
+        for archive in archives:
+            archive.close()
+
+    def __getstate__(self) -> dict[str, int]:
+        return {"max_open_shards": self.max_open_shards}
+
+    def __setstate__(self, state: dict[str, int]) -> None:
+        self.__init__(state["max_open_shards"])
+
+    def __del__(self) -> None:
+        try:
+            self.close()
+        except Exception:
+            pass
+
+    def _archive(self, path: Path) -> tarfile.TarFile:
+        cached = self._archives.get(path)
+        if cached is not None:
+            self._archives.move_to_end(path)
+            return cached
+
+        archive = tarfile.open(path, "r")
+        self._archives[path] = archive
+        self._evict()
+        return archive
+
+    def _evict(self) -> None:
+        while len(self._archives) > self.max_open_shards:
+            _path, archive = self._archives.popitem(last=False)
+            archive.close()
+
+    def _reset_after_fork(self) -> None:
+        pid = os.getpid()
+        if pid == self._pid:
+            return
+        archives = tuple(self._archives.values())
+        self._archives.clear()
+        self._pid = pid
+        for archive in archives:
+            archive.close()
 
 
 def payload_for_view(
@@ -47,11 +126,12 @@ def read_payload_bytes(
     root: str | Path,
     view: tuple[Role, Modality, View],
     entry: ViewManifestEntry,
+    *,
+    cache: PayloadCache | None = None,
 ) -> bytes:
-    _validate_payload_key(entry.key)
-    shard_path = view_shard_path(root, view, entry.shard)
-    if not shard_path.is_file():
-        raise FileNotFoundError(shard_path)
+    if cache is not None:
+        return cache.read(root, view, entry)
+    shard_path = _payload_shard_path(root, view, entry)
     with tarfile.open(shard_path, "r") as archive:
         payload = archive.extractfile(entry.key)
         if payload is None:
@@ -156,3 +236,15 @@ def _waveform_value(value: Any) -> tuple[torch.Tensor, int]:
 def _validate_payload_key(key: str) -> None:
     if Path(key).name != key:
         raise ValueError("View payload keys cannot contain path separators.")
+
+
+def _payload_shard_path(
+    root: str | Path,
+    view: tuple[Role, Modality, View],
+    entry: ViewManifestEntry,
+) -> Path:
+    _validate_payload_key(entry.key)
+    shard_path = view_shard_path(root, view, entry.shard)
+    if not shard_path.is_file():
+        raise FileNotFoundError(shard_path)
+    return shard_path
