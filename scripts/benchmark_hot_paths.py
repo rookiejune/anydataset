@@ -117,6 +117,11 @@ def bench_store_commit(
     audio_views: int,
     max_shard_samples: int,
 ) -> Measurement:
+    validate_positive("store_samples", samples)
+    validate_positive("store_parts", parts)
+    validate_positive("store_text_views", text_views)
+    validate_positive("store_audio_views", audio_views)
+    validate_positive("store_max_shard_samples", max_shard_samples)
     parts_dir = root / "parts"
     output_dir = root / "dataset"
     for part_id in range(parts):
@@ -200,6 +205,12 @@ def bench_sharded_csv(
     num_shards: int,
     shard_id: int,
 ) -> Measurement:
+    validate_positive("csv_shards", csv_shards)
+    validate_positive("csv_files_per_shard", files_per_shard)
+    validate_positive("csv_rows_per_file", rows_per_file)
+    validate_positive("csv_num_shards", num_shards)
+    if shard_id < 0 or shard_id >= num_shards:
+        raise ValueError("csv_shard_id must satisfy 0 <= shard_id < csv_num_shards.")
     csv_root = root / "csv"
     write_csv_dataset(
         csv_root,
@@ -230,6 +241,235 @@ def bench_sharded_csv(
     )
 
 
+def bench_indexed_loader_variants(args: argparse.Namespace) -> dict[str, Any]:
+    validate_positive("indexed_samples", args.indexed_samples)
+    validate_positive("indexed_batch_size", args.indexed_batch_size)
+    validate_non_negative("indexed_num_workers", args.indexed_num_workers)
+    validate_positive("indexed_payload_bytes", args.indexed_payload_bytes)
+    validate_positive("indexed_num_shards", args.indexed_num_shards)
+    if args.indexed_shard_id < 0 or args.indexed_shard_id >= args.indexed_num_shards:
+        raise ValueError(
+            "indexed_shard_id must satisfy 0 <= indexed_shard_id < indexed_num_shards."
+        )
+    variants = indexed_variants(args.indexed_variants)
+    return {
+        variant: run_repeated(
+            lambda _root, variant=variant: bench_indexed_loader(
+                variant,
+                samples=args.indexed_samples,
+                batch_size=args.indexed_batch_size,
+                num_workers=args.indexed_num_workers,
+                prefetch_factor=args.indexed_prefetch_factor,
+                payload_bytes=args.indexed_payload_bytes,
+                num_shards=args.indexed_num_shards,
+                shard_id=args.indexed_shard_id,
+            ),
+            repeats=args.repeats,
+        )
+        for variant in variants
+    }
+
+
+def indexed_variants(value: str) -> tuple[str, ...]:
+    allowed = {"runtime", "map_default", "map_spawn", "map_fork"}
+    output = tuple(item.strip() for item in value.split(",") if item.strip())
+    unknown = sorted(set(output) - allowed)
+    if unknown:
+        raise ValueError(f"Unknown indexed loader variants: {unknown}.")
+    if len(output) == 0:
+        raise ValueError("indexed_variants must contain at least one variant.")
+    if "map_fork" in output and "fork" not in multiprocessing.get_all_start_methods():
+        return tuple(variant for variant in output if variant != "map_fork")
+    return output
+
+
+def bench_indexed_loader(
+    variant: str,
+    *,
+    samples: int,
+    batch_size: int,
+    num_workers: int,
+    prefetch_factor: int | None,
+    payload_bytes: int,
+    num_shards: int,
+    shard_id: int,
+) -> Measurement:
+    factory = SyntheticDatasetFactory(samples=samples, payload_bytes=payload_bytes)
+    loader = make_indexed_loader(
+        variant,
+        factory=factory,
+        samples=samples,
+        batch_size=batch_size,
+        num_workers=num_workers,
+        prefetch_factor=prefetch_factor,
+        num_shards=num_shards,
+        shard_id=shard_id,
+    )
+
+    start = time.perf_counter()
+    selected = 0
+    checksum = 0
+    for batch in loader:
+        for index, row in batch:
+            selected += 1
+            checksum += int(index)
+            checksum += len(row[Role.DEFAULT, Modality.TEXT].views[TextView.TEXT])
+    seconds = time.perf_counter() - start
+    return Measurement(
+        seconds=seconds,
+        detail={
+            "variant": variant,
+            "samples": samples,
+            "selected_samples": selected,
+            "checksum": checksum,
+            "batch_size": batch_size,
+            "num_workers": num_workers,
+            "prefetch_factor": prefetch_factor,
+            "payload_bytes": payload_bytes,
+            "num_shards": num_shards,
+            "shard_id": shard_id,
+        },
+    )
+
+
+def make_indexed_loader(
+    variant: str,
+    *,
+    factory: "SyntheticDatasetFactory",
+    samples: int,
+    batch_size: int,
+    num_workers: int,
+    prefetch_factor: int | None,
+    num_shards: int,
+    shard_id: int,
+) -> DataLoader:
+    if variant == "runtime":
+        if num_shards != 1 or shard_id != 0:
+            raise ValueError("runtime variant only supports indexed_num_shards=1.")
+        return runtime_indexed_loader(
+            factory,
+            batch_size=batch_size,
+            num_workers=num_workers,
+            prefetch_factor=prefetch_factor,
+        )
+
+    context = indexed_loader_context(variant, num_workers)
+    kwargs: dict[str, Any] = {
+        "batch_size": batch_size,
+        "collate_fn": indexed_collate,
+        "num_workers": num_workers,
+        "sampler": GlobalIndexSampler(
+            samples=samples,
+            num_shards=num_shards,
+            shard_id=shard_id,
+        ),
+    }
+    if num_workers > 0:
+        if prefetch_factor is not None:
+            kwargs["prefetch_factor"] = prefetch_factor
+        if context is not None:
+            kwargs["multiprocessing_context"] = context
+    return DataLoader(MapIndexedDataset(factory), **kwargs)
+
+
+def indexed_loader_context(variant: str, num_workers: int):
+    if num_workers == 0:
+        return None
+    if variant == "map_default":
+        return None
+    if variant == "map_spawn":
+        return multiprocessing.get_context("spawn")
+    if variant == "map_fork":
+        return multiprocessing.get_context("fork")
+    raise ValueError(f"Unsupported indexed loader variant: {variant}.")
+
+
+def indexed_collate(batch: list[tuple[int, Sample]]) -> tuple[tuple[int, Sample], ...]:
+    return tuple(batch)
+
+
+@dataclass(frozen=True)
+class SyntheticDatasetFactory:
+    samples: int
+    payload_bytes: int
+
+    def __call__(self) -> "SyntheticDataset":
+        return SyntheticDataset(samples=self.samples, payload_bytes=self.payload_bytes)
+
+
+@dataclass(frozen=True)
+class SyntheticDataset(Dataset):
+    samples: int
+    payload_bytes: int
+
+    def __len__(self) -> int:
+        return self.samples
+
+    def __getitem__(self, index: int) -> Sample:
+        if index < 0:
+            index += len(self)
+        if index < 0 or index >= len(self):
+            raise IndexError("synthetic dataset index out of range.")
+        return {
+            (Role.DEFAULT, Modality.TEXT): TextItem(
+                views={TextView.TEXT: synthetic_payload(index, self.payload_bytes)}
+            )
+        }
+
+
+class MapIndexedDataset(Dataset):
+    def __init__(self, dataset_factory: Callable[[], Dataset]) -> None:
+        self.dataset_factory = dataset_factory
+        self._dataset: Dataset | None = None
+
+    def __getstate__(self) -> dict[str, Any]:
+        return {"dataset_factory": self.dataset_factory}
+
+    def __setstate__(self, state: dict[str, Any]) -> None:
+        self.dataset_factory = state["dataset_factory"]
+        self._dataset = None
+
+    @property
+    def dataset(self) -> Dataset:
+        if self._dataset is None:
+            self._dataset = self.dataset_factory()
+        return self._dataset
+
+    def __len__(self) -> int:
+        return len(self.dataset)
+
+    def __getitem__(self, index: int) -> tuple[int, Sample]:
+        return index, self.dataset[index]
+
+
+@dataclass(frozen=True)
+class GlobalIndexSampler(Sampler[int]):
+    samples: int
+    num_shards: int
+    shard_id: int
+
+    def __post_init__(self) -> None:
+        validate_positive("samples", self.samples)
+        validate_positive("num_shards", self.num_shards)
+        if self.shard_id < 0 or self.shard_id >= self.num_shards:
+            raise ValueError("shard_id must satisfy 0 <= shard_id < num_shards.")
+
+    def __iter__(self) -> Iterator[int]:
+        return iter(range(self.shard_id, self.samples, self.num_shards))
+
+    def __len__(self) -> int:
+        if self.shard_id >= self.samples:
+            return 0
+        return (self.samples - 1 - self.shard_id) // self.num_shards + 1
+
+
+def synthetic_payload(index: int, payload_bytes: int) -> str:
+    prefix = f"text-{index}-"
+    if len(prefix) >= payload_bytes:
+        return prefix
+    return prefix + ("x" * (payload_bytes - len(prefix)))
+
+
 def write_csv_dataset(
     root: Path,
     *,
@@ -249,6 +489,17 @@ def write_csv_dataset(
                 for _ in range(rows_per_file):
                     writer.writerow({"id": row_id, "text": f"text-{row_id}"})
                     row_id += 1
+
+
+def validate_positive(name: str, value: int) -> None:
+    if value <= 0:
+        raise ValueError(f"{name} must be positive.")
+
+
+def validate_non_negative(name: str, value: int) -> None:
+    if value < 0:
+        raise ValueError(f"{name} must be non-negative.")
+
 
 if __name__ == "__main__":
     main()
