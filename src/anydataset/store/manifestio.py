@@ -219,7 +219,7 @@ _VIEW_SCHEMA = (
     ("modality", "string"),
     ("role", "string"),
     ("view", "string"),
-    ("sample_id", "string"),
+    ("sample_index", "int64"),
     ("shard", "string"),
     ("key", "string"),
 )

@@ -14,11 +14,14 @@ from ..types.item import (
     View,
 )
 
+STORE_SCHEMA_VERSION = 2
+
 
 @dataclass(frozen=True)
 class DatasetManifest:
     dataset_id: str
     sample_count: int
+    schema_version: int
     split: str | None = None
 
 
@@ -43,7 +46,7 @@ class ViewManifestEntry:
     role: Role
     modality: Modality
     view: View
-    sample_id: str
+    sample_index: int
     shard: str
     key: str
 

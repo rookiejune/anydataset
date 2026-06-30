@@ -100,17 +100,17 @@ class PayloadCache:
 
 def payload_for_view(
     view: tuple[Role, Modality, View],
-    sample_id: str,
+    sample_index: int,
     value: Any,
 ) -> Payload:
     _, modality, key = view
     if modality is Modality.AUDIO and key == AudioView.FILE:
-        return _file_payload(sample_id, value)
+        return _file_payload(sample_index, value)
     if modality is Modality.AUDIO and key == AudioView.WAVEFORM:
-        return _waveform_payload(sample_id, value)
+        return _waveform_payload(sample_index, value)
     if modality is Modality.TEXT and key == TextView.TEXT:
-        return _text_payload(sample_id, value)
-    return _torch_payload(sample_id, value)
+        return _text_payload(sample_index, value)
+    return _torch_payload(sample_index, value)
 
 
 def payload_value(view: tuple[Role, Modality, View], data: bytes) -> Any:
@@ -150,7 +150,7 @@ def add_payload(archive: tarfile.TarFile, payload: Payload) -> None:
 
 
 def _torch_payload(
-    sample_id: str,
+    sample_index: int,
     value: Any,
 ) -> Payload:
     tensor = _maybe_tensor(value)
@@ -158,26 +158,26 @@ def _torch_payload(
     buffer = BytesIO()
     torch.save(payload_value, buffer)
     return Payload(
-        key=f"{sample_id}.pt",
+        key=f"{_sample_key(sample_index)}.pt",
         data=buffer.getvalue(),
     )
 
 
 def _waveform_payload(
-    sample_id: str,
+    sample_index: int,
     value: Any,
 ) -> Payload:
     waveform, sample_rate = _waveform_value(value)
     buffer = BytesIO()
     torch.save((waveform, sample_rate), buffer)
     return Payload(
-        key=f"{sample_id}.pt",
+        key=f"{_sample_key(sample_index)}.pt",
         data=buffer.getvalue(),
     )
 
 
 def _file_payload(
-    sample_id: str,
+    sample_index: int,
     value: Any,
 ) -> Payload:
     if isinstance(value, bytes):
@@ -192,22 +192,28 @@ def _file_payload(
     else:
         raise TypeError("file views must be bytes or a filesystem path.")
     return Payload(
-        key=f"{sample_id}{suffix}",
+        key=f"{_sample_key(sample_index)}{suffix}",
         data=data,
     )
 
 
 def _text_payload(
-    sample_id: str,
+    sample_index: int,
     value: Any,
 ) -> Payload:
     if not isinstance(value, str):
         raise TypeError("text views must be strings.")
     data = value.encode("utf-8")
     return Payload(
-        key=f"{sample_id}.txt",
+        key=f"{_sample_key(sample_index)}.txt",
         data=data,
     )
+
+
+def _sample_key(sample_index: int) -> str:
+    if sample_index < 0:
+        raise ValueError("sample_index must be non-negative.")
+    return f"{sample_index:012d}"
 
 
 def _maybe_tensor(value: Any) -> torch.Tensor | None:

@@ -32,8 +32,8 @@ class ViewWriter:
         self.tar = self._open_shard(self.shard)
         self.closed = False
 
-    def write(self, sample_id: str, value: Any) -> None:
-        payload = payload_for_view(self.view, sample_id, value)
+    def write(self, sample_index: int, value: Any) -> None:
+        payload = payload_for_view(self.view, sample_index, value)
         if self._should_roll():
             self._roll_shard()
         add_payload(self.tar, payload)
@@ -43,7 +43,7 @@ class ViewWriter:
                 role=self.view[0],
                 modality=self.view[1],
                 view=self.view[2],
-                sample_id=sample_id,
+                sample_index=sample_index,
                 shard=self.shard,
                 key=payload.key,
             )

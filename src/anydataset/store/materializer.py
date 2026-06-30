@@ -81,7 +81,7 @@ class ViewMaterializer:
         )
 
     @property
-    def dataset_id(self) -> str:
+    def _dataset_id(self) -> str:
         return _dataset_id(self.output_dir)
 
     def write(
@@ -191,7 +191,7 @@ class ViewMaterializer:
         fragments_dir = _prepare_resume_fragments_dir(Path(self.output_dir).expanduser())
         completed = completed_fragment_indexes(
             fragments_dir,
-            dataset_id=self.dataset_id,
+            dataset_id=self._dataset_id,
             split=self.split,
         )
         _validate_completed_indexes(completed, expected)
@@ -229,7 +229,7 @@ class ViewMaterializer:
         dataset = dataset_factory()
         return DatasetWriter(
             self.output_dir,
-            dataset_id=self.dataset_id,
+            dataset_id=self._dataset_id,
             split=self.split,
             max_shard_samples=self.max_shard_samples,
         ).write(self._samples(dataset, provider))
@@ -247,7 +247,7 @@ class ViewMaterializer:
         expected = _dataset_sample_count(dataset)
         completed = completed_fragment_indexes(
             fragments_dir,
-            dataset_id=self.dataset_id,
+            dataset_id=self._dataset_id,
             split=self.split,
         )
         _validate_completed_indexes(completed, expected)
@@ -300,7 +300,7 @@ class ViewMaterializer:
                 parts_dir = Path(tmpdir)
                 DatasetPartWriter(
                     parts_dir / "part-00000",
-                    dataset_id=self.dataset_id,
+                    dataset_id=self._dataset_id,
                     split=self.split,
                     shard_id=0,
                     num_shards=1,
@@ -326,7 +326,7 @@ class ViewMaterializer:
     ) -> Path:
         return DatasetPartWriter(
             Path(parts_dir) / f"part-{shard_id:05d}",
-            dataset_id=self.dataset_id,
+            dataset_id=self._dataset_id,
             split=self.split,
             shard_id=shard_id,
             num_shards=num_shards,
@@ -344,7 +344,7 @@ class ViewMaterializer:
         return commit_store_parts(
             self.output_dir,
             parts_dir,
-            dataset_id=self.dataset_id,
+            dataset_id=self._dataset_id,
             split=self.split,
         )
 
@@ -352,7 +352,7 @@ class ViewMaterializer:
         if expected == 0:
             path = DatasetWriter(
                 self.output_dir,
-                dataset_id=self.dataset_id,
+                dataset_id=self._dataset_id,
                 split=self.split,
                 max_shard_samples=self.max_shard_samples,
             ).write(())
@@ -361,7 +361,7 @@ class ViewMaterializer:
         path = commit_store_fragments(
             self.output_dir,
             fragments_dir,
-            dataset_id=self.dataset_id,
+            dataset_id=self._dataset_id,
             split=self.split,
             expected_sample_count=expected,
         )
@@ -447,7 +447,6 @@ class ViewMaterializer:
                 args=(
                     _WorkerConfig(
                         output_dir=Path(self.output_dir),
-                        dataset_id=self.dataset_id,
                         split=self.split,
                         max_shard_samples=self.max_shard_samples,
                         batch_size=self.batch_size,
@@ -545,7 +544,7 @@ class ViewMaterializer:
         completed = set(
             completed_fragment_indexes(
                 fragments_dir,
-                dataset_id=self.dataset_id,
+                dataset_id=self._dataset_id,
                 split=self.split,
             )
         )
@@ -556,11 +555,11 @@ class ViewMaterializer:
             if not pending:
                 continue
             outputs = self._materialized_indexed_batch(pending, provider)
-            indexes = tuple(index for index, _ in outputs)
+            indexes = tuple(sorted(index for index, _ in outputs))
             fragment_id = _fragment_id(indexes)
             DatasetFragmentWriter(
                 fragments_dir / fragment_id,
-                dataset_id=self.dataset_id,
+                dataset_id=self._dataset_id,
                 split=self.split,
                 fragment_id=fragment_id,
                 max_shard_samples=self.max_shard_samples,
@@ -629,7 +628,6 @@ class ModalityMaterializer(ViewMaterializer):
 @dataclass(frozen=True)
 class _WorkerConfig:
     output_dir: Path
-    dataset_id: str
     split: str | None
     max_shard_samples: int
     batch_size: int
@@ -725,7 +723,7 @@ def _materialize_worker(
             else:
                 DatasetPartWriter(
                     config.parts_dir / f"part-{config.shard_id:05d}",
-                    dataset_id=config.dataset_id,
+                    dataset_id=_dataset_id(config.output_dir),
                     split=config.split,
                     shard_id=config.shard_id,
                     num_shards=config.num_shards,

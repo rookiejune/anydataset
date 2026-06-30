@@ -8,6 +8,7 @@ from anydataset.store.jsonio import read_json, write_json
 from anydataset.store.manifest import (
     DatasetManifest,
     SampleManifestEntry,
+    STORE_SCHEMA_VERSION,
     ViewManifestEntry,
 )
 from anydataset.store.manifestio import (
@@ -59,6 +60,7 @@ class StoreTest(unittest.TestCase):
         view = (Role.DEFAULT, Modality.AUDIO, AudioView.WAVEFORM)
         manifest = DatasetManifest(
             dataset_id="toy-audio",
+            schema_version=STORE_SCHEMA_VERSION,
             split="train",
             sample_count=2,
         )
@@ -73,7 +75,7 @@ class StoreTest(unittest.TestCase):
             role=Role.DEFAULT,
             modality=Modality.AUDIO,
             view=AudioView.WAVEFORM,
-            sample_id="toy-audio-000000",
+            sample_index=3,
             shard="000000.tar",
             key="000000.pt",
         )
@@ -83,7 +85,14 @@ class StoreTest(unittest.TestCase):
         self.assertEqual(asdict(sample)["items"][0][1], {"label": "speech"})
         self.assertEqual(
             set(asdict(payload)),
-            {"role", "modality", "view", "sample_id", "shard", "key"},
+            {
+                "role",
+                "modality",
+                "view",
+                "sample_index",
+                "shard",
+                "key",
+            },
         )
 
     def test_json_and_manifest_helpers_round_trip(self):
@@ -99,7 +108,7 @@ class StoreTest(unittest.TestCase):
                 role=Role.DEFAULT,
                 modality=Modality.AUDIO,
                 view=AudioView.WAVEFORM,
-                sample_id="sample-0",
+                sample_index=0,
                 shard="000000.tar",
                 key="sample-0.pt",
             )

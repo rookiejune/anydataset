@@ -308,7 +308,9 @@ restored = dataset[0]
 Views are stored under `{role}/{modality}/{view}/`; payloads live in that
 view directory's `shards/` files. `ViewMaterializer` writes derived views to a
 delta store. Open both stores through `Source.STORE`, combine them with logical
-`merge()`, and call `write()` only when you need a self-contained store.
+`merge()`, and call `write()` only when you need a self-contained store. Base
+and delta stores are aligned by `sample_index`; callers are responsible for
+materializing views from the same ordered dataset.
 
 ```python
 from anydataset import AnyDataset, AudioView, Source, Spec, ViewMaterializer

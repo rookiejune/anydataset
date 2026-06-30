@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -11,6 +11,7 @@ from .jsonio import read_json
 from .manifest import (
     DatasetManifest,
     SampleManifestEntry,
+    STORE_SCHEMA_VERSION,
     ViewManifestEntry,
     view_from_dict,
 )
@@ -28,7 +29,7 @@ class StoreDataset(MapStyleABC):
     root: Path
     manifest: DatasetManifest
     samples: tuple[SampleManifestEntry, ...]
-    views: Mapping[tuple[item.Role, item.Modality, item.View], StoreView]
+    views: StoreViews
     _files: dict[str, Path] = field(default_factory=dict, compare=False, repr=False)
     _payloads: PayloadCache = field(
         default_factory=PayloadCache,
@@ -46,16 +47,88 @@ class StoreDataset(MapStyleABC):
 @dataclass(frozen=True)
 class StoreView:
     view: tuple[item.Role, item.Modality, item.View]
-    entries: Mapping[str, ViewManifestEntry]
     entries_by_index: tuple[ViewManifestEntry | None, ...]
+
+
+class StoreViews(Mapping[tuple[item.Role, item.Modality, item.View], StoreView]):
+    def __init__(
+        self,
+        root: Path,
+        samples: tuple[SampleManifestEntry, ...],
+        views: Iterable[tuple[item.Role, item.Modality, item.View]],
+    ) -> None:
+        self.root = root
+        self.samples = samples
+        self._views = tuple(views)
+        self._view_set = frozenset(self._views)
+        self._views_by_ref: dict[
+            tuple[item.Role, item.Modality],
+            tuple[tuple[item.Role, item.Modality, item.View], ...],
+        ] = {}
+        for view in self._views:
+            self._views_by_ref.setdefault(view[:2], ())
+            self._views_by_ref[view[:2]] = (*self._views_by_ref[view[:2]], view)
+        self._cache: dict[tuple[item.Role, item.Modality, item.View], StoreView] = {}
+        self._expected: dict[tuple[item.Role, item.Modality], frozenset[int]] = {}
+
+    def __getitem__(
+        self,
+        view: tuple[item.Role, item.Modality, item.View],
+    ) -> StoreView:
+        if view not in self._view_set:
+            raise KeyError(view)
+        cached = self._cache.get(view)
+        if cached is None:
+            cached = _load_view(
+                self.root,
+                view,
+                len(self.samples),
+                self._expected_indexes(view[:2]),
+            )
+            self._cache[view] = cached
+        return cached
+
+    def __iter__(self) -> Iterator[tuple[item.Role, item.Modality, item.View]]:
+        yield from self._views
+
+    def __len__(self) -> int:
+        return len(self._views)
+
+    def preload(self) -> None:
+        for view in self._views:
+            self[view]
+
+    def for_ref(
+        self,
+        ref: tuple[item.Role, item.Modality],
+    ) -> Iterator[tuple[tuple[item.Role, item.Modality, item.View], StoreView]]:
+        for view in self._views_by_ref.get(ref, ()):
+            yield view, self[view]
+
+    def _expected_indexes(
+        self,
+        ref: tuple[item.Role, item.Modality],
+    ) -> frozenset[int]:
+        cached = self._expected.get(ref)
+        if cached is None:
+            cached = frozenset(
+                sample.sample_index
+                for sample in self.samples
+                if _sample_has_item(sample, ref)
+            )
+            self._expected[ref] = cached
+        return cached
 
 
 def read_store_dataset(
     root: str | Path,
+    views: Iterable[tuple[item.Role, item.Modality, item.View]] | None = None,
+    *,
+    preload: bool = False,
 ) -> StoreDataset:
     root = Path(root).expanduser()
     _validate_dataset_root(root)
-    manifest = DatasetManifest(**read_json(dataset_json_path(root)))
+    manifest = read_store_manifest(root)
     samples = tuple(read_samples_manifest(root))
     if len(samples) != manifest.sample_count:
         raise ValueError(
@@ -63,18 +136,35 @@ def read_store_dataset(
         )
     _validate_samples(samples)
 
-    sample_indexes = {sample.sample_id: index for index, sample in enumerate(samples)}
-    indexes = {
-        view: _load_view(root, view, sample_indexes)
-        for view in _discover_views(root)
-    }
-    _validate_view_coverage(samples, indexes)
+    selected_views = _select_views(_discover_views(root), views)
+    store_views = StoreViews(root, samples, selected_views)
+    if preload:
+        store_views.preload()
     return StoreDataset(
         root=root,
         manifest=manifest,
         samples=samples,
-        views=indexes,
+        views=store_views,
     )
+
+
+def read_store_manifest(root: str | Path) -> DatasetManifest:
+    root = Path(root).expanduser()
+    _validate_dataset_root(root)
+    data = read_json(dataset_json_path(root))
+    version = data.get("schema_version")
+    if version != STORE_SCHEMA_VERSION:
+        raise ValueError(
+            "Unsupported store schema_version: "
+            f"{version!r}; expected {STORE_SCHEMA_VERSION}."
+        )
+    return DatasetManifest(**data)
+
+
+def read_store_views(root: str | Path) -> tuple[tuple[item.Role, item.Modality, item.View], ...]:
+    root = Path(root).expanduser()
+    _validate_dataset_root(root)
+    return _discover_views(root)
 
 
 def _validate_dataset_root(root: Path) -> None:
@@ -91,26 +181,51 @@ def _validate_dataset_root(root: Path) -> None:
 def _load_view(
     root: Path,
     view: tuple[item.Role, item.Modality, item.View],
-    sample_indexes: Mapping[str, int],
+    sample_count: int,
+    expected_ids: frozenset[int],
 ) -> StoreView:
     if not view_ready_path(root, view).exists():
         raise ValueError(f"Store dataset view is not ready: {_view_path(view)}.")
-    entries: dict[str, ViewManifestEntry] = {}
-    entries_by_index: list[ViewManifestEntry | None] = [None] * len(sample_indexes)
+    entries_by_index: list[ViewManifestEntry | None] = [None] * sample_count
+    actual_ids: set[int] = set()
     for entry in read_view_manifest(root, view):
         if _entry_view(entry) != view:
             raise ValueError("View manifest entry ref must match its path.")
-        if entry.sample_id in entries:
-            raise ValueError(f"Duplicate view entry for sample_id {entry.sample_id!r}.")
-        entries[entry.sample_id] = entry
-        index = sample_indexes.get(entry.sample_id)
-        if index is not None:
-            entries_by_index[index] = entry
+        if entry.sample_index < 0 or entry.sample_index >= sample_count:
+            raise ValueError(
+                f"View {_view_path(view)} has sample_index outside dataset: "
+                f"{entry.sample_index}."
+            )
+        if entries_by_index[entry.sample_index] is not None:
+            raise ValueError(
+                f"Duplicate view entry for sample_index {entry.sample_index}."
+            )
+        entries_by_index[entry.sample_index] = entry
+        actual_ids.add(entry.sample_index)
+    _validate_view_coverage(view, expected_ids, actual_ids)
     return StoreView(
         view=view,
-        entries=entries,
         entries_by_index=tuple(entries_by_index),
     )
+
+
+def _select_views(
+    available: tuple[tuple[item.Role, item.Modality, item.View], ...],
+    requested: Iterable[tuple[item.Role, item.Modality, item.View]] | None,
+) -> tuple[tuple[item.Role, item.Modality, item.View], ...]:
+    if requested is None:
+        return available
+    selected = tuple(requested)
+    available_set = frozenset(available)
+    seen: set[tuple[item.Role, item.Modality, item.View]] = set()
+    for view in selected:
+        _validate_view_ref(view)
+        if view in seen:
+            raise ValueError(f"Duplicate requested store view: {_view_path(view)}.")
+        if view not in available_set:
+            raise KeyError(f"Store dataset does not contain view {_view_path(view)}.")
+        seen.add(view)
+    return selected
 
 
 def _discover_views(root: Path) -> tuple[tuple[item.Role, item.Modality, item.View], ...]:
@@ -169,7 +284,11 @@ def _validate_view_dir(
 
 def _validate_samples(samples: tuple[SampleManifestEntry, ...]) -> None:
     sample_ids: set[str] = set()
-    for sample in samples:
+    for index, sample in enumerate(samples):
+        if sample.sample_index != index:
+            raise ValueError(
+                f"Sample manifest row {index} has sample_index {sample.sample_index}."
+            )
         if sample.sample_id in sample_ids:
             raise ValueError(f"Duplicate sample_id {sample.sample_id!r}.")
         sample_ids.add(sample.sample_id)
@@ -180,39 +299,44 @@ def _validate_samples(samples: tuple[SampleManifestEntry, ...]) -> None:
             refs.add(ref)
 
 
+def _validate_view_ref(view: tuple[item.Role, item.Modality, item.View]) -> None:
+    if not isinstance(view, tuple) or len(view) != 3:
+        raise TypeError("store views must be (Role, Modality, View) tuples.")
+    role, modality, key = view
+    if not isinstance(role, item.Role):
+        raise TypeError("store view role must be a Role.")
+    if not isinstance(modality, item.Modality):
+        raise TypeError("store view modality must be a Modality.")
+    if not isinstance(key, item.AudioView | item.ImageView | item.TextView):
+        raise TypeError("store view key must be a View.")
+
+
 def _validate_view_coverage(
-    samples: tuple[SampleManifestEntry, ...],
-    views: Mapping[tuple[item.Role, item.Modality, item.View], StoreView],
+    view: tuple[item.Role, item.Modality, item.View],
+    expected_ids: frozenset[int],
+    actual_ids: set[int],
 ) -> None:
-    expected = _sample_ids_by_item(samples)
-    for view, store_view in views.items():
-        sample_ref = view[:2]
-        expected_ids = expected.get(sample_ref, set())
-        actual_ids = set(store_view.entries)
-        if actual_ids == expected_ids:
-            continue
-        missing = sorted(expected_ids - actual_ids)
-        extra = sorted(actual_ids - expected_ids)
-        detail = _coverage_detail(missing, extra)
-        raise ValueError(f"View {_view_path(view)} sample coverage mismatch: {detail}.")
+    if actual_ids == expected_ids:
+        return
+    missing = sorted(expected_ids - actual_ids)
+    extra = sorted(actual_ids - expected_ids)
+    detail = _coverage_detail(missing, extra)
+    raise ValueError(f"View {_view_path(view)} sample coverage mismatch: {detail}.")
 
 
-def _sample_ids_by_item(
-    samples: tuple[SampleManifestEntry, ...],
-) -> dict[tuple[item.Role, item.Modality], set[str]]:
-    sample_ids: dict[tuple[item.Role, item.Modality], set[str]] = {}
-    for sample in samples:
-        for ref, _ in sample.items:
-            sample_ids.setdefault(ref, set()).add(sample.sample_id)
-    return sample_ids
+def _sample_has_item(
+    sample: SampleManifestEntry,
+    ref: tuple[item.Role, item.Modality],
+) -> bool:
+    return any(item_ref == ref for item_ref, _meta in sample.items)
 
 
-def _coverage_detail(missing: list[str], extra: list[str]) -> str:
+def _coverage_detail(missing: list[int], extra: list[int]) -> str:
     details = []
     if missing:
-        details.append(f"missing sample_id {missing[0]!r}")
+        details.append(f"missing sample_index {missing[0]}")
     if extra:
-        details.append(f"unexpected sample_id {extra[0]!r}")
+        details.append(f"unexpected sample_index {extra[0]}")
     return ", ".join(details)
 
 
@@ -223,17 +347,15 @@ def _sample_for_entry(
 ) -> item.Sample:
     views_by_ref: dict[tuple[item.Role, item.Modality], dict[Any, Any]] = {}
     item_entries = dict(sample.items)
-    for view_entry, view in dataset.views.items():
-        sample_ref = view_entry[:2]
-        if sample_ref not in item_entries:
-            continue
-        entry = view.entries_by_index[index]
-        if entry is None:
-            raise ValueError(
-                f"View {_view_path(view_entry)} is missing sample_id {sample.sample_id!r}."
-            )
-        views = views_by_ref.setdefault(sample_ref, {})
-        views[view_entry[2]] = _view_value(dataset, view, entry)
+    for sample_ref in item_entries:
+        for view_entry, view in dataset.views.for_ref(sample_ref):
+            entry = view.entries_by_index[index]
+            if entry is None:
+                raise ValueError(
+                    f"View {_view_path(view_entry)} is missing sample_index {index}."
+                )
+            views = views_by_ref.setdefault(sample_ref, {})
+            views[view_entry[2]] = _view_value(dataset, view, entry)
 
     result: dict[tuple[item.Role, item.Modality], item.Item] = {}
     for sample_ref, views in views_by_ref.items():

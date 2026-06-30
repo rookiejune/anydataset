@@ -7,6 +7,7 @@ import tempfile
 from bisect import bisect_right
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
+from itertools import islice
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -98,11 +99,15 @@ class ShardedCsvDataset:
                 continue
             if file.start >= stop:
                 return
-            for row_index, row in enumerate(self._read_file(file.path), start=file.start):
-                if row_index < start:
-                    continue
-                if row_index >= stop:
-                    break
+            yield_start = max(start, file.start)
+            yield_stop = min(stop, file.stop)
+            local_start = yield_start - file.start
+            local_stop = yield_stop - file.start
+            for offset, row in enumerate(
+                islice(self._read_file(file.path), local_start, local_stop),
+                start=local_start,
+            ):
+                row_index = file.start + offset
                 yield row_index, row
 
     def iter_indexed_shard(
@@ -116,9 +121,17 @@ class ShardedCsvDataset:
             raise ValueError("shard_id must satisfy 0 <= shard_id < num_shards.")
 
         for file in self._files():
-            for row_index, row in enumerate(self._read_file(file.path), start=file.start):
-                if row_index % num_shards == shard_id:
-                    yield row_index, row
+            first_index = _first_shard_index(file.start, num_shards, shard_id)
+            if first_index >= file.stop:
+                continue
+            local_start = first_index - file.start
+            for offset, row in enumerate(
+                islice(self._read_file(file.path), local_start, None, num_shards),
+            ):
+                row_index = first_index + offset * num_shards
+                if row_index >= file.stop:
+                    break
+                yield row_index, row
 
     def _base_dir(self) -> Path:
         return self.root / self.split if self.split is not None else self.root
@@ -299,6 +312,10 @@ def _split_csv_paths(path: Path) -> tuple[tuple[Path, ...], tuple[Path, ...]]:
 
 def _csv_path_key(path: Path) -> int:
     return int(path.stem)
+
+
+def _first_shard_index(start: int, num_shards: int, shard_id: int) -> int:
+    return start + (shard_id - start % num_shards) % num_shards
 
 
 def _file_record(path: Path, row_count: int) -> dict[str, Any]:

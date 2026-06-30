@@ -50,6 +50,28 @@ class ViewMaterializerTest(unittest.TestCase):
                 "longcat-delta",
             )
 
+    def test_materializer_parallel_write_preserves_sample_indexes(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = root / "longcat-delta"
+            samples = tuple(_audio_sample(torch.tensor([[float(index)]])) for index in range(2))
+
+            ViewMaterializer(
+                target,
+                split="train",
+            ).write(
+                dataset_factory=_DatasetFactory(samples),
+                provider_factory=_ParallelProviderFactory(),
+                devices=("cpu:0", "cpu:1"),
+            )
+
+            stored = read_store_dataset(target)
+            self.assertEqual(stored.manifest.dataset_id, "longcat-delta")
+            self.assertEqual(
+                [sample.sample_index for sample in stored.samples],
+                [0, 1],
+            )
+
     def test_materializer_writes_only_provider_output_by_default(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

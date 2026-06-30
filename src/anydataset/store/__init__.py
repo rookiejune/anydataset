@@ -20,6 +20,7 @@ from .parts import (
     commit_store_parts,
     completed_fragment_indexes,
 )
+from .reader import read_store_manifest, read_store_views
 from .writer import DatasetWriter
 
 __all__ = [
@@ -40,4 +41,6 @@ __all__ = [
     "commit_store_fragments",
     "commit_store_parts",
     "completed_fragment_indexes",
+    "read_store_manifest",
+    "read_store_views",
 ]

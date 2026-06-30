@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import os
 import shutil
-from collections.abc import Iterable, Mapping, Sequence
+from array import array
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import asdict, dataclass
+from heapq import heappop, heappush
 from pathlib import Path
 
 from .._sharding import validate_shard
@@ -14,14 +17,15 @@ from .manifest import (
     DatasetManifest,
     SampleItem,
     SampleManifestEntry,
+    STORE_SCHEMA_VERSION,
     ViewManifestEntry,
     string_key_dict,
 )
 from .manifestio import (
+    read_samples_manifest,
     read_view_manifest,
     sample_manifest_writer,
-    write_samples_manifest,
-    write_view_manifest,
+    view_manifest_writer,
 )
 from .paths import (
     dataset_json_path,
@@ -30,7 +34,7 @@ from .paths import (
     view_shard_path,
     view_shards_dir,
 )
-from .reader import read_store_dataset
+from .reader import read_store_manifest, read_store_views
 from .viewwriter import ViewWriter
 from .writer import (
     DEFAULT_MAX_SHARD_SAMPLES,
@@ -74,15 +78,13 @@ class DatasetPartWriter:
         sample_views: dict[tuple[Role, Modality], frozenset[View]] = {}
         sample_manifest = sample_manifest_writer(root)
         sample_count = 0
-        seen_indexes: set[int] = set()
+        previous_index: int | None = None
 
         try:
             for sample_index, sample in samples:
-                if sample_index in seen_indexes:
-                    raise ValueError(
-                        f"Duplicate materialized sample index {sample_index}."
-                    )
-                seen_indexes.add(sample_index)
+                if previous_index is not None and sample_index <= previous_index:
+                    raise ValueError("Materialized sample indexes must be increasing.")
+                previous_index = sample_index
                 if not isinstance(sample, Mapping):
                     raise TypeError("DatasetPartWriter.write expects Sample mappings.")
                 sample_id = _sample_id(self.dataset_id, sample_index)
@@ -115,10 +117,11 @@ class DatasetPartWriter:
                             shard_prefix=self._shard_prefix(),
                         )
                         sinks[view] = sink
-                    sink.write(sample_id, value)
+                    sink.write(sample_index, value)
 
             manifest = DatasetManifest(
                 dataset_id=self.dataset_id,
+                schema_version=STORE_SCHEMA_VERSION,
                 split=self.split,
                 sample_count=sample_count,
             )
@@ -169,12 +172,13 @@ class DatasetFragmentWriter:
     def write(self, samples: Sequence[IndexedSample]) -> Path:
         if not samples:
             raise ValueError("DatasetFragmentWriter.write requires samples.")
-        indexes = tuple(index for index, _ in samples)
+        ordered = tuple(sorted(samples, key=lambda item: item[0]))
+        indexes = tuple(index for index, _ in ordered)
         if len(set(indexes)) != len(indexes):
             raise ValueError("Dataset fragment sample indexes must be unique.")
         return replace_dir(
             self.output_dir,
-            lambda tmp: self._write_to_tmp(tmp, tuple(samples), indexes),
+            lambda tmp: self._write_to_tmp(tmp, ordered, indexes),
         )
 
     def _write_to_tmp(
@@ -308,24 +312,20 @@ def _commit_roots_to_tmp(
     split: str | None,
     expected_sample_count: int | None = None,
 ) -> Path:
-    sample_entries: list[SampleManifestEntry] = []
-    view_entries: dict[tuple[Role, Modality, View], list[ViewManifestEntry]] = {}
-
-    for store in stores:
-        dataset = read_store_dataset(store)
-        sample_entries.extend(dataset.samples)
-        for view in dataset.views:
-            entries = view_entries.setdefault(view, [])
-            entries.extend(read_view_manifest(store, view))
-
-    ordered = _ordered_samples(sample_entries)
-    if expected_sample_count is not None:
-        _validate_expected_indexes(ordered, expected_sample_count)
-    write_samples_manifest(root, _renumber_samples(ordered))
-    for view, entries in sorted(
-        view_entries.items(), key=lambda item: _view_path(item[0])
-    ):
-        write_view_manifest(root, view, _ordered_view_entries(entries, ordered))
+    sample_count, item_indexes = _write_ordered_samples_manifest(
+        root,
+        stores,
+        expected_sample_count=expected_sample_count,
+    )
+    for view in _store_views(stores):
+        expected_indexes = item_indexes.get(view[:2], ())
+        view_count = _write_ordered_view_manifest(root, stores, view, expected_indexes)
+        expected_view_count = len(expected_indexes)
+        if view_count != expected_view_count:
+            raise ValueError(
+                f"View {_view_path(view)} sample count {view_count} "
+                f"does not match item count {expected_view_count}."
+            )
         for store in stores:
             _copy_view_shards(store, root, view)
         view_ready_path(root, view).touch()
@@ -335,13 +335,13 @@ def _commit_roots_to_tmp(
         asdict(
             DatasetManifest(
                 dataset_id=dataset_id,
+                schema_version=STORE_SCHEMA_VERSION,
                 split=split,
-                sample_count=len(ordered),
+                sample_count=sample_count,
             )
         ),
     )
     dataset_ready_path(root).touch()
-    read_store_dataset(root)
     return root
 
 
@@ -359,6 +359,190 @@ def _sample_manifest_entry(
 
 def _item_entry(ref, item) -> SampleItem:
     return ref, string_key_dict(item.meta)
+
+
+def _write_ordered_samples_manifest(
+    root: Path,
+    stores: tuple[Path, ...],
+    *,
+    expected_sample_count: int | None,
+) -> tuple[int, dict[tuple[Role, Modality], array[int]]]:
+    writer = sample_manifest_writer(root)
+    item_indexes: dict[tuple[Role, Modality], array[int]] = {}
+    previous_index: int | None = None
+    count = 0
+    try:
+        for count, entry in enumerate(_merged_sample_entries(stores), start=1):
+            if previous_index is not None:
+                if entry.sample_index == previous_index:
+                    raise ValueError(f"Duplicate sample_index {entry.sample_index}.")
+                if entry.sample_index < previous_index:
+                    raise ValueError(
+                        "Sample manifests must be ordered by sample_index."
+                    )
+            if expected_sample_count is not None and count > expected_sample_count:
+                raise ValueError(
+                    "Materialized fragments coverage mismatch: "
+                    f"unexpected sample_index {entry.sample_index}"
+                )
+            expected_index = count - 1
+            if entry.sample_index != expected_index:
+                if expected_sample_count is not None:
+                    raise ValueError(
+                        "Materialized fragments coverage mismatch: "
+                        f"missing sample_index {expected_index}"
+                    )
+                raise ValueError(
+                    "Sample manifests must be dense by sample_index: "
+                    f"missing sample_index {expected_index}."
+                )
+            previous_index = entry.sample_index
+            writer.write(
+                SampleManifestEntry(
+                    sample_id=entry.sample_id,
+                    sample_index=entry.sample_index,
+                    items=entry.items,
+                )
+            )
+            for ref, _meta in entry.items:
+                item_indexes.setdefault(ref, array("q")).append(entry.sample_index)
+        if expected_sample_count is not None and count != expected_sample_count:
+            raise ValueError(
+                "Materialized fragments coverage mismatch: "
+                f"missing sample_index {count}"
+            )
+        writer.close()
+    except Exception:
+        writer.abort()
+        raise
+    return count, item_indexes
+
+
+def _write_ordered_view_manifest(
+    root: Path,
+    stores: tuple[Path, ...],
+    view: tuple[Role, Modality, View],
+    expected_indexes: Sequence[int],
+) -> int:
+    writer = view_manifest_writer(root, view)
+    entries = iter(_unique_merged_view_entries(stores, view))
+    current = _next_entry(entries)
+    count = 0
+    try:
+        for sample_index in expected_indexes:
+            if current is None:
+                raise ValueError(
+                    f"View {_view_path(view)} is missing sample_index "
+                    f"{sample_index}."
+                )
+            if current.sample_index < sample_index:
+                raise ValueError(
+                    f"View {_view_path(view)} has unexpected sample_index "
+                    f"{current.sample_index}."
+                )
+            if current.sample_index != sample_index:
+                raise ValueError(
+                    f"View {_view_path(view)} is missing sample_index "
+                    f"{sample_index}."
+                )
+            writer.write(current)
+            count += 1
+            current = _next_entry(entries)
+        if current is not None:
+            raise ValueError(
+                f"View {_view_path(view)} has unexpected sample_index "
+                f"{current.sample_index}."
+            )
+        writer.close()
+    except Exception:
+        writer.abort()
+        raise
+    return count
+
+
+def _merged_sample_entries(stores: tuple[Path, ...]) -> Iterator[SampleManifestEntry]:
+    iterators = [iter(read_samples_manifest(store)) for store in stores]
+    heap: list[tuple[int, int, SampleManifestEntry]] = []
+    for store_index, entries in enumerate(iterators):
+        try:
+            entry = next(entries)
+        except StopIteration:
+            continue
+        heappush(heap, (entry.sample_index, store_index, entry))
+    while heap:
+        _sample_index, store_index, entry = heappop(heap)
+        yield entry
+        try:
+            next_entry = next(iterators[store_index])
+        except StopIteration:
+            continue
+        heappush(heap, (next_entry.sample_index, store_index, next_entry))
+
+
+def _merged_view_entries(
+    stores: tuple[Path, ...],
+    view: tuple[Role, Modality, View],
+) -> Iterator[ViewManifestEntry]:
+    iterators = [
+        iter(read_view_manifest(store, view))
+        for store in stores
+        if view_ready_path(store, view).exists()
+    ]
+    heap: list[tuple[int, int, ViewManifestEntry]] = []
+    for store_index, entries in enumerate(iterators):
+        try:
+            entry = next(entries)
+        except StopIteration:
+            continue
+        _validate_view_entry(entry, view)
+        heappush(heap, (entry.sample_index, store_index, entry))
+    while heap:
+        _sample_index, store_index, entry = heappop(heap)
+        yield entry
+        try:
+            next_entry = next(iterators[store_index])
+        except StopIteration:
+            continue
+        _validate_view_entry(next_entry, view)
+        heappush(heap, (next_entry.sample_index, store_index, next_entry))
+
+
+def _unique_merged_view_entries(
+    stores: tuple[Path, ...],
+    view: tuple[Role, Modality, View],
+) -> Iterator[ViewManifestEntry]:
+    previous_index: int | None = None
+    for entry in _merged_view_entries(stores, view):
+        if entry.sample_index == previous_index:
+            raise ValueError(
+                f"Duplicate view entry for sample_index {entry.sample_index}."
+            )
+        if previous_index is not None and entry.sample_index < previous_index:
+            raise ValueError("View manifests must be ordered by sample_index.")
+        previous_index = entry.sample_index
+        yield entry
+
+
+def _next_entry(entries: Iterator[ViewManifestEntry]) -> ViewManifestEntry | None:
+    try:
+        return next(entries)
+    except StopIteration:
+        return None
+
+
+def _validate_view_entry(
+    entry: ViewManifestEntry,
+    view: tuple[Role, Modality, View],
+) -> None:
+    if (entry.role, entry.modality, entry.view) != view:
+        raise ValueError("View manifest entry ref must match its path.")
+
+
+def _store_views(stores: tuple[Path, ...]) -> tuple[tuple[Role, Modality, View], ...]:
+    views: set[tuple[Role, Modality, View]] = set()
+    for store in stores:
+        views.update(read_store_views(store))
+    return tuple(sorted(views, key=_view_path))
 
 
 def _part_roots(parts_dir: str | Path) -> tuple[Path, ...]:
@@ -440,31 +624,31 @@ def _validate_fragment(path: Path, dataset_id: str, split: str | None) -> None:
         raise ValueError(f"Fragment {path} split does not match {split!r}.")
     if data.get("fragment_id") != path.name:
         raise ValueError(f"Fragment {path} id does not match its directory name.")
-    dataset = read_store_dataset(path)
-    expected = set(_fragment_sample_indexes(data))
-    actual = {sample.sample_index for sample in dataset.samples}
-    if actual != expected:
+    indexes = _fragment_sample_indexes(data)
+    manifest = read_store_manifest(path)
+    if manifest.sample_count != len(indexes):
         raise ValueError(f"Fragment {path} sample indexes do not match its metadata.")
+    _validate_fragment_sample_manifest(path, indexes)
 
 
-def _validate_expected_indexes(
-    entries: tuple[SampleManifestEntry, ...],
-    expected_sample_count: int,
-) -> None:
-    if expected_sample_count < 0:
-        raise ValueError("expected_sample_count must be non-negative.")
-    actual = {entry.sample_index for entry in entries}
-    expected = set(range(expected_sample_count))
-    if actual == expected:
+def _validate_fragment_sample_manifest(path: Path, indexes: tuple[int, ...]) -> None:
+    samples = iter(read_samples_manifest(path))
+    for expected in indexes:
+        try:
+            sample = next(samples)
+        except StopIteration as exc:
+            raise ValueError(
+                f"Fragment {path} sample indexes do not match its metadata."
+            ) from exc
+        if sample.sample_index != expected:
+            raise ValueError(
+                f"Fragment {path} sample indexes do not match its metadata."
+            )
+    try:
+        next(samples)
+    except StopIteration:
         return
-    missing = sorted(expected - actual)
-    extra = sorted(actual - expected)
-    details = []
-    if missing:
-        details.append(f"missing sample_index {missing[0]}")
-    if extra:
-        details.append(f"unexpected sample_index {extra[0]}")
-    raise ValueError("Materialized fragments coverage mismatch: " + ", ".join(details))
+    raise ValueError(f"Fragment {path} sample indexes do not match its metadata.")
 
 
 def _fragment_sample_indexes(data: Mapping[str, object]) -> tuple[int, ...]:
@@ -513,52 +697,16 @@ def _copy_view_shards(
                 f"Duplicate view shard {source.name!r} for {_view_path(view)}."
         )
         target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source, target)
+        _link_or_copy(source, target)
         if not target.is_file():
             raise FileNotFoundError(target)
 
 
-def _ordered_samples(
-    entries: Iterable[SampleManifestEntry],
-) -> tuple[SampleManifestEntry, ...]:
-    sample_ids: set[str] = set()
-    indexes: set[int] = set()
-    ordered = sorted(entries, key=lambda entry: entry.sample_index)
-    for entry in ordered:
-        if entry.sample_id in sample_ids:
-            raise ValueError(f"Duplicate sample_id {entry.sample_id!r}.")
-        if entry.sample_index in indexes:
-            raise ValueError(f"Duplicate sample_index {entry.sample_index}.")
-        sample_ids.add(entry.sample_id)
-        indexes.add(entry.sample_index)
-    return tuple(ordered)
-
-
-def _renumber_samples(
-    entries: Iterable[SampleManifestEntry],
-) -> Iterable[SampleManifestEntry]:
-    for index, entry in enumerate(entries):
-        yield SampleManifestEntry(
-            sample_id=entry.sample_id,
-            sample_index=index,
-            items=entry.items,
-        )
-
-
-def _ordered_view_entries(
-    entries: Iterable[ViewManifestEntry],
-    samples: tuple[SampleManifestEntry, ...],
-) -> Iterable[ViewManifestEntry]:
-    sample_order = {sample.sample_id: index for index, sample in enumerate(samples)}
-    seen: set[str] = set()
-    ordered = sorted(entries, key=lambda entry: sample_order.get(entry.sample_id, -1))
-    for entry in ordered:
-        if entry.sample_id not in sample_order:
-            raise ValueError(f"View entry has unknown sample_id {entry.sample_id!r}.")
-        if entry.sample_id in seen:
-            raise ValueError(f"Duplicate view entry for sample_id {entry.sample_id!r}.")
-        seen.add(entry.sample_id)
-        yield entry
+def _link_or_copy(source: Path, target: Path) -> None:
+    try:
+        os.link(source, target)
+    except OSError:
+        shutil.copy2(source, target)
 
 
 def _part_json_path(root: str | Path) -> Path:

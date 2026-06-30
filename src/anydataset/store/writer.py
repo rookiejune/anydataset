@@ -22,6 +22,7 @@ from .manifest import (
     DatasetManifest,
     SampleItem,
     SampleManifestEntry,
+    STORE_SCHEMA_VERSION,
     string_key_dict,
 )
 from .manifestio import sample_manifest_writer
@@ -93,10 +94,11 @@ class DatasetWriter:
                             max_shard_samples=self.max_shard_samples,
                         )
                         sinks[view] = sink
-                    sink.write(sample_id, value)
+                    sink.write(index, value)
 
             manifest = DatasetManifest(
                 dataset_id=self.dataset_id,
+                schema_version=STORE_SCHEMA_VERSION,
                 split=self.split,
                 sample_count=sample_count,
             )

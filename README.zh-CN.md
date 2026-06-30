@@ -504,7 +504,7 @@ schema = {
 
 ## 生成新的 View
 
-store 的 view 目录直接使用 `{role}/{modality}/{view}`，真实 payload 放在该 view 目录下的 `shards/` 里。`ViewMaterializer` 会读取已有 dataset，把每个 item 的全部 views 交给 provider，由 provider 决定如何生成自己的输出 view。它写出的是 delta store：保留样本和轻量 meta，只写 provider 的输出 view，不复制原来的 view payload。
+store 的 view 目录直接使用 `{role}/{modality}/{view}`，真实 payload 放在该 view 目录下的 `shards/` 里。`ViewMaterializer` 会读取已有 dataset，把每个 item 的全部 views 交给 provider，由 provider 决定如何生成自己的输出 view。它写出的是 delta store：保留样本和轻量 meta，只写 provider 的输出 view，不复制原来的 view payload。base store 和 delta store 按 `sample_index` 对齐；调用方负责保证派生 view 来自同一顺序的数据集。
 
 ```python
 import torch

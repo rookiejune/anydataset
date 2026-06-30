@@ -22,10 +22,14 @@ from anydataset import (
 )
 from anydataset.store import DatasetWriter
 from anydataset.store.jsonio import write_json
-from anydataset.store.manifest import DatasetManifest, SampleManifestEntry
+from anydataset.store.manifest import (
+    DatasetManifest,
+    SampleManifestEntry,
+    STORE_SCHEMA_VERSION,
+)
 from anydataset.store.manifestio import write_samples_manifest
 from anydataset.store.paths import dataset_ready_path, view_dir, view_manifest_parquet_path
-from anydataset.store.reader import read_store_dataset
+from anydataset.store.reader import read_store_dataset, read_store_manifest
 
 
 class StoreSourceTest(unittest.TestCase):
@@ -56,6 +60,24 @@ class StoreSourceTest(unittest.TestCase):
         self.assertEqual(sample_rate, 4)
         self.assertEqual(audio.meta[AudioMeta.LABEL], "speech")
         self.assertEqual(text.views[TextView.TEXT], "hello")
+
+    def test_read_store_manifest_reads_dataset_json_only(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            output = root / "dataset"
+            waveform = torch.tensor([[1.0, 2.0, 3.0]])
+            DatasetWriter(output, dataset_id="toy-audio", split="train").write(
+                [_audio_sample(waveform=waveform)]
+            )
+            view_manifest_parquet_path(
+                output,
+                (Role.DEFAULT, Modality.AUDIO, AudioView.WAVEFORM),
+            ).unlink()
+
+            manifest = read_store_manifest(output)
+
+            self.assertEqual(manifest.dataset_id, "toy-audio")
+            self.assertEqual(manifest.sample_count, 1)
 
     def test_anydataset_reads_store_shorthand(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -149,7 +171,7 @@ class StoreSourceTest(unittest.TestCase):
 
             self.assertEqual(open_tar.call_count, 3)
 
-    def test_reader_loads_all_view_indexes(self):
+    def test_reader_discovers_all_views_without_preloading_indexes(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             source = root / "source.wav"
@@ -165,7 +187,11 @@ class StoreSourceTest(unittest.TestCase):
                 ]
             )
 
-            dataset = read_store_dataset(output)
+            with mock.patch(
+                "anydataset.store.reader.read_view_manifest",
+                side_effect=AssertionError("view index loaded"),
+            ):
+                dataset = read_store_dataset(output)
 
         self.assertEqual(
             set(dataset.views),
@@ -175,6 +201,60 @@ class StoreSourceTest(unittest.TestCase):
             },
         )
         self.assertEqual(len(dataset.samples), 1)
+
+    def test_reader_can_preload_all_view_indexes(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            source = root / "source.wav"
+            source.write_bytes(b"RIFF-data")
+            output = root / "dataset"
+            DatasetWriter(output, dataset_id="multi-view").write(
+                [
+                    _audio_sample(
+                        waveform=torch.tensor([[1.0, 2.0]]),
+                        file=str(source),
+                        sample_rate=16000,
+                    )
+                ]
+            )
+
+            dataset = read_store_dataset(output, preload=True)
+
+        self.assertEqual(
+            set(dataset.views),
+            {
+                (Role.DEFAULT, Modality.AUDIO, AudioView.FILE),
+                (Role.DEFAULT, Modality.AUDIO, AudioView.WAVEFORM),
+            },
+        )
+        self.assertEqual(len(dataset.views._cache), 2)
+
+    def test_reader_selects_requested_views(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            source = root / "source.wav"
+            source.write_bytes(b"RIFF-data")
+            output = root / "dataset"
+            waveform = torch.tensor([[1.0, 2.0]])
+            DatasetWriter(output, dataset_id="multi-view").write(
+                [
+                    _audio_sample(
+                        waveform=waveform,
+                        file=str(source),
+                        sample_rate=16000,
+                    )
+                ]
+            )
+            file_view = (Role.DEFAULT, Modality.AUDIO, AudioView.FILE)
+            waveform_view = (Role.DEFAULT, Modality.AUDIO, AudioView.WAVEFORM)
+            view_manifest_parquet_path(output, file_view).write_bytes(b"not parquet")
+
+            dataset = read_store_dataset(output, views=(waveform_view,))
+            sample = dataset[0]
+
+        audio = sample[Role.DEFAULT, Modality.AUDIO]
+        self.assertEqual(set(audio.views), {AudioView.WAVEFORM})
+        self.assertTrue(torch.equal(audio.views[AudioView.WAVEFORM][0], waveform))
 
     def test_store_dataset_merge_adds_overlay_views_logically(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -418,7 +498,7 @@ class StoreSourceTest(unittest.TestCase):
             (view_path / ".ready").touch()
 
             with self.assertRaises(ValueError):
-                read_store_dataset(output)
+                read_store_dataset(output, preload=True)
 
     def test_reader_rejects_duplicate_sample_ids(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -427,7 +507,13 @@ class StoreSourceTest(unittest.TestCase):
             output.mkdir()
             write_json(
                 output / "dataset.json",
-                asdict(DatasetManifest(dataset_id="toy-audio", sample_count=2)),
+                asdict(
+                    DatasetManifest(
+                        dataset_id="toy-audio",
+                        schema_version=STORE_SCHEMA_VERSION,
+                        sample_count=2,
+                    )
+                ),
             )
             write_samples_manifest(
                 output,
@@ -455,7 +541,7 @@ class StoreSourceTest(unittest.TestCase):
             _drop_last_parquet_row(view_manifest_parquet_path(output, view))
 
             with self.assertRaises(ValueError):
-                read_store_dataset(output)
+                read_store_dataset(output, preload=True)
 
 
 def _audio_sample(
@@ -491,7 +577,13 @@ def _write_empty_dataset(path: Path) -> None:
     path.mkdir()
     write_json(
         path / "dataset.json",
-        asdict(DatasetManifest(dataset_id="toy-audio", sample_count=0)),
+        asdict(
+            DatasetManifest(
+                dataset_id="toy-audio",
+                schema_version=STORE_SCHEMA_VERSION,
+                sample_count=0,
+            )
+        ),
     )
     write_samples_manifest(path, [])
     dataset_ready_path(path).touch()

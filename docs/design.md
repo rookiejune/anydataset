@@ -70,6 +70,10 @@ base store -> provider -> delta store -> logical merge -> schema selects derived
 写进程内部的 DataLoader workers；并行写入时调用方应提供可 pickle 的
 `dataset_factory`。
 
+store 内部以 `sample_index` 作为样本对齐键。`sample_id` 只用于 manifest 和错误信息
+的可读标识，不参与 base store 与 delta store 的对齐；调用方负责保证派生 view 来自
+同一顺序的数据集。
+
 `ViewMaterializer.write(..., resume=True)` 和 `ModalityMaterializer` 的同名参数用于
 长时间 provider 物化任务。开启后，库会把每个完成的 provider batch 写成独立 ready
 fragment，并按全局 `sample_index` 跳过已完成样本；所有样本覆盖后再原子提交最终
