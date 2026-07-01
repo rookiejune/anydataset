@@ -11,25 +11,9 @@
 
 ## Materializer follow-ups
 
-- Revisit indexed loader performance before wiring LBA into `ViewMaterializer`.
-  Store and most materializer inputs are map-style, so the default indexed path
-  should likely be a map-style wrapper that returns `(sample_index, sample)` and
-  uses a rank sampler over global indexes. Iterable/streaming inputs can keep
-  the current runtime-sharded `IterableDataset` path behind a keyword-only escape
-  hatch, with map-style errors telling users to pass that keyword.
-- Separate the process-model discussion for materializer performance. Outer
-  device/provider workers should stay spawn-friendly because providers often
-  touch CUDA, but inner PyTorch DataLoader workers only load data and may not
-  need the same start method. Compare always-spawn, torch default, and
-  fork-on-Linux behavior for map-style indexed wrappers; if caching the dataset
-  instance in the wrapper, make spawn serialization drop that cache so workers
-  can lazily rebuild from `dataset_factory`.
-  Preferred direction: keep outer provider/device workers on spawn, and make
-  inner DataLoader workers use fork only as a controlled Linux map-style indexed
-  loader optimization. Do not make fork a global silent default; iterable,
-  streaming, CUDA-touching, or unknown dataset paths should keep spawn/default
-  behavior, with an explicit loader start-method override for experiments.
+- Validate server-mode fork reader/writer behavior on the target Linux machines
+  with real store/materializer inputs. Local provider paths should keep spawn
+  because those processes may own torch/CUDA/provider state directly.
 - Recheck distributed LBA tail flush after the indexed loader decision. The
-  current iterable wrapper preserves correctness by object gather, while a true
   map-style indexed loader should let LBA use metadata-only flush through stable
   global sample indexes.

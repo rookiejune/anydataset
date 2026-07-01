@@ -24,12 +24,15 @@ from anydataset import (
     TextItem,
     TextView,
 )
-from anydataset._parallel import indexed_loader as runtime_indexed_loader
+from anydataset._parallel import (
+    indexed_loader as runtime_indexed_loader,
+    map_style_indexed_loader,
+)
 from anydataset.dataset.source.sharded_csv import ShardedCsvSource
 from anydataset.store.parts import DatasetPartWriter, commit_store_parts
 from anydataset.store.reader import read_store_dataset
 from anydataset.store.writer import DatasetWriter
-from torch.utils.data import DataLoader, Dataset, Sampler
+from torch.utils.data import DataLoader, Dataset
 
 
 @dataclass(frozen=True)
@@ -477,34 +480,24 @@ def make_indexed_loader(
             prefetch_factor=prefetch_factor,
         )
 
-    context = indexed_loader_context(variant, num_workers)
-    kwargs: dict[str, Any] = {
-        "batch_size": batch_size,
-        "collate_fn": indexed_collate,
-        "num_workers": num_workers,
-        "sampler": GlobalIndexSampler(
-            samples=samples,
-            num_shards=num_shards,
-            shard_id=shard_id,
-        ),
-    }
-    if num_workers > 0:
-        if prefetch_factor is not None:
-            kwargs["prefetch_factor"] = prefetch_factor
-        if context is not None:
-            kwargs["multiprocessing_context"] = context
-    return DataLoader(MapIndexedDataset(factory), **kwargs)
+    with rank_environment(num_shards=num_shards, shard_id=shard_id):
+        return map_style_indexed_loader(
+            factory,
+            sample_count=samples,
+            batch_size=batch_size,
+            num_workers=num_workers,
+            prefetch_factor=prefetch_factor,
+            start_method=indexed_variant_start_method(variant),
+        )
 
 
-def indexed_loader_context(variant: str, num_workers: int):
-    if num_workers == 0:
-        return None
+def indexed_variant_start_method(variant: str) -> str:
     if variant == "map_default":
-        return None
+        return "spawn"
     if variant == "map_spawn":
-        return multiprocessing.get_context("spawn")
+        return "spawn"
     if variant == "map_fork":
-        return multiprocessing.get_context("fork")
+        return "fork"
     raise ValueError(f"Unsupported indexed loader variant: {variant}.")
 
 
@@ -567,44 +560,26 @@ class ModuloFilter:
         return f"bucket_{index % self.modulo}"
 
 
-class MapIndexedDataset(Dataset):
-    def __init__(self, dataset_factory: Callable[[], Dataset]) -> None:
-        self.dataset_factory = dataset_factory
-        self._dataset: Dataset | None = None
+class rank_environment:
+    def __init__(self, *, num_shards: int, shard_id: int) -> None:
+        self.values = {
+            "WORLD_SIZE": str(num_shards),
+            "RANK": str(shard_id),
+        }
+        self.previous: dict[str, str | None] = {}
 
-    def __getstate__(self) -> dict[str, Any]:
-        return {"dataset_factory": self.dataset_factory}
+    def __enter__(self):
+        for key, value in self.values.items():
+            self.previous[key] = os.environ.get(key)
+            os.environ[key] = value
+        return self
 
-    def __setstate__(self, state: dict[str, Any]) -> None:
-        self.dataset_factory = state["dataset_factory"]
-        self._dataset = None
-
-    @property
-    def dataset(self) -> Dataset:
-        if self._dataset is None:
-            self._dataset = self.dataset_factory()
-        return self._dataset
-
-    def __len__(self) -> int:
-        return len(self.dataset)
-
-    def __getitem__(self, index: int) -> tuple[int, Sample]:
-        return index, self.dataset[index]
-
-
-@dataclass(frozen=True)
-class GlobalIndexSampler(Sampler[int]):
-    samples: int
-    num_shards: int
-    shard_id: int
-
-    def __iter__(self) -> Iterator[int]:
-        return iter(range(self.shard_id, self.samples, self.num_shards))
-
-    def __len__(self) -> int:
-        if self.shard_id >= self.samples:
-            return 0
-        return (self.samples - 1 - self.shard_id) // self.num_shards + 1
+    def __exit__(self, exc_type, exc, tb) -> None:
+        for key, value in self.previous.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
 
 
 def synthetic_payload(index: int, payload_bytes: int) -> str:

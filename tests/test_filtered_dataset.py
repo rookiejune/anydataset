@@ -598,8 +598,7 @@ class FilteredDatasetTest(unittest.TestCase):
                     num_workers=1,
                     batch_size=2,
                     runtime=Runtime(
-                        loader_start_method="fork",
-                        device_scope="remote",
+                        server_start_method="spawn",
                     ),
                 )
 

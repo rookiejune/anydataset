@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from .._parallel import (
     DeviceWorker,
     indexed_loader,
+    map_style_indexed_loader,
     multiprocessing_context,
     restore_environment,
     set_single_worker_environment,
@@ -18,6 +19,7 @@ from .._parallel import (
     validate_process_value,
     worker_configs,
 )
+from ..dataset.abc import uses_default_indexed_shard
 from ..runtime import Runtime
 from .rules import label
 from .storage import validate_metrics
@@ -149,6 +151,7 @@ def collect_ranges_parallel(
     num_workers: int,
     prefetch_factor: int | None,
     runtime: Runtime,
+    use_map_style_loader: bool,
 ) -> Iterable[_FilterChunk]:
     workers = min(len(devices), sample_count)
     validate_process_value(
@@ -179,6 +182,8 @@ def collect_ranges_parallel(
                 num_workers,
                 prefetch_factor,
                 runtime,
+                sample_count,
+                use_map_style_loader,
                 skip_indexes,
                 outputs[rank],
             ),
@@ -233,6 +238,8 @@ def _filter_worker(
     num_workers: int,
     prefetch_factor: int | None,
     runtime: Runtime,
+    sample_count: int,
+    use_map_style_loader: bool,
     skip_indexes: frozenset[int],
     output: multiprocessing.Queue,
 ) -> None:
@@ -248,6 +255,8 @@ def _filter_worker(
             num_workers=num_workers,
             prefetch_factor=prefetch_factor,
             runtime=runtime,
+            sample_count=sample_count,
+            use_map_style_loader=use_map_style_loader,
             skip_indexes=skip_indexes,
         ):
             output.put(chunk)
@@ -268,15 +277,23 @@ def collect_indexed_shard(
     num_workers: int,
     prefetch_factor: int | None,
     runtime: Runtime,
+    sample_count: int | None = None,
+    use_map_style_loader: bool | None = None,
     skip_indexes: frozenset[int] = frozenset(),
 ) -> Iterable[_IndexedFilterChunk]:
     rows: list[_FilterRow] = []
-    for batch in indexed_loader(
+    dataset = None
+    if use_map_style_loader is None or sample_count is None:
+        dataset = dataset_factory()
+    for batch in _filter_loader(
+        dataset,
         dataset_factory=dataset_factory,
+        sample_count=sample_count,
+        use_map_style_loader=use_map_style_loader,
         batch_size=batch_size,
         num_workers=num_workers,
         prefetch_factor=prefetch_factor,
-        start_method=runtime.loader_start_method,
+        runtime=runtime,
     ):
         for index, sample in batch:
             if index in skip_indexes:
@@ -306,17 +323,33 @@ def _filter_loader(
     dataset,
     *,
     dataset_factory: DatasetFactory,
+    sample_count: int | None = None,
+    use_map_style_loader: bool | None = None,
     batch_size: int,
     num_workers: int,
     prefetch_factor: int | None,
     runtime: Runtime,
 ):
+    if use_map_style_loader is None:
+        use_map_style_loader = uses_default_indexed_shard(dataset)
+    if use_map_style_loader:
+        if sample_count is None:
+            sample_count = len(dataset)
+        return map_style_indexed_loader(
+            dataset_factory,
+            sample_count=sample_count,
+            batch_size=batch_size,
+            num_workers=num_workers,
+            prefetch_factor=prefetch_factor,
+            start_method=runtime.reader_worker_start_method,
+            dataset=dataset,
+        )
     return indexed_loader(
         dataset_factory,
         batch_size=batch_size,
         num_workers=num_workers,
         prefetch_factor=prefetch_factor,
-        start_method=runtime.loader_start_method,
+        start_method=runtime.reader_worker_start_method,
     )
 
 

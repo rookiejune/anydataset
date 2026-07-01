@@ -85,9 +85,9 @@ store 内部以 `sample_index` 作为样本对齐键。`sample_id` 只用于 man
 `RemoteProviderFactory` 和 `RemoteFilterFactory` 常驻独立进程。
 server 进程只拥有 provider 和设备状态；materializer 进程只读 dataset、组 batch、
 通过 proxy provider 请求 server，并继续负责 fragment、resume 和 commit。需要隔离
-CUDA 与数据读取 worker 时，`Runtime(device_scope="remote",
-loader_start_method="fork")` 让调用方把 device 当作路由键，不在写入或过滤进程里设置
-torch device。filter cache 的写入仍由 filter 层负责，predicate server 只负责慢速判定。
+CUDA 与数据读取 worker 时，`Runtime(server_start_method="spawn")` 让调用方把 device 当作
+路由键，不在写入或过滤进程里设置 torch device；此时 reader 和 writer worker 默认用 fork
+以减少流水线开销。filter cache 的写入仍由 filter 层负责，predicate server 只负责慢速判定。
 
 ## 派生 Modality
 

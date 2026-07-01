@@ -21,6 +21,7 @@ from .._parallel import (
     free_port,
     indexed_loader,
     iter_indexed_shard,
+    map_style_indexed_loader,
     multiprocessing_context,
     restore_environment,
     set_single_worker_environment,
@@ -40,6 +41,7 @@ from .._resume import (
 )
 from .._validation import non_negative_int, optional_positive_int, positive_int
 from .._write_pipeline import BackgroundWriteSink
+from ..dataset.abc import uses_default_indexed_shard
 from ..runtime import Runtime
 from ..types.item import Sample
 from ..view import Provider
@@ -156,7 +158,9 @@ class ViewMaterializer:
             context="multi-device materialization",
             start_method=self.runtime.process_start_method,
         )
-        expected = dataset_sample_count(dataset_factory(), context="resume")
+        dataset = dataset_factory()
+        expected = dataset_sample_count(dataset, context="resume")
+        use_map_style_loader = uses_default_indexed_shard(dataset)
         fragments_dir = prepare_resume_dir(self.output_dir, "fragments")
         completed = validate_completed_indexes(
             completed_fragment_indexes(
@@ -180,6 +184,7 @@ class ViewMaterializer:
             worker_logs_dir=worker_logs_dir,
             fragments_dir=fragments_dir,
             expected=expected,
+            use_map_style_loader=use_map_style_loader,
             completed_count=len(completed),
         )
         return self._commit_fragments(fragments_dir, expected)
@@ -195,6 +200,7 @@ class ViewMaterializer:
         fragments_dir = prepare_resume_dir(output_dir, "fragments")
         dataset = dataset_factory()
         expected = dataset_sample_count(dataset, context="resume")
+        use_map_style_loader = uses_default_indexed_shard(dataset)
         completed = validate_completed_indexes(
             completed_fragment_indexes(
                 fragments_dir,
@@ -223,6 +229,9 @@ class ViewMaterializer:
                     self._write_resumable_loader_batches(
                         provider,
                         dataset_factory=dataset_factory,
+                        dataset=dataset,
+                        sample_count=expected,
+                        use_map_style_loader=use_map_style_loader,
                         fragments_dir=fragments_dir,
                         expected=expected,
                         progress=progress,
@@ -267,13 +276,21 @@ class ViewMaterializer:
         provider: MaterializerProvider,
         *,
         dataset_factory: DatasetFactory,
+        dataset: Any | None = None,
+        sample_count: int | None = None,
+        use_map_style_loader: bool | None = None,
         fragments_dir: Path,
         expected: int,
         progress: _ProgressSink | None = None,
         worker_id: int = 0,
     ) -> None:
         self._write_resumable_indexed_batches(
-            self._loader(dataset_factory=dataset_factory),
+            self._loader(
+                dataset_factory=dataset_factory,
+                dataset=dataset,
+                sample_count=sample_count,
+                use_map_style_loader=use_map_style_loader,
+            ),
             provider,
             fragments_dir=fragments_dir,
             expected=expected,
@@ -285,13 +302,33 @@ class ViewMaterializer:
         self,
         *,
         dataset_factory: DatasetFactory,
+        dataset: Any | None = None,
+        sample_count: int | None = None,
+        use_map_style_loader: bool | None = None,
     ) -> DataLoader:
+        if dataset is None:
+            if use_map_style_loader is None or sample_count is None:
+                dataset = dataset_factory()
+        if use_map_style_loader is None:
+            use_map_style_loader = uses_default_indexed_shard(dataset)
+        if use_map_style_loader:
+            if sample_count is None:
+                sample_count = len(dataset)
+            return map_style_indexed_loader(
+                dataset_factory,
+                sample_count=sample_count,
+                batch_size=self.batch_size,
+                num_workers=self.num_workers,
+                prefetch_factor=self.prefetch_factor,
+                start_method=self.runtime.reader_worker_start_method,
+                dataset=dataset,
+            )
         return indexed_loader(
             dataset_factory,
             batch_size=self.batch_size,
             num_workers=self.num_workers,
             prefetch_factor=self.prefetch_factor,
-            start_method=self.runtime.loader_start_method,
+            start_method=self.runtime.reader_worker_start_method,
         )
 
     def _run_parallel_parts(
@@ -304,6 +341,7 @@ class ViewMaterializer:
         worker_logs_dir: Path,
         fragments_dir: Path,
         expected: int,
+        use_map_style_loader: bool,
         completed_count: int,
     ) -> None:
         context = multiprocessing_context(self.runtime.process_start_method)
@@ -325,6 +363,7 @@ class ViewMaterializer:
                         write_prefetch=self.write_prefetch,
                         mode=self._materializer_mode,
                         runtime=self.runtime,
+                        use_map_style_loader=use_map_style_loader,
                         fragments_dir=fragments_dir,
                         expected=expected,
                         logs_dir=logs_dir,
@@ -473,7 +512,7 @@ class ViewMaterializer:
             _write_fragment,
             workers=self.write_workers,
             max_pending=self.write_prefetch,
-            start_method=self.runtime.process_start_method,
+            start_method=self.runtime.writer_worker_start_method,
             on_submit=lambda job, pending: _put_stage_progress(
                 progress,
                 worker_id=worker_id,
@@ -580,6 +619,7 @@ class _WorkerConfig:
     write_prefetch: int | None
     mode: _MaterializerMode
     runtime: Runtime
+    use_map_style_loader: bool
     fragments_dir: Path
     expected: int
     logs_dir: Path
@@ -647,6 +687,8 @@ def _materialize_worker(
             materializer._write_resumable_loader_batches(
                 provider,
                 dataset_factory=dataset_factory,
+                sample_count=config.expected,
+                use_map_style_loader=config.use_map_style_loader,
                 fragments_dir=config.fragments_dir,
                 expected=config.expected,
                 progress=progress,

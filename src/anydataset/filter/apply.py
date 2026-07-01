@@ -17,7 +17,12 @@ from .._resume import dataset_sample_count, indexes_complete
 from .._validation import non_negative_int, optional_positive_int, positive_int
 from .._write_pipeline import BackgroundWriteSink
 from ..cache import FileLock, anydataset_home
-from ..dataset.abc import AnyDataset, MapStyleABC, MergedDataset
+from ..dataset.abc import (
+    AnyDataset,
+    MapStyleABC,
+    MergedDataset,
+    uses_default_indexed_shard,
+)
 from ..runtime import Runtime
 from ..store.jsonio import read_json, write_json
 from ..store.reader import StoreDataset
@@ -513,7 +518,7 @@ def write_filter_resume_fragments(
         write_filter_fragment_job,
         workers=write_workers,
         max_pending=write_prefetch,
-        start_method=runtime.process_start_method,
+        start_method=runtime.writer_worker_start_method,
     )
     with sink:
         write_filter_resume_fragment_jobs(
@@ -585,6 +590,7 @@ def write_filter_resume_fragment_jobs(
             num_workers=num_workers,
             prefetch_factor=prefetch_factor,
             runtime=runtime,
+            use_map_style_loader=uses_default_indexed_shard(dataset),
         ):
             global_chunk = global_filter_chunk(dataset, chunk)
             sink.submit(

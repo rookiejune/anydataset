@@ -1,7 +1,7 @@
 # Performance Notes
 
-本文记录 `anydataset` 当前性能优化的讨论范围、实验顺序和阶段一基准。这里不放
-已经验证的最终结论；结论需要等 benchmark 在目标机器和真实数据集上跑完以后再沉淀。
+本文记录 `anydataset` 当前性能优化的讨论范围、实验顺序和阶段一基准。这里先记录
+局部 benchmark 结果；真实数据集和目标机器上的最终结论仍应沉淀到实验结果文档。
 
 ## 当前边界
 
@@ -9,26 +9,33 @@
   resume fragment、filter partition 和后续 store/delta 对齐。
 - 外层 device/provider worker 继续保持 spawn-friendly。provider 可能加载 CUDA 模型，
   不应为了 DataLoader 读取性能把外层进程模型改成 fork。
-- 内层 PyTorch DataLoader worker 主要负责读样本。它的 start method 可以和外层
-  provider worker 分开讨论。
-- 默认用户数据集以 map-style 为主；streaming/iterable 数据集需要保留支持，但不应让
-  iterable runtime sharding 成为所有 map-style 热路径的唯一实现。
+- 外层扫描 worker、server、reader 和 writer 的 start method 分开配置。
+  `Runtime(reader_start_method="auto", writer_start_method="auto")` 在没有 server 时使用
+  spawn，在 `server_start_method` 非空时使用 fork。
+- 默认用户数据集以 map-style 为主；streaming/iterable 数据集需要保留支持。当前
+  `StoreDataset`、`FilteredDataset` 和 `MergedDataset` 这类默认 map-style shard 语义的
+  materializer/filter 热路径会使用 map-style indexed loader；`AnyDataset` 仍优先保留
+  source-aware indexed shard 路径，避免把顺序 source 退化成随机访问。
 
 ## 待验证假设
 
-1. 对 map-style dataset，DataLoader 使用 sampler 分发全局 index，再由 wrapper 返回
-   `(sample_index, sample)`，可能比当前 `RuntimeIndexedDataset(IterableDataset)` 路径
-   更快。
-2. 对内层 DataLoader worker，PyTorch 默认 context 或 Linux fork 可能比固定 spawn 更快；
-   但 spawn 仍需要作为可验证的安全路径存在。
-3. map-style indexed wrapper 如果缓存 dataset 实例，必须在 spawn serialization 时丢弃
-   缓存，让 worker 通过 `dataset_factory` 懒加载重建。
-4. 只有 indexed loader 决策稳定后，才适合继续讨论 LBA tail flush 是否能从 object gather
+1. 只有 indexed loader 决策稳定后，才适合继续讨论 LBA tail flush 是否能从 object gather
    改成 metadata-only flush。
+
+## 已落地
+
+- `anydataset._parallel.map_style_indexed_loader` 使用 rank sampler 分发全局 sample index，
+  并由 `MapIndexedDataset` 返回 `(sample_index, sample)`。
+- wrapper 可以在当前进程复用已构造 dataset；spawn 序列化时丢弃该缓存，让 worker 通过
+  `dataset_factory` 懒加载重建。
+- `ViewMaterializer` 和多设备 `FilterRule` 对默认 map-style shard 语义的数据集使用该
+  loader；有自定义 `iter_indexed_shard` 的数据集继续走 runtime indexed loader。
+- server 模式下 reader/writer worker 默认用 fork；无 server 的本地路径保持 spawn，避免
+  本地 torch/CUDA/provider 状态被 worker 继承。
 
 ## 阶段一基准
 
-阶段一只增加实验入口，不修改 `src/` 默认实现。入口是：
+阶段一入口是：
 
 ```bash
 PYTHONPATH=src python scripts/benchmark_hot_paths.py
@@ -38,13 +45,12 @@ PYTHONPATH=src python scripts/benchmark_hot_paths.py
 
 - `store_commit`: 多 part store 提交成本。
 - `sharded_csv`: 物理 CSV 分片的 indexed shard 读取成本。
-- `indexed_loader`: 当前 runtime iterable loader 和 map-style indexed wrapper 候选实现。
+- `indexed_loader`: 当前 runtime iterable loader 和正式 map-style indexed loader 实现。
 
 `indexed_loader` 默认候选：
 
 - `runtime`: 当前 `anydataset._parallel.indexed_loader` 路径。
-- `map_default`: map-style wrapper + global index sampler，DataLoader 使用 PyTorch 默认
-  multiprocessing context。
+- `map_default`: map-style wrapper + global index sampler；当前等价于显式 spawn。
 - `map_spawn`: map-style wrapper + global index sampler，DataLoader 显式使用 spawn。
 - `map_fork`: map-style wrapper + global index sampler，DataLoader 显式使用 fork；仅在当前
   Python 支持 fork 时运行。
@@ -78,12 +84,11 @@ PYTHONPATH=src python scripts/benchmark_hot_paths.py \
   已构造 dataset cache。
 - 如果 `map_default` 或 `map_fork` 只在特定平台快，默认实现仍要保留显式可控的 start
   method，不能把平台差异藏进静默兼容逻辑。
-- 只有当 map-style wrapper 在 store-like 和真实 materializer 输入上都稳定更优，才考虑
-  把它设为 `ViewMaterializer` 默认 indexed path。
+- remote fork 默认只适用于 provider/filter 已经隔离到 server 的 reader/writer worker 路径；
+  local provider 路径继续使用 spawn。
 
 ## 暂不处理
 
-- 不在阶段一改 `anydataset._parallel.indexed_loader` 的公开行为。
 - 不在阶段一接入 LBA 或修改 distributed tail flush。
 - 不在阶段一重写 filter partition cache 生命周期；lazy index loading 继续和 cache
   snapshot 设计一起讨论。

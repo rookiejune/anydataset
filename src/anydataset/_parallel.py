@@ -1,8 +1,9 @@
 """Shared spawn/DataLoader runtime for dataset-wide parallel scans.
 
-The module exposes device worker setup, runtime index sharding, and picklability
-checks used by higher-level filter and materialization flows. It does not own
-filter labels, view generation, cache layout, or store writing rules.
+The module exposes device worker setup, runtime index sharding, map-style
+indexed loaders, and picklability checks used by higher-level filter and
+materialization flows. It does not own filter labels, view generation, cache
+layout, or store writing rules.
 """
 
 from __future__ import annotations
@@ -17,7 +18,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 import torch
-from torch.utils.data import DataLoader, IterableDataset
+from torch.utils.data import DataLoader, Dataset, IterableDataset, Sampler
 
 from ._logging import run_logs_dir, set_run_logs_dir
 from ._sharding import runtime_shard, validate_shard
@@ -47,6 +48,55 @@ class RuntimeIndexedDataset(IterableDataset):
     def __iter__(self) -> Iterator[tuple[int, Any]]:
         dataset = self.dataset_factory()
         yield from iter_runtime_indexed(dataset)
+
+
+class MapIndexedDataset(Dataset):
+    def __init__(
+        self,
+        dataset_factory: DatasetFactory,
+        dataset: Any | None = None,
+    ) -> None:
+        self.dataset_factory = dataset_factory
+        self._dataset = dataset
+
+    def __getstate__(self) -> dict[str, Any]:
+        return {"dataset_factory": self.dataset_factory}
+
+    def __setstate__(self, state: dict[str, Any]) -> None:
+        self.dataset_factory = state["dataset_factory"]
+        self._dataset = None
+
+    @property
+    def dataset(self) -> Any:
+        if self._dataset is None:
+            self._dataset = self.dataset_factory()
+        return self._dataset
+
+    def __len__(self) -> int:
+        return len(self.dataset)
+
+    def __getitem__(self, index: int) -> tuple[int, Any]:
+        return index, self.dataset[index]
+
+
+@dataclass(frozen=True)
+class GlobalIndexSampler(Sampler[int]):
+    sample_count: int
+    num_shards: int
+    shard_id: int
+
+    def __post_init__(self) -> None:
+        if self.sample_count < 0:
+            raise ValueError("sample_count must be non-negative.")
+        validate_shard(self.num_shards, self.shard_id)
+
+    def __iter__(self) -> Iterator[int]:
+        return iter(range(self.shard_id, self.sample_count, self.num_shards))
+
+    def __len__(self) -> int:
+        if self.shard_id >= self.sample_count:
+            return 0
+        return (self.sample_count - 1 - self.shard_id) // self.num_shards + 1
 
 
 def iter_runtime_indexed(dataset: Any) -> Iterator[tuple[int, Any]]:
@@ -86,6 +136,58 @@ def indexed_loader(
     prefetch_factor: int | None = None,
     start_method: StartMethod = "spawn",
 ) -> DataLoader:
+    return DataLoader(
+        RuntimeIndexedDataset(dataset_factory),
+        **_indexed_loader_kwargs(
+            dataset_factory,
+            batch_size=batch_size,
+            num_workers=num_workers,
+            prefetch_factor=prefetch_factor,
+            start_method=start_method,
+        ),
+    )
+
+
+def map_style_indexed_loader(
+    dataset_factory: DatasetFactory,
+    *,
+    sample_count: int,
+    batch_size: int,
+    num_workers: int,
+    prefetch_factor: int | None = None,
+    start_method: StartMethod = "spawn",
+    dataset: Any | None = None,
+) -> DataLoader:
+    shard = runtime_shard()
+    return DataLoader(
+        MapIndexedDataset(dataset_factory, dataset=dataset),
+        sampler=GlobalIndexSampler(
+            sample_count=sample_count,
+            num_shards=shard.rank_count,
+            shard_id=shard.rank_index,
+        ),
+        **_indexed_loader_kwargs(
+            dataset_factory,
+            batch_size=batch_size,
+            num_workers=num_workers,
+            prefetch_factor=prefetch_factor,
+            start_method=start_method,
+        ),
+    )
+
+
+def indexed_collate(batch: Sequence[tuple[int, Any]]) -> tuple[tuple[int, Any], ...]:
+    return tuple(batch)
+
+
+def _indexed_loader_kwargs(
+    dataset_factory: DatasetFactory,
+    *,
+    batch_size: int,
+    num_workers: int,
+    prefetch_factor: int | None,
+    start_method: StartMethod,
+) -> dict[str, Any]:
     kwargs: dict[str, Any] = {
         "batch_size": batch_size,
         "collate_fn": indexed_collate,
@@ -103,14 +205,7 @@ def indexed_loader(
             prefetch_factor or _DEFAULT_LOADER_PREFETCH_FACTOR
         )
         kwargs["worker_init_fn"] = _RunLogsWorkerInit(run_logs_dir())
-    return DataLoader(
-        RuntimeIndexedDataset(dataset_factory),
-        **kwargs,
-    )
-
-
-def indexed_collate(batch: Sequence[tuple[int, Any]]) -> tuple[tuple[int, Any], ...]:
-    return tuple(batch)
+    return kwargs
 
 
 @dataclass(frozen=True)

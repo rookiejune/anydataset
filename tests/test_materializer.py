@@ -171,8 +171,7 @@ class ViewMaterializerTest(unittest.TestCase):
                     batch_size=2,
                     num_workers=1,
                     runtime=Runtime(
-                        loader_start_method="fork",
-                        device_scope="remote",
+                        server_start_method="spawn",
                     ),
                 ).write(
                     dataset_factory=_DatasetFactory(samples),

@@ -304,6 +304,13 @@ class AnyDataset(_Base, MapStyleABC):
             yield index, self.transform_sample(self.parse_fn(row))
 
 
+def uses_default_indexed_shard(dataset: object) -> bool:
+    return (
+        isinstance(dataset, MapStyleABC)
+        and type(dataset).iter_indexed_shard is MapStyleABC.iter_indexed_shard
+    )
+
+
 def _identity_sample(row: Any) -> Sample:
     return row
 
