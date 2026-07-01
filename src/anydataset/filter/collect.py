@@ -58,6 +58,7 @@ def collect_ranges(
     metrics: bool,
     commit_samples: int,
     *,
+    skip_indexes: frozenset[int] = frozenset(),
     dataset_factory: DatasetFactory,
     batch_size: int,
     num_workers: int,
@@ -72,6 +73,7 @@ def collect_ranges(
             predicate,
             metrics,
             commit_samples,
+            skip_indexes=skip_indexes,
             dataset_factory=dataset_factory,
             batch_size=batch_size,
             num_workers=num_workers,
@@ -88,6 +90,7 @@ def collect_ranges_sequential(
     write_metrics: bool,
     commit_samples: int,
     *,
+    skip_indexes: frozenset[int] = frozenset(),
     dataset_factory: DatasetFactory,
     batch_size: int,
     num_workers: int,
@@ -107,6 +110,8 @@ def collect_ranges_sequential(
     )
     for batch in loader:
         for index, sample in batch:
+            if index in skip_indexes:
+                continue
             output = decision(predicate(sample), metrics=write_metrics)
             if output.label not in partitions:
                 partitions[output.label] = array("q")
@@ -139,6 +144,7 @@ def collect_ranges_parallel(
     commit_samples: int,
     *,
     sample_count: int,
+    skip_indexes: frozenset[int] = frozenset(),
     batch_size: int,
     num_workers: int,
     prefetch_factor: int | None,
@@ -173,6 +179,7 @@ def collect_ranges_parallel(
                 num_workers,
                 prefetch_factor,
                 runtime,
+                skip_indexes,
                 outputs[rank],
             ),
             name=f"anydataset-filter-{rank}",
@@ -189,6 +196,7 @@ def collect_ranges_parallel(
             workers=workers,
             sample_count=sample_count,
             commit_samples=commit_samples,
+            skip_indexes=skip_indexes,
         )
         completed = True
     finally:
@@ -225,6 +233,7 @@ def _filter_worker(
     num_workers: int,
     prefetch_factor: int | None,
     runtime: Runtime,
+    skip_indexes: frozenset[int],
     output: multiprocessing.Queue,
 ) -> None:
     env = set_worker_environment(worker, device_env="ANYDATASET_FILTER_DEVICE")
@@ -239,6 +248,7 @@ def _filter_worker(
             num_workers=num_workers,
             prefetch_factor=prefetch_factor,
             runtime=runtime,
+            skip_indexes=skip_indexes,
         ):
             output.put(chunk)
         output.put((_DONE, worker.rank, None))
@@ -258,6 +268,7 @@ def collect_indexed_shard(
     num_workers: int,
     prefetch_factor: int | None,
     runtime: Runtime,
+    skip_indexes: frozenset[int] = frozenset(),
 ) -> Iterable[_IndexedFilterChunk]:
     rows: list[_FilterRow] = []
     for batch in indexed_loader(
@@ -268,6 +279,8 @@ def collect_indexed_shard(
         start_method=runtime.loader_start_method,
     ):
         for index, sample in batch:
+            if index in skip_indexes:
+                continue
             output = decision(predicate(sample), metrics=write_metrics)
             if write_metrics and output.metrics is None:
                 raise TypeError("filter predicate must return FilterDecision when metrics=True.")
@@ -314,6 +327,7 @@ def _ordered_worker_chunks(
     workers: int,
     sample_count: int,
     commit_samples: int,
+    skip_indexes: frozenset[int],
 ) -> Iterable[_FilterChunk]:
     buffers: tuple[dict[int, _FilterRow], ...] = tuple({} for _rank in range(workers))
     done: set[int] = set()
@@ -321,6 +335,9 @@ def _ordered_worker_chunks(
     rows: list[_FilterRow] = []
 
     while next_index < sample_count:
+        if next_index in skip_indexes:
+            next_index += 1
+            continue
         rank = next_index % workers
         buffer = buffers[rank]
         while next_index not in buffer:

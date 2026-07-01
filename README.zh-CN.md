@@ -346,7 +346,9 @@ pickle callable。
 `commit_samples` 控制扫描多少条样本后提交一次内存里的 label batch，默认
 100,000；`max_shard_samples` 控制每个 parquet shard 最多多少个下标，默认
 1,000,000。这样不会单样本写入，也不会先把几百万个下标全塞进一个 Python 对象或
-单个 parquet 文件。
+单个 parquet 文件。filter cache 构建会把已完成 chunk 写进隐藏 resume fragment，
+所有样本覆盖后再 replay 成最终 cache。`write_workers` 默认用一个后台 writer，让
+predicate 执行和 parquet 写入重叠；`write_prefetch` 控制待写任务上限。
 
 如果 predicate 需要顺手记录逐样本指标，可以返回 `FilterDecision`，并在
 `apply` 时显式打开 `metrics=True`：
@@ -550,14 +552,18 @@ merged.write("/data/my_anydataset_with_longcat", split="train")
 
 如果 provider 需要 GPU，可以用 `devices` 控制并行设备。`devices="auto"` 会
 检测当前可见 CUDA 设备，每张卡启动一个 spawn worker；每个 worker 写自己的
-part 和 `$ANYDATASET_HOME/logs/<timestamp>-<pid>/materializer/part-xxxxx.log`，
-全部完成后主进程合并 store。
+fragment 和 `$ANYDATASET_HOME/logs/<timestamp>-<pid>/materializer/part-xxxxx.log`，
+全部完成后主进程合并 store。materializer 默认使用可续跑 fragment：已完成的
+provider batch 会保留在目标目录旁边的隐藏 resume 目录中，重跑时按全局
+`sample_index` 跳过，最后再原子提交最终 store。
 和过滤一样，多设备 materialize 拥有自己的离线 worker，不应放进已经存在的 DDP
 训练进程里运行。
 如果 `parse_fn` 里有 file 到 waveform 这类 CPU 重活，可以给 materializer 传
 `num_workers`，让每个设备 worker 内部通过 PyTorch `DataLoader` 做读取、
 解码和预取。materializer 会为设备 worker 设置 rank 环境，dataset 的 runtime
 shard 会把 rank 和 DataLoader worker 组合起来，保证样本只覆盖一次。
+`write_workers` 控制每个 materializer worker 内部的后台写进程数，默认用一个 writer
+让 provider 计算和 fragment 落盘重叠；`write_prefetch` 控制待写任务上限。
 
 ```python
 def provider_factory(device: str):

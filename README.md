@@ -199,7 +199,10 @@ Pass `num_workers` to let each device process read samples through a PyTorch
 Partition index files are sharded by `max_shard_samples` (default: 1,000,000),
 so large labels do not need one huge parquet file. `commit_samples` (default:
 100,000) bounds each in-memory label batch before it is committed to the shard
-writer.
+writer. Filter cache construction uses hidden resume fragments and replays them
+into the final cache when all samples are covered. `write_workers` defaults to
+one background writer so predicate execution can overlap with parquet writes;
+`write_prefetch` bounds pending write jobs.
 
 Predicates can return `FilterDecision` when a filter should also cache
 per-sample JSON metrics:
@@ -360,12 +363,11 @@ each writer process. For parallel writes, pass a picklable module-level
 
 For GPU-backed providers, let `devices` control parallelism. `devices="auto"`
 uses one spawned worker per visible CUDA device, writes worker logs under
-`$ANYDATASET_HOME/logs/<timestamp>-<pid>/materializer`, and commits the
-per-device parts when all workers finish.
-Pass `resume=True` to materializer `write()` calls for long-running provider
-jobs. Completed provider batches are kept as ready store fragments under a
-hidden sibling resume directory, and reruns skip completed global sample
-indexes before atomically committing the final store.
+`$ANYDATASET_HOME/logs/<timestamp>-<pid>/materializer`, and commits completed
+fragments when all workers finish. Materializers always use resumable fragments:
+completed provider batches are kept under a hidden sibling resume directory,
+and reruns skip completed global sample indexes before atomically committing
+the final store.
 Multi-device materialization uses Python `spawn`, so `dataset_factory` and
 `provider_factory` must be picklable, module-level callables. Like filtering,
 multi-device materialization owns its offline worker processes and should not
@@ -375,6 +377,9 @@ PyTorch `DataLoader`; this is useful when `parse_fn` does CPU-heavy work such
 as file-to-waveform decoding. The materializer sets rank environment variables
 for its device workers, and datasets combine rank and DataLoader worker state
 inside their runtime shard logic so each sample is covered once.
+`write_workers` controls background fragment writer processes inside each
+materializer worker; the default is one writer so provider execution can
+overlap with store writes. `write_prefetch` bounds pending write jobs.
 
 ```python
 def provider_factory(device: str):

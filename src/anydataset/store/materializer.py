@@ -3,13 +3,11 @@ from __future__ import annotations
 import logging
 import multiprocessing
 import os
-import shutil
+import time
 import traceback
-import hashlib
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from tempfile import TemporaryDirectory
 from typing import Any, Literal, cast
 
 from torch import distributed as dist
@@ -30,14 +28,23 @@ from .._parallel import (
     set_worker_environment,
     validate_process_value,
 )
-from .._progress import Progress, iter_with_progress, put_progress, watch_workers
+from .._progress import Progress, ProgressDashboard, put_progress, watch_workers
+from .._resume import (
+    cleanup_resume_dir,
+    dataset_sample_count,
+    index_batch_id,
+    indexes_complete,
+    pending_batch,
+    prepare_resume_dir,
+    validate_completed_indexes,
+)
 from .._validation import non_negative_int, optional_positive_int, positive_int
+from .._write_pipeline import BackgroundWriteSink
 from ..runtime import Runtime
 from ..types.item import Sample
 from ..view import Provider
 from ._batch import (
     indexed_sample_batches,
-    sample_batches,
     validate_batch_outputs,
     with_batch_modality_provider,
     with_batch_view_provider,
@@ -48,9 +55,7 @@ from ._types import MaterializerProvider, ModalityProviderLike
 from ._view import with_view_provider
 from .parts import (
     DatasetFragmentWriter,
-    DatasetPartWriter,
     commit_store_fragments,
-    commit_store_parts,
     completed_fragment_indexes,
 )
 from .writer import DEFAULT_MAX_SHARD_SAMPLES, DatasetWriter
@@ -58,6 +63,9 @@ from .writer import DEFAULT_MAX_SHARD_SAMPLES, DatasetWriter
 type DatasetFactory = Callable[[], Any]
 type ProviderFactory = Callable[[str], MaterializerProvider]
 type _MaterializerMode = Literal["view", "modality"]
+type _ProgressSink = multiprocessing.Queue | ProgressDashboard
+
+_PROGRESS_STAGES = ("reader", "provider", "writer")
 
 
 @dataclass
@@ -68,6 +76,8 @@ class ViewMaterializer:
     batch_size: int = 1
     num_workers: int = 0
     prefetch_factor: int | None = None
+    write_workers: int = 1
+    write_prefetch: int | None = None
     runtime: Runtime = field(default_factory=Runtime)
 
     def __post_init__(self) -> None:
@@ -81,6 +91,11 @@ class ViewMaterializer:
             "prefetch_factor",
             self.prefetch_factor,
         )
+        self.write_workers = non_negative_int("write_workers", self.write_workers)
+        self.write_prefetch = optional_positive_int(
+            "write_prefetch",
+            self.write_prefetch,
+        )
 
     @property
     def _dataset_id(self) -> str:
@@ -92,25 +107,9 @@ class ViewMaterializer:
         dataset_factory: DatasetFactory,
         provider_factory: ProviderFactory,
         devices: Devices = "auto",
-        resume: bool = False,
     ) -> Path:
         resolved = resolve_devices(devices)
-        if resume:
-            return self._write_resumable(
-                dataset_factory=dataset_factory,
-                provider_factory=provider_factory,
-                devices=resolved,
-        )
-        if len(resolved) == 1:
-            device = resolved[0]
-            if self.runtime.uses_local_device:
-                set_torch_device(device)
-            return self._write_single(
-                dataset_factory=dataset_factory,
-                provider=provider_factory(device),
-                device=device,
-            )
-        return self._write_devices(
+        return self._write_resumable(
             dataset_factory=dataset_factory,
             provider_factory=provider_factory,
             devices=resolved,
@@ -138,44 +137,6 @@ class ViewMaterializer:
             devices=devices,
         )
 
-    def _write_devices(
-        self,
-        *,
-        dataset_factory: DatasetFactory,
-        provider_factory: ProviderFactory,
-        devices: tuple[str, ...],
-    ) -> Path:
-        validate_process_value(
-            "dataset_factory",
-            dataset_factory,
-            context="multi-device materialization",
-            start_method=self.runtime.process_start_method,
-        )
-        validate_process_value(
-            "provider_factory",
-            provider_factory,
-            context="multi-device materialization",
-            start_method=self.runtime.process_start_method,
-        )
-        output_dir = _prepare_parallel_output_dir(Path(self.output_dir).expanduser())
-        logs_dir = run_logs_dir()
-        worker_logs_dir = logs_dir / "materializer"
-        logs_dir.mkdir(parents=True, exist_ok=True)
-        with TemporaryDirectory(
-            prefix=f".{output_dir.name}-parts-",
-            dir=str(output_dir.parent),
-        ) as tmpdir:
-            parts_dir = Path(tmpdir)
-            self._run_parallel_parts(
-                dataset_factory=dataset_factory,
-                provider_factory=provider_factory,
-                devices=devices,
-                parts_dir=parts_dir,
-                logs_dir=logs_dir,
-                worker_logs_dir=worker_logs_dir,
-            )
-            return self._commit_parts(parts_dir)
-
     def _write_resumable_devices(
         self,
         *,
@@ -195,15 +156,17 @@ class ViewMaterializer:
             context="multi-device materialization",
             start_method=self.runtime.process_start_method,
         )
-        expected = _dataset_sample_count(dataset_factory())
-        fragments_dir = _prepare_resume_fragments_dir(Path(self.output_dir).expanduser())
-        completed = completed_fragment_indexes(
-            fragments_dir,
-            dataset_id=self._dataset_id,
-            split=self.split,
+        expected = dataset_sample_count(dataset_factory(), context="resume")
+        fragments_dir = prepare_resume_dir(self.output_dir, "fragments")
+        completed = validate_completed_indexes(
+            completed_fragment_indexes(
+                fragments_dir,
+                dataset_id=self._dataset_id,
+                split=self.split,
+            ),
+            expected,
         )
-        _validate_completed_indexes(completed, expected)
-        if _complete(completed, expected):
+        if indexes_complete(completed, expected):
             return self._commit_fragments(fragments_dir, expected)
 
         logs_dir = run_logs_dir()
@@ -213,34 +176,13 @@ class ViewMaterializer:
             dataset_factory=dataset_factory,
             provider_factory=provider_factory,
             devices=devices,
-            parts_dir=fragments_dir,
             logs_dir=logs_dir,
             worker_logs_dir=worker_logs_dir,
-            resume=True,
             fragments_dir=fragments_dir,
+            expected=expected,
+            completed_count=len(completed),
         )
         return self._commit_fragments(fragments_dir, expected)
-
-    def _write_single(
-        self,
-        *,
-        dataset_factory: DatasetFactory,
-        provider: MaterializerProvider,
-        device: str,
-    ) -> Path:
-        if self.num_workers > 0:
-            return self._write_single_part(
-                provider,
-                device=device,
-                dataset_factory=dataset_factory,
-            )
-        dataset = dataset_factory()
-        return DatasetWriter(
-            self.output_dir,
-            dataset_id=self._dataset_id,
-            split=self.split,
-            max_shard_samples=self.max_shard_samples,
-        ).write(self._samples(dataset, provider))
 
     def _write_resumable_single(
         self,
@@ -250,111 +192,55 @@ class ViewMaterializer:
         device: str,
     ) -> Path:
         output_dir = Path(self.output_dir).expanduser()
-        fragments_dir = _prepare_resume_fragments_dir(output_dir)
+        fragments_dir = prepare_resume_dir(output_dir, "fragments")
         dataset = dataset_factory()
-        expected = _dataset_sample_count(dataset)
-        completed = completed_fragment_indexes(
-            fragments_dir,
-            dataset_id=self._dataset_id,
-            split=self.split,
+        expected = dataset_sample_count(dataset, context="resume")
+        completed = validate_completed_indexes(
+            completed_fragment_indexes(
+                fragments_dir,
+                dataset_id=self._dataset_id,
+                split=self.split,
+            ),
+            expected,
         )
-        _validate_completed_indexes(completed, expected)
-        if _complete(completed, expected):
+        if indexes_complete(completed, expected):
             return self._commit_fragments(fragments_dir, expected)
 
-        provider = provider_factory(device)
-        if self.num_workers > 0:
-            env = set_single_worker_environment(
-                device,
-                device_env="ANYDATASET_MATERIALIZE_DEVICE",
-            )
-            try:
-                self._write_resumable_loader_batches(
-                    provider,
-                    dataset_factory=dataset_factory,
-                    fragments_dir=fragments_dir,
+        with ProgressDashboard(
+            desc="materialize views",
+            total=expected,
+            count_stage="writer",
+            initial=len(completed),
+            stages=_PROGRESS_STAGES,
+        ) as progress:
+            provider = provider_factory(device)
+            if self.num_workers > 0:
+                env = set_single_worker_environment(
+                    device,
+                    device_env="ANYDATASET_MATERIALIZE_DEVICE",
                 )
-            finally:
-                restore_environment(env)
-        else:
-            self._write_resumable_indexed_batches(
-                indexed_sample_batches(
-                    iter_indexed_shard(dataset, 1, 0),
-                    self.batch_size,
-                ),
-                provider,
-                fragments_dir=fragments_dir,
-            )
-        return self._commit_fragments(fragments_dir, expected)
-
-    def _write_single_part(
-        self,
-        provider: MaterializerProvider,
-        *,
-        device: str,
-        dataset_factory: DatasetFactory,
-    ) -> Path:
-        output_dir = Path(self.output_dir).expanduser()
-        output_dir.parent.mkdir(parents=True, exist_ok=True)
-        env = set_single_worker_environment(
-            device,
-            device_env="ANYDATASET_MATERIALIZE_DEVICE",
-        )
-        with TemporaryDirectory(
-            prefix=f".{output_dir.name}-parts-",
-            dir=str(output_dir.parent),
-        ) as tmpdir:
-            try:
-                parts_dir = Path(tmpdir)
-                DatasetPartWriter(
-                    parts_dir / "part-00000",
-                    dataset_id=self._dataset_id,
-                    split=self.split,
-                    shard_id=0,
-                    num_shards=1,
-                    max_shard_samples=self.max_shard_samples,
-                ).write(
-                    self._loader_indexed_samples(
+                try:
+                    self._write_resumable_loader_batches(
                         provider,
                         dataset_factory=dataset_factory,
+                        fragments_dir=fragments_dir,
+                        expected=expected,
+                        progress=progress,
                     )
+                finally:
+                    restore_environment(env)
+            else:
+                self._write_resumable_indexed_batches(
+                    indexed_sample_batches(
+                        iter_indexed_shard(dataset, 1, 0),
+                        self.batch_size,
+                    ),
+                    provider,
+                    fragments_dir=fragments_dir,
+                    expected=expected,
+                    progress=progress,
                 )
-                return self._commit_parts(parts_dir)
-            finally:
-                restore_environment(env)
-
-    def _write_part(
-        self,
-        dataset: Any,
-        provider: MaterializerProvider,
-        *,
-        parts_dir: str | Path,
-        num_shards: int,
-        shard_id: int,
-    ) -> Path:
-        return DatasetPartWriter(
-            Path(parts_dir) / f"part-{shard_id:05d}",
-            dataset_id=self._dataset_id,
-            split=self.split,
-            shard_id=shard_id,
-            num_shards=num_shards,
-            max_shard_samples=self.max_shard_samples,
-        ).write(
-            self._indexed_samples(
-                dataset,
-                provider,
-                num_shards=num_shards,
-                shard_id=shard_id,
-            )
-        )
-
-    def _commit_parts(self, parts_dir: str | Path) -> Path:
-        return commit_store_parts(
-            self.output_dir,
-            parts_dir,
-            dataset_id=self._dataset_id,
-            split=self.split,
-        )
+        return self._commit_fragments(fragments_dir, expected)
 
     def _commit_fragments(self, fragments_dir: str | Path, expected: int) -> Path:
         if expected == 0:
@@ -364,7 +250,7 @@ class ViewMaterializer:
                 split=self.split,
                 max_shard_samples=self.max_shard_samples,
             ).write(())
-            _cleanup_resume_dir(Path(self.output_dir).expanduser())
+            cleanup_resume_dir(self.output_dir)
             return path
         path = commit_store_fragments(
             self.output_dir,
@@ -373,36 +259,8 @@ class ViewMaterializer:
             split=self.split,
             expected_sample_count=expected,
         )
-        _cleanup_resume_dir(Path(self.output_dir).expanduser())
+        cleanup_resume_dir(self.output_dir)
         return path
-
-    def _samples(self, dataset: Iterable[Sample], provider: MaterializerProvider):
-        if self.batch_size == 1:
-            for sample in dataset:
-                yield self._sample_with_provider(sample, provider)
-            return
-
-        for batch in sample_batches(dataset, self.batch_size):
-            yield from self._resilient_samples_with_batch_provider(batch, provider)
-
-    def _loader_indexed_samples(
-        self,
-        provider: MaterializerProvider,
-        *,
-        dataset_factory: DatasetFactory,
-    ) -> Iterator[tuple[int, Sample]]:
-        for batch in self._loader(dataset_factory=dataset_factory):
-            if self.batch_size == 1:
-                for index, sample in batch:
-                    yield index, self._sample_with_provider(sample, provider)
-                continue
-
-            indexes, samples = zip(*batch, strict=True)
-            outputs = tuple(
-                self._resilient_samples_with_batch_provider(samples, provider)
-            )
-            validate_batch_outputs(outputs, len(samples))
-            yield from zip(indexes, outputs, strict=True)
 
     def _write_resumable_loader_batches(
         self,
@@ -410,13 +268,15 @@ class ViewMaterializer:
         *,
         dataset_factory: DatasetFactory,
         fragments_dir: Path,
-        progress: multiprocessing.Queue | None = None,
+        expected: int,
+        progress: _ProgressSink | None = None,
         worker_id: int = 0,
     ) -> None:
         self._write_resumable_indexed_batches(
             self._loader(dataset_factory=dataset_factory),
             provider,
             fragments_dir=fragments_dir,
+            expected=expected,
             progress=progress,
             worker_id=worker_id,
         )
@@ -440,11 +300,11 @@ class ViewMaterializer:
         dataset_factory: DatasetFactory,
         provider_factory: ProviderFactory,
         devices: tuple[str, ...],
-        parts_dir: Path,
         logs_dir: Path,
         worker_logs_dir: Path,
-        resume: bool = False,
-        fragments_dir: Path | None = None,
+        fragments_dir: Path,
+        expected: int,
+        completed_count: int,
     ) -> None:
         context = multiprocessing_context(self.runtime.process_start_method)
         progress = context.Queue()
@@ -461,11 +321,12 @@ class ViewMaterializer:
                         batch_size=self.batch_size,
                         num_workers=self.num_workers,
                         prefetch_factor=self.prefetch_factor,
+                        write_workers=self.write_workers,
+                        write_prefetch=self.write_prefetch,
                         mode=self._materializer_mode,
                         runtime=self.runtime,
-                        parts_dir=parts_dir,
-                        resume=resume,
                         fragments_dir=fragments_dir,
+                        expected=expected,
                         logs_dir=logs_dir,
                         worker_logs_dir=worker_logs_dir,
                         device=device,
@@ -491,6 +352,10 @@ class ViewMaterializer:
                 desc="materialize views",
                 early_exit_message="View materialization worker exited early.",
                 failure_prefix="View materialization worker",
+                total=expected,
+                count_stage="writer",
+                initial=completed_count,
+                stages=_PROGRESS_STAGES,
             )
         except Exception:
             for worker in workers:
@@ -548,35 +413,82 @@ class ViewMaterializer:
         provider: MaterializerProvider,
         *,
         fragments_dir: Path,
-        progress: multiprocessing.Queue | None = None,
+        expected: int,
+        progress: _ProgressSink | None = None,
         worker_id: int = 0,
     ) -> None:
         completed = set(
-            completed_fragment_indexes(
-                fragments_dir,
-                dataset_id=self._dataset_id,
-                split=self.split,
+            validate_completed_indexes(
+                completed_fragment_indexes(
+                    fragments_dir,
+                    dataset_id=self._dataset_id,
+                    split=self.split,
+                ),
+                expected,
             )
         )
-        for batch in batches:
-            pending = tuple(
-                (index, sample) for index, sample in batch if index not in completed
-            )
-            if not pending:
-                continue
-            outputs = self._materialized_indexed_batch(pending, provider)
-            indexes = tuple(sorted(index for index, _ in outputs))
-            fragment_id = _fragment_id(indexes)
-            DatasetFragmentWriter(
-                fragments_dir / fragment_id,
-                dataset_id=self._dataset_id,
-                split=self.split,
-                fragment_id=fragment_id,
-                max_shard_samples=self.max_shard_samples,
-            ).write(outputs)
-            completed.update(indexes)
-            if progress is not None:
-                put_progress(progress, Progress(worker_id, len(outputs), False, None))
+        with self._fragment_sink(progress=progress, worker_id=worker_id) as sink:
+            read_start = time.perf_counter()
+            for batch in batches:
+                _put_stage_progress(
+                    progress,
+                    worker_id=worker_id,
+                    stage="reader",
+                    samples=len(batch),
+                    elapsed=time.perf_counter() - read_start,
+                )
+                pending = pending_batch(batch, frozenset(completed))
+                if not pending:
+                    read_start = time.perf_counter()
+                    continue
+                provider_start = time.perf_counter()
+                outputs = self._materialized_indexed_batch(pending, provider)
+                _put_stage_progress(
+                    progress,
+                    worker_id=worker_id,
+                    stage="provider",
+                    samples=len(outputs),
+                    elapsed=time.perf_counter() - provider_start,
+                )
+                indexes = tuple(sorted(index for index, _ in outputs))
+                job = _FragmentWriteJob(
+                    fragments_dir=fragments_dir,
+                    dataset_id=self._dataset_id,
+                    split=self.split,
+                    max_shard_samples=self.max_shard_samples,
+                    indexes=indexes,
+                    samples=outputs,
+                )
+                sink.submit(job)
+                completed.update(indexes)
+                read_start = time.perf_counter()
+
+    def _fragment_sink(
+        self,
+        *,
+        progress: _ProgressSink | None = None,
+        worker_id: int = 0,
+    ) -> BackgroundWriteSink[_FragmentWriteJob]:
+        return BackgroundWriteSink(
+            _write_fragment,
+            workers=self.write_workers,
+            max_pending=self.write_prefetch,
+            start_method=self.runtime.process_start_method,
+            on_submit=lambda job, pending: _put_stage_progress(
+                progress,
+                worker_id=worker_id,
+                stage="writer",
+                pending=pending,
+            ),
+            on_complete=lambda job, pending, elapsed: _put_stage_progress(
+                progress,
+                worker_id=worker_id,
+                stage="writer",
+                samples=len(job.samples),
+                elapsed=elapsed,
+                pending=pending,
+            ),
+        )
 
     def _materialized_indexed_batch(
         self,
@@ -636,6 +548,27 @@ class ModalityMaterializer(ViewMaterializer):
 
 
 @dataclass(frozen=True)
+class _FragmentWriteJob:
+    fragments_dir: Path
+    dataset_id: str
+    split: str | None
+    max_shard_samples: int
+    indexes: tuple[int, ...]
+    samples: tuple[tuple[int, Sample], ...]
+
+
+def _write_fragment(job: _FragmentWriteJob) -> None:
+    fragment_id = index_batch_id(job.indexes)
+    DatasetFragmentWriter(
+        job.fragments_dir / fragment_id,
+        dataset_id=job.dataset_id,
+        split=job.split,
+        fragment_id=fragment_id,
+        max_shard_samples=job.max_shard_samples,
+    ).write(job.samples)
+
+
+@dataclass(frozen=True)
 class _WorkerConfig:
     output_dir: Path
     split: str | None
@@ -643,11 +576,12 @@ class _WorkerConfig:
     batch_size: int
     num_workers: int
     prefetch_factor: int | None
+    write_workers: int
+    write_prefetch: int | None
     mode: _MaterializerMode
     runtime: Runtime
-    parts_dir: Path
-    resume: bool
-    fragments_dir: Path | None
+    fragments_dir: Path
+    expected: int
     logs_dir: Path
     worker_logs_dir: Path
     device: str
@@ -677,18 +611,6 @@ def _distributed_backend(device: str) -> str:
         if cuda_device(device) is not None and dist.is_nccl_available()
         else "gloo"
     )
-
-
-def _prepare_parallel_output_dir(output_dir: Path) -> Path:
-    if output_dir.exists():
-        if not output_dir.is_dir():
-            raise ValueError(f"Target path exists and is not a directory: {output_dir}")
-        entries = list(output_dir.iterdir())
-        if entries:
-            raise ValueError(f"Target directory must be empty: {output_dir}")
-    output_dir.parent.mkdir(parents=True, exist_ok=True)
-    output_dir.mkdir(exist_ok=True)
-    return output_dir
 
 
 def _materialize_worker(
@@ -722,34 +644,14 @@ def _materialize_worker(
                 process_group_created = _init_worker_process_group(config)
             provider = provider_factory(config.device)
             materializer = _worker_materializer(config)
-            if config.resume:
-                if config.fragments_dir is None:
-                    raise ValueError("fragments_dir is required for resume.")
-                materializer._write_resumable_loader_batches(
-                    provider,
-                    dataset_factory=dataset_factory,
-                    fragments_dir=config.fragments_dir,
-                    progress=progress,
-                    worker_id=config.shard_id,
-                )
-            else:
-                DatasetPartWriter(
-                    config.parts_dir / f"part-{config.shard_id:05d}",
-                    dataset_id=_dataset_id(config.output_dir),
-                    split=config.split,
-                    shard_id=config.shard_id,
-                    num_shards=config.num_shards,
-                    max_shard_samples=config.max_shard_samples,
-                ).write(
-                    iter_with_progress(
-                        materializer._loader_indexed_samples(
-                            provider,
-                            dataset_factory=dataset_factory,
-                        ),
-                        worker_id=config.shard_id,
-                        progress=progress,
-                    )
-                )
+            materializer._write_resumable_loader_batches(
+                provider,
+                dataset_factory=dataset_factory,
+                fragments_dir=config.fragments_dir,
+                expected=config.expected,
+                progress=progress,
+                worker_id=config.shard_id,
+            )
         except Exception:
             error = traceback.format_exc()
             logger.error("worker failed\n%s", error)
@@ -773,6 +675,8 @@ def _worker_materializer(config: _WorkerConfig) -> ViewMaterializer:
         batch_size=config.batch_size,
         num_workers=config.num_workers,
         prefetch_factor=config.prefetch_factor,
+        write_workers=config.write_workers,
+        write_prefetch=config.write_prefetch,
         runtime=config.runtime,
     )
 
@@ -794,61 +698,30 @@ def _worker_logger(logs_dir: Path, shard_id: int) -> logging.Logger:
     return logger
 
 
+def _put_stage_progress(
+    progress: _ProgressSink | None,
+    *,
+    worker_id: int,
+    stage: str,
+    samples: int = 0,
+    elapsed: float | None = None,
+    pending: int | None = None,
+) -> None:
+    if progress is None:
+        return
+    put_progress(
+        progress,
+        Progress(
+            worker_id,
+            samples,
+            False,
+            None,
+            stage=stage,
+            elapsed=elapsed,
+            pending=pending,
+        ),
+    )
+
+
 def _dataset_id(output_dir: str | Path) -> str:
     return Path(output_dir).expanduser().name or "dataset"
-
-
-def _resume_root(output_dir: Path) -> Path:
-    return output_dir.parent / f".{output_dir.name}.resume"
-
-
-def _resume_fragments_dir(output_dir: Path) -> Path:
-    return _resume_root(output_dir) / "fragments"
-
-
-def _prepare_resume_fragments_dir(output_dir: Path) -> Path:
-    if output_dir.exists():
-        if not output_dir.is_dir():
-            raise ValueError(f"Target path exists and is not a directory: {output_dir}")
-        if any(output_dir.iterdir()):
-            raise ValueError(f"Target directory must be empty: {output_dir}")
-    output_dir.parent.mkdir(parents=True, exist_ok=True)
-    fragments_dir = _resume_fragments_dir(output_dir)
-    fragments_dir.mkdir(parents=True, exist_ok=True)
-    return fragments_dir
-
-
-def _cleanup_resume_dir(output_dir: Path) -> None:
-    root = _resume_root(output_dir)
-    if root.exists():
-        shutil.rmtree(root)
-
-
-def _dataset_sample_count(dataset: Any) -> int:
-    try:
-        count = len(dataset)
-    except TypeError as exc:
-        raise TypeError("resume requires a dataset with __len__().") from exc
-    if not isinstance(count, int):
-        raise TypeError("dataset __len__() must return an integer.")
-    if count < 0:
-        raise ValueError("dataset length must be non-negative.")
-    return count
-
-
-def _validate_completed_indexes(indexes: frozenset[int], expected: int) -> None:
-    extras = sorted(index for index in indexes if index < 0 or index >= expected)
-    if extras:
-        raise ValueError(f"Completed fragment index is outside dataset: {extras[0]}.")
-
-
-def _complete(indexes: frozenset[int], expected: int) -> bool:
-    return len(indexes) == expected and indexes == frozenset(range(expected))
-
-
-def _fragment_id(indexes: Sequence[int]) -> str:
-    if not indexes:
-        raise ValueError("fragment indexes must not be empty.")
-    text = ",".join(str(index) for index in indexes)
-    digest = hashlib.sha256(text.encode("ascii")).hexdigest()[:16]
-    return f"batch-{indexes[0]:012d}-{indexes[-1]:012d}-{digest}"

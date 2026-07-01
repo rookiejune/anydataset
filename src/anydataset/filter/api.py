@@ -47,6 +47,8 @@ _FILTER_APPLY_DEFAULTS: _FilterApplyOptions = {
     "prefetch_factor": None,
     "commit_samples": _DEFAULT_COMMIT_SAMPLES,
     "max_shard_samples": _DEFAULT_MAX_SHARD_SAMPLES,
+    "write_workers": 1,
+    "write_prefetch": None,
     "runtime": Runtime(),
 }
 
@@ -219,6 +221,8 @@ class FilteredDataset(MapStyleABC):
             prefetch_factor=options["prefetch_factor"],
             commit_samples=options["commit_samples"],
             max_shard_samples=options["max_shard_samples"],
+            write_workers=options["write_workers"],
+            write_prefetch=options["write_prefetch"],
             runtime=options["runtime"],
             dataset_factory=dataset_factory,
         )
@@ -376,6 +380,14 @@ def _apply_options(kwargs: FilterApplyKwargs) -> _FilterApplyOptions:
         "max_shard_samples": kwargs.get(
             "max_shard_samples",
             _FILTER_APPLY_DEFAULTS["max_shard_samples"],
+        ),
+        "write_workers": kwargs.get(
+            "write_workers",
+            _FILTER_APPLY_DEFAULTS["write_workers"],
+        ),
+        "write_prefetch": kwargs.get(
+            "write_prefetch",
+            _FILTER_APPLY_DEFAULTS["write_prefetch"],
         ),
         "runtime": kwargs.get("runtime", _FILTER_APPLY_DEFAULTS["runtime"]),
     }

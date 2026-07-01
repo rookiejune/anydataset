@@ -55,7 +55,7 @@ def metrics_ready(path: Path) -> bool:
 def read_metrics(path: Path) -> Iterable[Mapping[str, Any]]:
     manifest = read_json(path / "metrics.json")
     for relpath in metrics_files(manifest):
-        for row in _read_metric_rows(path / relpath):
+        for row in read_metric_rows(path / relpath):
             yield row
 
 
@@ -152,7 +152,7 @@ class MetricsWriter:
         shard_index = len(self._files)
         relpath = Path("shards") / f"part-{shard_index:06d}.parquet"
         count = len(self._buffer)
-        _write_metrics(self._path / relpath, self._buffer)
+        write_metric_rows(self._path / relpath, self._buffer)
         self._files.append(
             {
                 "file": relpath.as_posix(),
@@ -262,7 +262,7 @@ class _FileIndex(Sequence[int]):
     def _shard(self, index: int) -> array[int]:
         shard = self._shards[index]
         if shard is None:
-            shard = _read_indices(self._files[index].path)
+            shard = read_index_rows(self._files[index].path)
             self._shards[index] = shard
         return shard
 
@@ -316,7 +316,7 @@ class _PartitionWriteState:
             / label_file_id(self._label)
             / f"part-{shard_index:06d}.parquet"
         )
-        _write_indices(self._path / relpath, self._buffer)
+        write_index_rows(self._path / relpath, self._buffer)
         count = len(self._buffer)
         self._files.append(
             {
@@ -328,13 +328,13 @@ class _PartitionWriteState:
         self._buffer = array("q")
 
 
-def _read_indices(path: Path) -> array[int]:
+def read_index_rows(path: Path) -> array[int]:
     _, pq = _pyarrow()
     table = pq.read_table(path, columns=["index"])
     return array("q", (int(index) for index in table.column("index").to_pylist()))
 
 
-def _write_indices(path: Path, indices: Sequence[int]) -> None:
+def write_index_rows(path: Path, indices: Sequence[int]) -> None:
     pa, pq = _pyarrow()
     path.parent.mkdir(parents=True, exist_ok=True)
     table = pa.Table.from_arrays(
@@ -344,7 +344,7 @@ def _write_indices(path: Path, indices: Sequence[int]) -> None:
     pq.write_table(table, path)
 
 
-def _read_metric_rows(path: Path) -> Iterable[Mapping[str, Any]]:
+def read_metric_rows(path: Path) -> Iterable[Mapping[str, Any]]:
     _, pq = _pyarrow()
     table = pq.read_table(path, columns=["index", "label", "metrics"])
     indices = table.column("index").to_pylist()
@@ -358,7 +358,7 @@ def _read_metric_rows(path: Path) -> Iterable[Mapping[str, Any]]:
         }
 
 
-def _write_metrics(path: Path, rows: Sequence[_FilterMetricsRow]) -> None:
+def write_metric_rows(path: Path, rows: Sequence[_FilterMetricsRow]) -> None:
     pa, pq = _pyarrow()
     path.parent.mkdir(parents=True, exist_ok=True)
     table = pa.Table.from_arrays(

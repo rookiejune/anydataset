@@ -704,12 +704,11 @@ class ViewMaterializerTest(unittest.TestCase):
             [1, 3],
         )
 
-    def test_materializer_parts_commit_readable_store(self):
+    def test_materializer_default_fragment_commit_readable_store(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             source = root / "source"
             target = root / "target"
-            parts = root / "parts"
             samples = [
                 _audio_sample(torch.tensor([[float(index)]]))
                 for index in range(4)
@@ -721,22 +720,11 @@ class ViewMaterializerTest(unittest.TestCase):
                 split="train",
             )
 
-            materializer._write_part(
-                dataset,
-                _Provider(offset=10),
-                parts_dir=parts,
-                num_shards=2,
-                shard_id=0,
+            materializer.write(
+                dataset_factory=_DatasetFactory(dataset),
+                provider_factory=_ProviderFactory(offset=10),
+                devices=("cpu:0", "cpu:1"),
             )
-            dataset = _store_dataset(source, root)
-            materializer._write_part(
-                dataset,
-                _Provider(offset=10),
-                parts_dir=parts,
-                num_shards=2,
-                shard_id=1,
-            )
-            materializer._commit_parts(parts)
 
             stored = read_store_dataset(target)
             indexes = [entry.sample_index for entry in read_samples_manifest(target)]
@@ -745,7 +733,8 @@ class ViewMaterializerTest(unittest.TestCase):
 
             self.assertEqual(len(stored), 4)
             self.assertEqual(indexes, [0, 1, 2, 3])
-            self.assertEqual(shards, {"part-00000-000000.tar", "part-00001-000000.tar"})
+            self.assertTrue(shards)
+            self.assertFalse((root / ".target.resume").exists())
             for index in range(4):
                 sample = stored[index]
                 self.assertTrue(
@@ -942,7 +931,6 @@ class ViewMaterializerTest(unittest.TestCase):
                     dataset_factory=_DatasetFactory(samples),
                     provider_factory=_FailOnceBatchProviderFactory(calls),
                     devices="cpu",
-                    resume=True,
                 )
 
             self.assertFalse(target.exists())
@@ -955,7 +943,6 @@ class ViewMaterializerTest(unittest.TestCase):
                 dataset_factory=_DatasetFactory(samples),
                 provider_factory=_FailOnceBatchProviderFactory(calls),
                 devices="cpu",
-                resume=True,
             )
 
             stored = read_store_dataset(target)
@@ -992,14 +979,12 @@ class ViewMaterializerTest(unittest.TestCase):
                     dataset_factory=_DatasetFactory(samples),
                     provider_factory=_FailOnceTTSBatchProviderFactory(calls),
                     devices="cpu",
-                    resume=True,
                 )
 
             ModalityMaterializer(target, split="train", batch_size=2).write(
                 dataset_factory=_DatasetFactory(samples),
                 provider_factory=_FailOnceTTSBatchProviderFactory(calls),
                 devices="cpu",
-                resume=True,
             )
 
             stored = read_store_dataset(target)

@@ -13,7 +13,9 @@ from typing import TYPE_CHECKING, Any
 from .._logging import write_info
 from .._devices import Devices, resolve_devices
 from .._parallel import validate_process_value
+from .._resume import dataset_sample_count, indexes_complete
 from .._validation import non_negative_int, optional_positive_int, positive_int
+from .._write_pipeline import BackgroundWriteSink
 from ..cache import FileLock, anydataset_home
 from ..dataset.abc import AnyDataset, MapStyleABC, MergedDataset
 from ..runtime import Runtime
@@ -21,6 +23,13 @@ from ..store.jsonio import read_json, write_json
 from ..store.reader import StoreDataset
 from ..types import Source, Spec
 from .collect import collect_ranges, collect_ranges_parallel
+from .resume import (
+    cleanup_filter_resume_dir,
+    completed_filter_indexes,
+    iter_filter_fragment_chunks,
+    prepare_filter_resume_dir,
+    write_filter_fragment,
+)
 from .rules import rule_cache_key
 from .storage import (
     MetricsWriter,
@@ -71,6 +80,8 @@ def apply_filter(
     prefetch_factor: int | None,
     commit_samples: int,
     max_shard_samples: int | None,
+    write_workers: int,
+    write_prefetch: int | None,
     runtime: Runtime,
     dataset_factory: DatasetFactory,
 ) -> _FilterCache:
@@ -87,6 +98,8 @@ def apply_filter(
         prefetch_factor=prefetch_factor,
         commit_samples=commit_samples,
         max_shard_samples=max_shard_samples,
+        write_workers=write_workers,
+        write_prefetch=write_prefetch,
         runtime=runtime,
         dataset_factory=dataset_factory,
     )
@@ -111,6 +124,8 @@ def ensure_filter(
     prefetch_factor: int | None,
     commit_samples: int,
     max_shard_samples: int | None,
+    write_workers: int,
+    write_prefetch: int | None,
     runtime: Runtime,
     dataset_factory: DatasetFactory,
 ) -> tuple[Path, Path | None]:
@@ -130,9 +145,11 @@ def ensure_filter(
         "max_shard_samples",
         max_shard_samples,
     )
+    write_workers = non_negative_int("write_workers", write_workers)
+    write_prefetch = optional_positive_int("write_prefetch", write_prefetch)
 
     identity = filter_identity(dataset)
-    base_count = len(dataset)
+    base_count = dataset_sample_count(dataset, context="filter")
     expected = metadata(identity, base_count, rule)
     cache_path = filter_path(rule, identity)
     metric_path = metrics_path(cache_path) if metrics else None
@@ -166,6 +183,8 @@ def ensure_filter(
             prefetch_factor=prefetch_factor,
             commit_samples=commit_samples,
             max_shard_samples=max_shard_samples,
+            write_workers=write_workers,
+            write_prefetch=write_prefetch,
             runtime=runtime,
             dataset_factory=dataset_factory,
         )
@@ -382,6 +401,8 @@ def write_cache(
     prefetch_factor: int | None,
     commit_samples: int,
     max_shard_samples: int | None,
+    write_workers: int,
+    write_prefetch: int | None,
     runtime: Runtime,
     dataset_factory: DatasetFactory,
 ) -> None:
@@ -396,6 +417,8 @@ def write_cache(
             tmp,
             dataset,
             rule,
+            cache_path=path,
+            metadata=metadata,
             metrics=metrics,
             devices=devices,
             batch_size=batch_size,
@@ -403,6 +426,8 @@ def write_cache(
             prefetch_factor=prefetch_factor,
             commit_samples=commit_samples,
             max_shard_samples=max_shard_samples,
+            write_workers=write_workers,
+            write_prefetch=write_prefetch,
             runtime=runtime,
             dataset_factory=dataset_factory,
         )
@@ -410,6 +435,7 @@ def write_cache(
         if path.exists():
             shutil.rmtree(path)
         os.replace(tmp, path)
+        cleanup_filter_resume_dir(path)
     except Exception:
         if tmp.exists():
             shutil.rmtree(tmp)
@@ -421,6 +447,8 @@ def write_partitions(
     dataset: FilterBase,
     rule: FilterRule,
     *,
+    cache_path: Path,
+    metadata: Mapping[str, Any],
     metrics: bool,
     devices: tuple[str, ...],
     batch_size: int,
@@ -428,8 +456,163 @@ def write_partitions(
     prefetch_factor: int | None,
     commit_samples: int,
     max_shard_samples: int | None,
+    write_workers: int,
+    write_prefetch: int | None,
     runtime: Runtime,
     dataset_factory: DatasetFactory,
+) -> None:
+    resume_dir = prepare_filter_resume_dir(cache_path, metadata, metrics=metrics)
+    expected = dataset_sample_count(dataset, context="filter")
+    completed = completed_filter_indexes(resume_dir, expected=expected)
+    if not indexes_complete(completed, expected):
+        write_filter_resume_fragments(
+            resume_dir,
+            dataset,
+            rule,
+            metrics=metrics,
+            devices=devices,
+            batch_size=batch_size,
+            num_workers=num_workers,
+            prefetch_factor=prefetch_factor,
+            commit_samples=commit_samples,
+            runtime=runtime,
+            dataset_factory=dataset_factory,
+            completed=completed,
+            write_workers=write_workers,
+            write_prefetch=write_prefetch,
+        )
+        completed = completed_filter_indexes(resume_dir, expected=expected)
+    if not indexes_complete(completed, expected):
+        raise RuntimeError("Filter resume fragments do not cover all samples.")
+    replay_filter_resume_fragments(
+        path,
+        resume_dir,
+        metrics=metrics,
+        max_shard_samples=max_shard_samples,
+    )
+
+
+def write_filter_resume_fragments(
+    path: Path,
+    dataset: FilterBase,
+    rule: FilterRule,
+    *,
+    metrics: bool,
+    devices: tuple[str, ...],
+    batch_size: int,
+    num_workers: int,
+    prefetch_factor: int | None,
+    commit_samples: int,
+    runtime: Runtime,
+    dataset_factory: DatasetFactory,
+    completed: frozenset[int],
+    write_workers: int,
+    write_prefetch: int | None,
+) -> None:
+    sink = BackgroundWriteSink(
+        write_filter_fragment_job,
+        workers=write_workers,
+        max_pending=write_prefetch,
+        start_method=runtime.process_start_method,
+    )
+    with sink:
+        write_filter_resume_fragment_jobs(
+            sink,
+            path,
+            dataset,
+            rule,
+            metrics=metrics,
+            devices=devices,
+            batch_size=batch_size,
+            num_workers=num_workers,
+            prefetch_factor=prefetch_factor,
+            commit_samples=commit_samples,
+            runtime=runtime,
+            dataset_factory=dataset_factory,
+            completed=completed,
+        )
+
+
+def write_filter_resume_fragment_jobs(
+    sink: BackgroundWriteSink[FilterFragmentJob],
+    path: Path,
+    dataset: FilterBase,
+    rule: FilterRule,
+    *,
+    metrics: bool,
+    devices: tuple[str, ...],
+    batch_size: int,
+    num_workers: int,
+    prefetch_factor: int | None,
+    commit_samples: int,
+    runtime: Runtime,
+    dataset_factory: DatasetFactory,
+    completed: frozenset[int],
+) -> None:
+    if len(devices) == 1 or len(dataset) == 0:
+        for chunk in collect_ranges(
+            dataset,
+            rule.factory,
+            devices[0],
+            metrics,
+            commit_samples,
+            skip_indexes=completed,
+            dataset_factory=dataset_factory,
+            batch_size=batch_size,
+            num_workers=num_workers,
+            prefetch_factor=prefetch_factor,
+            runtime=runtime,
+        ):
+            global_chunk = global_filter_chunk(dataset, chunk)
+            sink.submit(
+                FilterFragmentJob(
+                    path=path,
+                    scan_indexes=filter_chunk_indexes(chunk),
+                    chunk=global_chunk,
+                )
+            )
+    else:
+        factory = parallel_dataset_factory(dataset_factory, runtime)
+        for chunk in collect_ranges_parallel(
+            factory,
+            rule.factory,
+            devices,
+            metrics,
+            commit_samples,
+            sample_count=len(dataset),
+            skip_indexes=completed,
+            batch_size=batch_size,
+            num_workers=num_workers,
+            prefetch_factor=prefetch_factor,
+            runtime=runtime,
+        ):
+            global_chunk = global_filter_chunk(dataset, chunk)
+            sink.submit(
+                FilterFragmentJob(
+                    path=path,
+                    scan_indexes=filter_chunk_indexes(chunk),
+                    chunk=global_chunk,
+                )
+            )
+
+
+@dataclass(frozen=True)
+class FilterFragmentJob:
+    path: Path
+    scan_indexes: tuple[int, ...]
+    chunk: _FilterChunk
+
+
+def write_filter_fragment_job(job: FilterFragmentJob) -> None:
+    write_filter_fragment(job.path, job.scan_indexes, job.chunk)
+
+
+def replay_filter_resume_fragments(
+    path: Path,
+    resume_dir: Path,
+    *,
+    metrics: bool,
+    max_shard_samples: int | None,
 ) -> None:
     writer = PartitionWriter(path, max_shard_samples=max_shard_samples)
     metrics_writer = (
@@ -438,45 +621,8 @@ def write_partitions(
         else None
     )
     try:
-        if len(devices) == 1 or len(dataset) == 0:
-            for chunk in collect_ranges(
-                dataset,
-                rule.factory,
-                devices[0],
-                metrics,
-                commit_samples,
-                dataset_factory=dataset_factory,
-                batch_size=batch_size,
-                num_workers=num_workers,
-                prefetch_factor=prefetch_factor,
-                runtime=runtime,
-            ):
-                write_filter_chunk(
-                    writer,
-                    metrics_writer,
-                    global_filter_chunk(dataset, chunk),
-                    metrics=metrics,
-                )
-        else:
-            factory = parallel_dataset_factory(dataset_factory, runtime)
-            for chunk in collect_ranges_parallel(
-                factory,
-                rule.factory,
-                devices,
-                metrics,
-                commit_samples,
-                sample_count=len(dataset),
-                batch_size=batch_size,
-                num_workers=num_workers,
-                prefetch_factor=prefetch_factor,
-                runtime=runtime,
-            ):
-                write_filter_chunk(
-                    writer,
-                    metrics_writer,
-                    global_filter_chunk(dataset, chunk),
-                    metrics=metrics,
-                )
+        for chunk in iter_filter_fragment_chunks(resume_dir):
+            write_filter_chunk(writer, metrics_writer, chunk, metrics=metrics)
         writer.close()
         if metrics_writer is not None:
             metrics_writer.close()
@@ -485,6 +631,15 @@ def write_partitions(
         if metrics_writer is not None:
             metrics_writer.abort()
         raise
+
+
+def filter_chunk_indexes(chunk: _FilterChunk) -> tuple[int, ...]:
+    indexes = {
+        int(index)
+        for positions in chunk.partitions.values()
+        for index in positions
+    }
+    return tuple(sorted(indexes))
 
 
 def parallel_dataset_factory(factory: DatasetFactory, runtime: Runtime) -> DatasetFactory:

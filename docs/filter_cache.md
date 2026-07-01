@@ -111,7 +111,11 @@ controls the maximum number of indices written to one shard; the default is
 samples are scanned before one in-memory label batch is committed to the shard
 writer; the default is 100,000. Cache construction writes those bounded batches
 incrementally, so it does not need to hold every accepted index in one Python
-object before writing.
+object before writing. Cache construction keeps completed chunks in a hidden
+resume directory and replays them into the final cache after all samples are
+covered. `write_workers` controls background fragment writer processes; the
+default is one writer so predicate execution can overlap with parquet writes.
+`write_prefetch` bounds pending write jobs.
 
 `FilterRule.apply(..., device="auto")` uses one spawned process per visible CUDA
 device, or CPU single-process execution when CUDA is unavailable. Pass

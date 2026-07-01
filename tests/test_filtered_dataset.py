@@ -155,6 +155,121 @@ class FilteredDatasetTest(unittest.TestCase):
         self.assertEqual(_values(result.select_by("accept")), [2, 3])
         self.assertEqual(calls, [])
 
+    def test_rule_apply_resumes_from_completed_chunks(self):
+        _register_rows_source("unit_test_filter_resume")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            calls = root / "calls.txt"
+            marker = root / "failed.txt"
+            dataset = _dataset("unit_test_filter_resume", [0, 1, 2, 3])
+            rule = FilterRule(
+                name="resume_even",
+                factory=lambda: _FailOnceFilter(calls, marker, fail_value=2),
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "stop after first chunk"):
+                rule.apply(
+                    dataset_factory=lambda: dataset,
+                    device="cpu",
+                    commit_samples=2,
+                )
+
+            self.assertEqual(calls.read_text(encoding="utf-8").splitlines(), ["0", "1", "2"])
+
+            result = rule.apply(
+                dataset_factory=lambda: dataset,
+                device="cpu",
+                commit_samples=2,
+            )
+
+            self.assertEqual(
+                calls.read_text(encoding="utf-8").splitlines(),
+                ["0", "1", "2", "2", "3"],
+            )
+            self.assertEqual(result.counts, {"accept": 2, "reject": 2})
+            self.assertEqual(result.select_by("accept").indices, (0, 2))
+            self.assertFalse(
+                (result.cache_path.parent / f".{result.cache_path.name}.resume").exists()
+            )
+
+    def test_rule_apply_resumes_metrics_chunks(self):
+        _register_rows_source("unit_test_filter_resume_metrics")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            calls = root / "metric-calls.txt"
+            marker = root / "metric-failed.txt"
+            dataset = _dataset("unit_test_filter_resume_metrics", [0, 1, 2, 3])
+            rule = FilterRule(
+                name="resume_metrics",
+                factory=lambda: _FailOnceMetricFilter(calls, marker, fail_value=2),
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "stop after first chunk"):
+                rule.apply(
+                    dataset_factory=lambda: dataset,
+                    metrics=True,
+                    device="cpu",
+                    commit_samples=2,
+                )
+
+            result = rule.apply(
+                dataset_factory=lambda: dataset,
+                metrics=True,
+                device="cpu",
+                commit_samples=2,
+            )
+            rows = list(result.iter_metrics())
+
+            self.assertEqual(
+                calls.read_text(encoding="utf-8").splitlines(),
+                ["0", "1", "2", "2", "3"],
+            )
+            self.assertEqual(
+                rows,
+                [
+                    {"index": 0, "label": "accept", "metrics": {"score": 0}},
+                    {"index": 1, "label": "reject", "metrics": {"score": 1}},
+                    {"index": 2, "label": "accept", "metrics": {"score": 2}},
+                    {"index": 3, "label": "reject", "metrics": {"score": 3}},
+                ],
+            )
+
+    def test_chained_filter_resume_skips_view_indexes(self):
+        _register_rows_source("unit_test_filter_chain_resume")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            calls = root / "chain-calls.txt"
+            marker = root / "chain-failed.txt"
+            dataset = _dataset("unit_test_filter_chain_resume", [0, 1, 2, 3, 4])
+            first = FilterRule(
+                name="gte_two",
+                factory=lambda: lambda sample: _value(sample) >= 2,
+            ).apply(dataset_factory=lambda: dataset, device="cpu").select_by("accept")
+            calls.write_text("", encoding="utf-8")
+            second = FilterRule(
+                name="resume_chain_even",
+                factory=lambda: _FailOnceFilter(calls, marker, fail_value=4),
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "stop after first chunk"):
+                second.apply(
+                    dataset_factory=first.dataset_factory,
+                    device="cpu",
+                    commit_samples=2,
+                )
+
+            result = second.apply(
+                dataset_factory=first.dataset_factory,
+                device="cpu",
+                commit_samples=2,
+            )
+
+            self.assertEqual(
+                calls.read_text(encoding="utf-8").splitlines(),
+                ["2", "3", "4", "4"],
+            )
+            self.assertEqual(result.select_by("accept").indices, (2, 4))
+
     def test_rule_apply_creates_predicate_from_factory(self):
         _register_rows_source("unit_test_filter_factory")
         events = []
@@ -747,6 +862,10 @@ class FilteredDatasetTest(unittest.TestCase):
                 rule.apply(dataset_factory=lambda: dataset, num_workers=-1)
             with self.assertRaises(ValueError):
                 rule.apply(dataset_factory=lambda: dataset, prefetch_factor=0)
+            with self.assertRaises(ValueError):
+                rule.apply(dataset_factory=lambda: dataset, write_workers=-1)
+            with self.assertRaises(ValueError):
+                rule.apply(dataset_factory=lambda: dataset, write_prefetch=0)
 
     def test_filtered_dataset_rejects_empty_selection(self):
         _register_rows_source("unit_test_filter_requires_labels")
@@ -1043,6 +1162,33 @@ class _LazyIndex(Sequence[int]):
     def __iter__(self) -> Iterator[int]:
         self.iterated = True
         return iter(self._values)
+
+
+class _FailOnceFilter:
+    def __init__(self, calls: Path, marker: Path, *, fail_value: int) -> None:
+        self.calls = calls
+        self.marker = marker
+        self.fail_value = fail_value
+
+    def __call__(self, sample):
+        value = _value(sample)
+        with self.calls.open("a", encoding="utf-8") as file:
+            file.write(f"{value}\n")
+        if value == self.fail_value and not self.marker.exists():
+            self.marker.write_text("failed\n", encoding="utf-8")
+            raise RuntimeError("stop after first chunk")
+        return value % 2 == 0
+
+
+class _FailOnceMetricFilter(_FailOnceFilter):
+    def __call__(self, sample):
+        value = _value(sample)
+        with self.calls.open("a", encoding="utf-8") as file:
+            file.write(f"{value}\n")
+        if value == self.fail_value and not self.marker.exists():
+            self.marker.write_text("failed\n", encoding="utf-8")
+            raise RuntimeError("stop after first chunk")
+        return FilterDecision(label=value % 2 == 0, metrics={"score": value})
 
 
 def _unpicklable_dataset(

@@ -35,6 +35,8 @@ class FilterApplyKwargs(TypedDict):
     prefetch_factor: NotRequired[int | None]
     commit_samples: NotRequired[int]
     max_shard_samples: NotRequired[int | None]
+    write_workers: NotRequired[int]
+    write_prefetch: NotRequired[int | None]
     runtime: NotRequired[Runtime]
 
 
