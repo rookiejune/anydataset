@@ -1,4 +1,5 @@
 from .cache import CacheManager, anydataset_home
+from .runtime import Runtime
 from .dataset import (
     AnyDataset,
     Batch,
@@ -61,6 +62,13 @@ from .store import (
     ViewProvider,
     ViewTransform,
 )
+from .provider_service import (
+    ProviderServer,
+    RemoteFilterFactory,
+    RemoteFilterPredicate,
+    RemoteProvider,
+    RemoteProviderFactory,
+)
 from .dataset.source import for_source, has_source, register_source
 from .utils import resolve_dataset
 
@@ -104,9 +112,15 @@ __all__ = [
     "Meta",
     "Preset",
     "Provider",
+    "ProviderServer",
     "Requirement",
+    "RemoteFilterFactory",
+    "RemoteFilterPredicate",
+    "RemoteProvider",
+    "RemoteProviderFactory",
     "Role",
     "RoundRobinStrategy",
+    "Runtime",
     "Sample",
     "Schema",
     "SequentialStrategy",

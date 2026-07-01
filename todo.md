@@ -24,6 +24,11 @@
   fork-on-Linux behavior for map-style indexed wrappers; if caching the dataset
   instance in the wrapper, make spawn serialization drop that cache so workers
   can lazily rebuild from `dataset_factory`.
+  Preferred direction: keep outer provider/device workers on spawn, and make
+  inner DataLoader workers use fork only as a controlled Linux map-style indexed
+  loader optimization. Do not make fork a global silent default; iterable,
+  streaming, CUDA-touching, or unknown dataset paths should keep spawn/default
+  behavior, with an explicit loader start-method override for experiments.
 - Recheck distributed LBA tail flush after the indexed loader decision. The
   current iterable wrapper preserves correctness by object gather, while a true
   map-style indexed loader should let LBA use metadata-only flush through stable

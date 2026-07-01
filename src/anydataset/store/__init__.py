@@ -9,10 +9,8 @@ from ..view import (
     ViewProvider,
     ViewTransform,
 )
-from .materializer import (
-    ModalityMaterializer,
-    ViewMaterializer,
-)
+from ..runtime import Runtime
+from .materializer import ModalityMaterializer, ViewMaterializer
 from .parts import (
     DatasetFragmentWriter,
     DatasetPartWriter,
@@ -35,6 +33,7 @@ __all__ = [
     "ModalityProvider",
     "ModalityTransform",
     "Provider",
+    "Runtime",
     "ViewMaterializer",
     "ViewProvider",
     "ViewTransform",

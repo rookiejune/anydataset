@@ -223,7 +223,8 @@ class _FileIndex(Sequence[int]):
 
     def __getitem__(self, index: int | slice) -> int | tuple[int, ...]:
         if isinstance(index, slice):
-            return tuple(self[position] for position in range(*index.indices(len(self))))
+            start, stop, step = index.indices(len(self))
+            return tuple(self._iter_slice(start, stop, step))
         if index < 0:
             index += len(self)
         if index < 0 or index >= len(self):
@@ -236,6 +237,27 @@ class _FileIndex(Sequence[int]):
         for shard_index in range(len(self._files)):
             for index in self._shard(shard_index):
                 yield int(index)
+
+    def _iter_slice(self, start: int, stop: int, step: int) -> Iterable[int]:
+        if step <= 0:
+            for index in range(start, stop, step):
+                yield self[index]
+            return
+        if start >= stop:
+            return
+
+        shard_index = bisect_right(self._offsets, start) - 1
+        position = start
+        while position < stop and shard_index < len(self._files):
+            shard_offset = self._offsets[shard_index]
+            shard_stop = min(stop, self._offsets[shard_index + 1])
+            shard = self._shard(shard_index)
+            local_start = position - shard_offset
+            local_stop = shard_stop - shard_offset
+            for value in shard[local_start:local_stop:step]:
+                yield int(value)
+            position += ((shard_stop - position + step - 1) // step) * step
+            shard_index += 1
 
     def _shard(self, index: int) -> array[int]:
         shard = self._shards[index]

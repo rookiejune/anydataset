@@ -14,7 +14,7 @@ import socket
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import torch
 from torch.utils.data import DataLoader, IterableDataset
@@ -23,6 +23,7 @@ from ._logging import run_logs_dir, set_run_logs_dir
 from ._sharding import runtime_shard, validate_shard
 
 type DatasetFactory = Callable[[], Any]
+type StartMethod = Literal["fork", "spawn", "forkserver"]
 
 _DEFAULT_LOADER_PREFETCH_FACTOR = 2
 
@@ -83,6 +84,7 @@ def indexed_loader(
     batch_size: int,
     num_workers: int,
     prefetch_factor: int | None = None,
+    start_method: StartMethod = "spawn",
 ) -> DataLoader:
     kwargs: dict[str, Any] = {
         "batch_size": batch_size,
@@ -90,12 +92,13 @@ def indexed_loader(
         "num_workers": num_workers,
     }
     if num_workers > 0:
-        validate_spawn_value(
+        validate_process_value(
             "dataset_factory",
             dataset_factory,
             context="DataLoader workers",
+            start_method=start_method,
         )
-        kwargs["multiprocessing_context"] = multiprocessing_context()
+        kwargs["multiprocessing_context"] = multiprocessing_context(start_method)
         kwargs["prefetch_factor"] = (
             prefetch_factor or _DEFAULT_LOADER_PREFETCH_FACTOR
         )
@@ -138,8 +141,20 @@ def worker_configs(
     )
 
 
-def multiprocessing_context():
-    return multiprocessing.get_context("spawn")
+def multiprocessing_context(start_method: StartMethod = "spawn"):
+    return multiprocessing.get_context(start_method)
+
+
+def validate_process_value(
+    name: str,
+    value: object,
+    *,
+    context: str,
+    start_method: StartMethod,
+) -> None:
+    if start_method == "fork":
+        return
+    validate_spawn_value(name, value, context=context)
 
 
 def validate_spawn_value(name: str, value: object, *, context: str) -> None:

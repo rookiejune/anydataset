@@ -7,7 +7,7 @@ import shutil
 import traceback
 import hashlib
 from collections.abc import Callable, Iterable, Iterator, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any, Literal, cast
@@ -28,10 +28,11 @@ from .._parallel import (
     set_single_worker_environment,
     set_torch_device,
     set_worker_environment,
-    validate_spawn_value,
+    validate_process_value,
 )
 from .._progress import Progress, iter_with_progress, put_progress, watch_workers
 from .._validation import non_negative_int, optional_positive_int, positive_int
+from ..runtime import Runtime
 from ..types.item import Sample
 from ..view import Provider
 from ._batch import (
@@ -67,6 +68,7 @@ class ViewMaterializer:
     batch_size: int = 1
     num_workers: int = 0
     prefetch_factor: int | None = None
+    runtime: Runtime = field(default_factory=Runtime)
 
     def __post_init__(self) -> None:
         self.max_shard_samples = positive_int(
@@ -98,10 +100,11 @@ class ViewMaterializer:
                 dataset_factory=dataset_factory,
                 provider_factory=provider_factory,
                 devices=resolved,
-            )
+        )
         if len(resolved) == 1:
             device = resolved[0]
-            set_torch_device(device)
+            if self.runtime.uses_local_device:
+                set_torch_device(device)
             return self._write_single(
                 dataset_factory=dataset_factory,
                 provider=provider_factory(device),
@@ -122,7 +125,8 @@ class ViewMaterializer:
     ) -> Path:
         if len(devices) == 1:
             device = devices[0]
-            set_torch_device(device)
+            if self.runtime.uses_local_device:
+                set_torch_device(device)
             return self._write_resumable_single(
                 dataset_factory=dataset_factory,
                 provider_factory=provider_factory,
@@ -141,15 +145,17 @@ class ViewMaterializer:
         provider_factory: ProviderFactory,
         devices: tuple[str, ...],
     ) -> Path:
-        validate_spawn_value(
+        validate_process_value(
             "dataset_factory",
             dataset_factory,
             context="multi-device materialization",
+            start_method=self.runtime.process_start_method,
         )
-        validate_spawn_value(
+        validate_process_value(
             "provider_factory",
             provider_factory,
             context="multi-device materialization",
+            start_method=self.runtime.process_start_method,
         )
         output_dir = _prepare_parallel_output_dir(Path(self.output_dir).expanduser())
         logs_dir = run_logs_dir()
@@ -177,15 +183,17 @@ class ViewMaterializer:
         provider_factory: ProviderFactory,
         devices: tuple[str, ...],
     ) -> Path:
-        validate_spawn_value(
+        validate_process_value(
             "dataset_factory",
             dataset_factory,
             context="multi-device materialization",
+            start_method=self.runtime.process_start_method,
         )
-        validate_spawn_value(
+        validate_process_value(
             "provider_factory",
             provider_factory,
             context="multi-device materialization",
+            start_method=self.runtime.process_start_method,
         )
         expected = _dataset_sample_count(dataset_factory())
         fragments_dir = _prepare_resume_fragments_dir(Path(self.output_dir).expanduser())
@@ -423,6 +431,7 @@ class ViewMaterializer:
             batch_size=self.batch_size,
             num_workers=self.num_workers,
             prefetch_factor=self.prefetch_factor,
+            start_method=self.runtime.loader_start_method,
         )
 
     def _run_parallel_parts(
@@ -437,7 +446,7 @@ class ViewMaterializer:
         resume: bool = False,
         fragments_dir: Path | None = None,
     ) -> None:
-        context = multiprocessing_context()
+        context = multiprocessing_context(self.runtime.process_start_method)
         progress = context.Queue()
         master_addr = os.environ.get("MASTER_ADDR", "127.0.0.1")
         master_port = os.environ.get("MASTER_PORT", free_port())
@@ -453,6 +462,7 @@ class ViewMaterializer:
                         num_workers=self.num_workers,
                         prefetch_factor=self.prefetch_factor,
                         mode=self._materializer_mode,
+                        runtime=self.runtime,
                         parts_dir=parts_dir,
                         resume=resume,
                         fragments_dir=fragments_dir,
@@ -634,6 +644,7 @@ class _WorkerConfig:
     num_workers: int
     prefetch_factor: int | None
     mode: _MaterializerMode
+    runtime: Runtime
     parts_dir: Path
     resume: bool
     fragments_dir: Path | None
@@ -706,8 +717,9 @@ def _materialize_worker(
         )
         process_group_created = False
         try:
-            set_torch_device(config.device)
-            process_group_created = _init_worker_process_group(config)
+            if config.runtime.uses_local_device:
+                set_torch_device(config.device)
+                process_group_created = _init_worker_process_group(config)
             provider = provider_factory(config.device)
             materializer = _worker_materializer(config)
             if config.resume:
@@ -761,6 +773,7 @@ def _worker_materializer(config: _WorkerConfig) -> ViewMaterializer:
         batch_size=config.batch_size,
         num_workers=config.num_workers,
         prefetch_factor=config.prefetch_factor,
+        runtime=config.runtime,
     )
 
 

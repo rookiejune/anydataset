@@ -12,10 +12,11 @@ from typing import TYPE_CHECKING, Any
 
 from .._logging import write_info
 from .._devices import Devices, resolve_devices
-from .._parallel import validate_spawn_value
+from .._parallel import validate_process_value
 from .._validation import non_negative_int, optional_positive_int, positive_int
 from ..cache import FileLock, anydataset_home
 from ..dataset.abc import AnyDataset, MapStyleABC, MergedDataset
+from ..runtime import Runtime
 from ..store.jsonio import read_json, write_json
 from ..store.reader import StoreDataset
 from ..types import Source, Spec
@@ -70,6 +71,7 @@ def apply_filter(
     prefetch_factor: int | None,
     commit_samples: int,
     max_shard_samples: int | None,
+    runtime: Runtime,
     dataset_factory: DatasetFactory,
 ) -> _FilterCache:
     from .api import _FilterCache
@@ -85,6 +87,7 @@ def apply_filter(
         prefetch_factor=prefetch_factor,
         commit_samples=commit_samples,
         max_shard_samples=max_shard_samples,
+        runtime=runtime,
         dataset_factory=dataset_factory,
     )
     return _FilterCache(
@@ -108,6 +111,7 @@ def ensure_filter(
     prefetch_factor: int | None,
     commit_samples: int,
     max_shard_samples: int | None,
+    runtime: Runtime,
     dataset_factory: DatasetFactory,
 ) -> tuple[Path, Path | None]:
     from .api import FilterRule
@@ -162,6 +166,7 @@ def ensure_filter(
             prefetch_factor=prefetch_factor,
             commit_samples=commit_samples,
             max_shard_samples=max_shard_samples,
+            runtime=runtime,
             dataset_factory=dataset_factory,
         )
         return cache_path, metric_path
@@ -377,6 +382,7 @@ def write_cache(
     prefetch_factor: int | None,
     commit_samples: int,
     max_shard_samples: int | None,
+    runtime: Runtime,
     dataset_factory: DatasetFactory,
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -397,6 +403,7 @@ def write_cache(
             prefetch_factor=prefetch_factor,
             commit_samples=commit_samples,
             max_shard_samples=max_shard_samples,
+            runtime=runtime,
             dataset_factory=dataset_factory,
         )
         (tmp / ".ready").write_text("ready\n", encoding="utf-8")
@@ -421,6 +428,7 @@ def write_partitions(
     prefetch_factor: int | None,
     commit_samples: int,
     max_shard_samples: int | None,
+    runtime: Runtime,
     dataset_factory: DatasetFactory,
 ) -> None:
     writer = PartitionWriter(path, max_shard_samples=max_shard_samples)
@@ -441,6 +449,7 @@ def write_partitions(
                 batch_size=batch_size,
                 num_workers=num_workers,
                 prefetch_factor=prefetch_factor,
+                runtime=runtime,
             ):
                 write_filter_chunk(
                     writer,
@@ -449,7 +458,7 @@ def write_partitions(
                     metrics=metrics,
                 )
         else:
-            factory = parallel_dataset_factory(dataset_factory)
+            factory = parallel_dataset_factory(dataset_factory, runtime)
             for chunk in collect_ranges_parallel(
                 factory,
                 rule.factory,
@@ -460,6 +469,7 @@ def write_partitions(
                 batch_size=batch_size,
                 num_workers=num_workers,
                 prefetch_factor=prefetch_factor,
+                runtime=runtime,
             ):
                 write_filter_chunk(
                     writer,
@@ -477,11 +487,12 @@ def write_partitions(
         raise
 
 
-def parallel_dataset_factory(factory: DatasetFactory) -> DatasetFactory:
-    validate_spawn_value(
+def parallel_dataset_factory(factory: DatasetFactory, runtime: Runtime) -> DatasetFactory:
+    validate_process_value(
         "dataset_factory",
         factory,
         context="multi-device filtering",
+        start_method=runtime.process_start_method,
     )
     return factory
 

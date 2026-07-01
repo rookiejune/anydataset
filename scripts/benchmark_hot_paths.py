@@ -4,6 +4,7 @@ import argparse
 import csv
 import json
 import multiprocessing
+import os
 import statistics
 import tempfile
 import time
@@ -12,10 +13,22 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from anydataset import AudioItem, AudioView, Modality, Role, Sample, Spec, TextItem, TextView
+from anydataset import (
+    AudioItem,
+    AudioView,
+    FilterRule,
+    Modality,
+    Role,
+    Sample,
+    Spec,
+    TextItem,
+    TextView,
+)
 from anydataset._parallel import indexed_loader as runtime_indexed_loader
 from anydataset.dataset.source.sharded_csv import ShardedCsvSource
 from anydataset.store.parts import DatasetPartWriter, commit_store_parts
+from anydataset.store.reader import read_store_dataset
+from anydataset.store.writer import DatasetWriter
 from torch.utils.data import DataLoader, Dataset, Sampler
 
 
@@ -50,7 +63,21 @@ def main() -> None:
             ),
             repeats=args.repeats,
         ),
+        "store_reader": bench_store_reader_variants(args),
         "indexed_loader": bench_indexed_loader_variants(args),
+        "filter_parallel": run_repeated(
+            lambda root: bench_filter_parallel(
+                root,
+                samples=args.filter_samples,
+                devices=args.filter_devices,
+                batch_size=args.filter_batch_size,
+                num_workers=args.filter_num_workers,
+                prefetch_factor=args.filter_prefetch_factor,
+                commit_samples=args.filter_commit_samples,
+                payload_bytes=args.filter_payload_bytes,
+            ),
+            repeats=args.repeats,
+        ),
     }
     print(json.dumps(output, ensure_ascii=True, indent=2, sort_keys=True))
 
@@ -80,6 +107,13 @@ def parse_args() -> argparse.Namespace:
         default="runtime,map_default,map_spawn,map_fork",
         help="Comma-separated variants: runtime,map_default,map_spawn,map_fork.",
     )
+    parser.add_argument("--filter-samples", type=int, default=2_000)
+    parser.add_argument("--filter-devices", type=int, default=2)
+    parser.add_argument("--filter-batch-size", type=int, default=32)
+    parser.add_argument("--filter-num-workers", type=int, default=0)
+    parser.add_argument("--filter-prefetch-factor", type=int, default=None)
+    parser.add_argument("--filter-commit-samples", type=int, default=100_000)
+    parser.add_argument("--filter-payload-bytes", type=int, default=32)
     return parser.parse_args()
 
 
@@ -117,11 +151,6 @@ def bench_store_commit(
     audio_views: int,
     max_shard_samples: int,
 ) -> Measurement:
-    validate_positive("store_samples", samples)
-    validate_positive("store_parts", parts)
-    validate_positive("store_text_views", text_views)
-    validate_positive("store_audio_views", audio_views)
-    validate_positive("store_max_shard_samples", max_shard_samples)
     parts_dir = root / "parts"
     output_dir = root / "dataset"
     for part_id in range(parts):
@@ -205,12 +234,6 @@ def bench_sharded_csv(
     num_shards: int,
     shard_id: int,
 ) -> Measurement:
-    validate_positive("csv_shards", csv_shards)
-    validate_positive("csv_files_per_shard", files_per_shard)
-    validate_positive("csv_rows_per_file", rows_per_file)
-    validate_positive("csv_num_shards", num_shards)
-    if shard_id < 0 or shard_id >= num_shards:
-        raise ValueError("csv_shard_id must satisfy 0 <= shard_id < csv_num_shards.")
     csv_root = root / "csv"
     write_csv_dataset(
         csv_root,
@@ -241,16 +264,67 @@ def bench_sharded_csv(
     )
 
 
-def bench_indexed_loader_variants(args: argparse.Namespace) -> dict[str, Any]:
-    validate_positive("indexed_samples", args.indexed_samples)
-    validate_positive("indexed_batch_size", args.indexed_batch_size)
-    validate_non_negative("indexed_num_workers", args.indexed_num_workers)
-    validate_positive("indexed_payload_bytes", args.indexed_payload_bytes)
-    validate_positive("indexed_num_shards", args.indexed_num_shards)
-    if args.indexed_shard_id < 0 or args.indexed_shard_id >= args.indexed_num_shards:
-        raise ValueError(
-            "indexed_shard_id must satisfy 0 <= indexed_shard_id < indexed_num_shards."
+def bench_store_reader_variants(args: argparse.Namespace) -> dict[str, Any]:
+    return {
+        "lazy_all": run_repeated(
+            lambda root: bench_store_reader(root, args, "lazy_all"),
+            repeats=args.repeats,
+        ),
+        "preload_all": run_repeated(
+            lambda root: bench_store_reader(root, args, "preload_all"),
+            repeats=args.repeats,
+        ),
+        "preload_one": run_repeated(
+            lambda root: bench_store_reader(root, args, "preload_one"),
+            repeats=args.repeats,
+        ),
+    }
+
+
+def bench_store_reader(
+    root: Path,
+    args: argparse.Namespace,
+    mode: str,
+) -> Measurement:
+    output_dir = root / "reader"
+    DatasetWriter(
+        output_dir,
+        dataset_id="bench-reader",
+        split="train",
+        max_shard_samples=args.store_max_shard_samples,
+    ).write(
+        sample(
+            index,
+            text_views=args.store_text_views,
+            audio_views=args.store_audio_views,
         )
+        for index in range(args.store_samples)
+    )
+    selected = ((Role.DEFAULT, Modality.AUDIO, AudioView.WAVEFORM),)
+
+    start = time.perf_counter()
+    match mode:
+        case "lazy_all":
+            dataset = read_store_dataset(output_dir)
+        case "preload_all":
+            dataset = read_store_dataset(output_dir, preload=True)
+        case "preload_one":
+            dataset = read_store_dataset(output_dir, views=selected, preload=True)
+        case _:
+            raise KeyError(mode)
+    seconds = time.perf_counter() - start
+    return Measurement(
+        seconds=seconds,
+        detail={
+            "samples": args.store_samples,
+            "views": args.store_text_views + args.store_audio_views,
+            "loaded_views": len(dataset.views._cache),
+            "mode": mode,
+        },
+    )
+
+
+def bench_indexed_loader_variants(args: argparse.Namespace) -> dict[str, Any]:
     variants = indexed_variants(args.indexed_variants)
     return {
         variant: run_repeated(
@@ -328,6 +402,56 @@ def bench_indexed_loader(
             "payload_bytes": payload_bytes,
             "num_shards": num_shards,
             "shard_id": shard_id,
+        },
+    )
+
+
+def bench_filter_parallel(
+    root: Path,
+    *,
+    samples: int,
+    devices: int,
+    batch_size: int,
+    num_workers: int,
+    prefetch_factor: int | None,
+    commit_samples: int,
+    payload_bytes: int,
+) -> Measurement:
+    store_dir = root / "filter-store"
+    DatasetWriter(store_dir, dataset_id="bench-filter", split="train").write(
+        synthetic_sample(index, payload_bytes) for index in range(samples)
+    )
+    factory = StoreDatasetFactory(store_dir)
+    rule = FilterRule(name="bench_modulo", factory=ModuloFilterFactory(modulo=3))
+    previous_home = os.environ.get("ANYDATASET_HOME")
+    os.environ["ANYDATASET_HOME"] = str(root / "home")
+    try:
+        start = time.perf_counter()
+        result = rule.apply(
+            dataset_factory=factory,
+            device=tuple(f"cpu:{index}" for index in range(devices)),
+            batch_size=batch_size,
+            num_workers=num_workers,
+            prefetch_factor=prefetch_factor,
+            commit_samples=commit_samples,
+        )
+        seconds = time.perf_counter() - start
+    finally:
+        if previous_home is None:
+            os.environ.pop("ANYDATASET_HOME", None)
+        else:
+            os.environ["ANYDATASET_HOME"] = previous_home
+    return Measurement(
+        seconds=seconds,
+        detail={
+            "samples": samples,
+            "devices": devices,
+            "batch_size": batch_size,
+            "num_workers": num_workers,
+            "prefetch_factor": prefetch_factor,
+            "commit_samples": commit_samples,
+            "payload_bytes": payload_bytes,
+            "counts": dict(result.counts),
         },
     )
 
@@ -417,6 +541,32 @@ class SyntheticDataset(Dataset):
         }
 
 
+@dataclass(frozen=True)
+class StoreDatasetFactory:
+    root: Path
+
+    def __call__(self):
+        return read_store_dataset(self.root)
+
+
+@dataclass(frozen=True)
+class ModuloFilterFactory:
+    modulo: int
+
+    def __call__(self) -> "ModuloFilter":
+        return ModuloFilter(modulo=self.modulo)
+
+
+@dataclass(frozen=True)
+class ModuloFilter:
+    modulo: int
+
+    def __call__(self, sample: Sample) -> str:
+        text = sample[Role.DEFAULT, Modality.TEXT].views[TextView.TEXT]
+        index = int(text.split("-", maxsplit=2)[1])
+        return f"bucket_{index % self.modulo}"
+
+
 class MapIndexedDataset(Dataset):
     def __init__(self, dataset_factory: Callable[[], Dataset]) -> None:
         self.dataset_factory = dataset_factory
@@ -448,12 +598,6 @@ class GlobalIndexSampler(Sampler[int]):
     num_shards: int
     shard_id: int
 
-    def __post_init__(self) -> None:
-        validate_positive("samples", self.samples)
-        validate_positive("num_shards", self.num_shards)
-        if self.shard_id < 0 or self.shard_id >= self.num_shards:
-            raise ValueError("shard_id must satisfy 0 <= shard_id < num_shards.")
-
     def __iter__(self) -> Iterator[int]:
         return iter(range(self.shard_id, self.samples, self.num_shards))
 
@@ -468,6 +612,14 @@ def synthetic_payload(index: int, payload_bytes: int) -> str:
     if len(prefix) >= payload_bytes:
         return prefix
     return prefix + ("x" * (payload_bytes - len(prefix)))
+
+
+def synthetic_sample(index: int, payload_bytes: int) -> Sample:
+    return {
+        (Role.DEFAULT, Modality.TEXT): TextItem(
+            views={TextView.TEXT: synthetic_payload(index, payload_bytes)}
+        )
+    }
 
 
 def write_csv_dataset(
@@ -489,16 +641,6 @@ def write_csv_dataset(
                 for _ in range(rows_per_file):
                     writer.writerow({"id": row_id, "text": f"text-{row_id}"})
                     row_id += 1
-
-
-def validate_positive(name: str, value: int) -> None:
-    if value <= 0:
-        raise ValueError(f"{name} must be positive.")
-
-
-def validate_non_negative(name: str, value: int) -> None:
-    if value < 0:
-        raise ValueError(f"{name} must be non-negative.")
 
 
 if __name__ == "__main__":

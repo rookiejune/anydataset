@@ -22,7 +22,10 @@ from anydataset import (
     FilteredDataset,
     FilterRule,
     Modality,
+    ProviderServer,
+    RemoteFilterFactory,
     Role,
+    Runtime,
     Spec,
     TextItem,
     TextView,
@@ -455,6 +458,38 @@ class FilteredDatasetTest(unittest.TestCase):
 
         self.assertEqual(result.counts, {"zero": 4, "one": 3, "two": 3})
         self.assertEqual(result.select_by("one", "two").indices, (1, 2, 4, 5, 7, 8))
+
+    def test_rule_apply_remote_filter_with_fork_loader(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dataset_factory = partial(
+                _dataset,
+                "unit_test_filter_remote_fork_loader",
+                list(range(6)),
+            )
+            address = Path("/tmp") / f"anydataset-filter-{os.getpid()}-{id(self)}.sock"
+            server = ProviderServer(
+                address=address,
+                provider_factory=_RemoteModThreeFactory(),
+                device="cpu",
+            )
+
+            with server:
+                result = FilterRule(
+                    name="remote_mod_three",
+                    factory=RemoteFilterFactory({"cpu": address}),
+                ).apply(
+                    dataset_factory=dataset_factory,
+                    device="cpu",
+                    num_workers=1,
+                    batch_size=2,
+                    runtime=Runtime(
+                        loader_start_method="fork",
+                        device_scope="remote",
+                    ),
+                )
+
+        self.assertEqual(result.counts, {"zero": 2, "one": 2, "two": 2})
+        self.assertEqual(result.select_by("one", "two").indices, (1, 2, 4, 5))
 
     def test_rule_apply_writes_metrics_side_output(self):
         _register_rows_source("unit_test_filter_metrics")
@@ -1055,6 +1090,11 @@ def _mod_three(sample):
 
 def _mod_three_factory():
     return _mod_three
+
+
+class _RemoteModThreeFactory:
+    def __call__(self, device: str):
+        return _mod_three
 
 
 def _true_decision(sample):

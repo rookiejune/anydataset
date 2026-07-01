@@ -17,9 +17,12 @@ from anydataset import (
     ImageView,
     Modality,
     ModalityMaterializer,
+    ProviderServer,
+    RemoteProviderFactory,
     Role,
     Source,
     Spec,
+    Runtime,
     TextItem,
     TextMeta,
     TextView,
@@ -132,6 +135,55 @@ class ViewMaterializerTest(unittest.TestCase):
             stored = read_store_dataset(target)
             self.assertEqual(provider.batch_shapes, [(2, 1, 3)])
             self.assertEqual(provider.single_calls, 0)
+            self.assertTrue(
+                torch.equal(
+                    stored[0][Role.DEFAULT, Modality.AUDIO]
+                    .views[AudioView.LONGCAT]["semantic_codes"],
+                    torch.tensor([[1, 2, 3]]),
+                )
+            )
+            self.assertTrue(
+                torch.equal(
+                    stored[1][Role.DEFAULT, Modality.AUDIO]
+                    .views[AudioView.LONGCAT]["semantic_codes"],
+                    torch.tensor([[4]]),
+                )
+            )
+
+    def test_materializer_uses_remote_provider_with_fork_loader(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = root / "target"
+            samples = (
+                _audio_sample(torch.tensor([[1.0, 2.0, 3.0]])),
+                _audio_sample(torch.tensor([[4.0]])),
+            )
+            address = Path("/tmp") / f"anydataset-provider-{os.getpid()}-{id(self)}.sock"
+            server = ProviderServer(
+                address=address,
+                provider_factory=_BatchProviderFactory(),
+                device="cpu",
+            )
+
+            with server:
+                ViewMaterializer(
+                    target,
+                    batch_size=2,
+                    num_workers=1,
+                    runtime=Runtime(
+                        loader_start_method="fork",
+                        device_scope="remote",
+                    ),
+                ).write(
+                    dataset_factory=_DatasetFactory(samples),
+                    provider_factory=RemoteProviderFactory(
+                        AudioView.LONGCAT,
+                        {"cpu": address},
+                    ),
+                    devices="cpu",
+                )
+
+            stored = read_store_dataset(target)
             self.assertTrue(
                 torch.equal(
                     stored[0][Role.DEFAULT, Modality.AUDIO]
@@ -1212,6 +1264,12 @@ class _StaticProviderFactory:
 
     def __call__(self, device: str):
         return self.provider
+
+
+@dataclass(frozen=True)
+class _BatchProviderFactory:
+    def __call__(self, device: str):
+        return _BatchProvider()
 
 
 @dataclass(frozen=True)

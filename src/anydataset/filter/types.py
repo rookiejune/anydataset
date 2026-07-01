@@ -7,6 +7,7 @@ from typing import NotRequired, TypedDict
 
 from .._devices import Devices
 from ..dataset.abc import MapStyleABC
+from ..runtime import Runtime
 from ..types.item import Sample
 
 type JsonValue = None | bool | int | float | str | list[JsonValue] | dict[str, JsonValue]
@@ -34,6 +35,7 @@ class FilterApplyKwargs(TypedDict):
     prefetch_factor: NotRequired[int | None]
     commit_samples: NotRequired[int]
     max_shard_samples: NotRequired[int | None]
+    runtime: NotRequired[Runtime]
 
 
 @dataclass(frozen=True)

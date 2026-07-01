@@ -8,6 +8,7 @@ from typing import Any, Unpack
 
 from .._devices import Devices
 from ..dataset.abc import AnyDataset, MapStyleABC, MergedDataset
+from ..runtime import Runtime
 from ..store.reader import StoreDataset
 from ..types import Spec
 from ..types.item import Sample
@@ -46,6 +47,7 @@ _FILTER_APPLY_DEFAULTS: _FilterApplyOptions = {
     "prefetch_factor": None,
     "commit_samples": _DEFAULT_COMMIT_SAMPLES,
     "max_shard_samples": _DEFAULT_MAX_SHARD_SAMPLES,
+    "runtime": Runtime(),
 }
 
 
@@ -217,6 +219,7 @@ class FilteredDataset(MapStyleABC):
             prefetch_factor=options["prefetch_factor"],
             commit_samples=options["commit_samples"],
             max_shard_samples=options["max_shard_samples"],
+            runtime=options["runtime"],
             dataset_factory=dataset_factory,
         )
         self._bind_cache(cache, labels=normalized)
@@ -374,6 +377,7 @@ def _apply_options(kwargs: FilterApplyKwargs) -> _FilterApplyOptions:
             "max_shard_samples",
             _FILTER_APPLY_DEFAULTS["max_shard_samples"],
         ),
+        "runtime": kwargs.get("runtime", _FILTER_APPLY_DEFAULTS["runtime"]),
     }
 
 

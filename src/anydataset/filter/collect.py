@@ -15,9 +15,10 @@ from .._parallel import (
     restore_environment,
     set_single_worker_environment,
     set_worker_environment,
-    validate_spawn_value,
+    validate_process_value,
     worker_configs,
 )
+from ..runtime import Runtime
 from .rules import label
 from .storage import validate_metrics
 from .types import (
@@ -33,6 +34,8 @@ from .types import (
 )
 
 _DONE = "__done__"
+_WORKER_QUEUE_SIZE = 2
+_PARALLEL_WORKER_COMMIT_SAMPLES = 8_192
 
 
 @dataclass(frozen=True)
@@ -59,6 +62,7 @@ def collect_ranges(
     batch_size: int,
     num_workers: int,
     prefetch_factor: int | None,
+    runtime: Runtime,
 ) -> Iterable[_FilterChunk]:
     env = set_single_worker_environment(device, device_env="ANYDATASET_FILTER_DEVICE")
     try:
@@ -72,6 +76,7 @@ def collect_ranges(
             batch_size=batch_size,
             num_workers=num_workers,
             prefetch_factor=prefetch_factor,
+            runtime=runtime,
         )
     finally:
         restore_environment(env)
@@ -87,6 +92,7 @@ def collect_ranges_sequential(
     batch_size: int,
     num_workers: int,
     prefetch_factor: int | None,
+    runtime: Runtime,
 ) -> Iterable[_FilterChunk]:
     partitions: dict[str, array[int]] = {}
     metric_rows: list[_FilterMetricsRow] = []
@@ -97,6 +103,7 @@ def collect_ranges_sequential(
         batch_size=batch_size,
         num_workers=num_workers,
         prefetch_factor=prefetch_factor,
+        runtime=runtime,
     )
     for batch in loader:
         for index, sample in batch:
@@ -135,16 +142,24 @@ def collect_ranges_parallel(
     batch_size: int,
     num_workers: int,
     prefetch_factor: int | None,
+    runtime: Runtime,
 ) -> Iterable[_FilterChunk]:
     workers = min(len(devices), sample_count)
-    validate_spawn_value(
+    validate_process_value(
         "dataset_factory",
         dataset_factory,
         context="multi-device filtering",
+        start_method=runtime.process_start_method,
     )
-    validate_spawn_value("factory", factory, context="multi-device filtering")
-    context = multiprocessing_context()
-    output = context.Queue()
+    validate_process_value(
+        "factory",
+        factory,
+        context="multi-device filtering",
+        start_method=runtime.process_start_method,
+    )
+    context = multiprocessing_context(runtime.process_start_method)
+    worker_commit_samples = _worker_commit_samples(commit_samples)
+    outputs = tuple(context.Queue(maxsize=_WORKER_QUEUE_SIZE) for _rank in range(workers))
     processes = [
         context.Process(
             target=_filter_worker,
@@ -152,12 +167,13 @@ def collect_ranges_parallel(
                 dataset_factory,
                 factory,
                 metrics,
-                commit_samples,
+                worker_commit_samples,
                 worker,
                 batch_size,
                 num_workers,
                 prefetch_factor,
-                output,
+                runtime,
+                outputs[rank],
             ),
             name=f"anydataset-filter-{rank}",
         )
@@ -168,7 +184,7 @@ def collect_ranges_parallel(
     completed = False
     try:
         yield from _ordered_worker_chunks(
-            output,
+            outputs,
             processes,
             workers=workers,
             sample_count=sample_count,
@@ -208,6 +224,7 @@ def _filter_worker(
     batch_size: int,
     num_workers: int,
     prefetch_factor: int | None,
+    runtime: Runtime,
     output: multiprocessing.Queue,
 ) -> None:
     env = set_worker_environment(worker, device_env="ANYDATASET_FILTER_DEVICE")
@@ -221,6 +238,7 @@ def _filter_worker(
             batch_size=batch_size,
             num_workers=num_workers,
             prefetch_factor=prefetch_factor,
+            runtime=runtime,
         ):
             output.put(chunk)
         output.put((_DONE, worker.rank, None))
@@ -239,6 +257,7 @@ def collect_indexed_shard(
     batch_size: int,
     num_workers: int,
     prefetch_factor: int | None,
+    runtime: Runtime,
 ) -> Iterable[_IndexedFilterChunk]:
     rows: list[_FilterRow] = []
     for batch in indexed_loader(
@@ -246,6 +265,7 @@ def collect_indexed_shard(
         batch_size=batch_size,
         num_workers=num_workers,
         prefetch_factor=prefetch_factor,
+        start_method=runtime.loader_start_method,
     ):
         for index, sample in batch:
             output = decision(predicate(sample), metrics=write_metrics)
@@ -265,6 +285,10 @@ def collect_indexed_shard(
         yield _IndexedFilterChunk(rank=int(os.environ["RANK"]), rows=tuple(rows))
 
 
+def _worker_commit_samples(commit_samples: int) -> int:
+    return min(commit_samples, _PARALLEL_WORKER_COMMIT_SAMPLES)
+
+
 def _filter_loader(
     dataset,
     *,
@@ -272,35 +296,39 @@ def _filter_loader(
     batch_size: int,
     num_workers: int,
     prefetch_factor: int | None,
+    runtime: Runtime,
 ):
     return indexed_loader(
         dataset_factory,
         batch_size=batch_size,
         num_workers=num_workers,
         prefetch_factor=prefetch_factor,
+        start_method=runtime.loader_start_method,
     )
 
 
 def _ordered_worker_chunks(
-    output: multiprocessing.Queue,
+    outputs: Sequence[multiprocessing.Queue],
     processes: list[multiprocessing.Process],
     *,
     workers: int,
     sample_count: int,
     commit_samples: int,
 ) -> Iterable[_FilterChunk]:
-    buffer: dict[int, _FilterRow] = {}
+    buffers: tuple[dict[int, _FilterRow], ...] = tuple({} for _rank in range(workers))
     done: set[int] = set()
     next_index = 0
     rows: list[_FilterRow] = []
 
     while next_index < sample_count:
+        rank = next_index % workers
+        buffer = buffers[rank]
         while next_index not in buffer:
-            if len(done) == workers:
+            if rank in done:
                 raise RuntimeError(
                     f"Filter workers finished before emitting sample {next_index}."
                 )
-            _read_worker_message(output, processes, buffer, done)
+            _read_worker_message(outputs[rank], processes, buffer, done, rank=rank)
         rows.append(buffer.pop(next_index))
         next_index += 1
         if len(rows) == commit_samples:
@@ -310,8 +338,9 @@ def _ordered_worker_chunks(
     if rows:
         yield _chunk_from_rows(rows)
 
-    while len(done) < workers:
-        _read_worker_message(output, processes, buffer, done)
+    for rank, output in enumerate(outputs):
+        while rank not in done:
+            _read_worker_message(output, processes, buffers[rank], done, rank=rank)
 
 
 def _read_worker_message(
@@ -319,6 +348,8 @@ def _read_worker_message(
     processes: list[multiprocessing.Process],
     buffer: dict[int, _FilterRow],
     done: set[int],
+    *,
+    rank: int,
 ) -> None:
     try:
         message = output.get(timeout=0.2)
@@ -335,7 +366,15 @@ def _read_worker_message(
             raise RuntimeError(f"Filter worker exited early: {details}.")
         return
     if isinstance(message, _IndexedFilterChunk):
+        if message.rank != rank:
+            raise RuntimeError(
+                f"Filter worker {rank} queue received chunk from worker {message.rank}."
+            )
         for row in message.rows:
+            if row.index % len(processes) != rank:
+                raise RuntimeError(
+                    f"Filter worker {rank} emitted sample {row.index} outside its shard."
+                )
             if row.index in buffer:
                 raise RuntimeError(f"Duplicate filtered sample index: {row.index}.")
             buffer[row.index] = row

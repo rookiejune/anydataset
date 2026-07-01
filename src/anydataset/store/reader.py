@@ -61,13 +61,15 @@ class StoreViews(Mapping[tuple[item.Role, item.Modality, item.View], StoreView])
         self.samples = samples
         self._views = tuple(views)
         self._view_set = frozenset(self._views)
-        self._views_by_ref: dict[
+        views_by_ref: dict[
             tuple[item.Role, item.Modality],
-            tuple[tuple[item.Role, item.Modality, item.View], ...],
+            list[tuple[item.Role, item.Modality, item.View]],
         ] = {}
         for view in self._views:
-            self._views_by_ref.setdefault(view[:2], ())
-            self._views_by_ref[view[:2]] = (*self._views_by_ref[view[:2]], view)
+            views_by_ref.setdefault(view[:2], []).append(view)
+        self._views_by_ref = {
+            ref: tuple(ref_views) for ref, ref_views in views_by_ref.items()
+        }
         self._cache: dict[tuple[item.Role, item.Modality, item.View], StoreView] = {}
         self._expected: dict[tuple[item.Role, item.Modality], frozenset[int]] = {}
 
@@ -345,26 +347,17 @@ def _sample_for_entry(
     index: int,
     sample: SampleManifestEntry,
 ) -> item.Sample:
-    views_by_ref: dict[tuple[item.Role, item.Modality], dict[Any, Any]] = {}
-    item_entries = dict(sample.items)
-    for sample_ref in item_entries:
+    result: dict[tuple[item.Role, item.Modality], item.Item] = {}
+    for sample_ref, item_entry in sample.items:
+        views: dict[Any, Any] = {}
         for view_entry, view in dataset.views.for_ref(sample_ref):
             entry = view.entries_by_index[index]
             if entry is None:
                 raise ValueError(
                     f"View {_view_path(view_entry)} is missing sample_index {index}."
                 )
-            views = views_by_ref.setdefault(sample_ref, {})
             views[view_entry[2]] = _view_value(dataset, view, entry)
-
-    result: dict[tuple[item.Role, item.Modality], item.Item] = {}
-    for sample_ref, views in views_by_ref.items():
-        item_entry = item_entries.get(sample_ref)
         result[sample_ref] = _item_from_entry(sample_ref, item_entry, views)
-
-    for sample_ref, item_entry in item_entries.items():
-        if sample_ref not in result:
-            result[sample_ref] = _item_from_entry(sample_ref, item_entry, {})
     return result
 
 
