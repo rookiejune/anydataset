@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-from collections.abc import Iterable, Iterator, Mapping
+from array import array
+from bisect import bisect_left, bisect_right
+from collections import OrderedDict
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -15,7 +18,17 @@ from .manifest import (
     ViewManifestEntry,
     view_from_dict,
 )
-from .manifestio import read_samples_manifest, read_view_manifest, samples_manifest_exists
+from .manifestio import (
+    read_sample_manifest_index,
+    read_samples_manifest_row_group,
+    read_view_manifest_indexes,
+    read_view_manifest_row_group,
+    sample_manifest_row_count,
+    sample_manifest_row_groups,
+    samples_manifest_exists,
+    view_manifest_row_count,
+    view_manifest_row_groups,
+)
 from .paths import (
     dataset_json_path,
     dataset_ready_path,
@@ -28,7 +41,7 @@ from .payload import PayloadCache, payload_value, read_payload_bytes
 class StoreDataset(MapStyleABC):
     root: Path
     manifest: DatasetManifest
-    samples: tuple[SampleManifestEntry, ...]
+    samples: SampleManifestSequence
     views: StoreViews
     _files: dict[str, Path] = field(default_factory=dict, compare=False, repr=False)
     _payloads: PayloadCache = field(
@@ -41,20 +54,224 @@ class StoreDataset(MapStyleABC):
         return len(self.samples)
 
     def __getitem__(self, index: int) -> item.Sample:
-        return _sample_for_entry(self, index, self.samples[index])
+        if index < 0:
+            index += len(self)
+        if index < 0 or index >= len(self):
+            raise IndexError("store dataset index out of range.")
+        sample = self.samples[index]
+        return _sample_for_entry(self, sample.sample_index, sample)
+
+
+class SampleManifestSequence(Sequence[SampleManifestEntry]):
+    def __init__(
+        self,
+        root: Path,
+        *,
+        count: int,
+        row_groups: Sequence[int],
+        max_cached_groups: int = 2,
+    ) -> None:
+        self.root = root
+        self._count = count
+        self._row_groups = tuple(row_groups)
+        self._offsets = _offsets(self._row_groups)
+        self._max_cached_groups = max_cached_groups
+        self._cache: OrderedDict[int, tuple[SampleManifestEntry, ...]] = OrderedDict()
+
+    def __len__(self) -> int:
+        return self._count
+
+    def __getitem__(
+        self,
+        index: int | slice,
+    ) -> SampleManifestEntry | tuple[SampleManifestEntry, ...]:
+        if isinstance(index, slice):
+            start, stop, step = index.indices(len(self))
+            return tuple(self[position] for position in range(start, stop, step))
+        if index < 0:
+            index += len(self)
+        if index < 0 or index >= len(self):
+            raise IndexError("sample manifest index out of range.")
+        row_group = bisect_right(self._offsets, index) - 1
+        rows = self._row_group(row_group)
+        return rows[index - self._offsets[row_group]]
+
+    def __iter__(self) -> Iterator[SampleManifestEntry]:
+        for row_group in range(len(self._row_groups)):
+            yield from self._row_group(row_group)
+
+    def __getstate__(self) -> dict[str, Any]:
+        return {
+            "root": self.root,
+            "count": self._count,
+            "row_groups": self._row_groups,
+            "max_cached_groups": self._max_cached_groups,
+        }
+
+    def __setstate__(self, state: dict[str, Any]) -> None:
+        self.__init__(
+            state["root"],
+            count=state["count"],
+            row_groups=state["row_groups"],
+            max_cached_groups=state["max_cached_groups"],
+        )
+
+    def _row_group(self, row_group: int) -> tuple[SampleManifestEntry, ...]:
+        cached = self._cache.get(row_group)
+        if cached is not None:
+            self._cache.move_to_end(row_group)
+            return cached
+        rows = read_samples_manifest_row_group(self.root, row_group)
+        start = self._offsets[row_group]
+        for offset, sample in enumerate(rows):
+            _validate_sample_entry(sample, start + offset)
+        self._cache[row_group] = rows
+        while len(self._cache) > self._max_cached_groups:
+            self._cache.popitem(last=False)
+        return rows
 
 
 @dataclass(frozen=True)
 class StoreView:
     view: tuple[item.Role, item.Modality, item.View]
-    entries_by_index: tuple[ViewManifestEntry | None, ...]
+    entries_by_index: ViewEntryIndex
+
+
+class ViewEntryIndex:
+    def __init__(
+        self,
+        root: Path,
+        view: tuple[item.Role, item.Modality, item.View],
+        *,
+        sample_count: int,
+        row_groups: Sequence[int],
+        sample_indexes: array[int],
+        max_cached_groups: int = 2,
+    ) -> None:
+        self.root = root
+        self.view = view
+        self._sample_count = sample_count
+        self._row_groups = tuple(row_groups)
+        self._offsets = _offsets(self._row_groups)
+        self._sample_indexes = sample_indexes
+        self._max_cached_groups = max_cached_groups
+        self._cache: OrderedDict[int, tuple[ViewManifestEntry, ...]] = OrderedDict()
+
+    @classmethod
+    def load(
+        cls,
+        root: Path,
+        view: tuple[item.Role, item.Modality, item.View],
+        *,
+        sample_count: int,
+    ) -> ViewEntryIndex:
+        row_count = view_manifest_row_count(root, view)
+        row_groups = view_manifest_row_groups(root, view)
+        sample_indexes = array("q", read_view_manifest_indexes(root, view))
+        if len(sample_indexes) != row_count:
+            raise ValueError("View manifest row count changed while loading index.")
+        _validate_view_indexes(view, sample_indexes, sample_count)
+        return cls(
+            root,
+            view,
+            sample_count=sample_count,
+            row_groups=row_groups,
+            sample_indexes=sample_indexes,
+        )
+
+    def __len__(self) -> int:
+        return self._sample_count
+
+    def __getitem__(self, sample_index: int) -> ViewManifestEntry | None:
+        if sample_index < 0:
+            sample_index += self._sample_count
+        if sample_index < 0 or sample_index >= self._sample_count:
+            raise IndexError("view entry index out of range.")
+        position = bisect_left(self._sample_indexes, sample_index)
+        if position >= len(self._sample_indexes):
+            return None
+        if self._sample_indexes[position] != sample_index:
+            return None
+        row_group = bisect_right(self._offsets, position) - 1
+        rows = self._row_group(row_group)
+        entry = rows[position - self._offsets[row_group]]
+        if entry.sample_index != sample_index:
+            raise ValueError(
+                f"View {_view_path(self.view)} index changed while reading."
+            )
+        return entry
+
+    def validate_coverage(
+        self,
+        expected_indexes: Iterable[int],
+    ) -> None:
+        actual_position = 0
+        actual_count = len(self._sample_indexes)
+        for expected in expected_indexes:
+            if actual_position >= actual_count:
+                _raise_view_coverage_error(self.view, missing=expected, extra=None)
+            actual = int(self._sample_indexes[actual_position])
+            if actual < expected:
+                _raise_view_coverage_error(self.view, missing=None, extra=actual)
+            if actual > expected:
+                _raise_view_coverage_error(self.view, missing=expected, extra=None)
+            actual_position += 1
+        if actual_position < actual_count:
+            _raise_view_coverage_error(
+                self.view,
+                missing=None,
+                extra=int(self._sample_indexes[actual_position]),
+            )
+
+    def validate_entries(self) -> None:
+        for row_group in range(len(self._row_groups)):
+            self._row_group(row_group)
+
+    def __getstate__(self) -> dict[str, Any]:
+        return {
+            "root": self.root,
+            "view": self.view,
+            "sample_count": self._sample_count,
+            "row_groups": self._row_groups,
+            "sample_indexes": self._sample_indexes,
+            "max_cached_groups": self._max_cached_groups,
+        }
+
+    def __setstate__(self, state: dict[str, Any]) -> None:
+        self.__init__(
+            state["root"],
+            state["view"],
+            sample_count=state["sample_count"],
+            row_groups=state["row_groups"],
+            sample_indexes=state["sample_indexes"],
+            max_cached_groups=state["max_cached_groups"],
+        )
+
+    def _row_group(self, row_group: int) -> tuple[ViewManifestEntry, ...]:
+        cached = self._cache.get(row_group)
+        if cached is not None:
+            self._cache.move_to_end(row_group)
+            return cached
+        rows = read_view_manifest_row_group(self.root, self.view, row_group)
+        start = self._offsets[row_group]
+        for offset, entry in enumerate(rows):
+            if _entry_view(entry) != self.view:
+                raise ValueError("View manifest entry ref must match its path.")
+            if entry.sample_index != self._sample_indexes[start + offset]:
+                raise ValueError(
+                    f"View {_view_path(self.view)} index changed while reading."
+                )
+        self._cache[row_group] = rows
+        while len(self._cache) > self._max_cached_groups:
+            self._cache.popitem(last=False)
+        return rows
 
 
 class StoreViews(Mapping[tuple[item.Role, item.Modality, item.View], StoreView]):
     def __init__(
         self,
         root: Path,
-        samples: tuple[SampleManifestEntry, ...],
+        samples: SampleManifestSequence,
         views: Iterable[tuple[item.Role, item.Modality, item.View]],
     ) -> None:
         self.root = root
@@ -71,7 +288,7 @@ class StoreViews(Mapping[tuple[item.Role, item.Modality, item.View], StoreView])
             ref: tuple(ref_views) for ref, ref_views in views_by_ref.items()
         }
         self._cache: dict[tuple[item.Role, item.Modality, item.View], StoreView] = {}
-        self._expected: dict[tuple[item.Role, item.Modality], frozenset[int]] = {}
+        self._validated: set[tuple[item.Role, item.Modality, item.View]] = set()
 
     def __getitem__(
         self,
@@ -79,16 +296,7 @@ class StoreViews(Mapping[tuple[item.Role, item.Modality, item.View], StoreView])
     ) -> StoreView:
         if view not in self._view_set:
             raise KeyError(view)
-        cached = self._cache.get(view)
-        if cached is None:
-            cached = _load_view(
-                self.root,
-                view,
-                len(self.samples),
-                self._expected_indexes(view[:2]),
-            )
-            self._cache[view] = cached
-        return cached
+        return self._view(view, validate_coverage=False)
 
     def __iter__(self) -> Iterator[tuple[item.Role, item.Modality, item.View]]:
         yield from self._views
@@ -98,7 +306,7 @@ class StoreViews(Mapping[tuple[item.Role, item.Modality, item.View], StoreView])
 
     def preload(self) -> None:
         for view in self._views:
-            self[view]
+            self._view(view, validate_coverage=True)
 
     def for_ref(
         self,
@@ -107,18 +315,26 @@ class StoreViews(Mapping[tuple[item.Role, item.Modality, item.View], StoreView])
         for view in self._views_by_ref.get(ref, ()):
             yield view, self[view]
 
-    def _expected_indexes(
+    def _view(
         self,
-        ref: tuple[item.Role, item.Modality],
-    ) -> frozenset[int]:
-        cached = self._expected.get(ref)
+        view: tuple[item.Role, item.Modality, item.View],
+        *,
+        validate_coverage: bool,
+    ) -> StoreView:
+        cached = self._cache.get(view)
         if cached is None:
-            cached = frozenset(
-                sample.sample_index
-                for sample in self.samples
-                if _sample_has_item(sample, ref)
+            cached = _load_view(
+                self.root,
+                view,
+                len(self.samples),
             )
-            self._expected[ref] = cached
+            self._cache[view] = cached
+        if validate_coverage and view not in self._validated:
+            cached.entries_by_index.validate_entries()
+            cached.entries_by_index.validate_coverage(
+                _sample_indexes_for_ref(self.samples, view[:2])
+            )
+            self._validated.add(view)
         return cached
 
 
@@ -131,12 +347,17 @@ def read_store_dataset(
     root = Path(root).expanduser()
     _validate_dataset_root(root)
     manifest = read_store_manifest(root)
-    samples = tuple(read_samples_manifest(root))
-    if len(samples) != manifest.sample_count:
+    actual_sample_count = sample_manifest_row_count(root)
+    if actual_sample_count != manifest.sample_count:
         raise ValueError(
             "sample manifest row count must match dataset.json sample_count."
         )
-    _validate_samples(samples)
+    _validate_sample_manifest_index(root, manifest.sample_count)
+    samples = SampleManifestSequence(
+        root,
+        count=manifest.sample_count,
+        row_groups=sample_manifest_row_groups(root),
+    )
 
     selected_views = _select_views(_discover_views(root), views)
     store_views = StoreViews(root, samples, selected_views)
@@ -180,34 +401,27 @@ def _validate_dataset_root(root: Path) -> None:
         raise FileNotFoundError(root / "samples.parquet")
 
 
+def _offsets(counts: Sequence[int]) -> tuple[int, ...]:
+    offsets = [0]
+    for count in counts:
+        offsets.append(offsets[-1] + count)
+    return tuple(offsets)
+
+
 def _load_view(
     root: Path,
     view: tuple[item.Role, item.Modality, item.View],
     sample_count: int,
-    expected_ids: frozenset[int],
 ) -> StoreView:
     if not view_ready_path(root, view).exists():
         raise ValueError(f"Store dataset view is not ready: {_view_path(view)}.")
-    entries_by_index: list[ViewManifestEntry | None] = [None] * sample_count
-    actual_ids: set[int] = set()
-    for entry in read_view_manifest(root, view):
-        if _entry_view(entry) != view:
-            raise ValueError("View manifest entry ref must match its path.")
-        if entry.sample_index < 0 or entry.sample_index >= sample_count:
-            raise ValueError(
-                f"View {_view_path(view)} has sample_index outside dataset: "
-                f"{entry.sample_index}."
-            )
-        if entries_by_index[entry.sample_index] is not None:
-            raise ValueError(
-                f"Duplicate view entry for sample_index {entry.sample_index}."
-            )
-        entries_by_index[entry.sample_index] = entry
-        actual_ids.add(entry.sample_index)
-    _validate_view_coverage(view, expected_ids, actual_ids)
     return StoreView(
         view=view,
-        entries_by_index=tuple(entries_by_index),
+        entries_by_index=ViewEntryIndex.load(
+            root,
+            view,
+            sample_count=sample_count,
+        ),
     )
 
 
@@ -284,21 +498,32 @@ def _validate_view_dir(
         raise FileNotFoundError(path / "manifest.parquet")
 
 
-def _validate_samples(samples: tuple[SampleManifestEntry, ...]) -> None:
+def _validate_sample_manifest_index(root: Path, sample_count: int) -> None:
     sample_ids: set[str] = set()
-    for index, sample in enumerate(samples):
-        if sample.sample_index != index:
+    count = 0
+    for index, (sample_index, sample_id) in enumerate(read_sample_manifest_index(root)):
+        if sample_index != index:
             raise ValueError(
-                f"Sample manifest row {index} has sample_index {sample.sample_index}."
+                f"Sample manifest row {index} has sample_index {sample_index}."
             )
-        if sample.sample_id in sample_ids:
-            raise ValueError(f"Duplicate sample_id {sample.sample_id!r}.")
-        sample_ids.add(sample.sample_id)
-        refs: set[tuple[item.Role, item.Modality]] = set()
-        for ref, _ in sample.items:
-            if ref in refs:
-                raise ValueError(f"Duplicate sample item ref {ref!r}.")
-            refs.add(ref)
+        if sample_id in sample_ids:
+            raise ValueError(f"Duplicate sample_id {sample_id!r}.")
+        sample_ids.add(sample_id)
+        count += 1
+    if count != sample_count:
+        raise ValueError("sample manifest row count must match dataset.json sample_count.")
+
+
+def _validate_sample_entry(sample: SampleManifestEntry, index: int) -> None:
+    if sample.sample_index != index:
+        raise ValueError(
+            f"Sample manifest row {index} has sample_index {sample.sample_index}."
+        )
+    refs: set[tuple[item.Role, item.Modality]] = set()
+    for ref, _ in sample.items:
+        if ref in refs:
+            raise ValueError(f"Duplicate sample item ref {ref!r}.")
+        refs.add(ref)
 
 
 def _validate_view_ref(view: tuple[item.Role, item.Modality, item.View]) -> None:
@@ -313,33 +538,47 @@ def _validate_view_ref(view: tuple[item.Role, item.Modality, item.View]) -> None
         raise TypeError("store view key must be a View.")
 
 
-def _validate_view_coverage(
+def _validate_view_indexes(
     view: tuple[item.Role, item.Modality, item.View],
-    expected_ids: frozenset[int],
-    actual_ids: set[int],
+    indexes: Sequence[int],
+    sample_count: int,
 ) -> None:
-    if actual_ids == expected_ids:
-        return
-    missing = sorted(expected_ids - actual_ids)
-    extra = sorted(actual_ids - expected_ids)
-    detail = _coverage_detail(missing, extra)
-    raise ValueError(f"View {_view_path(view)} sample coverage mismatch: {detail}.")
+    previous: int | None = None
+    for index in indexes:
+        if index < 0 or index >= sample_count:
+            raise ValueError(
+                f"View {_view_path(view)} has sample_index outside dataset: {index}."
+            )
+        if previous is not None:
+            if index == previous:
+                raise ValueError(f"Duplicate view entry for sample_index {index}.")
+            if index < previous:
+                raise ValueError("View manifest entries must be ordered by sample_index.")
+        previous = index
 
 
-def _sample_has_item(
-    sample: SampleManifestEntry,
+def _sample_indexes_for_ref(
+    samples: Iterable[SampleManifestEntry],
     ref: tuple[item.Role, item.Modality],
-) -> bool:
-    return any(item_ref == ref for item_ref, _meta in sample.items)
+) -> Iterator[int]:
+    for sample in samples:
+        if any(item_ref == ref for item_ref, _meta in sample.items):
+            yield sample.sample_index
 
 
-def _coverage_detail(missing: list[int], extra: list[int]) -> str:
+def _raise_view_coverage_error(
+    view: tuple[item.Role, item.Modality, item.View],
+    *,
+    missing: int | None,
+    extra: int | None,
+) -> None:
     details = []
-    if missing:
-        details.append(f"missing sample_index {missing[0]}")
-    if extra:
-        details.append(f"unexpected sample_index {extra[0]}")
-    return ", ".join(details)
+    if missing is not None:
+        details.append(f"missing sample_index {missing}")
+    if extra is not None:
+        details.append(f"unexpected sample_index {extra}")
+    detail = ", ".join(details)
+    raise ValueError(f"View {_view_path(view)} sample coverage mismatch: {detail}.")
 
 
 def _sample_for_entry(

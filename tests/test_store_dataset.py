@@ -188,7 +188,7 @@ class StoreSourceTest(unittest.TestCase):
             )
 
             with mock.patch(
-                "anydataset.store.reader.read_view_manifest",
+                "anydataset.store.reader.read_view_manifest_indexes",
                 side_effect=AssertionError("view index loaded"),
             ):
                 dataset = read_store_dataset(output)
@@ -201,6 +201,47 @@ class StoreSourceTest(unittest.TestCase):
             },
         )
         self.assertEqual(len(dataset.samples), 1)
+
+    def test_reader_does_not_load_sample_rows_when_opening_dataset(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            output = root / "dataset"
+            DatasetWriter(output, dataset_id="toy-audio").write(
+                [_audio_sample(waveform=torch.tensor([[1.0]]))]
+            )
+
+            with mock.patch(
+                "anydataset.store.reader.read_samples_manifest_row_group",
+                side_effect=AssertionError("sample rows loaded"),
+            ):
+                dataset = read_store_dataset(output)
+
+        self.assertEqual(len(dataset), 1)
+
+    def test_reader_loads_only_requested_sample_row_group(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            output = root / "dataset"
+            DatasetWriter(output, dataset_id="toy-audio").write(
+                [
+                    _audio_sample(waveform=torch.tensor([[1.0]])),
+                    _audio_sample(waveform=torch.tensor([[2.0]])),
+                ]
+            )
+            _rewrite_sample_manifest_one_row_per_group(output)
+            dataset = read_store_dataset(output)
+
+            with mock.patch(
+                "anydataset.store.reader.read_samples_manifest_row_group",
+                wraps=__import__(
+                    "anydataset.store.reader",
+                    fromlist=["read_samples_manifest_row_group"],
+                ).read_samples_manifest_row_group,
+            ) as read_group:
+                dataset.samples[1]
+
+            read_group.assert_called_once()
+            self.assertEqual(read_group.call_args.args[1], 1)
 
     def test_reader_can_preload_all_view_indexes(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -613,6 +654,20 @@ def _drop_last_parquet_row(path: Path) -> None:
 
     table = pq.read_table(path)
     pq.write_table(table.slice(0, table.num_rows - 1), path)
+
+
+def _rewrite_sample_manifest_one_row_per_group(root: Path) -> None:
+    import pyarrow.parquet as pq
+
+    path = root / "samples.parquet"
+    table = pq.read_table(path)
+    writer = pq.ParquetWriter(path.with_suffix(".tmp"), table.schema)
+    try:
+        for index in range(table.num_rows):
+            writer.write_table(table.slice(index, 1))
+    finally:
+        writer.close()
+    path.with_suffix(".tmp").replace(path)
 
 
 if __name__ == "__main__":

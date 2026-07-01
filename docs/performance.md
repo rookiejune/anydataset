@@ -16,6 +16,9 @@
   `StoreDataset`、`FilteredDataset` 和 `MergedDataset` 这类默认 map-style shard 语义的
   materializer/filter 热路径会使用 map-style indexed loader；`AnyDataset` 仍优先保留
   source-aware indexed shard 路径，避免把顺序 source 退化成随机访问。
+- store 格式保持稳定；reader 侧可以只读 parquet metadata 和轻量 index 列，按 row group
+  懒加载 sample/view manifest 的完整行。`preload=True` 仍表示显式加载并校验所有 view
+  manifest。
 
 ## 待验证假设
 
@@ -32,6 +35,12 @@
   loader；有自定义 `iter_indexed_shard` 的数据集继续走 runtime indexed loader。
 - server 模式下 reader/writer worker 默认用 fork；无 server 的本地路径保持 spawn，避免
   本地 torch/CUDA/provider 状态被 worker 继承。
+- `StoreDataset` 打开时不再把 `samples.parquet` 全量转成 Python tuple；`samples` 保留
+  sequence 接口，并按 parquet row group 懒加载完整 sample manifest 行。
+- store view manifest 先加载 `sample_index` 轻量列建立查找索引，具体 shard/key 行按
+  row group 懒加载；随机读单个样本不需要把整个 view manifest 转成对象。
+- part/fragment commit 不再常驻保存 `item ref -> sample_index array`；提交时先写
+  ordered sample manifest，再按 view 流式扫描 sample manifest 做覆盖校验。
 
 ## 阶段一基准
 

@@ -26,6 +26,32 @@ def read_samples_manifest(root: str | Path) -> Iterator[SampleManifestEntry]:
         yield _sample_entry(row)
 
 
+def sample_manifest_row_count(root: str | Path) -> int:
+    return _parquet_row_count(samples_parquet_path(root))
+
+
+def sample_manifest_row_groups(root: str | Path) -> tuple[int, ...]:
+    return _parquet_row_groups(samples_parquet_path(root))
+
+
+def read_samples_manifest_row_group(
+    root: str | Path,
+    row_group: int,
+) -> tuple[SampleManifestEntry, ...]:
+    return tuple(
+        _sample_entry(row)
+        for row in _read_parquet_row_group(samples_parquet_path(root), row_group)
+    )
+
+
+def read_sample_manifest_index(root: str | Path) -> Iterator[tuple[int, str]]:
+    for row in _read_parquet_rows(
+        samples_parquet_path(root),
+        columns=["sample_index", "sample_id"],
+    ):
+        yield int(row["sample_index"]), str(row["sample_id"])
+
+
 def write_samples_manifest(
     root: str | Path,
     entries: Iterable[SampleManifestEntry],
@@ -46,6 +72,45 @@ def read_view_manifest(
 ) -> Iterator[ViewManifestEntry]:
     for row in _read_parquet_rows(view_manifest_parquet_path(root, view)):
         yield _view_entry(row)
+
+
+def view_manifest_row_count(
+    root: str | Path,
+    view: tuple[Role, Modality, View],
+) -> int:
+    return _parquet_row_count(view_manifest_parquet_path(root, view))
+
+
+def view_manifest_row_groups(
+    root: str | Path,
+    view: tuple[Role, Modality, View],
+) -> tuple[int, ...]:
+    return _parquet_row_groups(view_manifest_parquet_path(root, view))
+
+
+def read_view_manifest_row_group(
+    root: str | Path,
+    view: tuple[Role, Modality, View],
+    row_group: int,
+) -> tuple[ViewManifestEntry, ...]:
+    return tuple(
+        _view_entry(row)
+        for row in _read_parquet_row_group(
+            view_manifest_parquet_path(root, view),
+            row_group,
+        )
+    )
+
+
+def read_view_manifest_indexes(
+    root: str | Path,
+    view: tuple[Role, Modality, View],
+) -> Iterator[int]:
+    for row in _read_parquet_rows(
+        view_manifest_parquet_path(root, view),
+        columns=["sample_index"],
+    ):
+        yield int(row["sample_index"])
 
 
 def write_view_manifest(
@@ -127,12 +192,42 @@ def _json_text(value: Any) -> str:
     return json.dumps(value, ensure_ascii=True, sort_keys=True)
 
 
-def _read_parquet_rows(path: Path) -> Iterator[dict[str, Any]]:
+def _read_parquet_rows(
+    path: Path,
+    *,
+    columns: list[str] | None = None,
+) -> Iterator[dict[str, Any]]:
     _, pq = _pyarrow()
     parquet = pq.ParquetFile(path)
-    for batch in parquet.iter_batches(batch_size=4096):
+    for batch in parquet.iter_batches(batch_size=4096, columns=columns):
         for row in batch.to_pylist():
             yield _decode_row(row)
+
+
+def _read_parquet_row_group(
+    path: Path,
+    row_group: int,
+    *,
+    columns: list[str] | None = None,
+) -> Iterator[dict[str, Any]]:
+    _, pq = _pyarrow()
+    table = pq.ParquetFile(path).read_row_group(row_group, columns=columns)
+    for row in table.to_pylist():
+        yield _decode_row(row)
+
+
+def _parquet_row_count(path: Path) -> int:
+    _, pq = _pyarrow()
+    return int(pq.ParquetFile(path).metadata.num_rows)
+
+
+def _parquet_row_groups(path: Path) -> tuple[int, ...]:
+    _, pq = _pyarrow()
+    metadata = pq.ParquetFile(path).metadata
+    return tuple(
+        int(metadata.row_group(index).num_rows)
+        for index in range(metadata.num_row_groups)
+    )
 
 
 class _ParquetRowWriter:

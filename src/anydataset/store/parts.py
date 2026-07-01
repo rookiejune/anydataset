@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import os
 import shutil
-from array import array
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import asdict, dataclass
 from heapq import heappop, heappush
@@ -312,15 +311,17 @@ def _commit_roots_to_tmp(
     split: str | None,
     expected_sample_count: int | None = None,
 ) -> Path:
-    sample_count, item_indexes = _write_ordered_samples_manifest(
+    sample_count = _write_ordered_samples_manifest(
         root,
         stores,
         expected_sample_count=expected_sample_count,
     )
     for view in _store_views(stores):
-        expected_indexes = item_indexes.get(view[:2], ())
-        view_count = _write_ordered_view_manifest(root, stores, view, expected_indexes)
-        expected_view_count = len(expected_indexes)
+        view_count, expected_view_count = _write_ordered_view_manifest(
+            root,
+            stores,
+            view,
+        )
         if view_count != expected_view_count:
             raise ValueError(
                 f"View {_view_path(view)} sample count {view_count} "
@@ -366,9 +367,8 @@ def _write_ordered_samples_manifest(
     stores: tuple[Path, ...],
     *,
     expected_sample_count: int | None,
-) -> tuple[int, dict[tuple[Role, Modality], array[int]]]:
+) -> int:
     writer = sample_manifest_writer(root)
-    item_indexes: dict[tuple[Role, Modality], array[int]] = {}
     previous_index: int | None = None
     count = 0
     try:
@@ -404,8 +404,6 @@ def _write_ordered_samples_manifest(
                     items=entry.items,
                 )
             )
-            for ref, _meta in entry.items:
-                item_indexes.setdefault(ref, array("q")).append(entry.sample_index)
         if expected_sample_count is not None and count != expected_sample_count:
             raise ValueError(
                 "Materialized fragments coverage mismatch: "
@@ -415,21 +413,22 @@ def _write_ordered_samples_manifest(
     except Exception:
         writer.abort()
         raise
-    return count, item_indexes
+    return count
 
 
 def _write_ordered_view_manifest(
     root: Path,
     stores: tuple[Path, ...],
     view: tuple[Role, Modality, View],
-    expected_indexes: Sequence[int],
-) -> int:
+) -> tuple[int, int]:
     writer = view_manifest_writer(root, view)
     entries = iter(_unique_merged_view_entries(stores, view))
     current = _next_entry(entries)
     count = 0
+    expected_count = 0
     try:
-        for sample_index in expected_indexes:
+        for sample_index in _sample_indexes_for_ref(root, view[:2]):
+            expected_count += 1
             if current is None:
                 raise ValueError(
                     f"View {_view_path(view)} is missing sample_index "
@@ -457,7 +456,16 @@ def _write_ordered_view_manifest(
     except Exception:
         writer.abort()
         raise
-    return count
+    return count, expected_count
+
+
+def _sample_indexes_for_ref(
+    root: Path,
+    ref: tuple[Role, Modality],
+) -> Iterator[int]:
+    for sample in read_samples_manifest(root):
+        if any(item_ref == ref for item_ref, _meta in sample.items):
+            yield sample.sample_index
 
 
 def _merged_sample_entries(stores: tuple[Path, ...]) -> Iterator[SampleManifestEntry]:
