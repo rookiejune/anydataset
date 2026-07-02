@@ -6,25 +6,25 @@ import torch
 
 from anydataset import (
     AnyDataset,
+    IterableAnyDataset,
+    MultipleAnyDataset,
+    Preset,
+    Source,
+    Spec,
+    Task,
+    resolve_dataset,
+)
+from anydataset.dataset import FieldGroup, FieldRef, collate_fn
+from anydataset.types import (
     AudioItem,
     AudioMeta,
     AudioReq,
     AudioView,
-    FieldGroup,
-    FieldRef,
     ImageItem,
     ImageView,
-    IterableAnyDataset,
     Modality,
-    MultipleAnyDataset,
-    Preset,
     Role,
-    Source,
-    Spec,
-    Task,
     TextView,
-    collate_fn,
-    resolve_dataset,
 )
 from anydataset.presets import WMT19
 

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from anydataset import Runtime
+from anydataset.runtime import Runtime
 
 
 class RuntimeTest(unittest.TestCase):

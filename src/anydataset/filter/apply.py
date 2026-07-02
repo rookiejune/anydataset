@@ -13,8 +13,8 @@ from .._logging import write_info
 from .._parallel import validate_process_value
 from .._resume import (
     dataset_sample_count,
-    format_index_ranges,
     indexes_complete,
+    log_resume_summary,
     missing_indexes,
 )
 from .._validation import non_negative_int, optional_positive_int, positive_int
@@ -504,17 +504,17 @@ def write_partitions(
     if not indexes_complete(completed, expected):
         missing = missing_indexes(completed, expected)
         use_map_style_loader = uses_default_indexed_shard(dataset)
-        write_info(
+        log_resume_summary(
             "filter",
-            "resume "
-            f"expected={expected} completed={len(completed)} "
-            f"missing={len(missing)} map_style={use_map_style_loader} "
-            f"ranges={format_index_ranges(missing)}",
+            expected=expected,
+            completed_count=len(completed),
+            missing=missing,
+            use_map_style_loader=use_map_style_loader,
         )
-        write_filter_resume_fragments(
-            resume_dir,
-            dataset,
-            rule,
+        writer = _FilterResumeFragmentWriter(
+            path=resume_dir,
+            dataset=dataset,
+            rule=rule,
             metrics=metrics,
             devices=devices,
             batch_size=batch_size,
@@ -525,9 +525,8 @@ def write_partitions(
             dataset_factory=dataset_factory,
             completed=completed,
             missing=missing,
-            write_workers=write_workers,
-            write_prefetch=write_prefetch,
         )
+        writer.write(write_workers=write_workers, write_prefetch=write_prefetch)
         completed = completed_filter_indexes(resume_dir, expected=expected)
     if not indexes_complete(completed, expected):
         raise RuntimeError("Filter resume fragments do not cover all samples.")
@@ -539,115 +538,78 @@ def write_partitions(
     )
 
 
-def write_filter_resume_fragments(
-    path: Path,
-    dataset: FilterBase,
-    rule: FilterRule,
-    *,
-    metrics: bool,
-    devices: tuple[str, ...],
-    batch_size: int,
-    num_workers: int,
-    prefetch_factor: int | None,
-    commit_samples: int,
-    runtime: Runtime,
-    dataset_factory: DatasetFactory,
-    completed: frozenset[int],
-    missing: tuple[int, ...],
-    write_workers: int,
-    write_prefetch: int | None,
-) -> None:
-    sink = BackgroundWriteSink(
-        write_filter_fragment_job,
-        workers=write_workers,
-        max_pending=write_prefetch,
-        start_method=runtime.writer_worker_start_method,
-    )
-    with sink:
-        write_filter_resume_fragment_jobs(
-            sink,
-            path,
-            dataset,
-            rule,
-            metrics=metrics,
-            devices=devices,
-            batch_size=batch_size,
-            num_workers=num_workers,
-            prefetch_factor=prefetch_factor,
-            commit_samples=commit_samples,
-            runtime=runtime,
-            dataset_factory=dataset_factory,
-            completed=completed,
-            missing=missing,
+@dataclass(frozen=True)
+class _FilterResumeFragmentWriter:
+    path: Path
+    dataset: FilterBase
+    rule: FilterRule
+    metrics: bool
+    devices: tuple[str, ...]
+    batch_size: int
+    num_workers: int
+    prefetch_factor: int | None
+    commit_samples: int
+    runtime: Runtime
+    dataset_factory: DatasetFactory
+    completed: frozenset[int]
+    missing: tuple[int, ...]
+
+    def write(self, *, write_workers: int, write_prefetch: int | None) -> None:
+        sink = BackgroundWriteSink(
+            write_filter_fragment_job,
+            workers=write_workers,
+            max_pending=write_prefetch,
+            start_method=self.runtime.writer_worker_start_method,
+        )
+        with sink:
+            self.write_jobs(sink)
+
+    def write_jobs(self, sink: BackgroundWriteSink[FilterFragmentJob]) -> None:
+        for chunk in self._chunks():
+            sink.submit(self._job(chunk))
+
+    def _chunks(self) -> Iterable[_FilterChunk]:
+        use_map_style_loader = uses_default_indexed_shard(self.dataset)
+        if len(self.devices) == 1 or len(self.dataset) == 0:
+            yield from collect_ranges(
+                self.dataset,
+                self.rule.factory,
+                self.devices[0],
+                self.metrics,
+                self.commit_samples,
+                skip_indexes=self.completed,
+                sample_indexes=self.missing if use_map_style_loader else None,
+                dataset_factory=self.dataset_factory,
+                batch_size=self.batch_size,
+                num_workers=self.num_workers,
+                prefetch_factor=self.prefetch_factor,
+                runtime=self.runtime,
+            )
+            return
+
+        factory = parallel_dataset_factory(self.dataset_factory, self.runtime)
+        yield from collect_ranges_parallel(
+            factory,
+            self.rule.factory,
+            self.devices,
+            self.metrics,
+            self.commit_samples,
+            sample_count=len(self.dataset),
+            skip_indexes=self.completed,
+            sample_indexes=self.missing if use_map_style_loader else None,
+            batch_size=self.batch_size,
+            num_workers=self.num_workers,
+            prefetch_factor=self.prefetch_factor,
+            runtime=self.runtime,
+            use_map_style_loader=use_map_style_loader,
         )
 
-
-def write_filter_resume_fragment_jobs(
-    sink: BackgroundWriteSink[FilterFragmentJob],
-    path: Path,
-    dataset: FilterBase,
-    rule: FilterRule,
-    *,
-    metrics: bool,
-    devices: tuple[str, ...],
-    batch_size: int,
-    num_workers: int,
-    prefetch_factor: int | None,
-    commit_samples: int,
-    runtime: Runtime,
-    dataset_factory: DatasetFactory,
-    completed: frozenset[int],
-    missing: tuple[int, ...],
-) -> None:
-    use_map_style_loader = uses_default_indexed_shard(dataset)
-    if len(devices) == 1 or len(dataset) == 0:
-        for chunk in collect_ranges(
-            dataset,
-            rule.factory,
-            devices[0],
-            metrics,
-            commit_samples,
-            skip_indexes=completed,
-            sample_indexes=missing if use_map_style_loader else None,
-            dataset_factory=dataset_factory,
-            batch_size=batch_size,
-            num_workers=num_workers,
-            prefetch_factor=prefetch_factor,
-            runtime=runtime,
-        ):
-            global_chunk = global_filter_chunk(dataset, chunk)
-            sink.submit(
-                FilterFragmentJob(
-                    path=path,
-                    scan_indexes=filter_chunk_indexes(chunk),
-                    chunk=global_chunk,
-                )
-            )
-    else:
-        factory = parallel_dataset_factory(dataset_factory, runtime)
-        for chunk in collect_ranges_parallel(
-            factory,
-            rule.factory,
-            devices,
-            metrics,
-            commit_samples,
-            sample_count=len(dataset),
-            skip_indexes=completed,
-            sample_indexes=missing if use_map_style_loader else None,
-            batch_size=batch_size,
-            num_workers=num_workers,
-            prefetch_factor=prefetch_factor,
-            runtime=runtime,
-            use_map_style_loader=use_map_style_loader,
-        ):
-            global_chunk = global_filter_chunk(dataset, chunk)
-            sink.submit(
-                FilterFragmentJob(
-                    path=path,
-                    scan_indexes=filter_chunk_indexes(chunk),
-                    chunk=global_chunk,
-                )
-            )
+    def _job(self, chunk: _FilterChunk) -> FilterFragmentJob:
+        return FilterFragmentJob(
+            path=self.path,
+            scan_indexes=filter_chunk_indexes(chunk),
+            chunk=global_filter_chunk(self.dataset, chunk),
+        )
 
 
 @dataclass(frozen=True)

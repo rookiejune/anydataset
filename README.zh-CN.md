@@ -13,13 +13,19 @@ Spec/Preset -> AnyDataset/IterableAnyDataset -> Sample -> Schema -> collate_fn -
 ## 安装
 
 ```bash
-pip install -e '.[huggingface,test]'
+pip install anydataset
 ```
 
-如果要处理音频数据集：
+如果要处理 Hugging Face 数据集或音频文件：
 
 ```bash
-pip install -e '.[huggingface,audio]'
+pip install 'anydataset[huggingface,audio]'
+```
+
+本地开发环境：
+
+```bash
+pip install -e '.[huggingface,audio,dev]'
 ```
 
 ## 快速开始
@@ -27,14 +33,14 @@ pip install -e '.[huggingface,audio]'
 ```python
 from torch.utils.data import DataLoader
 
-from anydataset import (
+from anydataset import Preset
+from anydataset.dataset import collate_fn
+from anydataset.types import (
     ImageMeta,
     ImageReq,
     ImageView,
     Modality,
-    Preset,
     Role,
-    collate_fn,
 )
 
 dataset = Preset.MNIST.create(split="train")
@@ -75,13 +81,8 @@ fleurs = Preset.FLEURS.create(split="train", config_name="en_us")
 ```python
 from functools import partial
 
-from anydataset import (
-    AnyDataset,
-    ImageMeta,
-    ImageView,
-    Source,
-    Spec,
-)
+from anydataset import AnyDataset, Source, Spec
+from anydataset.types import ImageMeta, ImageView
 from anydataset.utils import sample_from_row
 
 dataset = AnyDataset(
@@ -105,7 +106,8 @@ dataset = AnyDataset(
 ```python
 from functools import partial
 
-from anydataset import AudioView, IterableAnyDataset, Source, Spec
+from anydataset import IterableAnyDataset, Source, Spec
+from anydataset.types import AudioView
 from anydataset.utils import sample_from_row
 
 dataset = IterableAnyDataset(
@@ -178,7 +180,8 @@ dataset = IterableAnyDataset(
 `MultipleAnyDataset` 可以把多个数据集组合成一个 iterable dataset。组合后的迭代顺序由 strategy 决定。
 
 ```python
-from anydataset import MultipleAnyDataset, Preset, RoundRobinStrategy
+from anydataset import MultipleAnyDataset, Preset
+from anydataset.dataset import RoundRobinStrategy
 
 dataset = MultipleAnyDataset(
     datasets=[
@@ -192,7 +195,8 @@ dataset = MultipleAnyDataset(
 按权重随机采样：
 
 ```python
-from anydataset import MultipleAnyDataset, Preset, WeightedRandomStrategy
+from anydataset import MultipleAnyDataset, Preset
+from anydataset.dataset import WeightedRandomStrategy
 
 dataset = MultipleAnyDataset(
     datasets=[
@@ -221,7 +225,12 @@ rank_iter = dataset.shard(num_shards=8, shard_id=0)
 - `Meta` 表达标签、语言等旁信息。
 
 ```python
-from anydataset import AudioReq, AudioView, Modality, Role
+from anydataset.types import (
+    AudioReq,
+    AudioView,
+    Modality,
+    Role,
+)
 
 schema = {
     (Role.DEFAULT, Modality.AUDIO): AudioReq(
@@ -235,7 +244,7 @@ schema = {
 ```python
 from torch.utils.data import DataLoader
 
-from anydataset import collate_fn
+from anydataset.dataset import collate_fn
 
 loader = DataLoader(
     dataset,
@@ -257,7 +266,12 @@ loader = DataLoader(dataset, batch_size=16, collate_fn=Task.AUDIO_CODEC.collate_
 一个样本里有多个同模态 item 时，用 role 区分。例如机器翻译可以有 source text 和 target text：
 
 ```python
-from anydataset import Modality, Role, TextReq, TextView
+from anydataset.types import (
+    Modality,
+    Role,
+    TextReq,
+    TextView,
+)
 
 text = TextReq(views=frozenset({TextView.TEXT}))
 schema = {
@@ -269,7 +283,12 @@ schema = {
 语音到语音翻译也可以用同一套结构表达。preset 可以产出 source audio 和 target audio；训练时如果只需要 LongCat codes，用户自己写 schema 即可，不需要为这个组合任务新增内置 `Task`：
 
 ```python
-from anydataset import AudioReq, AudioView, Modality, Role
+from anydataset.types import (
+    AudioReq,
+    AudioView,
+    Modality,
+    Role,
+)
 
 longcat_audio = AudioReq(views=frozenset({AudioView.LONGCAT}))
 schema = {
@@ -281,7 +300,7 @@ schema = {
 如果数据集同时提供源语言转写和目标语言文本，可以在 preset 里一起产出文本 item。需要辅助 loss、过滤或调试时，再把文本加进 schema：
 
 ```python
-from anydataset import TextMeta, TextReq, TextView
+from anydataset.types import TextMeta, TextReq, TextView
 
 text = TextReq(
     views=frozenset({TextView.TEXT}),
@@ -424,7 +443,8 @@ accepted = filtered.select_by("accept")
 `Batch.sample` 和单条 `Sample` 的逻辑结构相同，只是每个字段都已经 batch 化。
 
 ```python
-from anydataset import AudioView, FieldGroup, FieldRef, Modality, Role
+from anydataset.dataset import FieldGroup, FieldRef
+from anydataset.types import AudioView, Modality, Role
 
 audio_ref = (Role.DEFAULT, Modality.AUDIO)
 audio = batch.sample[audio_ref]
@@ -443,7 +463,7 @@ waveform_mask = batch.masks[
 meta 字段需要先在 schema 里声明，然后从 `item.meta` 里取：
 
 ```python
-from anydataset import ImageMeta
+from anydataset.types import ImageMeta
 
 labels = batch.sample[(Role.DEFAULT, Modality.IMAGE)].meta[ImageMeta.LABEL]
 ```
@@ -459,7 +479,13 @@ store 会把样本元信息和 view payload 保存在同一个数据集目录下
 ```python
 import torch
 
-from anydataset import AudioItem, AudioView, DatasetWriter, Modality, Role
+from anydataset.store import DatasetWriter
+from anydataset.types import (
+    AudioItem,
+    AudioView,
+    Modality,
+    Role,
+)
 
 samples = [
     {
@@ -495,7 +521,12 @@ dataset = AnyDataset(
 训练时需要哪些 view，仍然由 schema 指定：
 
 ```python
-from anydataset import AudioReq, AudioView, Modality, Role
+from anydataset.types import (
+    AudioReq,
+    AudioView,
+    Modality,
+    Role,
+)
 
 schema = {
     (Role.DEFAULT, Modality.AUDIO): AudioReq(
@@ -511,7 +542,9 @@ store 的 view 目录直接使用 `{role}/{modality}/{view}`，真实 payload �
 ```python
 import torch
 
-from anydataset import AnyDataset, AudioView, Source, Spec, ViewMaterializer
+from anydataset import AnyDataset, Source, Spec
+from anydataset.store import ViewMaterializer
+from anydataset.types import AudioView
 
 class ToyLongCat:
     output = AudioView.LONGCAT
@@ -687,3 +720,16 @@ python -m pytest -q
 [docs/filter_cache.md](docs/filter_cache.md)，质量过滤说明在
 [docs/translation_quality.md](docs/translation_quality.md) 和
 [docs/speech_quality.md](docs/speech_quality.md)，待办事项在 [todo.md](todo.md)。
+
+## 发布
+
+```bash
+python scripts/check_release.py
+```
+
+`anydataset` v1 把 canonical `Sample` 映射、source registry、filter cache
+布局、store schema 和 materializer API 作为公开稳定面。包会暴露
+`anydataset.__version__`，发布检查会先确认它和 `pyproject.toml` 版本一致，
+再清理旧构建产物、运行 pytest、构建 sdist/wheel、执行 `twine check`，并在
+隔离虚拟环境里安装 wheel 做 smoke test。只想检查版本和测试门禁时，可以加
+`--skip-build`。

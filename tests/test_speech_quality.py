@@ -4,7 +4,14 @@ import unittest
 
 import torch
 
-from anydataset import AudioItem, AudioView, Modality, Role, TextItem, TextView
+from anydataset.types import (
+    AudioItem,
+    AudioView,
+    Modality,
+    Role,
+    TextItem,
+    TextView,
+)
 from anydataset.quality.speech import Label, Predicate, Profile
 
 

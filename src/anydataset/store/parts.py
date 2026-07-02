@@ -220,9 +220,15 @@ def commit_store_parts(
     parts = _part_roots(parts_dir)
     if not parts:
         raise ValueError(f"No materialized parts found: {parts_dir}")
+    _validate_parts(parts, dataset_id, split)
     return replace_dir(
         output_dir,
-        lambda tmp: _commit_to_tmp(tmp, parts, dataset_id=dataset_id, split=split),
+        lambda tmp: _commit_roots_to_tmp(
+            tmp,
+            parts,
+            dataset_id=dataset_id,
+            split=split,
+        ),
     )
 
 
@@ -243,14 +249,17 @@ def commit_store_fragments(
     )
     if not fragments:
         raise ValueError(f"No materialized fragments found: {fragments_dir}")
+    views = _store_views_from_first(fragments)
     return replace_dir(
         output_dir,
-        lambda tmp: _commit_fragments_to_tmp(
+        lambda tmp: _commit_roots_to_tmp(
             tmp,
             fragments,
             dataset_id=dataset_id,
             split=split,
             expected_sample_count=expected_sample_count,
+            stream_ordered=True,
+            views=views,
         ),
     )
 
@@ -286,36 +295,6 @@ def completed_fragment_indexes(
     return frozenset(indexes)
 
 
-def _commit_to_tmp(
-    root: Path,
-    parts: tuple[Path, ...],
-    *,
-    dataset_id: str,
-    split: str | None,
-) -> Path:
-    _validate_parts(parts, dataset_id, split)
-    return _commit_roots_to_tmp(root, parts, dataset_id=dataset_id, split=split)
-
-
-def _commit_fragments_to_tmp(
-    root: Path,
-    fragments: tuple[Path, ...],
-    *,
-    dataset_id: str,
-    split: str | None,
-    expected_sample_count: int | None,
-) -> Path:
-    return _commit_roots_to_tmp(
-        root,
-        fragments,
-        dataset_id=dataset_id,
-        split=split,
-        expected_sample_count=expected_sample_count,
-        stream_ordered=True,
-        views=_store_views_from_first(fragments),
-    )
-
-
 def _commit_roots_to_tmp(
     root: Path,
     stores: tuple[Path, ...],
@@ -332,6 +311,31 @@ def _commit_roots_to_tmp(
         expected_sample_count=expected_sample_count,
         stream_ordered=stream_ordered,
     )
+    _write_committed_view_manifests(
+        root,
+        stores,
+        sample_indexes_by_ref,
+        stream_ordered=stream_ordered,
+        views=views,
+    )
+    _write_committed_dataset_manifest(
+        root,
+        dataset_id=dataset_id,
+        split=split,
+        sample_count=sample_count,
+    )
+    dataset_ready_path(root).touch()
+    return root
+
+
+def _write_committed_view_manifests(
+    root: Path,
+    stores: tuple[Path, ...],
+    sample_indexes_by_ref: SampleIndexByRef,
+    *,
+    stream_ordered: bool,
+    views: tuple[tuple[Role, Modality, View], ...] | None,
+) -> None:
     for view in (views if views is not None else _store_views(stores)):
         view_count, expected_view_count = _write_ordered_view_manifest(
             root,
@@ -349,6 +353,14 @@ def _commit_roots_to_tmp(
             _copy_view_shards(store, root, view)
         view_ready_path(root, view).touch()
 
+
+def _write_committed_dataset_manifest(
+    root: Path,
+    *,
+    dataset_id: str,
+    split: str | None,
+    sample_count: int,
+) -> None:
     write_json(
         dataset_json_path(root),
         asdict(
@@ -360,8 +372,6 @@ def _commit_roots_to_tmp(
             )
         ),
     )
-    dataset_ready_path(root).touch()
-    return root
 
 
 def _sample_manifest_entry(

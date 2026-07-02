@@ -7,7 +7,8 @@ from unittest.mock import patch
 
 import torch
 
-from anydataset import (
+from anydataset.dataset import collate_fn
+from anydataset.types import (
     AudioItem,
     AudioReq,
     AudioView,
@@ -16,7 +17,6 @@ from anydataset import (
     TextItem,
     TextReq,
     TextView,
-    collate_fn,
 )
 from anydataset.provider.moss_tts import MossTTSProvider
 from anydataset.provider.whisper import WhisperASRProvider

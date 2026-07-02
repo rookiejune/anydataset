@@ -6,11 +6,11 @@ import unittest
 from anydataset import (
     AnyDataset,
     Spec,
-    for_source,
     has_source,
     register_source,
     resolve_dataset,
 )
+from anydataset.dataset.source import for_source
 
 
 class ListSource:

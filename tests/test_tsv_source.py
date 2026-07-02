@@ -2,7 +2,12 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from anydataset import IterableAnyDataset, Spec, has_source, resolve_dataset
+from anydataset import (
+    IterableAnyDataset,
+    Spec,
+    has_source,
+    resolve_dataset,
+)
 
 
 class TsvSourceTest(unittest.TestCase):

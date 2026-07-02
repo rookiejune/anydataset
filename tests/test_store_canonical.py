@@ -4,16 +4,14 @@ from pathlib import Path
 
 import torch
 
-from anydataset import (
-    AnyDataset,
+from anydataset import AnyDataset, Source, Spec
+from anydataset.types import (
     AudioItem,
     AudioView,
     ImageItem,
     ImageView,
     Modality,
     Role,
-    Source,
-    Spec,
     TextItem,
     TextView,
 )

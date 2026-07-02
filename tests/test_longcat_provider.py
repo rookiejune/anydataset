@@ -10,16 +10,14 @@ import numpy as np
 import torch
 from torch import Tensor
 
-from anydataset import (
-    AnyDataset,
+from anydataset import AnyDataset, Source, Spec
+from anydataset.dataset import collate_fn
+from anydataset.types import (
     AudioItem,
     AudioReq,
     AudioView,
     Modality,
     Role,
-    Source,
-    Spec,
-    collate_fn,
 )
 from anydataset.provider.longcat import LongCatProvider
 from anydataset.store import DatasetWriter, ViewMaterializer

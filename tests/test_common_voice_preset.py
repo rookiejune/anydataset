@@ -3,15 +3,14 @@ import tempfile
 import unittest
 from unittest import mock
 
-from anydataset import (
+from anydataset import Preset, resolve_dataset
+from anydataset.types import (
     AudioMeta,
     AudioView,
     Modality,
-    Preset,
     Role,
     TextMeta,
     TextView,
-    resolve_dataset,
 )
 from anydataset.presets import CommonVoice
 

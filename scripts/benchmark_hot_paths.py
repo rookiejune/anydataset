@@ -13,14 +13,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from anydataset import (
+from anydataset import FilterRule, Spec
+from anydataset.types import (
     AudioItem,
     AudioView,
-    FilterRule,
     Modality,
     Role,
     Sample,
-    Spec,
     TextItem,
     TextView,
 )

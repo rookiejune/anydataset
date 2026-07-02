@@ -14,7 +14,7 @@ from torch import distributed as dist
 from torch.utils.data import DataLoader
 
 from .._devices import Devices, resolve_devices
-from .._logging import run_logs_dir, use_run_logs_dir, write_info
+from .._logging import run_logs_dir, use_run_logs_dir
 from .._parallel import (
     DeviceWorker,
     cuda_device,
@@ -34,9 +34,9 @@ from .._resume import (
     append_completed_index_cache,
     cleanup_resume_dir,
     dataset_sample_count,
-    format_index_ranges,
     index_batch_id,
     indexes_complete,
+    log_resume_summary,
     missing_indexes,
     pending_batch,
     prepare_resume_dir,
@@ -183,7 +183,7 @@ class ViewMaterializer:
             return self._commit_fragments(fragments_dir, expected)
 
         missing = missing_indexes(completed, expected)
-        _log_resume_summary(
+        log_resume_summary(
             "materializer",
             expected=expected,
             completed_count=len(completed),
@@ -231,7 +231,7 @@ class ViewMaterializer:
             return self._commit_fragments(fragments_dir, expected)
 
         missing = missing_indexes(completed, expected)
-        _log_resume_summary(
+        log_resume_summary(
             "materializer",
             expected=expected,
             completed_count=len(completed),
@@ -504,112 +504,15 @@ class ViewMaterializer:
                 expected,
             )
         )
-        with self._fragment_sink(progress=progress, worker_id=worker_id) as sink:
-            pending_outputs: list[tuple[int, Sample]] = []
-            read_start = time.perf_counter()
-            for batch in batches:
-                _put_stage_progress(
-                    progress,
-                    worker_id=worker_id,
-                    stage="reader",
-                    samples=len(batch),
-                    elapsed=time.perf_counter() - read_start,
-                )
-                pending = pending_batch(batch, frozenset(completed))
-                if not pending:
-                    read_start = time.perf_counter()
-                    continue
-                provider_start = time.perf_counter()
-                outputs = self._materialized_indexed_batch(pending, provider)
-                _put_stage_progress(
-                    progress,
-                    worker_id=worker_id,
-                    stage="provider",
-                    samples=len(outputs),
-                    elapsed=time.perf_counter() - provider_start,
-                )
-                pending_outputs.extend(outputs)
-                while len(pending_outputs) >= self.commit_samples:
-                    completed.update(
-                        self._submit_fragment(
-                            sink,
-                            fragments_dir=fragments_dir,
-                            samples=pending_outputs[: self.commit_samples],
-                        )
-                    )
-                    del pending_outputs[: self.commit_samples]
-                read_start = time.perf_counter()
-            if pending_outputs:
-                completed.update(
-                    self._submit_fragment(
-                        sink,
-                        fragments_dir=fragments_dir,
-                        samples=pending_outputs,
-                    )
-                )
-
-    def _submit_fragment(
-        self,
-        sink: BackgroundWriteSink[_FragmentWriteJob],
-        *,
-        fragments_dir: Path,
-        samples: Sequence[tuple[int, Sample]],
-    ) -> tuple[int, ...]:
-        indexed = tuple(samples)
-        indexes = tuple(sorted(index for index, _ in indexed))
-        job = _FragmentWriteJob(
+        writer = _FragmentBatchWriter(
+            materializer=self,
             fragments_dir=fragments_dir,
-            dataset_id=self._dataset_id,
-            split=self.split,
-            max_shard_samples=self.max_shard_samples,
-            indexes=indexes,
-            samples=indexed,
+            completed=completed,
+            provider=provider,
+            progress=progress,
+            worker_id=worker_id,
         )
-        sink.submit(job)
-        return indexes
-
-    def _fragment_sink(
-        self,
-        *,
-        progress: _ProgressSink | None = None,
-        worker_id: int = 0,
-    ) -> BackgroundWriteSink[_FragmentWriteJob]:
-        return BackgroundWriteSink(
-            _write_fragment,
-            workers=self.write_workers,
-            max_pending=self.write_prefetch,
-            start_method=self.runtime.writer_worker_start_method,
-            on_submit=lambda job, pending: _put_stage_progress(
-                progress,
-                worker_id=worker_id,
-                stage="writer",
-                pending=pending,
-            ),
-            on_complete=lambda job, pending, elapsed: _put_stage_progress(
-                progress,
-                worker_id=worker_id,
-                stage="writer",
-                samples=len(job.samples),
-                elapsed=elapsed,
-                pending=pending,
-            ),
-        )
-
-    def _materialized_indexed_batch(
-        self,
-        batch: Sequence[tuple[int, Sample]],
-        provider: MaterializerProvider,
-    ) -> tuple[tuple[int, Sample], ...]:
-        if self.batch_size == 1:
-            return tuple(
-                (index, self._sample_with_provider(sample, provider))
-                for index, sample in batch
-            )
-
-        indexes, samples = zip(*batch, strict=True)
-        outputs = tuple(self._resilient_samples_with_batch_provider(samples, provider))
-        validate_batch_outputs(outputs, len(samples))
-        return tuple(zip(indexes, outputs, strict=True))
+        writer.write(batches)
 
     def _samples_with_batch_provider(
         self,
@@ -649,6 +552,141 @@ class ModalityMaterializer(ViewMaterializer):
     ) -> Iterator[Sample]:
         return with_batch_modality_provider(
             samples, cast(ModalityProviderLike, provider)
+        )
+
+
+@dataclass
+class _FragmentBatchWriter:
+    materializer: ViewMaterializer
+    fragments_dir: Path
+    completed: set[int]
+    provider: MaterializerProvider
+    progress: _ProgressSink | None = None
+    worker_id: int = 0
+
+    def write(self, batches: Iterable[Sequence[tuple[int, Sample]]]) -> None:
+        with self._sink() as sink:
+            pending_outputs: list[tuple[int, Sample]] = []
+            read_start = time.perf_counter()
+            for batch in batches:
+                self._record_read(batch, read_start)
+                pending = pending_batch(batch, frozenset(self.completed))
+                if not pending:
+                    read_start = time.perf_counter()
+                    continue
+                outputs = self._materialized_batch(pending)
+                pending_outputs.extend(outputs)
+                self._flush_ready(sink, pending_outputs)
+                read_start = time.perf_counter()
+            self._flush_remaining(sink, pending_outputs)
+
+    def _record_read(
+        self,
+        batch: Sequence[tuple[int, Sample]],
+        read_start: float,
+    ) -> None:
+        _put_stage_progress(
+            self.progress,
+            worker_id=self.worker_id,
+            stage="reader",
+            samples=len(batch),
+            elapsed=time.perf_counter() - read_start,
+        )
+
+    def _materialized_batch(
+        self,
+        batch: Sequence[tuple[int, Sample]],
+    ) -> tuple[tuple[int, Sample], ...]:
+        provider_start = time.perf_counter()
+        outputs = self._materialized_indexed_batch(batch)
+        _put_stage_progress(
+            self.progress,
+            worker_id=self.worker_id,
+            stage="provider",
+            samples=len(outputs),
+            elapsed=time.perf_counter() - provider_start,
+        )
+        return outputs
+
+    def _materialized_indexed_batch(
+        self,
+        batch: Sequence[tuple[int, Sample]],
+    ) -> tuple[tuple[int, Sample], ...]:
+        if self.materializer.batch_size == 1:
+            return tuple(
+                (
+                    index,
+                    self.materializer._sample_with_provider(sample, self.provider),
+                )
+                for index, sample in batch
+            )
+
+        indexes, samples = zip(*batch, strict=True)
+        outputs = tuple(
+            self.materializer._resilient_samples_with_batch_provider(
+                samples,
+                self.provider,
+            )
+        )
+        validate_batch_outputs(outputs, len(samples))
+        return tuple(zip(indexes, outputs, strict=True))
+
+    def _flush_ready(
+        self,
+        sink: BackgroundWriteSink[_FragmentWriteJob],
+        pending_outputs: list[tuple[int, Sample]],
+    ) -> None:
+        while len(pending_outputs) >= self.materializer.commit_samples:
+            self._submit(sink, pending_outputs[: self.materializer.commit_samples])
+            del pending_outputs[: self.materializer.commit_samples]
+
+    def _flush_remaining(
+        self,
+        sink: BackgroundWriteSink[_FragmentWriteJob],
+        pending_outputs: list[tuple[int, Sample]],
+    ) -> None:
+        if pending_outputs:
+            self._submit(sink, pending_outputs)
+
+    def _submit(
+        self,
+        sink: BackgroundWriteSink[_FragmentWriteJob],
+        samples: Sequence[tuple[int, Sample]],
+    ) -> None:
+        indexed = tuple(samples)
+        indexes = tuple(sorted(index for index, _ in indexed))
+        sink.submit(
+            _FragmentWriteJob(
+                fragments_dir=self.fragments_dir,
+                dataset_id=self.materializer._dataset_id,
+                split=self.materializer.split,
+                max_shard_samples=self.materializer.max_shard_samples,
+                indexes=indexes,
+                samples=indexed,
+            )
+        )
+        self.completed.update(indexes)
+
+    def _sink(self) -> BackgroundWriteSink[_FragmentWriteJob]:
+        return BackgroundWriteSink(
+            _write_fragment,
+            workers=self.materializer.write_workers,
+            max_pending=self.materializer.write_prefetch,
+            start_method=self.materializer.runtime.writer_worker_start_method,
+            on_submit=lambda job, pending: _put_stage_progress(
+                self.progress,
+                worker_id=self.worker_id,
+                stage="writer",
+                pending=pending,
+            ),
+            on_complete=lambda job, pending, elapsed: _put_stage_progress(
+                self.progress,
+                worker_id=self.worker_id,
+                stage="writer",
+                samples=len(job.samples),
+                elapsed=elapsed,
+                pending=pending,
+            ),
         )
 
 
@@ -835,23 +873,6 @@ def _put_stage_progress(
             elapsed=elapsed,
             pending=pending,
         ),
-    )
-
-
-def _log_resume_summary(
-    source: str,
-    *,
-    expected: int,
-    completed_count: int,
-    missing: Sequence[int],
-    use_map_style_loader: bool,
-) -> None:
-    write_info(
-        source,
-        "resume "
-        f"expected={expected} completed={completed_count} "
-        f"missing={len(missing)} map_style={use_map_style_loader} "
-        f"ranges={format_index_ranges(missing)}",
     )
 
 

@@ -1,6 +1,11 @@
 import unittest
 
-from anydataset import Preset, Source, Spec, resolve_dataset
+from anydataset import (
+    Preset,
+    Source,
+    Spec,
+    resolve_dataset,
+)
 
 
 class ResolverTest(unittest.TestCase):

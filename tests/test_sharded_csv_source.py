@@ -4,7 +4,13 @@ import tempfile
 import unittest
 from unittest import mock
 
-from anydataset import AnyDataset, IterableAnyDataset, Spec, has_source, resolve_dataset
+from anydataset import (
+    AnyDataset,
+    IterableAnyDataset,
+    Spec,
+    has_source,
+    resolve_dataset,
+)
 
 
 class ShardedCsvSourceTest(unittest.TestCase):

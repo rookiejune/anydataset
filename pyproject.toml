@@ -1,20 +1,38 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "anydataset"
-version = "0.1.0"
-description = "PyTorch-first iterable datasets assembled from multiple cached sources."
+version = "1.0.0"
+description = "PyTorch-first canonical datasets, cached filters, and materialized views."
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = ["torch>=2.0", "pyarrow>=14.0"]
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [
+    { name = "rookiejune" },
+]
+keywords = ["datasets", "pytorch", "cache", "filtering", "multimodal"]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
 
 [project.optional-dependencies]
 audio = ["torchaudio>=2.0"]
 huggingface = ["datasets[audio]>=2.0", "huggingface_hub>=0.20"]
 examples = ["tensorboard>=2.0", "torchvision>=0.15"]
 test = ["pytest>=8.0"]
+dev = ["pytest>=8.0", "build>=1.0", "twine>=5.0"]
+
+[project.urls]
+Repository = "https://github.com/rookiejune/anydataset"
+Issues = "https://github.com/rookiejune/anydataset/issues"
 
 [tool.setuptools.packages.find]
 where = ["src"]

@@ -37,11 +37,11 @@ def read_samples_manifest(root: str | Path) -> Iterator[SampleManifestEntry]:
 
 
 def sample_manifest_row_count(root: str | Path) -> int:
-    return _parquet_row_count(samples_parquet_path(root))
+    return row_count(samples_parquet_path(root))
 
 
 def sample_manifest_row_groups(root: str | Path) -> tuple[int, ...]:
-    return _parquet_row_groups(samples_parquet_path(root))
+    return row_groups(samples_parquet_path(root))
 
 
 def read_samples_manifest_row_group(
@@ -55,7 +55,7 @@ def read_samples_manifest_row_group(
 
 
 def read_sample_manifest_index(root: str | Path) -> Iterator[tuple[int, str]]:
-    yield from _read_parquet_int_string_columns(
+    yield from read_int_string_columns(
         samples_parquet_path(root),
         int_column="sample_index",
         string_column="sample_id",
@@ -88,14 +88,14 @@ def view_manifest_row_count(
     root: str | Path,
     view: tuple[Role, Modality, View],
 ) -> int:
-    return _parquet_row_count(view_manifest_parquet_path(root, view))
+    return row_count(view_manifest_parquet_path(root, view))
 
 
 def view_manifest_row_groups(
     root: str | Path,
     view: tuple[Role, Modality, View],
 ) -> tuple[int, ...]:
-    return _parquet_row_groups(view_manifest_parquet_path(root, view))
+    return row_groups(view_manifest_parquet_path(root, view))
 
 
 def read_view_manifest_row_group(
@@ -116,7 +116,7 @@ def read_view_manifest_indexes(
     root: str | Path,
     view: tuple[Role, Modality, View],
 ) -> Iterator[int]:
-    yield from _read_parquet_int_column(
+    yield from read_int_column(
         view_manifest_parquet_path(root, view),
         "sample_index",
     )
@@ -138,14 +138,14 @@ def write_view_manifest(
 
 
 def sample_manifest_writer(root: str | Path) -> ParquetRowWriter:
-    return _manifest_writer(samples_parquet_path(root), _SAMPLE_SCHEMA, _sample_row)
+    return ParquetRowWriter(samples_parquet_path(root), _SAMPLE_SCHEMA, _sample_row)
 
 
 def view_manifest_writer(
     root: str | Path,
     view: tuple[Role, Modality, View],
 ) -> ParquetRowWriter:
-    return _manifest_writer(
+    return ParquetRowWriter(
         view_manifest_parquet_path(root, view),
         _VIEW_SCHEMA,
         _view_row,
@@ -220,49 +220,8 @@ def _read_parquet_row_group(
         yield _decode_row(row)
 
 
-def _read_parquet_int_column(path: Path, column: str) -> Iterator[int]:
-    yield from read_int_column(path, column)
-
-
-def _read_parquet_int_string_columns(
-    path: Path,
-    *,
-    int_column: str,
-    string_column: str,
-) -> Iterator[tuple[int, str]]:
-    yield from read_int_string_columns(
-        path,
-        int_column=int_column,
-        string_column=string_column,
-    )
-
-
-def _parquet_row_count(path: Path) -> int:
-    return row_count(path)
-
-
-def _parquet_row_groups(path: Path) -> tuple[int, ...]:
-    return row_groups(path)
-
-
-def _manifest_writer(
-    path: Path,
-    schema: ParquetSchema,
-    encode: Callable[[Any], dict[str, Any]],
-) -> ParquetRowWriter:
-    return ParquetRowWriter(path, schema, encode)
-
-
 def _schema(pa, fields: tuple[tuple[str, str], ...]):
     return parquet_schema(pa, fields)
-
-
-def _field_type(pa, type_name: str):
-    return parquet_schema(pa, (("value", type_name),)).field("value").type
-
-
-def _pyarrow():
-    return pyarrow()
 
 
 _SAMPLE_SCHEMA = (

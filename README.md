@@ -13,13 +13,19 @@ rows are parsed into canonical samples.
 ## Install
 
 ```bash
-pip install -e '.[huggingface,test]'
+pip install anydataset
 ```
 
-For audio file loading:
+For Hugging Face datasets or audio file loading:
 
 ```bash
-pip install -e '.[huggingface,audio]'
+pip install 'anydataset[huggingface,audio]'
+```
+
+For local development:
+
+```bash
+pip install -e '.[huggingface,audio,dev]'
 ```
 
 ## Presets
@@ -29,7 +35,8 @@ Built-in presets currently include `MNIST`, `CIFAR10`, `FLEURS`,
 `LIBRISPEECH_ASR`, `COMMON_VOICE`, `ESC50`, `NSYNTH`, `FSD50K`, and `WMT19`.
 
 ```python
-from anydataset import AudioView, Modality, Preset, Role
+from anydataset import Preset
+from anydataset.types import AudioView, Modality, Role
 
 dataset = Preset.FLEURS.create(split="validation")
 sample = next(iter(dataset))
@@ -65,7 +72,14 @@ csv = resolve_dataset("sharded_csv:///data/bitext:train")
 `Spec` and an optional `parse_fn` that maps one raw row to a canonical `Sample`.
 
 ```python
-from anydataset import AnyDataset, ImageItem, ImageMeta, ImageView, Modality, Role, Source, Spec
+from anydataset import AnyDataset, Source, Spec
+from anydataset.types import (
+    ImageItem,
+    ImageMeta,
+    ImageView,
+    Modality,
+    Role,
+)
 
 def parse(row):
     return {
@@ -124,7 +138,8 @@ Runtime warnings and worker logs live under
 Combine already-created datasets with `MultipleAnyDataset`.
 
 ```python
-from anydataset import MultipleAnyDataset, Preset, RoundRobinStrategy
+from anydataset import MultipleAnyDataset, Preset
+from anydataset.dataset import RoundRobinStrategy
 
 dataset = MultipleAnyDataset(
     [
@@ -283,15 +298,13 @@ store can be read back through `Source.STORE`.
 ```python
 import torch
 
-from anydataset import (
-    AnyDataset,
+from anydataset import AnyDataset, Source, Spec
+from anydataset.store import DatasetWriter
+from anydataset.types import (
     AudioItem,
     AudioView,
-    DatasetWriter,
     Modality,
     Role,
-    Source,
-    Spec,
 )
 
 sample = {
@@ -316,7 +329,9 @@ and delta stores are aligned by `sample_index`; callers are responsible for
 materializing views from the same ordered dataset.
 
 ```python
-from anydataset import AnyDataset, AudioView, Source, Spec, ViewMaterializer
+from anydataset import AnyDataset, Source, Spec
+from anydataset.store import ViewMaterializer
+from anydataset.types import AudioView
 
 class ToyLongCat:
     output = AudioView.LONGCAT
@@ -426,7 +441,8 @@ when the output modality already exists or when the input modality is ambiguous.
 Generated items start with empty metadata.
 
 ```python
-from anydataset import AudioView, ModalityMaterializer, TextView
+from anydataset.store import ModalityMaterializer
+from anydataset.types import AudioView, TextView
 
 
 class ToyTTS:
@@ -459,3 +475,15 @@ audio-to-text.
 Additional design notes live in `docs/design.md`, filter cache details in
 `docs/filter_cache.md`, and quality-filter notes in
 `docs/translation_quality.md` and `docs/speech_quality.md`.
+
+## Release
+
+```bash
+python scripts/check_release.py
+```
+
+The package exposes `anydataset.__version__`, and the release check verifies
+that it matches the `pyproject.toml` version before building. The release check
+cleans old build artifacts, runs pytest, builds sdist/wheel, runs `twine check`,
+and smoke-installs the wheel in an isolated virtual environment. Use
+`--skip-build` when only the version and test gate should run.

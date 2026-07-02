@@ -6,17 +6,15 @@ from unittest import mock
 
 import torch
 
-from anydataset import (
-    AnyDataset,
+from anydataset import AnyDataset, Source, Spec
+from anydataset.dataset import DatasetStoreWriter
+from anydataset.types import (
     AudioItem,
     AudioMeta,
     AudioReq,
     AudioView,
-    DatasetStoreWriter,
     Modality,
     Role,
-    Source,
-    Spec,
     TextItem,
     TextView,
 )

@@ -16,6 +16,8 @@ from collections.abc import Iterable, Sequence
 from pathlib import Path
 from typing import Any, TypeVar
 
+from ._logging import write_info
+
 T = TypeVar("T")
 
 _COMPLETED_INDEX_CACHE = ".completed-indexes.jsonl"
@@ -123,6 +125,23 @@ def format_index_ranges(indexes: Sequence[int], *, limit: int = 8) -> str:
     if truncated:
         ranges.append("...")
     return ",".join(ranges)
+
+
+def log_resume_summary(
+    source: str,
+    *,
+    expected: int,
+    completed_count: int,
+    missing: Sequence[int],
+    use_map_style_loader: bool,
+) -> None:
+    write_info(
+        source,
+        "resume "
+        f"expected={expected} completed={completed_count} "
+        f"missing={len(missing)} map_style={use_map_style_loader} "
+        f"ranges={format_index_ranges(missing)}",
+    )
 
 
 def cached_completed_indexes(

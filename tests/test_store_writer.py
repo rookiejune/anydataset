@@ -8,7 +8,7 @@ from unittest import mock
 
 import torch
 
-from anydataset import (
+from anydataset.types import (
     AudioItem,
     AudioMeta,
     AudioView,

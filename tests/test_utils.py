@@ -1,6 +1,6 @@
 import unittest
 
-from anydataset import (
+from anydataset.types import (
     AudioMeta,
     AudioView,
     ImageMeta,

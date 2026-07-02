@@ -7,22 +7,18 @@ from unittest import mock
 
 import torch
 
-from anydataset import (
-    AnyDataset,
+from anydataset import AnyDataset, Source, Spec
+from anydataset.dataset import FieldGroup, FieldRef
+from anydataset.provider_service import ProviderServer, RemoteProviderFactory
+from anydataset.runtime import Runtime
+from anydataset.store import ModalityMaterializer
+from anydataset.types import (
     AudioItem,
     AudioView,
-    FieldGroup,
-    FieldRef,
     ImageItem,
     ImageView,
     Modality,
-    ModalityMaterializer,
-    ProviderServer,
-    RemoteProviderFactory,
     Role,
-    Source,
-    Spec,
-    Runtime,
     TextItem,
     TextMeta,
     TextView,

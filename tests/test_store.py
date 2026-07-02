@@ -4,7 +4,7 @@ from dataclasses import asdict
 from pathlib import Path
 from unittest import mock
 
-from anydataset import AudioView, Modality, Role
+from anydataset.types import AudioView, Modality, Role
 from anydataset.store.jsonio import read_json, write_json
 from anydataset.store.manifest import (
     DatasetManifest,
