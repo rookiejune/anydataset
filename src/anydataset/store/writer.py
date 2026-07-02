@@ -25,8 +25,8 @@ from .manifest import (
     STORE_SCHEMA_VERSION,
     string_key_dict,
 )
+from .._io.atomic import replace_dir
 from .manifestio import sample_manifest_writer
-from .atomic import replace_dir
 from .paths import (
     dataset_json_path,
     dataset_ready_path,

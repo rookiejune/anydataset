@@ -26,6 +26,22 @@ def replace_dir(target: str | Path, write: Callable[[Path], ValueT]) -> Path:
         raise
 
 
+def replace_existing_dir(target: str | Path, write: Callable[[Path], ValueT]) -> Path:
+    target = Path(target)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp = tmp_dir(target)
+    cleanup_dir(tmp)
+    tmp.mkdir(parents=True)
+    try:
+        write(tmp)
+        cleanup_dir(target)
+        os.replace(tmp, target)
+        return target
+    except Exception:
+        cleanup_dir(tmp)
+        raise
+
+
 def validate_empty_target(path: Path) -> None:
     if path.exists():
         if not path.is_dir():

@@ -10,6 +10,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .._io.parquet import read_rows, write_columns
+from .._io.shard import BufferedShardWriter
 from ..store.jsonio import read_json, write_json
 from .rules import label_file_id
 from .types import JsonValue, _FilterMetricsRow, _Index
@@ -109,58 +111,36 @@ class PartitionWriter:
 
 
 class MetricsWriter:
-    __slots__ = ("_buffer", "_count", "_files", "_max_shard_samples", "_path")
+    __slots__ = ("_path", "_shards")
 
     def __init__(self, path: Path, *, max_shard_samples: int | None) -> None:
         self._path = path
-        self._max_shard_samples = max_shard_samples
-        self._buffer: list[_FilterMetricsRow] = []
-        self._files: list[dict[str, Any]] = []
-        self._count = 0
+        self._shards = BufferedShardWriter[_FilterMetricsRow, list[_FilterMetricsRow]](
+            path,
+            max_shard_items=max_shard_samples,
+            new_buffer=list,
+            extend=list.extend,
+            size=len,
+            shard_path=_metric_shard_path,
+            write_buffer=write_metric_rows,
+        )
 
     def write_rows(self, rows: Sequence[_FilterMetricsRow]) -> None:
-        if len(rows) == 0:
-            return
-        if self._max_shard_samples is None:
-            self._buffer.extend(rows)
-            return
-        offset = 0
-        while offset < len(rows):
-            capacity = self._max_shard_samples - len(self._buffer)
-            next_offset = min(offset + capacity, len(rows))
-            self._buffer.extend(rows[offset:next_offset])
-            offset = next_offset
-            if len(self._buffer) >= self._max_shard_samples:
-                self._flush()
+        self._shards.write(rows)
 
     def close(self) -> None:
-        if self._buffer:
-            self._flush()
+        self._shards.close()
         write_json(
             self._path / "metrics.json",
             {
                 "schema_version": 1,
-                "count": self._count,
-                "files": self._files,
+                "count": self._shards.count,
+                "files": list(self._shards.files),
             },
         )
 
     def abort(self) -> None:
-        self._buffer.clear()
-
-    def _flush(self) -> None:
-        shard_index = len(self._files)
-        relpath = Path("shards") / f"part-{shard_index:06d}.parquet"
-        count = len(self._buffer)
-        write_metric_rows(self._path / relpath, self._buffer)
-        self._files.append(
-            {
-                "file": relpath.as_posix(),
-                "count": count,
-            }
-        )
-        self._count += count
-        self._buffer = []
+        self._shards.abort()
 
 
 def merged_index(indexes: Sequence[_Index]) -> _Index:
@@ -268,7 +248,7 @@ class _FileIndex(Sequence[int]):
 
 
 class _PartitionWriteState:
-    __slots__ = ("_buffer", "_count", "_files", "_label", "_max_shard_samples", "_path")
+    __slots__ = ("_label", "_shards")
 
     def __init__(
         self,
@@ -277,105 +257,83 @@ class _PartitionWriteState:
         *,
         max_shard_samples: int | None,
     ) -> None:
-        self._path = path
         self._label = label
-        self._max_shard_samples = max_shard_samples
-        self._buffer = array("q")
-        self._files: list[dict[str, Any]] = []
-        self._count = 0
+        self._shards = BufferedShardWriter[int, array[int]](
+            path,
+            max_shard_items=max_shard_samples,
+            new_buffer=_index_buffer,
+            extend=_extend_index_buffer,
+            size=len,
+            shard_path=lambda index: _partition_shard_path(label, index),
+            write_buffer=write_index_rows,
+        )
 
     def write(self, indices: Sequence[int]) -> None:
-        if self._max_shard_samples is None:
-            self._buffer.extend(indices)
-            return
-        offset = 0
-        while offset < len(indices):
-            capacity = self._max_shard_samples - len(self._buffer)
-            next_offset = min(offset + capacity, len(indices))
-            self._buffer.extend(indices[offset:next_offset])
-            offset = next_offset
-            if len(self._buffer) >= self._max_shard_samples:
-                self._flush()
+        self._shards.write(indices)
 
     def close(self) -> dict[str, Any]:
-        if self._buffer or not self._files:
-            self._flush()
+        self._shards.close(flush_empty=True)
         return {
             "label": self._label,
-            "count": self._count,
-            "files": self._files,
+            "count": self._shards.count,
+            "files": list(self._shards.files),
         }
 
     def abort(self) -> None:
-        self._buffer.clear()
+        self._shards.abort()
 
-    def _flush(self) -> None:
-        shard_index = len(self._files)
-        relpath = (
-            Path("partitions")
-            / label_file_id(self._label)
-            / f"part-{shard_index:06d}.parquet"
-        )
-        write_index_rows(self._path / relpath, self._buffer)
-        count = len(self._buffer)
-        self._files.append(
-            {
-                "file": relpath.as_posix(),
-                "count": count,
-            }
-        )
-        self._count += count
-        self._buffer = array("q")
+
+def _metric_shard_path(shard_index: int) -> Path:
+    return Path("shards") / f"part-{shard_index:06d}.parquet"
+
+
+def _partition_shard_path(label: str, shard_index: int) -> Path:
+    return Path("partitions") / label_file_id(label) / f"part-{shard_index:06d}.parquet"
+
+
+def _index_buffer() -> array[int]:
+    return array("q")
+
+
+def _extend_index_buffer(buffer: array[int], indices: Sequence[int]) -> None:
+    buffer.extend(indices)
 
 
 def read_index_rows(path: Path) -> array[int]:
-    _, pq = _pyarrow()
-    table = pq.read_table(path, columns=["index"])
-    return array("q", (int(index) for index in table.column("index").to_pylist()))
+    return array("q", (int(row["index"]) for row in read_rows(path, columns=["index"])))
 
 
 def write_index_rows(path: Path, indices: Sequence[int]) -> None:
-    pa, pq = _pyarrow()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    table = pa.Table.from_arrays(
-        [pa.array(indices, type=pa.int64())],
-        schema=pa.schema([("index", pa.int64())]),
+    write_columns(
+        path,
+        {"index": indices},
+        (("index", "int64"),),
     )
-    pq.write_table(table, path)
 
 
 def read_metric_rows(path: Path) -> Iterable[Mapping[str, Any]]:
-    _, pq = _pyarrow()
-    table = pq.read_table(path, columns=["index", "label", "metrics"])
-    indices = table.column("index").to_pylist()
-    labels = table.column("label").to_pylist()
-    metrics = table.column("metrics").to_pylist()
-    for index, label, payload in zip(indices, labels, metrics, strict=True):
+    for row in read_rows(path, columns=["index", "label", "metrics"]):
         yield {
-            "index": int(index),
-            "label": str(label),
-            "metrics": json.loads(str(payload)),
+            "index": int(row["index"]),
+            "label": str(row["label"]),
+            "metrics": json.loads(str(row["metrics"])),
         }
 
 
 def write_metric_rows(path: Path, rows: Sequence[_FilterMetricsRow]) -> None:
-    pa, pq = _pyarrow()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    table = pa.Table.from_arrays(
-        [
-            pa.array((row.index for row in rows), type=pa.int64()),
-            pa.array((row.label for row in rows), type=pa.string()),
-            pa.array((_metrics_json(row.metrics) for row in rows), type=pa.string()),
-        ],
-        schema=pa.schema(
-            [
-                ("index", pa.int64()),
-                ("label", pa.string()),
-                ("metrics", pa.string()),
-            ]
+    write_columns(
+        path,
+        {
+            "index": (row.index for row in rows),
+            "label": (row.label for row in rows),
+            "metrics": (_metrics_json(row.metrics) for row in rows),
+        },
+        (
+            ("index", "int64"),
+            ("label", "string"),
+            ("metrics", "string"),
         ),
     )
-    pq.write_table(table, path)
 
 
 def _validate_json_value(value: Any) -> JsonValue:
@@ -408,12 +366,3 @@ def _metrics_json(metrics: Mapping[str, JsonValue]) -> str:
         )
     except (TypeError, ValueError) as exc:
         raise TypeError("filter decision metrics must be JSON-serializable.") from exc
-
-
-def _pyarrow():
-    try:
-        import pyarrow as pa
-        import pyarrow.parquet as pq
-    except ImportError as exc:
-        raise ImportError("Cached filters require pyarrow.") from exc
-    return pa, pq

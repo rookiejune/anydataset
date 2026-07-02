@@ -1,13 +1,23 @@
 from __future__ import annotations
 
 import json
-import os
-import uuid
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
+from .._io.parquet import (
+    ParquetRowWriter,
+    ParquetSchema,
+    parquet_schema,
+    pyarrow,
+    read_int_column,
+    read_int_string_columns,
+    read_row_group,
+    read_rows,
+    row_count,
+    row_groups,
+)
 from ..types.item import Modality, Role, View
 from .manifest import (
     SampleManifestEntry,
@@ -127,14 +137,14 @@ def write_view_manifest(
         raise
 
 
-def sample_manifest_writer(root: str | Path) -> _ParquetRowWriter:
+def sample_manifest_writer(root: str | Path) -> ParquetRowWriter:
     return _manifest_writer(samples_parquet_path(root), _SAMPLE_SCHEMA, _sample_row)
 
 
 def view_manifest_writer(
     root: str | Path,
     view: tuple[Role, Modality, View],
-) -> _ParquetRowWriter:
+) -> ParquetRowWriter:
     return _manifest_writer(
         view_manifest_parquet_path(root, view),
         _VIEW_SCHEMA,
@@ -196,11 +206,8 @@ def _read_parquet_rows(
     *,
     columns: list[str] | None = None,
 ) -> Iterator[dict[str, Any]]:
-    _, pq = _pyarrow()
-    parquet = pq.ParquetFile(path)
-    for batch in parquet.iter_batches(batch_size=4096, columns=columns):
-        for row in batch.to_pylist():
-            yield _decode_row(row)
+    for row in read_rows(path, columns=columns):
+        yield _decode_row(row)
 
 
 def _read_parquet_row_group(
@@ -209,19 +216,12 @@ def _read_parquet_row_group(
     *,
     columns: list[str] | None = None,
 ) -> Iterator[dict[str, Any]]:
-    _, pq = _pyarrow()
-    table = pq.ParquetFile(path).read_row_group(row_group, columns=columns)
-    for row in table.to_pylist():
+    for row in read_row_group(path, row_group, columns=columns):
         yield _decode_row(row)
 
 
 def _read_parquet_int_column(path: Path, column: str) -> Iterator[int]:
-    _, pq = _pyarrow()
-    parquet = pq.ParquetFile(path)
-    for batch in parquet.iter_batches(batch_size=4096, columns=[column]):
-        values = batch.column(0)
-        for index in range(len(values)):
-            yield int(values[index].as_py())
+    yield from read_int_column(path, column)
 
 
 def _read_parquet_int_string_columns(
@@ -230,105 +230,39 @@ def _read_parquet_int_string_columns(
     int_column: str,
     string_column: str,
 ) -> Iterator[tuple[int, str]]:
-    _, pq = _pyarrow()
-    parquet = pq.ParquetFile(path)
-    for batch in parquet.iter_batches(
-        batch_size=4096,
-        columns=[int_column, string_column],
-    ):
-        int_values = batch.column(0)
-        string_values = batch.column(1)
-        for index in range(len(int_values)):
-            yield int(int_values[index].as_py()), str(string_values[index].as_py())
-
-
-def _parquet_row_count(path: Path) -> int:
-    _, pq = _pyarrow()
-    return int(pq.ParquetFile(path).metadata.num_rows)
-
-
-def _parquet_row_groups(path: Path) -> tuple[int, ...]:
-    _, pq = _pyarrow()
-    metadata = pq.ParquetFile(path).metadata
-    return tuple(
-        int(metadata.row_group(index).num_rows)
-        for index in range(metadata.num_row_groups)
+    yield from read_int_string_columns(
+        path,
+        int_column=int_column,
+        string_column=string_column,
     )
 
 
-class _ParquetRowWriter:
-    def __init__(
-        self,
-        path: Path,
-        schema,
-        encode: Callable[[Any], dict[str, Any]],
-    ) -> None:
-        pa, pq = _pyarrow()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        self.pa = pa
-        self.pq = pq
-        self.path = path
-        self.tmp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
-        self.schema = _schema(pa, schema)
-        self.encode = encode
-        self.writer = pq.ParquetWriter(self.tmp, self.schema)
-        self.rows: list[dict[str, Any]] = []
-        self.closed = False
+def _parquet_row_count(path: Path) -> int:
+    return row_count(path)
 
-    def write(self, entry: Any) -> None:
-        self.rows.append(self.encode(entry))
-        if len(self.rows) >= 4096:
-            self._flush()
 
-    def close(self) -> None:
-        if self.closed:
-            return
-        self._flush()
-        self.writer.close()
-        os.replace(self.tmp, self.path)
-        self.closed = True
-
-    def abort(self) -> None:
-        if not self.closed:
-            self.writer.close()
-        if self.tmp.exists():
-            self.tmp.unlink()
-        self.closed = True
-
-    def _flush(self) -> None:
-        table = self.pa.Table.from_pylist(self.rows, schema=self.schema)
-        self.writer.write_table(table)
-        self.rows.clear()
+def _parquet_row_groups(path: Path) -> tuple[int, ...]:
+    return row_groups(path)
 
 
 def _manifest_writer(
     path: Path,
-    schema: tuple[tuple[str, str], ...],
+    schema: ParquetSchema,
     encode: Callable[[Any], dict[str, Any]],
-) -> _ParquetRowWriter:
-    return _ParquetRowWriter(path, schema, encode)
+) -> ParquetRowWriter:
+    return ParquetRowWriter(path, schema, encode)
 
 
 def _schema(pa, fields: tuple[tuple[str, str], ...]):
-    return pa.schema([(name, _field_type(pa, type_name)) for name, type_name in fields])
+    return parquet_schema(pa, fields)
 
 
 def _field_type(pa, type_name: str):
-    match type_name:
-        case "int64":
-            return pa.int64()
-        case "string":
-            return pa.string()
-    raise ValueError(f"Unsupported parquet field type: {type_name!r}.")
+    return parquet_schema(pa, (("value", type_name),)).field("value").type
 
 
 def _pyarrow():
-    try:
-        import pyarrow as pa
-        import pyarrow.parquet as pq
-    except ImportError as exc:
-        raise ImportError("Store manifests require pyarrow.") from exc
-    return pa, pq
+    return pyarrow()
 
 
 _SAMPLE_SCHEMA = (

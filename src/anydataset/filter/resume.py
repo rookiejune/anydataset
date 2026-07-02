@@ -19,7 +19,7 @@ from .._resume import (
     resume_dir,
     validate_completed_indexes,
 )
-from ..store.atomic import replace_dir
+from .._io.atomic import replace_dir
 from ..store.jsonio import read_json, write_json
 from .storage import (
     read_index_rows,

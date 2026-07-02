@@ -2,16 +2,14 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
-import shutil
-import threading
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from .._logging import write_info
+from .._io.atomic import replace_existing_dir
 from .._devices import Devices, resolve_devices
+from .._logging import write_info
 from .._parallel import validate_process_value
 from .._resume import dataset_sample_count, indexes_complete
 from .._validation import non_negative_int, optional_positive_int, positive_int
@@ -411,19 +409,14 @@ def write_cache(
     runtime: Runtime,
     dataset_factory: DatasetFactory,
 ) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.parent / f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp"
-    if tmp.exists():
-        shutil.rmtree(tmp)
-    tmp.mkdir(parents=True)
-    try:
-        write_json(tmp / "rule.json", dict(metadata))
-        write_partitions(
+    replace_existing_dir(
+        path,
+        lambda tmp: _write_cache_tmp(
             tmp,
+            path,
+            metadata,
             dataset,
             rule,
-            cache_path=path,
-            metadata=metadata,
             metrics=metrics,
             devices=devices,
             batch_size=batch_size,
@@ -435,16 +428,50 @@ def write_cache(
             write_prefetch=write_prefetch,
             runtime=runtime,
             dataset_factory=dataset_factory,
-        )
-        (tmp / ".ready").write_text("ready\n", encoding="utf-8")
-        if path.exists():
-            shutil.rmtree(path)
-        os.replace(tmp, path)
-        cleanup_filter_resume_dir(path)
-    except Exception:
-        if tmp.exists():
-            shutil.rmtree(tmp)
-        raise
+        ),
+    )
+    cleanup_filter_resume_dir(path)
+
+
+def _write_cache_tmp(
+    tmp: Path,
+    cache_path: Path,
+    metadata: Mapping[str, Any],
+    dataset: FilterBase,
+    rule: FilterRule,
+    *,
+    metrics: bool,
+    devices: tuple[str, ...],
+    batch_size: int,
+    num_workers: int,
+    prefetch_factor: int | None,
+    commit_samples: int,
+    max_shard_samples: int | None,
+    write_workers: int,
+    write_prefetch: int | None,
+    runtime: Runtime,
+    dataset_factory: DatasetFactory,
+) -> None:
+    write_json(tmp / "rule.json", dict(metadata))
+    write_partitions(
+        tmp,
+        dataset,
+        rule,
+        cache_path=cache_path,
+        metadata=metadata,
+        metrics=metrics,
+        devices=devices,
+        batch_size=batch_size,
+        num_workers=num_workers,
+        prefetch_factor=prefetch_factor,
+        commit_samples=commit_samples,
+        max_shard_samples=max_shard_samples,
+        write_workers=write_workers,
+        write_prefetch=write_prefetch,
+        runtime=runtime,
+        dataset_factory=dataset_factory,
+    )
+    (tmp / ".ready").write_text("ready\n", encoding="utf-8")
 
 
 def write_partitions(

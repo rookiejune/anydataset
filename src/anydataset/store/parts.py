@@ -7,10 +7,10 @@ from dataclasses import asdict, dataclass
 from heapq import heappop, heappush
 from pathlib import Path
 
+from .._io.atomic import replace_dir
 from .._sharding import validate_shard
 from .._validation import positive_int
 from ..types.item import Modality, Role, Sample, View
-from .atomic import replace_dir
 from .jsonio import read_json, write_json
 from .manifest import (
     DatasetManifest,
