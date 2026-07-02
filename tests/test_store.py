@@ -2,6 +2,7 @@ import tempfile
 import unittest
 from dataclasses import asdict
 from pathlib import Path
+from unittest import mock
 
 from anydataset import AudioView, Modality, Role
 from anydataset.store.jsonio import read_json, write_json
@@ -13,7 +14,9 @@ from anydataset.store.manifest import (
 )
 from anydataset.store.manifestio import (
     read_samples_manifest,
+    read_sample_manifest_index,
     read_view_manifest,
+    read_view_manifest_indexes,
     samples_manifest_exists,
     write_samples_manifest,
     write_view_manifest,
@@ -122,6 +125,35 @@ class StoreTest(unittest.TestCase):
             self.assertTrue(samples_manifest_exists(root))
             self.assertEqual(tuple(read_samples_manifest(root)), (sample,))
             self.assertEqual(tuple(read_view_manifest(root, view)), (payload,))
+
+    def test_manifest_index_helpers_do_not_materialize_row_dicts(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            view = (Role.DEFAULT, Modality.AUDIO, AudioView.WAVEFORM)
+            sample = SampleManifestEntry(
+                sample_id="sample-0",
+                sample_index=0,
+            )
+            payload = ViewManifestEntry(
+                role=Role.DEFAULT,
+                modality=Modality.AUDIO,
+                view=AudioView.WAVEFORM,
+                sample_index=0,
+                shard="000000.tar",
+                key="sample-0.pt",
+            )
+            write_samples_manifest(root, [sample])
+            write_view_manifest(root, view, [payload])
+
+            with mock.patch(
+                "anydataset.store.manifestio._read_parquet_rows",
+                side_effect=AssertionError("row dicts materialized"),
+            ):
+                sample_index = tuple(read_sample_manifest_index(root))
+                view_indexes = tuple(read_view_manifest_indexes(root, view))
+
+        self.assertEqual(sample_index, ((0, "sample-0"),))
+        self.assertEqual(view_indexes, (0,))
 
 
 if __name__ == "__main__":

@@ -45,11 +45,11 @@ def read_samples_manifest_row_group(
 
 
 def read_sample_manifest_index(root: str | Path) -> Iterator[tuple[int, str]]:
-    for row in _read_parquet_rows(
+    yield from _read_parquet_int_string_columns(
         samples_parquet_path(root),
-        columns=["sample_index", "sample_id"],
-    ):
-        yield int(row["sample_index"]), str(row["sample_id"])
+        int_column="sample_index",
+        string_column="sample_id",
+    )
 
 
 def write_samples_manifest(
@@ -106,11 +106,10 @@ def read_view_manifest_indexes(
     root: str | Path,
     view: tuple[Role, Modality, View],
 ) -> Iterator[int]:
-    for row in _read_parquet_rows(
+    yield from _read_parquet_int_column(
         view_manifest_parquet_path(root, view),
-        columns=["sample_index"],
-    ):
-        yield int(row["sample_index"])
+        "sample_index",
+    )
 
 
 def write_view_manifest(
@@ -214,6 +213,33 @@ def _read_parquet_row_group(
     table = pq.ParquetFile(path).read_row_group(row_group, columns=columns)
     for row in table.to_pylist():
         yield _decode_row(row)
+
+
+def _read_parquet_int_column(path: Path, column: str) -> Iterator[int]:
+    _, pq = _pyarrow()
+    parquet = pq.ParquetFile(path)
+    for batch in parquet.iter_batches(batch_size=4096, columns=[column]):
+        values = batch.column(0)
+        for index in range(len(values)):
+            yield int(values[index].as_py())
+
+
+def _read_parquet_int_string_columns(
+    path: Path,
+    *,
+    int_column: str,
+    string_column: str,
+) -> Iterator[tuple[int, str]]:
+    _, pq = _pyarrow()
+    parquet = pq.ParquetFile(path)
+    for batch in parquet.iter_batches(
+        batch_size=4096,
+        columns=[int_column, string_column],
+    ):
+        int_values = batch.column(0)
+        string_values = batch.column(1)
+        for index in range(len(int_values)):
+            yield int(int_values[index].as_py()), str(string_values[index].as_py())
 
 
 def _parquet_row_count(path: Path) -> int:
