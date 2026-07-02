@@ -75,9 +75,11 @@ store 内部以 `sample_index` 作为样本对齐键。`sample_id` 只用于 man
 同一顺序的数据集。
 
 `ViewMaterializer` 和 `ModalityMaterializer` 默认使用可续跑的 fragment 流水线。
-库会把每个完成的 provider batch 写成独立 ready fragment，并按全局
+库会把完成的 provider batch 聚合到 checkpoint chunk 后写成 ready fragment，并按全局
 `sample_index` 跳过已完成样本；所有样本覆盖后再原子提交最终 store 并清理 resume
 目录。fragment 仍使用普通 store 校验，损坏或语义不匹配时显式报错，不静默丢弃。
+`commit_samples` 控制 checkpoint 粒度，默认是 `max(batch_size, 32)`，避免默认可续跑时
+产生过多小文件；需要更细断点时可以显式调低。
 `write_workers` 控制每个 materializer worker 内的后台写进程数，默认用一个 writer
 让 provider 计算和 fragment 落盘重叠；`write_prefetch` 控制待写任务上限。
 

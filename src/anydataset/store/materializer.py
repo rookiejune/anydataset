@@ -71,6 +71,7 @@ type _MaterializerMode = Literal["view", "modality"]
 type _ProgressSink = multiprocessing.Queue | ProgressDashboard
 
 _PROGRESS_STAGES = ("reader", "provider", "writer")
+DEFAULT_COMMIT_SAMPLES = 32
 
 
 @dataclass
@@ -79,6 +80,7 @@ class ViewMaterializer:
     split: str | None = None
     max_shard_samples: int = DEFAULT_MAX_SHARD_SAMPLES
     batch_size: int = 1
+    commit_samples: int | None = None
     num_workers: int = 0
     prefetch_factor: int | None = None
     write_workers: int = 1
@@ -91,6 +93,10 @@ class ViewMaterializer:
             self.max_shard_samples,
         )
         self.batch_size = positive_int("batch_size", self.batch_size)
+        if self.commit_samples is None:
+            self.commit_samples = max(self.batch_size, DEFAULT_COMMIT_SAMPLES)
+        else:
+            self.commit_samples = positive_int("commit_samples", self.commit_samples)
         self.num_workers = non_negative_int("num_workers", self.num_workers)
         self.prefetch_factor = optional_positive_int(
             "prefetch_factor",
@@ -387,6 +393,7 @@ class ViewMaterializer:
                         split=self.split,
                         max_shard_samples=self.max_shard_samples,
                         batch_size=self.batch_size,
+                        commit_samples=self.commit_samples,
                         num_workers=self.num_workers,
                         prefetch_factor=self.prefetch_factor,
                         write_workers=self.write_workers,
@@ -498,6 +505,7 @@ class ViewMaterializer:
             )
         )
         with self._fragment_sink(progress=progress, worker_id=worker_id) as sink:
+            pending_outputs: list[tuple[int, Sample]] = []
             read_start = time.perf_counter()
             for batch in batches:
                 _put_stage_progress(
@@ -520,18 +528,45 @@ class ViewMaterializer:
                     samples=len(outputs),
                     elapsed=time.perf_counter() - provider_start,
                 )
-                indexes = tuple(sorted(index for index, _ in outputs))
-                job = _FragmentWriteJob(
-                    fragments_dir=fragments_dir,
-                    dataset_id=self._dataset_id,
-                    split=self.split,
-                    max_shard_samples=self.max_shard_samples,
-                    indexes=indexes,
-                    samples=outputs,
-                )
-                sink.submit(job)
-                completed.update(indexes)
+                pending_outputs.extend(outputs)
+                while len(pending_outputs) >= self.commit_samples:
+                    completed.update(
+                        self._submit_fragment(
+                            sink,
+                            fragments_dir=fragments_dir,
+                            samples=pending_outputs[: self.commit_samples],
+                        )
+                    )
+                    del pending_outputs[: self.commit_samples]
                 read_start = time.perf_counter()
+            if pending_outputs:
+                completed.update(
+                    self._submit_fragment(
+                        sink,
+                        fragments_dir=fragments_dir,
+                        samples=pending_outputs,
+                    )
+                )
+
+    def _submit_fragment(
+        self,
+        sink: BackgroundWriteSink[_FragmentWriteJob],
+        *,
+        fragments_dir: Path,
+        samples: Sequence[tuple[int, Sample]],
+    ) -> tuple[int, ...]:
+        indexed = tuple(samples)
+        indexes = tuple(sorted(index for index, _ in indexed))
+        job = _FragmentWriteJob(
+            fragments_dir=fragments_dir,
+            dataset_id=self._dataset_id,
+            split=self.split,
+            max_shard_samples=self.max_shard_samples,
+            indexes=indexes,
+            samples=indexed,
+        )
+        sink.submit(job)
+        return indexes
 
     def _fragment_sink(
         self,
@@ -645,6 +680,7 @@ class _WorkerConfig:
     split: str | None
     max_shard_samples: int
     batch_size: int
+    commit_samples: int
     num_workers: int
     prefetch_factor: int | None
     write_workers: int
@@ -751,6 +787,7 @@ def _worker_materializer(config: _WorkerConfig) -> ViewMaterializer:
         split=config.split,
         max_shard_samples=config.max_shard_samples,
         batch_size=config.batch_size,
+        commit_samples=config.commit_samples,
         num_workers=config.num_workers,
         prefetch_factor=config.prefetch_factor,
         write_workers=config.write_workers,

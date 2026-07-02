@@ -340,6 +340,7 @@ def _release_exception(error: BaseException) -> None:
 
 def _clear_cuda_cache() -> None:
     gc.collect()
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-        torch.cuda.ipc_collect()
+    if not torch.cuda.is_available() or not torch.cuda.is_initialized():
+        return
+    torch.cuda.empty_cache()
+    torch.cuda.ipc_collect()

@@ -57,14 +57,14 @@ class ViewMaterializerTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             target = root / "longcat-delta"
-            samples = tuple(_audio_sample(torch.tensor([[float(index)]])) for index in range(2))
+            samples = tuple(_text_sample(f"text-{index}") for index in range(2))
 
             ViewMaterializer(
                 target,
                 split="train",
             ).write(
                 dataset_factory=_DatasetFactory(samples),
-                provider_factory=_ParallelProviderFactory(),
+                provider_factory=_ParallelTextProviderFactory(),
                 devices=("cpu:0", "cpu:1"),
             )
 
@@ -155,13 +155,13 @@ class ViewMaterializerTest(unittest.TestCase):
             root = Path(tmpdir)
             target = root / "target"
             samples = (
-                _audio_sample(torch.tensor([[1.0, 2.0, 3.0]])),
-                _audio_sample(torch.tensor([[4.0]])),
+                _text_sample("hello"),
+                _text_sample("world"),
             )
             address = Path("/tmp") / f"anydataset-provider-{os.getpid()}-{id(self)}.sock"
             server = ProviderServer(
                 address=address,
-                provider_factory=_BatchProviderFactory(),
+                provider_factory=_TextBatchProviderFactory(prefix="remote"),
                 device="cpu",
             )
 
@@ -176,26 +176,20 @@ class ViewMaterializerTest(unittest.TestCase):
                 ).write(
                     dataset_factory=_DatasetFactory(samples),
                     provider_factory=RemoteProviderFactory(
-                        AudioView.LONGCAT,
+                        TextView.TEXT,
                         {"cpu": address},
                     ),
                     devices="cpu",
                 )
 
             stored = read_store_dataset(target)
-            self.assertTrue(
-                torch.equal(
-                    stored[0][Role.DEFAULT, Modality.AUDIO]
-                    .views[AudioView.LONGCAT]["semantic_codes"],
-                    torch.tensor([[1, 2, 3]]),
-                )
+            self.assertEqual(
+                stored[0][Role.DEFAULT, Modality.TEXT].views[TextView.TEXT],
+                "remote:hello",
             )
-            self.assertTrue(
-                torch.equal(
-                    stored[1][Role.DEFAULT, Modality.AUDIO]
-                    .views[AudioView.LONGCAT]["semantic_codes"],
-                    torch.tensor([[4]]),
-                )
+            self.assertEqual(
+                stored[1][Role.DEFAULT, Modality.TEXT].views[TextView.TEXT],
+                "remote:world",
             )
 
     def test_materializer_collates_multiple_roles_for_one_batch_provider_call(self):
@@ -750,14 +744,14 @@ class ViewMaterializerTest(unittest.TestCase):
             home = root / "home"
             target = root / "target"
             samples = tuple(
-                _audio_sample(torch.tensor([[float(index)]]))
+                _text_sample(f"text-{index}")
                 for index in range(4)
             )
 
             with mock.patch.dict(os.environ, {"ANYDATASET_HOME": str(home)}):
                 ViewMaterializer(target, split="train").write(
                     dataset_factory=_DatasetFactory(samples),
-                    provider_factory=_ParallelProviderFactory(),
+                    provider_factory=_ParallelTextProviderFactory(),
                     devices=("cpu:0", "cpu:1"),
                 )
 
@@ -767,45 +761,33 @@ class ViewMaterializerTest(unittest.TestCase):
             self.assertEqual([path.name for path in logs], ["part-00000.log", "part-00001.log"])
             self.assertIn("cpu:0", logs[0].read_text(encoding="utf-8"))
             self.assertIn("cpu:1", logs[1].read_text(encoding="utf-8"))
-            self.assertTrue(
-                torch.equal(
-                    stored[0][Role.DEFAULT, Modality.AUDIO]
-                    .views[AudioView.LONGCAT]["semantic_codes"],
-                    torch.tensor([[0]]),
-                )
+            self.assertEqual(
+                stored[0][Role.DEFAULT, Modality.TEXT].views[TextView.TEXT],
+                "cpu0:text-0",
             )
-            self.assertTrue(
-                torch.equal(
-                    stored[1][Role.DEFAULT, Modality.AUDIO]
-                    .views[AudioView.LONGCAT]["semantic_codes"],
-                    torch.tensor([[101]]),
-                )
+            self.assertEqual(
+                stored[1][Role.DEFAULT, Modality.TEXT].views[TextView.TEXT],
+                "cpu1:text-1",
             )
 
     def test_materializer_single_device_loader_workers_cover_all_samples(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             target = root / "target"
-            samples = tuple(
-                _audio_sample(torch.tensor([[float(index)]]))
-                for index in range(6)
-            )
+            samples = tuple(_text_sample(f"text-{index}") for index in range(6))
 
             ViewMaterializer(target, split="train", num_workers=2).write(
                 dataset_factory=_DatasetFactory(samples),
-                provider_factory=_ProviderFactory(offset=10),
+                provider_factory=_TextProviderFactory(prefix="worker"),
                 devices="cpu",
             )
 
             stored = read_store_dataset(target)
             self.assertEqual(len(stored), 6)
             for index in range(6):
-                self.assertTrue(
-                    torch.equal(
-                        stored[index][Role.DEFAULT, Modality.AUDIO]
-                        .views[AudioView.LONGCAT]["semantic_codes"],
-                        torch.tensor([[index + 10]]),
-                    )
+                self.assertEqual(
+                    stored[index][Role.DEFAULT, Modality.TEXT].views[TextView.TEXT],
+                    f"worker:text-{index}",
                 )
 
     def test_materializer_loader_workers_use_dataset_factory_not_dataset_pickle(self):
@@ -814,20 +796,17 @@ class ViewMaterializerTest(unittest.TestCase):
             target = root / "target"
 
             ViewMaterializer(target, split="train", num_workers=2).write(
-                dataset_factory=_UnpicklableDatasetFactory(6),
-                provider_factory=_ProviderFactory(offset=10),
+                dataset_factory=_UnpicklableTextDatasetFactory(6),
+                provider_factory=_TextProviderFactory(prefix="worker"),
                 devices="cpu",
             )
 
             stored = read_store_dataset(target)
             self.assertEqual(len(stored), 6)
             for index in range(6):
-                self.assertTrue(
-                    torch.equal(
-                        stored[index][Role.DEFAULT, Modality.AUDIO]
-                        .views[AudioView.LONGCAT]["semantic_codes"],
-                        torch.tensor([[index + 10]]),
-                    )
+                self.assertEqual(
+                    stored[index][Role.DEFAULT, Modality.TEXT].views[TextView.TEXT],
+                    f"worker:text-{index}",
                 )
 
     def test_materializer_parallel_loader_workers_cover_all_samples(self):
@@ -835,15 +814,12 @@ class ViewMaterializerTest(unittest.TestCase):
             root = Path(tmpdir)
             home = root / "home"
             target = root / "target"
-            samples = tuple(
-                _audio_sample(torch.tensor([[float(index)]]))
-                for index in range(8)
-            )
+            samples = tuple(_text_sample(f"text-{index}") for index in range(8))
 
             with mock.patch.dict(os.environ, {"ANYDATASET_HOME": str(home)}):
                 ViewMaterializer(target, split="train", num_workers=2).write(
                     dataset_factory=_DatasetFactory(samples),
-                    provider_factory=_ParallelProviderFactory(),
+                    provider_factory=_ParallelTextProviderFactory(),
                     devices=("cpu:0", "cpu:1"),
                 )
 
@@ -852,13 +828,10 @@ class ViewMaterializerTest(unittest.TestCase):
             self.assertEqual(len(stored), 8)
             self.assertEqual([path.name for path in logs], ["part-00000.log", "part-00001.log"])
             for index in range(8):
-                expected = index + (100 if index % 2 else 0)
-                self.assertTrue(
-                    torch.equal(
-                        stored[index][Role.DEFAULT, Modality.AUDIO]
-                        .views[AudioView.LONGCAT]["semantic_codes"],
-                        torch.tensor([[expected]]),
-                    )
+                prefix = "cpu1" if index % 2 else "cpu0"
+                self.assertEqual(
+                    stored[index][Role.DEFAULT, Modality.TEXT].views[TextView.TEXT],
+                    f"{prefix}:text-{index}",
                 )
 
     def test_modality_materializer_parallel_write_uses_modality_mode(self):
@@ -928,7 +901,12 @@ class ViewMaterializerTest(unittest.TestCase):
             factory = _ReadTrackingDatasetFactory(samples, reads)
 
             with self.assertRaisesRegex(RuntimeError, "stop after first batch"):
-                ViewMaterializer(target, split="train", batch_size=2).write(
+                ViewMaterializer(
+                    target,
+                    split="train",
+                    batch_size=2,
+                    commit_samples=2,
+                ).write(
                     dataset_factory=factory,
                     provider_factory=_FailOnceBatchProviderFactory(calls),
                     devices="cpu",
@@ -940,7 +918,12 @@ class ViewMaterializerTest(unittest.TestCase):
                 ["0,1", "2,3"],
             )
 
-            ViewMaterializer(target, split="train", batch_size=2).write(
+            ViewMaterializer(
+                target,
+                split="train",
+                batch_size=2,
+                commit_samples=2,
+            ).write(
                 dataset_factory=factory,
                 provider_factory=_FailOnceBatchProviderFactory(calls),
                 devices="cpu",
@@ -980,13 +963,23 @@ class ViewMaterializerTest(unittest.TestCase):
             )
 
             with self.assertRaisesRegex(RuntimeError, "stop after first batch"):
-                ModalityMaterializer(target, split="train", batch_size=2).write(
+                ModalityMaterializer(
+                    target,
+                    split="train",
+                    batch_size=2,
+                    commit_samples=2,
+                ).write(
                     dataset_factory=_DatasetFactory(samples),
                     provider_factory=_FailOnceTTSBatchProviderFactory(calls),
                     devices="cpu",
                 )
 
-            ModalityMaterializer(target, split="train", batch_size=2).write(
+            ModalityMaterializer(
+                target,
+                split="train",
+                batch_size=2,
+                commit_samples=2,
+            ).write(
                 dataset_factory=_DatasetFactory(samples),
                 provider_factory=_FailOnceTTSBatchProviderFactory(calls),
                 devices="cpu",
@@ -1003,6 +996,38 @@ class ViewMaterializerTest(unittest.TestCase):
                 ].views[AudioView.WAVEFORM]
                 self.assertTrue(torch.equal(waveform, torch.tensor([[float(index + 1)]])))
                 self.assertEqual(sample_rate, 16000)
+
+    def test_materializer_default_resume_commits_coarser_than_provider_batches(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = root / "target"
+            calls = root / "calls.txt"
+            samples = tuple(
+                _audio_sample(torch.tensor([[float(index)]]))
+                for index in range(4)
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "stop after first batch"):
+                ViewMaterializer(target, split="train", batch_size=2).write(
+                    dataset_factory=_DatasetFactory(samples),
+                    provider_factory=_FailOnceBatchProviderFactory(calls),
+                    devices="cpu",
+                )
+
+            self.assertFalse(target.exists())
+
+            ViewMaterializer(target, split="train", batch_size=2).write(
+                dataset_factory=_DatasetFactory(samples),
+                provider_factory=_FailOnceBatchProviderFactory(calls),
+                devices="cpu",
+            )
+
+            stored = read_store_dataset(target)
+            self.assertEqual(
+                calls.read_text(encoding="utf-8").splitlines(),
+                ["0,1", "2,3", "0,1", "2,3"],
+            )
+            self.assertEqual(len(stored), 4)
 
 
 def _source_dataset(path: Path, root: Path, samples):
@@ -1027,6 +1052,14 @@ def _audio_sample(waveform: torch.Tensor):
     return {
         (Role.DEFAULT, Modality.AUDIO): AudioItem(
             views={AudioView.WAVEFORM: (waveform, 4)},
+        )
+    }
+
+
+def _text_sample(text: str):
+    return {
+        (Role.DEFAULT, Modality.TEXT): TextItem(
+            views={TextView.TEXT: text},
         )
     }
 
@@ -1070,6 +1103,25 @@ class _Provider:
     def __call__(self, views):
         waveform, _ = views[AudioView.WAVEFORM]
         return {"semantic_codes": waveform.to(torch.int64) + int(self.offset)}
+
+
+class _TextProvider:
+    output = TextView.TEXT
+
+    def __init__(self, *, prefix: str):
+        self.prefix = prefix
+
+    def __call__(self, views):
+        return f"{self.prefix}:{views[TextView.TEXT]}"
+
+
+class _TextBatchProvider(_TextProvider):
+    def call_batch(self, batch):
+        ref = (Role.DEFAULT, Modality.TEXT)
+        return [
+            f"{self.prefix}:{text}"
+            for text in batch.sample[ref].views[TextView.TEXT]
+        ]
 
 
 class _BatchProvider(_Provider):
@@ -1226,6 +1278,14 @@ class _ProviderFactory:
         return _Provider(offset=self.offset)
 
 
+@dataclass(frozen=True)
+class _TextProviderFactory:
+    prefix: str
+
+    def __call__(self, device: str):
+        return _TextProvider(prefix=self.prefix)
+
+
 class _UnpicklableDataset:
     def __init__(self, count: int):
         self.count = count
@@ -1235,6 +1295,20 @@ class _UnpicklableDataset:
 
     def __getitem__(self, index: int):
         return _audio_sample(torch.tensor([[float(index)]]))
+
+    def __getstate__(self):
+        raise TypeError("dataset instance must not be pickled")
+
+
+class _UnpicklableTextDataset:
+    def __init__(self, count: int):
+        self.count = count
+
+    def __len__(self):
+        return self.count
+
+    def __getitem__(self, index: int):
+        return _text_sample(f"text-{index}")
 
     def __getstate__(self):
         raise TypeError("dataset instance must not be pickled")
@@ -1271,6 +1345,14 @@ class _UnpicklableDatasetFactory:
 
 
 @dataclass(frozen=True)
+class _UnpicklableTextDatasetFactory:
+    count: int
+
+    def __call__(self):
+        return _UnpicklableTextDataset(self.count)
+
+
+@dataclass(frozen=True)
 class _StaticProviderFactory:
     provider: object
 
@@ -1282,6 +1364,14 @@ class _StaticProviderFactory:
 class _BatchProviderFactory:
     def __call__(self, device: str):
         return _BatchProvider()
+
+
+@dataclass(frozen=True)
+class _TextBatchProviderFactory:
+    prefix: str
+
+    def __call__(self, device: str):
+        return _TextBatchProvider(prefix=self.prefix)
 
 
 @dataclass(frozen=True)
@@ -1300,6 +1390,12 @@ class _ASRProviderFactory:
 class _ParallelProviderFactory:
     def __call__(self, device: str):
         return _Provider(offset=100 if device.endswith(":1") else 0)
+
+
+@dataclass(frozen=True)
+class _ParallelTextProviderFactory:
+    def __call__(self, device: str):
+        return _TextProvider(prefix="cpu1" if device.endswith(":1") else "cpu0")
 
 
 @dataclass(frozen=True)

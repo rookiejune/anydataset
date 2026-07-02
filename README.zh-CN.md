@@ -554,8 +554,10 @@ merged.write("/data/my_anydataset_with_longcat", split="train")
 检测当前可见 CUDA 设备，每张卡启动一个 spawn worker；每个 worker 写自己的
 fragment 和 `$ANYDATASET_HOME/logs/<timestamp>-<pid>/materializer/part-xxxxx.log`，
 全部完成后主进程合并 store。materializer 默认使用可续跑 fragment：已完成的
-provider batch 会保留在目标目录旁边的隐藏 resume 目录中，重跑时按全局
-`sample_index` 跳过，最后再原子提交最终 store。
+provider batch 会聚合成 checkpoint chunk，保留在目标目录旁边的隐藏 resume 目录中；
+重跑时按全局 `sample_index` 跳过，最后再原子提交最终 store。`commit_samples`
+控制 checkpoint 粒度，默认是 `max(batch_size, 32)`，避免默认可续跑时产生过多小文件；
+需要更细断点时可以显式调低。
 和过滤一样，多设备 materialize 拥有自己的离线 worker，不应放进已经存在的 DDP
 训练进程里运行。
 如果 `parse_fn` 里有 file 到 waveform 这类 CPU 重活，可以给 materializer 传
