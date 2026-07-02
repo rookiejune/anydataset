@@ -10,13 +10,14 @@ formats in their own modules.
 import time
 from collections import deque
 from collections.abc import Callable
-from concurrent.futures import Future, ProcessPoolExecutor
-from typing import Generic, TypeVar
+from concurrent.futures import Executor, Future, ProcessPoolExecutor, ThreadPoolExecutor
+from typing import Generic, Literal, TypeVar
 
 from ._parallel import StartMethod, multiprocessing_context, validate_process_value
 from ._validation import non_negative_int, optional_positive_int
 
 T = TypeVar("T")
+type WriteBackend = Literal["thread", "process"]
 
 
 class BackgroundWriteSink(Generic[T]):
@@ -26,6 +27,7 @@ class BackgroundWriteSink(Generic[T]):
         *,
         workers: int,
         start_method: StartMethod,
+        backend: WriteBackend = "thread",
         max_pending: int | None = None,
         on_submit: Callable[[T, int], None] | None = None,
         on_complete: Callable[[T, int, float], None] | None = None,
@@ -34,15 +36,21 @@ class BackgroundWriteSink(Generic[T]):
         self.workers = non_negative_int("write_workers", workers)
         self.max_pending = optional_positive_int("max_pending", max_pending)
         self.start_method = start_method
+        self.backend = backend
         self.on_submit = on_submit
         self.on_complete = on_complete
-        self._executor: ProcessPoolExecutor | None = None
+        self._executor: Executor | None = None
         self._pending: deque[tuple[T, Future[None], float]] = deque()
         self._closed = False
 
     def __enter__(self) -> BackgroundWriteSink[T]:
         if self.workers == 0:
             return self
+        if self.backend == "thread":
+            self._executor = ThreadPoolExecutor(max_workers=self.workers)
+            return self
+        if self.backend != "process":
+            raise ValueError(f"Unsupported write backend: {self.backend!r}.")
         validate_process_value(
             "write",
             self.write,

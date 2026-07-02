@@ -9,9 +9,10 @@
   resume fragment、filter partition 和后续 store/delta 对齐。
 - 外层 device/provider worker 继续保持 spawn-friendly。provider 可能加载 CUDA 模型，
   不应为了 DataLoader 读取性能把外层进程模型改成 fork。
-- 外层扫描 worker、server、reader 和 writer 的 start method 分开配置。
-  `Runtime(reader_start_method="auto", writer_start_method="auto")` 在没有 server 时使用
-  spawn，在 `server_start_method` 非空时使用 fork。
+- 外层扫描 worker、server 和 reader 的 start method 分开配置。
+  `Runtime(reader_start_method="auto")` 在没有 server 时使用 spawn，在
+  `server_start_method` 非空时使用 fork。后台 writer 默认使用 thread backend；只有显式
+  使用 process writer backend 时才读取 `writer_start_method`。
 - 默认用户数据集以 map-style 为主；streaming/iterable 数据集需要保留支持。当前
   `StoreDataset`、`FilteredDataset` 和 `MergedDataset` 这类默认 map-style shard 语义的
   materializer/filter 热路径会使用 map-style indexed loader；`AnyDataset` 仍优先保留
@@ -41,6 +42,9 @@
   row group 懒加载；随机读单个样本不需要把整个 view manifest 转成对象。
 - part/fragment commit 不再常驻保存 `item ref -> sample_index array`；提交时先写
   ordered sample manifest，再按 view 流式扫描 sample manifest 做覆盖校验。
+- `BackgroundWriteSink` 支持 thread 和 process backend；materializer/filter 默认使用
+  thread writer，保留 provider/filter 计算和落盘重叠，同时避免把大 write job 通过
+  process pipe pickle 传输。
 
 ## 阶段一基准
 
@@ -55,6 +59,7 @@ PYTHONPATH=src python scripts/benchmark_hot_paths.py
 - `store_commit`: 多 part store 提交成本。
 - `sharded_csv`: 物理 CSV 分片的 indexed shard 读取成本。
 - `indexed_loader`: 当前 runtime iterable loader 和正式 map-style indexed loader 实现。
+- `writer_pipeline`: inline、thread、spawn process 和 fork process 后台写入对比。
 
 `indexed_loader` 默认候选：
 

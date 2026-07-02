@@ -28,6 +28,7 @@ from anydataset._parallel import (
     indexed_loader as runtime_indexed_loader,
     map_style_indexed_loader,
 )
+from anydataset._write_pipeline import BackgroundWriteSink
 from anydataset.dataset.source.sharded_csv import ShardedCsvSource
 from anydataset.store.parts import DatasetPartWriter, commit_store_parts
 from anydataset.store.reader import read_store_dataset
@@ -81,6 +82,7 @@ def main() -> None:
             ),
             repeats=args.repeats,
         ),
+        "writer_pipeline": bench_writer_pipeline_variants(args),
     }
     print(json.dumps(output, ensure_ascii=True, indent=2, sort_keys=True))
 
@@ -117,6 +119,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--filter-prefetch-factor", type=int, default=None)
     parser.add_argument("--filter-commit-samples", type=int, default=100_000)
     parser.add_argument("--filter-payload-bytes", type=int, default=32)
+    parser.add_argument("--writer-jobs", type=int, default=256)
+    parser.add_argument("--writer-payload-bytes", type=int, default=64 * 1024)
+    parser.add_argument("--writer-workers", type=int, default=1)
+    parser.add_argument("--writer-prefetch", type=int, default=None)
+    parser.add_argument("--writer-producer-delay-ms", type=float, default=0.0)
+    parser.add_argument(
+        "--writer-variants",
+        default="inline,thread,process_spawn,process_fork",
+        help=(
+            "Comma-separated variants: inline,thread,process_spawn,process_fork."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -457,6 +471,163 @@ def bench_filter_parallel(
             "counts": dict(result.counts),
         },
     )
+
+
+def bench_writer_pipeline_variants(args: argparse.Namespace) -> dict[str, Any]:
+    variants = writer_variants(args.writer_variants)
+    return {
+        variant: run_repeated(
+            lambda root, variant=variant: bench_writer_pipeline(
+                root,
+                variant,
+                jobs=args.writer_jobs,
+                payload_bytes=args.writer_payload_bytes,
+                workers=args.writer_workers,
+                prefetch=args.writer_prefetch,
+                producer_delay_ms=args.writer_producer_delay_ms,
+            ),
+            repeats=args.repeats,
+        )
+        for variant in variants
+    }
+
+
+def writer_variants(value: str) -> tuple[str, ...]:
+    allowed = {"inline", "thread", "process_spawn", "process_fork"}
+    output = tuple(item.strip() for item in value.split(",") if item.strip())
+    unknown = sorted(set(output) - allowed)
+    if unknown:
+        raise ValueError(f"Unknown writer pipeline variants: {unknown}.")
+    if len(output) == 0:
+        raise ValueError("writer_variants must contain at least one variant.")
+    if "process_fork" in output and "fork" not in multiprocessing.get_all_start_methods():
+        return tuple(variant for variant in output if variant != "process_fork")
+    return output
+
+
+def bench_writer_pipeline(
+    root: Path,
+    variant: str,
+    *,
+    jobs: int,
+    payload_bytes: int,
+    workers: int,
+    prefetch: int | None,
+    producer_delay_ms: float,
+) -> Measurement:
+    output_dir = root / "writer" / variant
+    output_dir.mkdir(parents=True, exist_ok=True)
+    payload = synthetic_payload(0, payload_bytes).encode("utf-8")
+    write_jobs = tuple(
+        WriteJob(path=output_dir / f"part-{index:06d}.bin", payload=payload)
+        for index in range(jobs)
+    )
+
+    start = time.perf_counter()
+    match variant:
+        case "inline":
+            for job in write_jobs:
+                write_payload_job(job)
+                maybe_sleep(producer_delay_ms)
+        case "thread":
+            run_thread_writer(
+                write_jobs,
+                workers=workers,
+                prefetch=prefetch,
+                producer_delay_ms=producer_delay_ms,
+            )
+        case "process_spawn":
+            run_process_writer(
+                write_jobs,
+                workers=workers,
+                prefetch=prefetch,
+                producer_delay_ms=producer_delay_ms,
+                start_method="spawn",
+            )
+        case "process_fork":
+            run_process_writer(
+                write_jobs,
+                workers=workers,
+                prefetch=prefetch,
+                producer_delay_ms=producer_delay_ms,
+                start_method="fork",
+            )
+        case _:
+            raise KeyError(variant)
+    seconds = time.perf_counter() - start
+
+    total_bytes = sum(path.stat().st_size for path in output_dir.iterdir())
+    return Measurement(
+        seconds=seconds,
+        detail={
+            "variant": variant,
+            "jobs": jobs,
+            "payload_bytes": payload_bytes,
+            "total_bytes": total_bytes,
+            "workers": workers,
+            "prefetch": prefetch,
+            "producer_delay_ms": producer_delay_ms,
+        },
+    )
+
+
+def run_process_writer(
+    jobs: tuple["WriteJob", ...],
+    *,
+    workers: int,
+    prefetch: int | None,
+    producer_delay_ms: float,
+    start_method: str,
+) -> None:
+    with BackgroundWriteSink(
+        write_payload_job,
+        workers=workers,
+        max_pending=prefetch,
+        start_method=start_method,
+        backend="process",
+    ) as sink:
+        for job in jobs:
+            sink.submit(job)
+            maybe_sleep(producer_delay_ms)
+
+
+def run_thread_writer(
+    jobs: tuple["WriteJob", ...],
+    *,
+    workers: int,
+    prefetch: int | None,
+    producer_delay_ms: float,
+) -> None:
+    if workers <= 0:
+        for job in jobs:
+            write_payload_job(job)
+            maybe_sleep(producer_delay_ms)
+        return
+    with BackgroundWriteSink(
+        write_payload_job,
+        workers=workers,
+        max_pending=prefetch,
+        start_method="spawn",
+        backend="thread",
+    ) as sink:
+        for job in jobs:
+            sink.submit(job)
+            maybe_sleep(producer_delay_ms)
+
+
+def maybe_sleep(milliseconds: float) -> None:
+    if milliseconds > 0:
+        time.sleep(milliseconds / 1000)
+
+
+@dataclass(frozen=True)
+class WriteJob:
+    path: Path
+    payload: bytes
+
+
+def write_payload_job(job: WriteJob) -> None:
+    job.path.write_bytes(job.payload)
 
 
 def make_indexed_loader(
