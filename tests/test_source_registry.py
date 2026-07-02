@@ -21,7 +21,7 @@ class ListSource:
 class SourceRegistryTest(unittest.TestCase):
     def test_registers_custom_source_for_dataset_prepare(self):
         register_source("unit_test_list", ListSource)
-        with tempfile.TemporaryDirectory() as tmpdir:
+        with tempfile.TemporaryDirectory():
             spec = Spec(source="unit_test_list", path="/tmp/custom")
             dataset = AnyDataset(spec)
             metadata_path = dataset.cache_manager.root / "sources" / spec.cache_relpath / "metadata.json"

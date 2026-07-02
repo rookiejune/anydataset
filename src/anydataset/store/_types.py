@@ -1,10 +1,10 @@
-from __future__ import annotations
-
 """Shared materializer provider and item helpers.
 
 The module keeps provider type aliases and view-to-modality conversion logic
 used by view, modality, and batch materialization helpers.
 """
+
+from __future__ import annotations
 
 from typing import Any
 

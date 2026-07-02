@@ -1,10 +1,10 @@
-from __future__ import annotations
-
 """Materialize new views for existing sample modalities.
 
 The module validates provider output types and returns sparse samples containing
 only the generated views for matching input modalities.
 """
+
+from __future__ import annotations
 
 from typing import Any, cast
 
@@ -14,7 +14,6 @@ from ..types.item import (
     ImageItem,
     ImageView,
     Item,
-    Modality,
     Sample,
     TextItem,
     TextView,

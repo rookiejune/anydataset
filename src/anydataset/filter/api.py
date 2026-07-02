@@ -6,7 +6,6 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Unpack
 
-from .._devices import Devices
 from ..dataset.abc import AnyDataset, MapStyleABC, MergedDataset
 from ..runtime import Runtime
 from ..store.reader import StoreDataset
@@ -21,11 +20,7 @@ from .apply import (
     filter_universe,
     make_filtered_dataset_factory,
 )
-from .rules import (
-    label,
-    unique_labels,
-    validate_string,
-)
+from .rules import label, unique_labels, validate_string
 from .storage import merged_index, read_metrics
 from .types import (
     DatasetFactory,
@@ -68,12 +63,7 @@ class FilterRule:
         self._factory = factory
 
     def __repr__(self) -> str:
-        return (
-            "FilterRule("
-            f"name={self.name!r}, "
-            f"factory={self.factory!r}"
-            ")"
-        )
+        return f"FilterRule(name={self.name!r}, factory={self.factory!r})"
 
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, FilterRule):

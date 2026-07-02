@@ -8,6 +8,7 @@ from unittest import mock
 from anydataset._parallel import (
     GlobalIndexSampler,
     MapIndexedDataset,
+    SelectedIndexSampler,
     map_style_indexed_loader,
 )
 
@@ -18,6 +19,12 @@ class ParallelRuntimeTest(unittest.TestCase):
 
         self.assertEqual(list(sampler), [1, 4, 7])
         self.assertEqual(len(sampler), 3)
+
+    def test_selected_index_sampler_shards_missing_indexes_by_rank(self):
+        sampler = SelectedIndexSampler((2, 5, 9, 12), num_shards=2, shard_id=1)
+
+        self.assertEqual(list(sampler), [5, 12])
+        self.assertEqual(len(sampler), 2)
 
     def test_map_indexed_dataset_drops_cached_dataset_when_pickled(self):
         dataset = _UnpicklableDataset(3)
@@ -40,6 +47,23 @@ class ParallelRuntimeTest(unittest.TestCase):
 
         self.assertEqual(rows, [(1, 1), (3, 3), (5, 5)])
 
+    def test_map_style_loader_reads_selected_indexes_only(self):
+        dataset = _TrackedDataset(6)
+
+        loader = map_style_indexed_loader(
+            _DatasetFactory(6),
+            sample_count=6,
+            sample_indexes=(2, 5),
+            batch_size=2,
+            num_workers=0,
+            dataset=dataset,
+        )
+
+        rows = [row for batch in loader for row in batch]
+
+        self.assertEqual(rows, [(2, 2), (5, 5)])
+        self.assertEqual(dataset.calls, [2, 5])
+
 
 @dataclass(frozen=True)
 class _DatasetFactory:
@@ -61,6 +85,19 @@ class _UnpicklableDataset:
 
     def __getstate__(self):
         raise TypeError("dataset instance must not be pickled")
+
+
+class _TrackedDataset:
+    def __init__(self, count: int) -> None:
+        self.count = count
+        self.calls: list[int] = []
+
+    def __len__(self) -> int:
+        return self.count
+
+    def __getitem__(self, index: int) -> int:
+        self.calls.append(index)
+        return index
 
 
 if __name__ == "__main__":

@@ -17,7 +17,7 @@ class HuggingFaceDatasetTest(unittest.TestCase):
             return [{"value": 1}]
 
         fake_datasets.load_dataset = load_dataset
-        with tempfile.TemporaryDirectory() as tmpdir:
+        with tempfile.TemporaryDirectory():
             dataset = AnyDataset(
                 Spec(
                     source=Source.HF,
@@ -49,7 +49,7 @@ class HuggingFaceDatasetTest(unittest.TestCase):
             train=[{"value": 1}],
             validation=[{"value": 2}],
         )
-        with tempfile.TemporaryDirectory() as tmpdir:
+        with tempfile.TemporaryDirectory():
             dataset = AnyDataset(
                 Spec(
                     source=Source.HF_DISK,
@@ -73,7 +73,7 @@ class HuggingFaceDatasetTest(unittest.TestCase):
         fake_datasets.load_from_disk = lambda *args, **kwargs: DatasetDict(
             train=[{"value": 1}],
         )
-        with tempfile.TemporaryDirectory() as tmpdir:
+        with tempfile.TemporaryDirectory():
             dataset = AnyDataset(
                 Spec(source=Source.HF_DISK, path="/tmp/saved_dataset"),
             )

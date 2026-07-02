@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import os
 import shutil
-from collections.abc import Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import asdict, dataclass
 from heapq import heappop, heappush
 from pathlib import Path
 
 from .._io.atomic import replace_dir
+from .._resume import cached_completed_indexes, write_completed_index_cache
 from .._sharding import validate_shard
 from .._validation import positive_int
 from ..types.item import Modality, Role, Sample, View
@@ -46,6 +47,7 @@ from .writer import (
 )
 
 type IndexedSample = tuple[int, Sample]
+type SampleIndexByRef = dict[tuple[Role, Modality], tuple[int, ...]]
 
 
 @dataclass
@@ -259,19 +261,28 @@ def completed_fragment_indexes(
     dataset_id: str,
     split: str | None = None,
 ) -> frozenset[int]:
-    if not Path(fragments_dir).is_dir():
+    root = Path(fragments_dir)
+    if not root.is_dir():
         return frozenset()
+    fragment_dirs = _fragment_dirs(root)
+    cached = cached_completed_indexes(root, (path.name for path in fragment_dirs))
+    if cached is not None:
+        return cached
     indexes: set[int] = set()
-    for fragment in _fragment_roots(
-        fragments_dir,
+    cache_entries: list[tuple[str, tuple[int, ...]]] = []
+    for fragment in _validate_fragment_roots(
+        fragment_dirs,
         dataset_id=dataset_id,
         split=split,
     ):
         data = read_json(_fragment_json_path(fragment))
-        for index in _fragment_sample_indexes(data):
+        fragment_indexes = _fragment_sample_indexes(data)
+        cache_entries.append((fragment.name, fragment_indexes))
+        for index in fragment_indexes:
             if index in indexes:
                 raise ValueError(f"Duplicate materialized fragment index {index}.")
             indexes.add(index)
+    write_completed_index_cache(root, cache_entries)
     return frozenset(indexes)
 
 
@@ -300,6 +311,8 @@ def _commit_fragments_to_tmp(
         dataset_id=dataset_id,
         split=split,
         expected_sample_count=expected_sample_count,
+        stream_ordered=True,
+        views=_store_views_from_first(fragments),
     )
 
 
@@ -310,17 +323,22 @@ def _commit_roots_to_tmp(
     dataset_id: str,
     split: str | None,
     expected_sample_count: int | None = None,
+    stream_ordered: bool = False,
+    views: tuple[tuple[Role, Modality, View], ...] | None = None,
 ) -> Path:
-    sample_count = _write_ordered_samples_manifest(
+    sample_count, sample_indexes_by_ref = _write_ordered_samples_manifest(
         root,
         stores,
         expected_sample_count=expected_sample_count,
+        stream_ordered=stream_ordered,
     )
-    for view in _store_views(stores):
+    for view in (views if views is not None else _store_views(stores)):
         view_count, expected_view_count = _write_ordered_view_manifest(
             root,
             stores,
             view,
+            sample_indexes_by_ref.get(view[:2], ()),
+            stream_ordered=stream_ordered,
         )
         if view_count != expected_view_count:
             raise ValueError(
@@ -367,12 +385,19 @@ def _write_ordered_samples_manifest(
     stores: tuple[Path, ...],
     *,
     expected_sample_count: int | None,
-) -> int:
+    stream_ordered: bool = False,
+) -> tuple[int, SampleIndexByRef]:
     writer = sample_manifest_writer(root)
     previous_index: int | None = None
     count = 0
+    indexes_by_ref: dict[tuple[Role, Modality], list[int]] = {}
     try:
-        for count, entry in enumerate(_merged_sample_entries(stores), start=1):
+        entries = (
+            _stream_sample_entries(stores)
+            if stream_ordered
+            else _merged_sample_entries(stores)
+        )
+        for count, entry in enumerate(entries, start=1):
             if previous_index is not None:
                 if entry.sample_index == previous_index:
                     raise ValueError(f"Duplicate sample_index {entry.sample_index}.")
@@ -394,9 +419,11 @@ def _write_ordered_samples_manifest(
                     )
                 raise ValueError(
                     "Sample manifests must be dense by sample_index: "
-                    f"missing sample_index {expected_index}."
-                )
+                        f"missing sample_index {expected_index}."
+                    )
             previous_index = entry.sample_index
+            for ref, _meta in entry.items:
+                indexes_by_ref.setdefault(ref, []).append(entry.sample_index)
             writer.write(
                 SampleManifestEntry(
                     sample_id=entry.sample_id,
@@ -413,21 +440,27 @@ def _write_ordered_samples_manifest(
     except Exception:
         writer.abort()
         raise
-    return count
+    return count, {
+        ref: tuple(indexes)
+        for ref, indexes in indexes_by_ref.items()
+    }
 
 
 def _write_ordered_view_manifest(
     root: Path,
     stores: tuple[Path, ...],
     view: tuple[Role, Modality, View],
+    sample_indexes: Sequence[int],
+    *,
+    stream_ordered: bool = False,
 ) -> tuple[int, int]:
     writer = view_manifest_writer(root, view)
-    entries = iter(_unique_merged_view_entries(stores, view))
+    entries = iter(_unique_view_entries(_view_entries(stores, view, stream_ordered)))
     current = _next_entry(entries)
     count = 0
     expected_count = 0
     try:
-        for sample_index in _sample_indexes_for_ref(root, view[:2]):
+        for sample_index in sample_indexes:
             expected_count += 1
             if current is None:
                 raise ValueError(
@@ -459,15 +492,6 @@ def _write_ordered_view_manifest(
     return count, expected_count
 
 
-def _sample_indexes_for_ref(
-    root: Path,
-    ref: tuple[Role, Modality],
-) -> Iterator[int]:
-    for sample in read_samples_manifest(root):
-        if any(item_ref == ref for item_ref, _meta in sample.items):
-            yield sample.sample_index
-
-
 def _merged_sample_entries(stores: tuple[Path, ...]) -> Iterator[SampleManifestEntry]:
     iterators = [iter(read_samples_manifest(store)) for store in stores]
     heap: list[tuple[int, int, SampleManifestEntry]] = []
@@ -485,6 +509,14 @@ def _merged_sample_entries(stores: tuple[Path, ...]) -> Iterator[SampleManifestE
         except StopIteration:
             continue
         heappush(heap, (next_entry.sample_index, store_index, next_entry))
+
+
+def _stream_sample_entries(stores: tuple[Path, ...]) -> Iterator[SampleManifestEntry]:
+    yield from _merged_loaded_entries(
+        stores,
+        lambda store: _sorted_entries(read_samples_manifest(store), _sample_entry_key),
+        _sample_entry_key,
+    )
 
 
 def _merged_view_entries(
@@ -515,12 +547,32 @@ def _merged_view_entries(
         heappush(heap, (next_entry.sample_index, store_index, next_entry))
 
 
-def _unique_merged_view_entries(
+def _stream_view_entries(
     stores: tuple[Path, ...],
     view: tuple[Role, Modality, View],
 ) -> Iterator[ViewManifestEntry]:
+    yield from _merged_loaded_entries(
+        tuple(store for store in stores if view_ready_path(store, view).exists()),
+        lambda store: _sorted_view_entries(store, view),
+        _view_entry_key,
+    )
+
+
+def _view_entries(
+    stores: tuple[Path, ...],
+    view: tuple[Role, Modality, View],
+    stream_ordered: bool,
+) -> Iterator[ViewManifestEntry]:
+    if stream_ordered:
+        return _stream_view_entries(stores, view)
+    return _merged_view_entries(stores, view)
+
+
+def _unique_view_entries(
+    entries: Iterator[ViewManifestEntry],
+) -> Iterator[ViewManifestEntry]:
     previous_index: int | None = None
-    for entry in _merged_view_entries(stores, view):
+    for entry in entries:
         if entry.sample_index == previous_index:
             raise ValueError(
                 f"Duplicate view entry for sample_index {entry.sample_index}."
@@ -529,6 +581,51 @@ def _unique_merged_view_entries(
             raise ValueError("View manifests must be ordered by sample_index.")
         previous_index = entry.sample_index
         yield entry
+
+
+def _sorted_entries[T](entries: Iterable[T], key: Callable[[T], int]) -> tuple[T, ...]:
+    return tuple(sorted(entries, key=key))
+
+
+def _sorted_view_entries(
+    store: Path,
+    view: tuple[Role, Modality, View],
+) -> tuple[ViewManifestEntry, ...]:
+    entries = _sorted_entries(read_view_manifest(store, view), _view_entry_key)
+    for entry in entries:
+        _validate_view_entry(entry, view)
+    return entries
+
+
+def _merged_loaded_entries[T](
+    stores: tuple[Path, ...],
+    load: Callable[[Path], tuple[T, ...]],
+    key: Callable[[T], int],
+) -> Iterator[T]:
+    loaded = [iter(load(store)) for store in stores]
+    heap: list[tuple[int, int, T]] = []
+    for store_index, entries in enumerate(loaded):
+        try:
+            entry = next(entries)
+        except StopIteration:
+            continue
+        heappush(heap, (key(entry), store_index, entry))
+    while heap:
+        _entry_key, store_index, entry = heappop(heap)
+        yield entry
+        try:
+            next_entry = next(loaded[store_index])
+        except StopIteration:
+            continue
+        heappush(heap, (key(next_entry), store_index, next_entry))
+
+
+def _sample_entry_key(entry: SampleManifestEntry) -> int:
+    return entry.sample_index
+
+
+def _view_entry_key(entry: ViewManifestEntry) -> int:
+    return entry.sample_index
 
 
 def _next_entry(entries: Iterator[ViewManifestEntry]) -> ViewManifestEntry | None:
@@ -553,6 +650,14 @@ def _store_views(stores: tuple[Path, ...]) -> tuple[tuple[Role, Modality, View],
     return tuple(sorted(views, key=_view_path))
 
 
+def _store_views_from_first(
+    stores: tuple[Path, ...],
+) -> tuple[tuple[Role, Modality, View], ...]:
+    if not stores:
+        return ()
+    return read_store_views(stores[0])
+
+
 def _part_roots(parts_dir: str | Path) -> tuple[Path, ...]:
     root = Path(parts_dir).expanduser()
     if not root.is_dir():
@@ -574,7 +679,15 @@ def _fragment_roots(
     root = Path(fragments_dir).expanduser()
     if not root.is_dir():
         return ()
-    fragments = tuple(
+    return _validate_fragment_roots(
+        _fragment_dirs(root),
+        dataset_id=dataset_id,
+        split=split,
+    )
+
+
+def _fragment_dirs(root: Path) -> tuple[Path, ...]:
+    return tuple(
         sorted(
             (
                 path
@@ -586,6 +699,14 @@ def _fragment_roots(
             key=_fragment_sort_key,
         )
     )
+
+
+def _validate_fragment_roots(
+    fragments: tuple[Path, ...],
+    *,
+    dataset_id: str,
+    split: str | None,
+) -> tuple[Path, ...]:
     for fragment in fragments:
         _validate_fragment(fragment, dataset_id, split)
     return fragments

@@ -65,7 +65,7 @@ class DatasetWriterTest(unittest.TestCase):
             ).write([sample])
 
             dataset_json = read_json(dataset_json_path(output))
-            dataset = DatasetManifest(**dataset_json)
+            DatasetManifest(**dataset_json)
             sample_entry = next(read_samples_manifest(output))
             view_entry = next(read_view_manifest(output, view))
 

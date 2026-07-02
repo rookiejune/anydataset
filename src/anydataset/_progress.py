@@ -1,10 +1,10 @@
-from __future__ import annotations
-
 """Progress reporting for dataset-wide worker scans.
 
 The module only counts completed iterations and worker lifecycle events. It does
 not own sample indices, filter labels, store layout, or materializer semantics.
 """
+
+from __future__ import annotations
 
 import multiprocessing
 import sys
@@ -141,7 +141,7 @@ class ProgressDashboard:
         for position, stage in enumerate(self.stages, start=1):
             bar = _progress_bar(
                 desc=f"{stage:>8}",
-                total=self.total,
+                total=self._stage_total(),
                 position=position,
                 leave=False,
             )
@@ -191,6 +191,11 @@ class ProgressDashboard:
         stats = self._stats.get(message.stage)
         if stats is not None:
             bar.set_postfix_str(_format_stage_stats(stats))
+
+    def _stage_total(self) -> int | None:
+        if self.total is None:
+            return None
+        return max(0, self.total - self.initial)
 
 
 def _dead_worker(workers: list[multiprocessing.Process]) -> bool:

@@ -1,10 +1,10 @@
-from __future__ import annotations
-
 """Small helpers for writing count-bounded shard files.
 
 The helper owns only shard buffering and manifest file bookkeeping. Callers keep
 the actual file format and top-level manifest schema.
 """
+
+from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from pathlib import Path

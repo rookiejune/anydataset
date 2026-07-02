@@ -17,22 +17,18 @@ from ..types.item import (
     TextItem,
     View,
 )
+from .._io.atomic import replace_dir
 from .jsonio import write_json
 from .manifest import (
+    STORE_SCHEMA_VERSION,
     DatasetManifest,
     SampleItem,
     SampleManifestEntry,
-    STORE_SCHEMA_VERSION,
     string_key_dict,
 )
-from .._io.atomic import replace_dir
 from .manifestio import sample_manifest_writer
-from .paths import (
-    dataset_json_path,
-    dataset_ready_path,
-)
+from .paths import dataset_json_path, dataset_ready_path
 from .viewwriter import ViewWriter
-
 
 DEFAULT_MAX_SHARD_SAMPLES = 100_000
 
@@ -53,7 +49,9 @@ class DatasetWriter:
         )
 
     def write(self, samples: Iterable[Sample]) -> Path:
-        return replace_dir(self.output_dir, lambda tmp: self._write_to_tmp(tmp, samples))
+        return replace_dir(
+            self.output_dir, lambda tmp: self._write_to_tmp(tmp, samples)
+        )
 
     def _write_to_tmp(self, root: Path, samples: Iterable[Sample]) -> Path:
         sinks: dict[tuple[Role, Modality, View], ViewWriter] = {}

@@ -4,7 +4,7 @@ import gc
 import os
 import time
 import traceback
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum, auto
 from multiprocessing.connection import Client, Listener
@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any
 import torch
 
 from ._parallel import StartMethod, multiprocessing_context, validate_process_value
-from .types.item import Reference, View
+from .types.item import View
 from .view import BatchOutput, ViewMap
 
 if TYPE_CHECKING:

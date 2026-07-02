@@ -1,10 +1,10 @@
-from __future__ import annotations
-
 """Materialize sample datasets into store directories.
 
 The module coordinates single-process and part-based parallel writes. Store file
 format details stay in `anydataset.store.writer` and `anydataset.store.parts`.
 """
+
+from __future__ import annotations
 
 import multiprocessing
 import traceback

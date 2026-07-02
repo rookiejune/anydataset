@@ -14,6 +14,7 @@ import pickle
 import socket
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
+from itertools import islice
 from pathlib import Path
 from typing import Any, Literal
 
@@ -99,6 +100,31 @@ class GlobalIndexSampler(Sampler[int]):
         return (self.sample_count - 1 - self.shard_id) // self.num_shards + 1
 
 
+@dataclass(frozen=True)
+class SelectedIndexSampler(Sampler[int]):
+    indexes: Sequence[int]
+    num_shards: int
+    shard_id: int
+
+    def __post_init__(self) -> None:
+        validate_shard(self.num_shards, self.shard_id)
+        previous: int | None = None
+        for index in self.indexes:
+            if index < 0:
+                raise ValueError("sample indexes must be non-negative.")
+            if previous is not None and index <= previous:
+                raise ValueError("sample indexes must be strictly increasing.")
+            previous = index
+
+    def __iter__(self) -> Iterator[int]:
+        return islice(self.indexes, self.shard_id, None, self.num_shards)
+
+    def __len__(self) -> int:
+        if self.shard_id >= len(self.indexes):
+            return 0
+        return (len(self.indexes) - 1 - self.shard_id) // self.num_shards + 1
+
+
 def iter_runtime_indexed(dataset: Any) -> Iterator[tuple[int, Any]]:
     iter_indexed = getattr(dataset, "iter_indexed_runtime_shard", None)
     if callable(iter_indexed):
@@ -128,6 +154,10 @@ def iter_indexed_shard(
     raise TypeError("dataset must provide iter_indexed_shard() or be map-style.")
 
 
+def can_select_indexes(dataset: object) -> bool:
+    return hasattr(dataset, "__len__") and hasattr(dataset, "__getitem__")
+
+
 def indexed_loader(
     dataset_factory: DatasetFactory,
     *,
@@ -152,6 +182,7 @@ def map_style_indexed_loader(
     dataset_factory: DatasetFactory,
     *,
     sample_count: int,
+    sample_indexes: Sequence[int] | None = None,
     batch_size: int,
     num_workers: int,
     prefetch_factor: int | None = None,
@@ -159,13 +190,21 @@ def map_style_indexed_loader(
     dataset: Any | None = None,
 ) -> DataLoader:
     shard = runtime_shard()
-    return DataLoader(
-        MapIndexedDataset(dataset_factory, dataset=dataset),
-        sampler=GlobalIndexSampler(
+    if sample_indexes is None:
+        sampler = GlobalIndexSampler(
             sample_count=sample_count,
             num_shards=shard.rank_count,
             shard_id=shard.rank_index,
-        ),
+        )
+    else:
+        sampler = SelectedIndexSampler(
+            sample_indexes,
+            num_shards=shard.rank_count,
+            shard_id=shard.rank_index,
+        )
+    return DataLoader(
+        MapIndexedDataset(dataset_factory, dataset=dataset),
+        sampler=sampler,
         **_indexed_loader_kwargs(
             dataset_factory,
             batch_size=batch_size,

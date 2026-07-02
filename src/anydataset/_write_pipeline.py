@@ -1,11 +1,11 @@
-from __future__ import annotations
-
 """Bounded background write pipeline for dataset-wide scans.
 
 The module owns only submission, backpressure, worker lifetime, and exception
 propagation. Callers keep domain-specific fragment, partition, and manifest
 formats in their own modules.
 """
+
+from __future__ import annotations
 
 import time
 from collections import deque

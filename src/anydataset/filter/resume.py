@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """Filter cache resume fragments.
 
 This module stores completed filter chunks while a cache is being rebuilt. Each
@@ -8,16 +6,21 @@ the global partition and metrics rows that will be replayed into the final
 filter cache.
 """
 
+from __future__ import annotations
+
 import os
 from array import array
 from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 
 from .._resume import (
+    append_completed_index_cache,
+    cached_completed_indexes,
     cleanup_resume_dir,
     index_batch_id,
     resume_dir,
     validate_completed_indexes,
+    write_completed_index_cache,
 )
 from .._io.atomic import replace_dir
 from ..store.jsonio import read_json, write_json
@@ -54,12 +57,20 @@ def cleanup_filter_resume_dir(cache_path: Path) -> None:
 
 
 def completed_filter_indexes(path: Path, *, expected: int) -> frozenset[int]:
+    fragments = _filter_fragment_dirs(path)
+    cached = cached_completed_indexes(path, (fragment.name for fragment in fragments))
+    if cached is not None:
+        return validate_completed_indexes(cached, expected)
     indexes: set[int] = set()
-    for fragment in filter_fragments(path):
-        for index in _fragment_scan_indexes(fragment):
+    cache_entries: list[tuple[str, tuple[int, ...]]] = []
+    for fragment in tuple(sorted(fragments, key=_fragment_sort_key)):
+        fragment_indexes = _fragment_scan_indexes(fragment)
+        cache_entries.append((fragment.name, fragment_indexes))
+        for index in fragment_indexes:
             if index in indexes:
                 raise ValueError(f"Duplicate filter resume index {index}.")
             indexes.add(index)
+    write_completed_index_cache(path, cache_entries)
     return validate_completed_indexes(indexes, expected)
 
 
@@ -78,22 +89,22 @@ def write_filter_fragment(
         path / fragment_id,
         lambda tmp: _write_fragment(tmp, fragment_id, ordered, chunk),
     )
+    append_completed_index_cache(path, fragment_id, ordered)
 
 
 def filter_fragments(path: Path) -> tuple[Path, ...]:
+    return tuple(sorted(_filter_fragment_dirs(path), key=_fragment_sort_key))
+
+
+def _filter_fragment_dirs(path: Path) -> tuple[Path, ...]:
     if not path.is_dir():
         return ()
     return tuple(
-        sorted(
-            (
-                child
-                for child in path.iterdir()
-                if child.is_dir()
-                if not child.name.startswith(".")
-                if (child / "fragment.json").is_file()
-            ),
-            key=_fragment_sort_key,
-        )
+        child
+        for child in path.iterdir()
+        if child.is_dir()
+        if not child.name.startswith(".")
+        if (child / "fragment.json").is_file()
     )
 
 

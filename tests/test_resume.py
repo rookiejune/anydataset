@@ -3,6 +3,8 @@ import unittest
 from pathlib import Path
 
 from anydataset._resume import (
+    append_completed_index_cache,
+    cached_completed_indexes,
     cleanup_resume_dir,
     dataset_sample_count,
     index_batch_id,
@@ -11,6 +13,7 @@ from anydataset._resume import (
     prepare_resume_dir,
     resume_root,
     validate_completed_indexes,
+    write_completed_index_cache,
 )
 
 
@@ -68,6 +71,43 @@ class ResumeHelpersTest(unittest.TestCase):
         self.assertEqual(first, second)
         self.assertTrue(first.startswith("batch-000000000002-000000000009-"))
         self.assertNotIn("/", first)
+
+    def test_completed_index_cache_round_trips_indexes(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+
+            write_completed_index_cache(
+                root,
+                (
+                    ("batch-a", (0, 2)),
+                    ("batch-b", (3,)),
+                ),
+            )
+
+            self.assertEqual(
+                cached_completed_indexes(root, ("batch-b", "batch-a")),
+                frozenset({0, 2, 3}),
+            )
+
+    def test_completed_index_cache_ignores_fragment_mismatch(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+
+            write_completed_index_cache(root, (("batch-a", (0,)),))
+
+            self.assertIsNone(cached_completed_indexes(root, ("batch-a", "batch-b")))
+
+    def test_append_completed_index_cache_records_new_fragment(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+
+            append_completed_index_cache(root, "batch-a", (0, 1))
+            append_completed_index_cache(root, "batch-b", (2,))
+
+            self.assertEqual(
+                cached_completed_indexes(root, ("batch-a", "batch-b")),
+                frozenset({0, 1, 2}),
+            )
 
 
 if __name__ == "__main__":

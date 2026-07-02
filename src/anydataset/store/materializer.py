@@ -14,7 +14,7 @@ from torch import distributed as dist
 from torch.utils.data import DataLoader
 
 from .._devices import Devices, resolve_devices
-from .._logging import run_logs_dir, use_run_logs_dir
+from .._logging import run_logs_dir, use_run_logs_dir, write_info
 from .._parallel import (
     DeviceWorker,
     cuda_device,
@@ -31,10 +31,13 @@ from .._parallel import (
 )
 from .._progress import Progress, ProgressDashboard, put_progress, watch_workers
 from .._resume import (
+    append_completed_index_cache,
     cleanup_resume_dir,
     dataset_sample_count,
+    format_index_ranges,
     index_batch_id,
     indexes_complete,
+    missing_indexes,
     pending_batch,
     prepare_resume_dir,
     validate_completed_indexes,
@@ -173,6 +176,14 @@ class ViewMaterializer:
         if indexes_complete(completed, expected):
             return self._commit_fragments(fragments_dir, expected)
 
+        missing = missing_indexes(completed, expected)
+        _log_resume_summary(
+            "materializer",
+            expected=expected,
+            completed_count=len(completed),
+            missing=missing,
+            use_map_style_loader=use_map_style_loader,
+        )
         logs_dir = run_logs_dir()
         worker_logs_dir = logs_dir / "materializer"
         logs_dir.mkdir(parents=True, exist_ok=True)
@@ -186,6 +197,7 @@ class ViewMaterializer:
             expected=expected,
             use_map_style_loader=use_map_style_loader,
             completed_count=len(completed),
+            missing_indexes=missing,
         )
         return self._commit_fragments(fragments_dir, expected)
 
@@ -212,6 +224,14 @@ class ViewMaterializer:
         if indexes_complete(completed, expected):
             return self._commit_fragments(fragments_dir, expected)
 
+        missing = missing_indexes(completed, expected)
+        _log_resume_summary(
+            "materializer",
+            expected=expected,
+            completed_count=len(completed),
+            missing=missing,
+            use_map_style_loader=use_map_style_loader,
+        )
         with ProgressDashboard(
             desc="materialize views",
             total=expected,
@@ -232,6 +252,7 @@ class ViewMaterializer:
                         dataset=dataset,
                         sample_count=expected,
                         use_map_style_loader=use_map_style_loader,
+                        sample_indexes=missing,
                         fragments_dir=fragments_dir,
                         expected=expected,
                         progress=progress,
@@ -241,7 +262,11 @@ class ViewMaterializer:
             else:
                 self._write_resumable_indexed_batches(
                     indexed_sample_batches(
-                        iter_indexed_shard(dataset, 1, 0),
+                        _missing_indexed_samples(
+                            dataset,
+                            missing,
+                            use_map_style_loader=use_map_style_loader,
+                        ),
                         self.batch_size,
                     ),
                     provider,
@@ -279,6 +304,7 @@ class ViewMaterializer:
         dataset: Any | None = None,
         sample_count: int | None = None,
         use_map_style_loader: bool | None = None,
+        sample_indexes: Sequence[int] | None = None,
         fragments_dir: Path,
         expected: int,
         progress: _ProgressSink | None = None,
@@ -290,6 +316,7 @@ class ViewMaterializer:
                 dataset=dataset,
                 sample_count=sample_count,
                 use_map_style_loader=use_map_style_loader,
+                sample_indexes=sample_indexes,
             ),
             provider,
             fragments_dir=fragments_dir,
@@ -305,6 +332,7 @@ class ViewMaterializer:
         dataset: Any | None = None,
         sample_count: int | None = None,
         use_map_style_loader: bool | None = None,
+        sample_indexes: Sequence[int] | None = None,
     ) -> DataLoader:
         if dataset is None:
             if use_map_style_loader is None or sample_count is None:
@@ -317,6 +345,7 @@ class ViewMaterializer:
             return map_style_indexed_loader(
                 dataset_factory,
                 sample_count=sample_count,
+                sample_indexes=sample_indexes,
                 batch_size=self.batch_size,
                 num_workers=self.num_workers,
                 prefetch_factor=self.prefetch_factor,
@@ -343,6 +372,7 @@ class ViewMaterializer:
         expected: int,
         use_map_style_loader: bool,
         completed_count: int,
+        missing_indexes: Sequence[int],
     ) -> None:
         context = multiprocessing_context(self.runtime.process_start_method)
         progress = context.Queue()
@@ -364,6 +394,7 @@ class ViewMaterializer:
                         mode=self._materializer_mode,
                         runtime=self.runtime,
                         use_map_style_loader=use_map_style_loader,
+                        missing_indexes=tuple(missing_indexes),
                         fragments_dir=fragments_dir,
                         expected=expected,
                         logs_dir=logs_dir,
@@ -605,6 +636,7 @@ def _write_fragment(job: _FragmentWriteJob) -> None:
         fragment_id=fragment_id,
         max_shard_samples=job.max_shard_samples,
     ).write(job.samples)
+    append_completed_index_cache(job.fragments_dir, fragment_id, job.indexes)
 
 
 @dataclass(frozen=True)
@@ -620,6 +652,7 @@ class _WorkerConfig:
     mode: _MaterializerMode
     runtime: Runtime
     use_map_style_loader: bool
+    missing_indexes: tuple[int, ...]
     fragments_dir: Path
     expected: int
     logs_dir: Path
@@ -662,10 +695,12 @@ def _materialize_worker(
     with use_run_logs_dir(config.logs_dir):
         logger = _worker_logger(config.worker_logs_dir, config.shard_id)
         logger.info(
-            "starting shard %s/%s on %s",
+            "starting shard %s/%s on %s missing=%s map_style=%s",
             config.shard_id,
             config.num_shards,
             config.device,
+            _shard_missing_count(config.missing_indexes, config.num_shards, config.shard_id),
+            config.use_map_style_loader,
         )
         env = set_worker_environment(
             DeviceWorker(
@@ -689,6 +724,7 @@ def _materialize_worker(
                 dataset_factory=dataset_factory,
                 sample_count=config.expected,
                 use_map_style_loader=config.use_map_style_loader,
+                sample_indexes=config.missing_indexes,
                 fragments_dir=config.fragments_dir,
                 expected=config.expected,
                 progress=progress,
@@ -763,6 +799,42 @@ def _put_stage_progress(
             pending=pending,
         ),
     )
+
+
+def _log_resume_summary(
+    source: str,
+    *,
+    expected: int,
+    completed_count: int,
+    missing: Sequence[int],
+    use_map_style_loader: bool,
+) -> None:
+    write_info(
+        source,
+        "resume "
+        f"expected={expected} completed={completed_count} "
+        f"missing={len(missing)} map_style={use_map_style_loader} "
+        f"ranges={format_index_ranges(missing)}",
+    )
+
+
+def _shard_missing_count(indexes: Sequence[int], num_shards: int, shard_id: int) -> int:
+    if shard_id >= len(indexes):
+        return 0
+    return (len(indexes) - 1 - shard_id) // num_shards + 1
+
+
+def _missing_indexed_samples(
+    dataset: Any,
+    indexes: Sequence[int],
+    *,
+    use_map_style_loader: bool,
+) -> Iterator[tuple[int, Sample]]:
+    if use_map_style_loader:
+        for index in indexes:
+            yield index, dataset[index]
+        return
+    yield from iter_indexed_shard(dataset, 1, 0)
 
 
 def _dataset_id(output_dir: str | Path) -> str:

@@ -1,10 +1,10 @@
-from __future__ import annotations
-
 """Batch provider helpers for materialization.
 
 The module batches samples, validates batched provider outputs, and retries
 CUDA out-of-memory batches by splitting them into smaller calls.
 """
+
+from __future__ import annotations
 
 import gc
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence

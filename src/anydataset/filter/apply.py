@@ -11,7 +11,12 @@ from .._io.atomic import replace_existing_dir
 from .._devices import Devices, resolve_devices
 from .._logging import write_info
 from .._parallel import validate_process_value
-from .._resume import dataset_sample_count, indexes_complete
+from .._resume import (
+    dataset_sample_count,
+    format_index_ranges,
+    indexes_complete,
+    missing_indexes,
+)
 from .._validation import non_negative_int, optional_positive_int, positive_int
 from .._write_pipeline import BackgroundWriteSink
 from ..cache import FileLock, anydataset_home
@@ -497,6 +502,15 @@ def write_partitions(
     expected = dataset_sample_count(dataset, context="filter")
     completed = completed_filter_indexes(resume_dir, expected=expected)
     if not indexes_complete(completed, expected):
+        missing = missing_indexes(completed, expected)
+        use_map_style_loader = uses_default_indexed_shard(dataset)
+        write_info(
+            "filter",
+            "resume "
+            f"expected={expected} completed={len(completed)} "
+            f"missing={len(missing)} map_style={use_map_style_loader} "
+            f"ranges={format_index_ranges(missing)}",
+        )
         write_filter_resume_fragments(
             resume_dir,
             dataset,
@@ -510,6 +524,7 @@ def write_partitions(
             runtime=runtime,
             dataset_factory=dataset_factory,
             completed=completed,
+            missing=missing,
             write_workers=write_workers,
             write_prefetch=write_prefetch,
         )
@@ -538,6 +553,7 @@ def write_filter_resume_fragments(
     runtime: Runtime,
     dataset_factory: DatasetFactory,
     completed: frozenset[int],
+    missing: tuple[int, ...],
     write_workers: int,
     write_prefetch: int | None,
 ) -> None:
@@ -562,6 +578,7 @@ def write_filter_resume_fragments(
             runtime=runtime,
             dataset_factory=dataset_factory,
             completed=completed,
+            missing=missing,
         )
 
 
@@ -580,7 +597,9 @@ def write_filter_resume_fragment_jobs(
     runtime: Runtime,
     dataset_factory: DatasetFactory,
     completed: frozenset[int],
+    missing: tuple[int, ...],
 ) -> None:
+    use_map_style_loader = uses_default_indexed_shard(dataset)
     if len(devices) == 1 or len(dataset) == 0:
         for chunk in collect_ranges(
             dataset,
@@ -589,6 +608,7 @@ def write_filter_resume_fragment_jobs(
             metrics,
             commit_samples,
             skip_indexes=completed,
+            sample_indexes=missing if use_map_style_loader else None,
             dataset_factory=dataset_factory,
             batch_size=batch_size,
             num_workers=num_workers,
@@ -613,11 +633,12 @@ def write_filter_resume_fragment_jobs(
             commit_samples,
             sample_count=len(dataset),
             skip_indexes=completed,
+            sample_indexes=missing if use_map_style_loader else None,
             batch_size=batch_size,
             num_workers=num_workers,
             prefetch_factor=prefetch_factor,
             runtime=runtime,
-            use_map_style_loader=uses_default_indexed_shard(dataset),
+            use_map_style_loader=use_map_style_loader,
         ):
             global_chunk = global_filter_chunk(dataset, chunk)
             sink.submit(

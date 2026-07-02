@@ -305,9 +305,20 @@ class AnyDataset(_Base, MapStyleABC):
 
 
 def uses_default_indexed_shard(dataset: object) -> bool:
+    if isinstance(dataset, AnyDataset):
+        source_dataset = dataset.dataset
+        iter_indexed = getattr(source_dataset, "iter_indexed_shard", None)
+        iter_runtime = getattr(source_dataset, "iter_indexed_runtime_shard", None)
+        return not callable(iter_indexed) and not callable(iter_runtime)
+    if isinstance(dataset, MapStyleABC):
+        return type(dataset).iter_indexed_shard is MapStyleABC.iter_indexed_shard
+    iter_indexed = getattr(dataset, "iter_indexed_shard", None)
+    iter_runtime = getattr(dataset, "iter_indexed_runtime_shard", None)
     return (
-        isinstance(dataset, MapStyleABC)
-        and type(dataset).iter_indexed_shard is MapStyleABC.iter_indexed_shard
+        hasattr(dataset, "__len__")
+        and hasattr(dataset, "__getitem__")
+        and not callable(iter_indexed)
+        and not callable(iter_runtime)
     )
 
 

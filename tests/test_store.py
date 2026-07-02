@@ -60,7 +60,6 @@ class StoreTest(unittest.TestCase):
         )
 
     def test_manifest_dataclasses_round_trip(self):
-        view = (Role.DEFAULT, Modality.AUDIO, AudioView.WAVEFORM)
         manifest = DatasetManifest(
             dataset_id="toy-audio",
             schema_version=STORE_SCHEMA_VERSION,

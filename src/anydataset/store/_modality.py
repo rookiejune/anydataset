@@ -1,10 +1,10 @@
-from __future__ import annotations
-
 """Materialize missing modalities from existing role-local inputs.
 
 The module enforces the modality materializer contract: each role must have
 exactly one non-output input modality, and generated items do not inherit meta.
 """
+
+from __future__ import annotations
 
 from collections.abc import Iterator, Mapping
 from typing import Any

@@ -920,14 +920,16 @@ class ViewMaterializerTest(unittest.TestCase):
             root = Path(tmpdir)
             target = root / "target"
             calls = root / "calls.txt"
+            reads = root / "reads.txt"
             samples = tuple(
                 _audio_sample(torch.tensor([[float(index)]]))
                 for index in range(4)
             )
+            factory = _ReadTrackingDatasetFactory(samples, reads)
 
             with self.assertRaisesRegex(RuntimeError, "stop after first batch"):
                 ViewMaterializer(target, split="train", batch_size=2).write(
-                    dataset_factory=_DatasetFactory(samples),
+                    dataset_factory=factory,
                     provider_factory=_FailOnceBatchProviderFactory(calls),
                     devices="cpu",
                 )
@@ -939,7 +941,7 @@ class ViewMaterializerTest(unittest.TestCase):
             )
 
             ViewMaterializer(target, split="train", batch_size=2).write(
-                dataset_factory=_DatasetFactory(samples),
+                dataset_factory=factory,
                 provider_factory=_FailOnceBatchProviderFactory(calls),
                 devices="cpu",
             )
@@ -948,6 +950,10 @@ class ViewMaterializerTest(unittest.TestCase):
             self.assertEqual(
                 calls.read_text(encoding="utf-8").splitlines(),
                 ["0,1", "2,3", "2,3"],
+            )
+            self.assertEqual(
+                reads.read_text(encoding="utf-8").splitlines(),
+                ["0", "1", "2", "3", "2", "3"],
             )
             self.assertFalse((root / ".target.resume").exists())
             for index in range(4):
@@ -1232,6 +1238,28 @@ class _UnpicklableDataset:
 
     def __getstate__(self):
         raise TypeError("dataset instance must not be pickled")
+
+
+class _ReadTrackingDataset:
+    def __init__(self, samples, calls: Path):
+        self.samples = samples
+        self.calls = calls
+
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, index: int):
+        _append_call(self.calls, str(index))
+        return self.samples[index]
+
+
+@dataclass(frozen=True)
+class _ReadTrackingDatasetFactory:
+    samples: object
+    calls: Path
+
+    def __call__(self):
+        return _ReadTrackingDataset(self.samples, self.calls)
 
 
 @dataclass(frozen=True)
