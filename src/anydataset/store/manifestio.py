@@ -202,14 +202,16 @@ def _read_view_manifest_rows(
     row_group: int | None = None,
 ) -> Iterator[dict[str, Any]]:
     path = view_manifest_parquet_path(root, view)
-    sample_index_by_id = _legacy_sample_index_by_id(root, path)
+    sample_index_by_id = None
+    if not _has_column(path, "sample_index"):
+        sample_index_by_id = _sample_index_by_id(root)
     rows = (
         _read_parquet_rows(path)
         if row_group is None
         else _read_parquet_row_group(path, row_group)
     )
     for row in rows:
-        yield _normalize_view_manifest_row(row, sample_index_by_id)
+        yield _view_manifest_row(row, sample_index_by_id)
 
 
 def _read_view_manifest_indexes(
@@ -217,15 +219,15 @@ def _read_view_manifest_indexes(
     view: tuple[Role, Modality, View],
 ) -> Iterator[int]:
     path = view_manifest_parquet_path(root, view)
-    sample_index_by_id = _legacy_sample_index_by_id(root, path)
-    if sample_index_by_id is None:
+    if _has_column(path, "sample_index"):
         yield from read_int_column(path, "sample_index")
         return
+    sample_index_by_id = _sample_index_by_id(root)
     for row in _read_parquet_rows(path, columns=["sample_id"]):
-        yield _normalize_view_manifest_row(row, sample_index_by_id)["sample_index"]
+        yield _view_manifest_row(row, sample_index_by_id)["sample_index"]
 
 
-def _normalize_view_manifest_row(
+def _view_manifest_row(
     row: dict[str, Any],
     sample_index_by_id: dict[str, int] | None,
 ) -> dict[str, Any]:
@@ -238,14 +240,11 @@ def _normalize_view_manifest_row(
     return row
 
 
-def _legacy_sample_index_by_id(root: str | Path, path: str | Path) -> dict[str, int] | None:
-    if _has_column(path, "sample_index"):
-        return None
-    return _sample_index_by_id(root)
-
-
 def _sample_index_by_id(root: str | Path) -> dict[str, int]:
-    return {sample_id: sample_index for sample_index, sample_id in read_sample_manifest_index(root)}
+    return {
+        sample_id: sample_index
+        for sample_index, sample_id in read_sample_manifest_index(root)
+    }
 
 
 def _has_column(path: str | Path, name: str) -> bool:
