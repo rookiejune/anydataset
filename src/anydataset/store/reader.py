@@ -376,7 +376,9 @@ def read_store_manifest(root: str | Path) -> DatasetManifest:
     _validate_dataset_root(root)
     data = read_json(dataset_json_path(root))
     version = data.get("schema_version")
-    if version != STORE_SCHEMA_VERSION:
+    if version is None:
+        data = {**data, "schema_version": 1}
+    elif version != STORE_SCHEMA_VERSION:
         raise ValueError(
             "Unsupported store schema_version: "
             f"{version!r}; expected {STORE_SCHEMA_VERSION}."

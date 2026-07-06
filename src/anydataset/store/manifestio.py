@@ -80,7 +80,7 @@ def read_view_manifest(
     root: str | Path,
     view: tuple[Role, Modality, View],
 ) -> Iterator[ViewManifestEntry]:
-    for row in _read_parquet_rows(view_manifest_parquet_path(root, view)):
+    for row in _read_view_manifest_rows(root, view):
         yield _view_entry(row)
 
 
@@ -105,10 +105,7 @@ def read_view_manifest_row_group(
 ) -> tuple[ViewManifestEntry, ...]:
     return tuple(
         _view_entry(row)
-        for row in _read_parquet_row_group(
-            view_manifest_parquet_path(root, view),
-            row_group,
-        )
+        for row in _read_view_manifest_rows(root, view, row_group=row_group)
     )
 
 
@@ -116,10 +113,7 @@ def read_view_manifest_indexes(
     root: str | Path,
     view: tuple[Role, Modality, View],
 ) -> Iterator[int]:
-    yield from read_int_column(
-        view_manifest_parquet_path(root, view),
-        "sample_index",
-    )
+    yield from _read_view_manifest_indexes(root, view)
 
 
 def write_view_manifest(
@@ -199,6 +193,64 @@ def _decode_row(row: dict[str, Any]) -> dict[str, Any]:
 
 def _json_text(value: Any) -> str:
     return json.dumps(value, ensure_ascii=True, sort_keys=True)
+
+
+def _read_view_manifest_rows(
+    root: str | Path,
+    view: tuple[Role, Modality, View],
+    *,
+    row_group: int | None = None,
+) -> Iterator[dict[str, Any]]:
+    path = view_manifest_parquet_path(root, view)
+    sample_index_by_id = _legacy_sample_index_by_id(root, path)
+    rows = (
+        _read_parquet_rows(path)
+        if row_group is None
+        else _read_parquet_row_group(path, row_group)
+    )
+    for row in rows:
+        yield _normalize_view_manifest_row(row, sample_index_by_id)
+
+
+def _read_view_manifest_indexes(
+    root: str | Path,
+    view: tuple[Role, Modality, View],
+) -> Iterator[int]:
+    path = view_manifest_parquet_path(root, view)
+    sample_index_by_id = _legacy_sample_index_by_id(root, path)
+    if sample_index_by_id is None:
+        yield from read_int_column(path, "sample_index")
+        return
+    for row in _read_parquet_rows(path, columns=["sample_id"]):
+        yield _normalize_view_manifest_row(row, sample_index_by_id)["sample_index"]
+
+
+def _normalize_view_manifest_row(
+    row: dict[str, Any],
+    sample_index_by_id: dict[str, int] | None,
+) -> dict[str, Any]:
+    row = dict(row)
+    sample_id = row.pop("sample_id", None)
+    if "sample_index" not in row:
+        if sample_index_by_id is None or sample_id is None:
+            raise ValueError("legacy view manifest entries must contain sample_id.")
+        row["sample_index"] = sample_index_by_id[str(sample_id)]
+    return row
+
+
+def _legacy_sample_index_by_id(root: str | Path, path: str | Path) -> dict[str, int] | None:
+    if _has_column(path, "sample_index"):
+        return None
+    return _sample_index_by_id(root)
+
+
+def _sample_index_by_id(root: str | Path) -> dict[str, int]:
+    return {sample_id: sample_index for sample_index, sample_id in read_sample_manifest_index(root)}
+
+
+def _has_column(path: str | Path, name: str) -> bool:
+    _, pq = pyarrow()
+    return name in pq.ParquetFile(path).schema_arrow.names
 
 
 def _read_parquet_rows(
