@@ -75,3 +75,12 @@ def string_key_dict(values: Mapping[Any, Any]) -> dict[str, Any]:
         key.value if isinstance(key, StrEnum) else str(key): value
         for key, value in values.items()
     }
+
+
+def dataset_manifest_dict(manifest: DatasetManifest) -> dict[str, Any]:
+    return {
+        "dataset_id": manifest.dataset_id,
+        "sample_count": manifest.sample_count,
+        "schema_version": manifest.schema_version,
+        "split": manifest.split,
+    }

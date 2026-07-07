@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterable, Mapping
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +24,7 @@ from .manifest import (
     DatasetManifest,
     SampleItem,
     SampleManifestEntry,
+    dataset_manifest_dict,
     string_key_dict,
 )
 from .manifestio import sample_manifest_writer
@@ -58,12 +59,13 @@ class DatasetWriter:
         sample_views: dict[tuple[Role, Modality], frozenset[View]] = {}
         sample_manifest = sample_manifest_writer(root)
         sample_count = 0
+        sample_id_prefix = _sample_id_prefix(self.dataset_id)
 
         try:
             for index, sample in enumerate(samples):
                 if not isinstance(sample, Mapping):
                     raise TypeError("DatasetWriter.write expects Sample mappings.")
-                sample_id = _sample_id(self.dataset_id, index)
+                sample_id = _sample_id(sample_id_prefix, index)
                 _validate_sample(sample)
                 views = (
                     self.views if self.views is not None else _sample_view_refs(sample)
@@ -100,7 +102,7 @@ class DatasetWriter:
                 split=self.split,
                 sample_count=sample_count,
             )
-            write_json(dataset_json_path(root), asdict(manifest))
+            write_json(dataset_json_path(root), dataset_manifest_dict(manifest))
             sample_manifest.close()
             for sink in sinks.values():
                 sink.close()
@@ -185,8 +187,11 @@ def _validate_sample(sample: Sample) -> None:
         _validate_item(modality, item)
 
 
-def _sample_id(dataset_id: str, index: int) -> str:
-    dataset = _slug(dataset_id)
+def _sample_id_prefix(dataset_id: str) -> str:
+    return _slug(dataset_id)
+
+
+def _sample_id(dataset: str, index: int) -> str:
     return f"{index:012d}-{dataset}"
 
 

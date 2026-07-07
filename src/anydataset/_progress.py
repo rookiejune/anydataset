@@ -152,8 +152,10 @@ class ProgressDashboard:
         return self
 
     def __exit__(self, exc_type, exc_value, traceback) -> None:
-        for bar in reversed(tuple(self._stage_bars.values())):
-            bar.__exit__(exc_type, exc_value, traceback)
+        for stage in reversed(self.stages):
+            bar = self._stage_bars.get(stage)
+            if bar is not None:
+                bar.__exit__(exc_type, exc_value, traceback)
         self._stage_bars.clear()
         if self._bar is not None:
             self._bar.__exit__(exc_type, exc_value, traceback)

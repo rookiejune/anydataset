@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import shutil
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from heapq import heappop, heappush
 from pathlib import Path
 from typing import TypeVar
@@ -20,6 +20,7 @@ from .manifest import (
     SampleManifestEntry,
     STORE_SCHEMA_VERSION,
     ViewManifestEntry,
+    dataset_manifest_dict,
     string_key_dict,
 )
 from .manifestio import (
@@ -40,6 +41,7 @@ from .viewwriter import ViewWriter
 from .writer import (
     DEFAULT_MAX_SHARD_SAMPLES,
     _sample_id,
+    _sample_id_prefix,
     _sample_view_refs,
     _sample_view_value,
     _validate_sample,
@@ -82,6 +84,7 @@ class DatasetPartWriter:
         sample_manifest = sample_manifest_writer(root)
         sample_count = 0
         previous_index: int | None = None
+        sample_id_prefix = _sample_id_prefix(self.dataset_id)
 
         try:
             for sample_index, sample in samples:
@@ -90,7 +93,7 @@ class DatasetPartWriter:
                 previous_index = sample_index
                 if not isinstance(sample, Mapping):
                     raise TypeError("DatasetPartWriter.write expects Sample mappings.")
-                sample_id = _sample_id(self.dataset_id, sample_index)
+                sample_id = _sample_id(sample_id_prefix, sample_index)
                 _validate_sample(sample)
                 views = (
                     self.views if self.views is not None else _sample_view_refs(sample)
@@ -128,7 +131,7 @@ class DatasetPartWriter:
                 split=self.split,
                 sample_count=sample_count,
             )
-            write_json(dataset_json_path(root), asdict(manifest))
+            write_json(dataset_json_path(root), dataset_manifest_dict(manifest))
             write_json(
                 _part_json_path(root),
                 {
@@ -363,7 +366,7 @@ def _write_committed_dataset_manifest(
 ) -> None:
     write_json(
         dataset_json_path(root),
-        asdict(
+        dataset_manifest_dict(
             DatasetManifest(
                 dataset_id=dataset_id,
                 schema_version=STORE_SCHEMA_VERSION,

@@ -603,7 +603,7 @@ class _FragmentBatchWriter:
             read_start = time.perf_counter()
             for batch in batches:
                 self._record_read(batch, read_start)
-                pending = pending_batch(batch, frozenset(self.completed))
+                pending = pending_batch(batch, self.completed)
                 if not pending:
                     read_start = time.perf_counter()
                     continue

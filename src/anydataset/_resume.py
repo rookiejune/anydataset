@@ -12,7 +12,7 @@ import hashlib
 import json
 import os
 import shutil
-from collections.abc import Iterable, Sequence
+from collections.abc import Collection, Iterable, Sequence
 from pathlib import Path
 from typing import Any, TypeVar
 
@@ -66,9 +66,12 @@ def dataset_sample_count(dataset: Any, *, context: str) -> int:
 
 def validate_completed_indexes(indexes: Iterable[int], expected: int) -> frozenset[int]:
     completed = frozenset(indexes)
-    extras = sorted(index for index in completed if index < 0 or index >= expected)
-    if extras:
-        raise ValueError(f"Completed fragment index is outside dataset: {extras[0]}.")
+    extra: int | None = None
+    for index in completed:
+        if index < 0 or index >= expected:
+            extra = index if extra is None else min(extra, index)
+    if extra is not None:
+        raise ValueError(f"Completed fragment index is outside dataset: {extra}.")
     return completed
 
 
@@ -82,7 +85,7 @@ def missing_indexes(completed: frozenset[int], expected: int) -> tuple[int, ...]
 
 def pending_batch(
     batch: Iterable[tuple[int, T]],
-    completed: frozenset[int],
+    completed: Collection[int],
 ) -> tuple[tuple[int, T], ...]:
     return tuple((index, value) for index, value in batch if index not in completed)
 

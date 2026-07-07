@@ -28,6 +28,7 @@ class ParquetRowWriter:
         self.encode = encode
         self.writer = pq.ParquetWriter(self.tmp, self.schema)
         self.rows: list[dict[str, Any]] = []
+        self._wrote_rows = False
         self.closed = False
 
     def write(self, entry: Any) -> None:
@@ -38,7 +39,8 @@ class ParquetRowWriter:
     def close(self) -> None:
         if self.closed:
             return
-        self._flush()
+        if self.rows or not self._wrote_rows:
+            self._flush()
         self.writer.close()
         os.replace(self.tmp, self.path)
         self.closed = True
@@ -53,6 +55,8 @@ class ParquetRowWriter:
     def _flush(self) -> None:
         table = self.pa.Table.from_pylist(self.rows, schema=self.schema)
         self.writer.write_table(table)
+        if self.rows:
+            self._wrote_rows = True
         self.rows.clear()
 
 
@@ -127,7 +131,7 @@ def write_rows(
     pa, pq = pyarrow()
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    table = pa.Table.from_pylist(list(rows), schema=parquet_schema(pa, schema))
+    table = pa.Table.from_pylist(rows, schema=parquet_schema(pa, schema))
     pq.write_table(table, path)
 
 
