@@ -74,6 +74,11 @@ store 内部以 `sample_index` 作为样本对齐键。`sample_id` 只用于 man
 的可读标识，不参与 base store 与 delta store 的对齐；调用方负责保证派生 view 来自
 同一顺序的数据集。
 
+`ViewMaterializer` 默认只写 provider 输出 view；如果 delta store 需要额外携带原始
+item 的少量 view 或 meta，调用方通过 `keep_schema` 显式声明。`keep_schema` 使用现有
+`Schema`/`Requirement` 语义，只复制声明的字段；如果声明的 view 和 provider 输出冲突，
+materializer 必须报错，不静默覆盖。
+
 `ViewMaterializer` 和 `ModalityMaterializer` 默认使用可续跑的 fragment 流水线。
 库会把完成的 provider batch 聚合到 checkpoint chunk 后写成 ready fragment，并按全局
 `sample_index` 跳过已完成样本；所有样本覆盖后再原子提交最终 store 并清理 resume

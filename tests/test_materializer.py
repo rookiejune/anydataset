@@ -14,6 +14,7 @@ from anydataset.runtime import Runtime
 from anydataset.store import ModalityMaterializer
 from anydataset.types import (
     AudioItem,
+    AudioReq,
     AudioView,
     ImageItem,
     ImageView,
@@ -21,6 +22,7 @@ from anydataset.types import (
     Role,
     TextItem,
     TextMeta,
+    TextReq,
     TextView,
 )
 from anydataset.store import DatasetWriter, ViewMaterializer
@@ -455,6 +457,179 @@ class ViewMaterializerTest(unittest.TestCase):
                     torch.tensor([[11, 12]]),
                 )
             )
+
+    def test_materializer_keep_schema_copies_selected_item_fields(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            source = root / "source"
+            target = root / "target"
+            dataset = _source_dataset(
+                source,
+                root,
+                [
+                    {
+                        (Role.DEFAULT, Modality.AUDIO): AudioItem(
+                            views={
+                                AudioView.WAVEFORM: (
+                                    torch.tensor([[1.0, 2.0]]),
+                                    4,
+                                )
+                            }
+                        ),
+                        (Role.DEFAULT, Modality.TEXT): TextItem(
+                            views={TextView.TEXT: "hello"},
+                            meta={TextMeta.LANG: "en_us"},
+                        ),
+                    }
+                ],
+            )
+
+            ViewMaterializer(
+                target,
+                keep_schema={
+                    (Role.DEFAULT, Modality.TEXT): TextReq(
+                        views=frozenset({TextView.TEXT}),
+                        meta=frozenset({TextMeta.LANG}),
+                    )
+                },
+            ).write(
+                dataset_factory=_DatasetFactory(dataset),
+                provider_factory=_ProviderFactory(offset=10),
+                devices="cpu",
+            )
+
+            stored = read_store_dataset(target)
+            sample = _read_sample(target, root)
+
+            self.assertEqual(
+                set(stored.views),
+                {
+                    (Role.DEFAULT, Modality.AUDIO, AudioView.LONGCAT),
+                    (Role.DEFAULT, Modality.TEXT, TextView.TEXT),
+                },
+            )
+            self.assertEqual(
+                set(sample[Role.DEFAULT, Modality.AUDIO].views),
+                {AudioView.LONGCAT},
+            )
+            self.assertEqual(
+                sample[Role.DEFAULT, Modality.TEXT].views[TextView.TEXT],
+                "hello",
+            )
+            self.assertEqual(
+                sample[Role.DEFAULT, Modality.TEXT].meta[TextMeta.LANG],
+                "en_us",
+            )
+
+    def test_materializer_keep_schema_merges_same_item_fields(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            source = root / "source"
+            target = root / "target"
+            waveform = torch.tensor([[1.0, 2.0]])
+            dataset = _source_dataset(source, root, [_audio_sample(waveform)])
+
+            ViewMaterializer(
+                target,
+                keep_schema={
+                    (Role.DEFAULT, Modality.AUDIO): AudioReq(
+                        views=frozenset({AudioView.WAVEFORM})
+                    )
+                },
+            ).write(
+                dataset_factory=_DatasetFactory(dataset),
+                provider_factory=_ProviderFactory(offset=10),
+                devices="cpu",
+            )
+
+            sample = _read_sample(target, root)
+            audio = sample[Role.DEFAULT, Modality.AUDIO]
+
+            self.assertEqual(
+                set(audio.views),
+                {AudioView.WAVEFORM, AudioView.LONGCAT},
+            )
+            self.assertTrue(torch.equal(audio.views[AudioView.WAVEFORM][0], waveform))
+            self.assertTrue(
+                torch.equal(
+                    audio.views[AudioView.LONGCAT]["semantic_codes"],
+                    torch.tensor([[11, 12]]),
+                )
+            )
+
+    def test_materializer_keep_schema_rejects_output_view_conflict(self):
+        sample = {
+            (Role.DEFAULT, Modality.AUDIO): AudioItem(
+                views={
+                    AudioView.WAVEFORM: (torch.tensor([[1.0]]), 4),
+                    AudioView.LONGCAT: {"semantic_codes": torch.tensor([[0]])},
+                }
+            )
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with self.assertRaisesRegex(ValueError, "view conflict"):
+                ViewMaterializer(
+                    Path(tmpdir) / "target",
+                    keep_schema={
+                        (Role.DEFAULT, Modality.AUDIO): AudioReq(
+                            views=frozenset({AudioView.LONGCAT})
+                        )
+                    },
+                ).write(
+                    dataset_factory=_DatasetFactory((sample,)),
+                    provider_factory=_ProviderFactory(offset=10),
+                    devices="cpu",
+                )
+
+    def test_materializer_parallel_keep_schema_copies_selected_fields(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = root / "target"
+            samples = tuple(
+                {
+                    (Role.DEFAULT, Modality.AUDIO): AudioItem(
+                        views={
+                            AudioView.WAVEFORM: (
+                                torch.tensor([[float(index)]]),
+                                4,
+                            )
+                        }
+                    ),
+                    (Role.DEFAULT, Modality.TEXT): TextItem(
+                        views={TextView.TEXT: f"text-{index}"},
+                        meta={TextMeta.LANG: "en_us"},
+                    ),
+                }
+                for index in range(2)
+            )
+
+            ViewMaterializer(
+                target,
+                keep_schema={
+                    (Role.DEFAULT, Modality.TEXT): TextReq(
+                        views=frozenset({TextView.TEXT}),
+                        meta=frozenset({TextMeta.LANG}),
+                    )
+                },
+            ).write(
+                dataset_factory=_DatasetFactory(samples),
+                provider_factory=_ParallelProviderFactory(),
+                devices=("cpu:0", "cpu:1"),
+            )
+
+            stored = read_store_dataset(target)
+
+            self.assertEqual(len(stored), 2)
+            for index in range(2):
+                sample = stored[index]
+                self.assertEqual(
+                    sample[Role.DEFAULT, Modality.TEXT].views[TextView.TEXT],
+                    f"text-{index}",
+                )
+                self.assertEqual(
+                    sample[Role.DEFAULT, Modality.TEXT].meta[TextMeta.LANG],
+                    "en_us",
+                )
 
     def test_modality_materializer_adds_missing_modality_with_empty_meta(self):
         with tempfile.TemporaryDirectory() as tmpdir:

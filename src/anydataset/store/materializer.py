@@ -46,7 +46,7 @@ from .._validation import non_negative_int, optional_positive_int, positive_int
 from .._write_pipeline import BackgroundWriteSink
 from ..dataset.abc import uses_default_indexed_shard
 from ..runtime import Runtime
-from ..types.item import Sample
+from ..types.item import Item, Sample, Schema, View
 from ..view import Provider
 from ._batch import (
     indexed_sample_batches,
@@ -86,6 +86,7 @@ class ViewMaterializer:
     write_workers: int = 1
     write_prefetch: int | None = None
     runtime: Runtime = field(default_factory=Runtime)
+    keep_schema: Schema | None = None
 
     def __post_init__(self) -> None:
         self.max_shard_samples = positive_int(
@@ -398,6 +399,7 @@ class ViewMaterializer:
                         prefetch_factor=self.prefetch_factor,
                         write_workers=self.write_workers,
                         write_prefetch=self.write_prefetch,
+                        keep_schema=self.keep_schema,
                         mode=self._materializer_mode,
                         runtime=self.runtime,
                         use_map_style_loader=use_map_style_loader,
@@ -460,7 +462,10 @@ class ViewMaterializer:
         sample: Sample,
         provider: MaterializerProvider,
     ) -> Sample:
-        return with_view_provider(sample, cast(Provider, provider))
+        return self._output_sample(
+            sample,
+            with_view_provider(sample, cast(Provider, provider)),
+        )
 
     def _indexed_samples(
         self,
@@ -519,7 +524,27 @@ class ViewMaterializer:
         samples: Sequence[Sample],
         provider: MaterializerProvider,
     ) -> Iterator[Sample]:
-        return with_batch_view_provider(samples, cast(Provider, provider))
+        return self._output_samples(
+            samples,
+            with_batch_view_provider(samples, cast(Provider, provider)),
+        )
+
+    def _output_sample(self, source: Sample, output: Sample) -> Sample:
+        if self.keep_schema is None:
+            return output
+        kept = _select_sample(source, self.keep_schema)
+        return _merge_output_samples(kept, output)
+
+    def _output_samples(
+        self,
+        sources: Sequence[Sample],
+        outputs: Iterator[Sample],
+    ) -> Iterator[Sample]:
+        if self.keep_schema is None:
+            yield from outputs
+            return
+        for source, output in zip(sources, outputs, strict=True):
+            yield self._output_sample(source, output)
 
     def _resilient_samples_with_batch_provider(
         self,
@@ -543,15 +568,22 @@ class ModalityMaterializer(ViewMaterializer):
         sample: Sample,
         provider: MaterializerProvider,
     ) -> Sample:
-        return with_modality_provider(sample, cast(ModalityProviderLike, provider))
+        return self._output_sample(
+            sample,
+            with_modality_provider(sample, cast(ModalityProviderLike, provider)),
+        )
 
     def _samples_with_batch_provider(
         self,
         samples: Sequence[Sample],
         provider: MaterializerProvider,
     ) -> Iterator[Sample]:
-        return with_batch_modality_provider(
-            samples, cast(ModalityProviderLike, provider)
+        return self._output_samples(
+            samples,
+            with_batch_modality_provider(
+                samples,
+                cast(ModalityProviderLike, provider),
+            ),
         )
 
 
@@ -723,6 +755,7 @@ class _WorkerConfig:
     prefetch_factor: int | None
     write_workers: int
     write_prefetch: int | None
+    keep_schema: Schema | None
     mode: _MaterializerMode
     runtime: Runtime
     use_map_style_loader: bool
@@ -830,6 +863,7 @@ def _worker_materializer(config: _WorkerConfig) -> ViewMaterializer:
         prefetch_factor=config.prefetch_factor,
         write_workers=config.write_workers,
         write_prefetch=config.write_prefetch,
+        keep_schema=config.keep_schema,
         runtime=config.runtime,
     )
 
@@ -893,6 +927,63 @@ def _missing_indexed_samples(
             yield index, dataset[index]
         return
     yield from iter_indexed_shard(dataset, 1, 0)
+
+
+def _select_sample(sample: Sample, schema: Schema) -> Sample:
+    return {
+        reference: sample[reference].select_by(requirement)
+        for reference, requirement in schema.items()
+    }
+
+
+def _merge_output_samples(left: Sample, right: Sample) -> Sample:
+    result = dict(left)
+    for ref, item in right.items():
+        current = result.get(ref)
+        if current is None:
+            result[ref] = item
+            continue
+        result[ref] = _merge_output_items(current, item, ref=ref)
+    return result
+
+
+def _merge_output_items(left: Item, right: Item, *, ref: object) -> Item:
+    if type(left) is not type(right):
+        raise TypeError(f"Materialized sample item {ref!r} has incompatible types.")
+    view_conflicts = set(left.views) & set(right.views)
+    if view_conflicts:
+        view = _first_sorted_view(view_conflicts)
+        raise ValueError(
+            f"Materialized sample item {ref!r} view conflict for {view!r}."
+        )
+
+    meta = dict(left.meta)
+    for key, value in right.meta.items():
+        current = meta.get(key)
+        if key in meta and not _values_equal(current, value):
+            raise ValueError(
+                f"Materialized sample item {ref!r} metadata conflict for {key!r}."
+            )
+        meta[key] = value
+
+    return type(left)(
+        views={**left.views, **right.views},
+        meta=meta,
+    )
+
+
+def _first_sorted_view(views: set[View]) -> View:
+    return sorted(views, key=lambda view: view.value)[0]
+
+
+def _values_equal(left: Any, right: Any) -> bool:
+    equal = left == right
+    if isinstance(equal, bool):
+        return equal
+    try:
+        return bool(equal)
+    except (TypeError, ValueError, RuntimeError):
+        return left is right
 
 
 def _dataset_id(output_dir: str | Path) -> str:
