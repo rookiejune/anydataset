@@ -39,16 +39,15 @@ def _with_provider(
     item: Item,
     provider: Provider,
 ) -> Item:
-    match item:
-        case AudioItem():
-            provider = _audio_provider(provider)
-            return with_view(item, provider.output, provider(item.views))
-        case ImageItem():
-            provider = _image_provider(provider)
-            return with_view(item, provider.output, provider(item.views))
-        case TextItem():
-            provider = _text_provider(provider)
-            return with_view(item, provider.output, provider(item.views))
+    if isinstance(item, AudioItem):
+        provider = _audio_provider(provider)
+        return with_view(item, provider.output, provider(item.views))
+    if isinstance(item, ImageItem):
+        provider = _image_provider(provider)
+        return with_view(item, provider.output, provider(item.views))
+    if isinstance(item, TextItem):
+        provider = _text_provider(provider)
+        return with_view(item, provider.output, provider(item.views))
     raise TypeError(f"Unsupported materializer item: {type(item).__name__}.")
 
 
@@ -57,28 +56,27 @@ def with_view(
     view: View,
     value: Any,
 ) -> Item:
-    match item:
-        case AudioItem():
-            if not isinstance(view, AudioView):
-                raise TypeError("audio item materializer output must be an AudioView.")
-            return AudioItem(
-                views=views(view, value),
-                meta=item.meta,
-            )
-        case ImageItem():
-            if not isinstance(view, ImageView):
-                raise TypeError("image item materializer output must be an ImageView.")
-            return ImageItem(
-                views=views(view, value),
-                meta=item.meta,
-            )
-        case TextItem():
-            if not isinstance(view, TextView):
-                raise TypeError("text item materializer output must be a TextView.")
-            return TextItem(
-                views=views(view, value),
-                meta=item.meta,
-            )
+    if isinstance(item, AudioItem):
+        if not isinstance(view, AudioView):
+            raise TypeError("audio item materializer output must be an AudioView.")
+        return AudioItem(
+            views=views(view, value),
+            meta=item.meta,
+        )
+    if isinstance(item, ImageItem):
+        if not isinstance(view, ImageView):
+            raise TypeError("image item materializer output must be an ImageView.")
+        return ImageItem(
+            views=views(view, value),
+            meta=item.meta,
+        )
+    if isinstance(item, TextItem):
+        if not isinstance(view, TextView):
+            raise TypeError("text item materializer output must be a TextView.")
+        return TextItem(
+            views=views(view, value),
+            meta=item.meta,
+        )
     raise TypeError(f"Unsupported materializer item: {type(item).__name__}.")
 
 

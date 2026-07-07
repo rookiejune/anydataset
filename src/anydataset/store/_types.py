@@ -6,17 +6,22 @@ used by view, modality, and batch materialization helpers.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, TypeVar, Union
 
 from ..types.item import AudioView, ImageView, Modality, TextView, View
 from ..view import ModalityProvider, Provider
 
-type ModalityProviderLike = (
-    ModalityProvider[AudioView]
-    | ModalityProvider[ImageView]
-    | ModalityProvider[TextView]
-)
-type MaterializerProvider = Provider | ModalityProviderLike
+ViewT = TypeVar("ViewT")
+
+ModalityProviderLike = Union[
+    ModalityProvider[AudioView],
+    ModalityProvider[ImageView],
+    ModalityProvider[TextView],
+]
+MaterializerProvider = Union[
+    Provider,
+    ModalityProviderLike,
+]
 
 
 def output_modality(view: View) -> Modality:
@@ -29,5 +34,5 @@ def output_modality(view: View) -> Modality:
     raise TypeError("materializer output must be an AudioView, ImageView, or TextView.")
 
 
-def views[ViewT](view: ViewT, value: Any) -> dict[ViewT, Any]:
+def views(view: ViewT, value: Any) -> dict[ViewT, Any]:
     return {view: value}

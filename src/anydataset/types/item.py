@@ -2,11 +2,18 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
-from enum import StrEnum, auto
-from typing import Any, Self
+from enum import auto
+from typing import Any, Generic, TypeVar, Union
+
+from .._compat import Self, StrEnum
+
+KeyT = TypeVar("KeyT")
+ValueT = TypeVar("ValueT")
+ViewT = TypeVar("ViewT")
+MetaT = TypeVar("MetaT")
 
 
-def _select[KeyT, ValueT](
+def _select(
     values: Mapping[KeyT, ValueT],
     keys: Iterable[KeyT],
 ) -> Mapping[KeyT, ValueT]:
@@ -14,7 +21,7 @@ def _select[KeyT, ValueT](
 
 
 @dataclass(frozen=True)
-class _Requirement[ViewT, MetaT]:
+class _Requirement(Generic[ViewT, MetaT]):
     views: frozenset[ViewT] = frozenset()
     meta: frozenset[MetaT] = frozenset()
 
@@ -31,7 +38,7 @@ class _Requirement[ViewT, MetaT]:
 
 
 @dataclass(frozen=True)
-class _Item[ViewT, MetaT]:
+class _Item(Generic[ViewT, MetaT]):
     views: Mapping[ViewT, Any] = field(default_factory=dict)
     meta: Mapping[MetaT, Any] = field(default_factory=dict)
 
@@ -117,10 +124,10 @@ class TextReq(
 ): ...
 
 
-type View = AudioView | ImageView | TextView
-type Meta = AudioMeta | ImageMeta | TextMeta
-type Item = AudioItem | ImageItem | TextItem
-type Requirement = AudioReq | ImageReq | TextReq
+View = Union[AudioView, ImageView, TextView]
+Meta = Union[AudioMeta, ImageMeta, TextMeta]
+Item = Union[AudioItem, ImageItem, TextItem]
+Requirement = Union[AudioReq, ImageReq, TextReq]
 
 
 class Role(StrEnum):
@@ -135,8 +142,8 @@ class Modality(StrEnum):
     TEXT = auto()
 
 
-type Reference = tuple[Role, Modality]
-type ItemTransform = Callable[[Item], Item]
-type Transforms = Mapping[Reference, ItemTransform]
-type Schema = Mapping[Reference, Requirement]
-type Sample = Mapping[Reference, Item]
+Reference = tuple[Role, Modality]
+ItemTransform = Callable[[Item], Item]
+Transforms = Mapping[Reference, ItemTransform]
+Schema = Mapping[Reference, Requirement]
+Sample = Mapping[Reference, Item]

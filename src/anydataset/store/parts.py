@@ -6,6 +6,7 @@ from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import asdict, dataclass
 from heapq import heappop, heappush
 from pathlib import Path
+from typing import TypeVar
 
 from .._io.atomic import replace_dir
 from .._resume import cached_completed_indexes, write_completed_index_cache
@@ -46,8 +47,9 @@ from .writer import (
     _view_path,
 )
 
-type IndexedSample = tuple[int, Sample]
-type SampleIndexByRef = dict[tuple[Role, Modality], tuple[int, ...]]
+T = TypeVar("T")
+
+IndexedSample = tuple[int, Sample]
 
 
 @dataclass
@@ -305,7 +307,7 @@ def _commit_roots_to_tmp(
     stream_ordered: bool = False,
     views: tuple[tuple[Role, Modality, View], ...] | None = None,
 ) -> Path:
-    sample_count, sample_indexes_by_ref = _write_ordered_samples_manifest(
+    sample_count = _write_ordered_samples_manifest(
         root,
         stores,
         expected_sample_count=expected_sample_count,
@@ -314,7 +316,6 @@ def _commit_roots_to_tmp(
     _write_committed_view_manifests(
         root,
         stores,
-        sample_indexes_by_ref,
         stream_ordered=stream_ordered,
         views=views,
     )
@@ -331,7 +332,6 @@ def _commit_roots_to_tmp(
 def _write_committed_view_manifests(
     root: Path,
     stores: tuple[Path, ...],
-    sample_indexes_by_ref: SampleIndexByRef,
     *,
     stream_ordered: bool,
     views: tuple[tuple[Role, Modality, View], ...] | None,
@@ -341,7 +341,7 @@ def _write_committed_view_manifests(
             root,
             stores,
             view,
-            sample_indexes_by_ref.get(view[:2], ()),
+            _sample_indexes_for_ref(root, view[:2]),
             stream_ordered=stream_ordered,
         )
         if view_count != expected_view_count:
@@ -396,11 +396,10 @@ def _write_ordered_samples_manifest(
     *,
     expected_sample_count: int | None,
     stream_ordered: bool = False,
-) -> tuple[int, SampleIndexByRef]:
+) -> int:
     writer = sample_manifest_writer(root)
     previous_index: int | None = None
     count = 0
-    indexes_by_ref: dict[tuple[Role, Modality], list[int]] = {}
     try:
         entries = (
             _stream_sample_entries(stores)
@@ -432,8 +431,6 @@ def _write_ordered_samples_manifest(
                         f"missing sample_index {expected_index}."
                     )
             previous_index = entry.sample_index
-            for ref, _meta in entry.items:
-                indexes_by_ref.setdefault(ref, []).append(entry.sample_index)
             writer.write(
                 SampleManifestEntry(
                     sample_id=entry.sample_id,
@@ -450,17 +447,14 @@ def _write_ordered_samples_manifest(
     except Exception:
         writer.abort()
         raise
-    return count, {
-        ref: tuple(indexes)
-        for ref, indexes in indexes_by_ref.items()
-    }
+    return count
 
 
 def _write_ordered_view_manifest(
     root: Path,
     stores: tuple[Path, ...],
     view: tuple[Role, Modality, View],
-    sample_indexes: Sequence[int],
+    sample_indexes: Iterable[int],
     *,
     stream_ordered: bool = False,
 ) -> tuple[int, int]:
@@ -500,6 +494,15 @@ def _write_ordered_view_manifest(
         writer.abort()
         raise
     return count, expected_count
+
+
+def _sample_indexes_for_ref(
+    root: Path,
+    ref: tuple[Role, Modality],
+) -> Iterator[int]:
+    for entry in read_samples_manifest(root):
+        if any(item_ref == ref for item_ref, _meta in entry.items):
+            yield entry.sample_index
 
 
 def _merged_sample_entries(stores: tuple[Path, ...]) -> Iterator[SampleManifestEntry]:
@@ -593,7 +596,7 @@ def _unique_view_entries(
         yield entry
 
 
-def _sorted_entries[T](entries: Iterable[T], key: Callable[[T], int]) -> tuple[T, ...]:
+def _sorted_entries(entries: Iterable[T], key: Callable[[T], int]) -> tuple[T, ...]:
     return tuple(sorted(entries, key=key))
 
 
@@ -607,7 +610,7 @@ def _sorted_view_entries(
     return entries
 
 
-def _merged_loaded_entries[T](
+def _merged_loaded_entries(
     stores: tuple[Path, ...],
     load: Callable[[Path], tuple[T, ...]],
     key: Callable[[T], int],

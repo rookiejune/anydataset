@@ -7,6 +7,7 @@ from typing import Iterator, Protocol
 
 from torch.utils.data import IterableDataset
 
+from .._compat import strict_zip
 from .._sharding import runtime_shard, validate_shard
 from ..types.item import Sample
 from .abc import IterableAnyDataset, MapStyleABC
@@ -45,24 +46,28 @@ class WeightedRandomStrategy:
 
     def iter(self, datasets: Sequence[Iterable[Sample]]) -> Iterator[Sample]:
         weights = self._weights(len(datasets))
-        active = [
-            (iter(dataset), weight)
-            for dataset, weight in zip(datasets, weights, strict=True)
-            if weight > 0
-        ]
+        active: list[Iterator[Sample]] = []
+        active_weights: list[float] = []
+        for dataset, weight in strict_zip(datasets, weights):
+            if weight > 0:
+                active.append(iter(dataset))
+                active_weights.append(weight)
+        cumulative_weights = _cumulative_weights(active_weights)
         rng = random.Random(self.seed)
 
         while active:
             index = rng.choices(
                 range(len(active)),
-                weights=[weight for _, weight in active],
+                cum_weights=cumulative_weights,
                 k=1,
             )[0]
-            iterator, _ = active[index]
+            iterator = active[index]
             try:
                 yield next(iterator)
             except StopIteration:
                 del active[index]
+                del active_weights[index]
+                cumulative_weights = _cumulative_weights(active_weights)
 
     def _weights(self, count: int) -> tuple[float, ...]:
         if self.weights is None:
@@ -78,6 +83,15 @@ class WeightedRandomStrategy:
         if not any(weight > 0 for weight in weights):
             raise ValueError("At least one dataset weight must be positive.")
         return weights
+
+
+def _cumulative_weights(weights: Sequence[float]) -> list[float]:
+    total = 0.0
+    output = []
+    for weight in weights:
+        total += weight
+        output.append(total)
+    return output
 
 
 @dataclass

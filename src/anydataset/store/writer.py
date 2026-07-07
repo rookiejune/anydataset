@@ -162,16 +162,15 @@ def _sample_view_value(sample: Sample, view: tuple[Role, Modality, View]) -> Any
 
 
 def _validate_item(modality: Modality, item: Item) -> None:
-    match modality:
-        case Modality.AUDIO:
-            if not isinstance(item, AudioItem):
-                raise TypeError("audio sample items must be AudioItem instances.")
-        case Modality.IMAGE:
-            if not isinstance(item, ImageItem):
-                raise TypeError("image sample items must be ImageItem instances.")
-        case Modality.TEXT:
-            if not isinstance(item, TextItem):
-                raise TypeError("text sample items must be TextItem instances.")
+    if modality is Modality.AUDIO:
+        if not isinstance(item, AudioItem):
+            raise TypeError("audio sample items must be AudioItem instances.")
+    elif modality is Modality.IMAGE:
+        if not isinstance(item, ImageItem):
+            raise TypeError("image sample items must be ImageItem instances.")
+    elif modality is Modality.TEXT:
+        if not isinstance(item, TextItem):
+            raise TypeError("text sample items must be TextItem instances.")
 
 
 def _validate_sample(sample: Sample) -> None:

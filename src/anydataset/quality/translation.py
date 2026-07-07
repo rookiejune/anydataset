@@ -13,16 +13,17 @@ from collections import Counter
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
-from enum import StrEnum, auto
+from enum import auto
 from functools import cached_property
 from math import isfinite
-from typing import Self
+from typing import Union
 
+from .._compat import Self, StrEnum
 from ..filter import FilterDecision
 from ..filter.types import JsonValue
 from ..types import Modality, Preset, Role, Sample, TextItem, TextMeta, TextView
 
-type Scorer = Callable[[str, str], float]
+Scorer = Callable[[str, str], float]
 
 _NUMBER_RE = re.compile(r"[+-]?\d+(?:[.,:/-]\d+)*")
 _PLACEHOLDER_RE = re.compile(
@@ -82,15 +83,15 @@ class Label(StrEnum):
 
     @property
     def rank(self) -> int:
-        match self:
-            case Label.REJECT:
-                return 0
-            case Label.REVIEW:
-                return 1
-            case Label.USABLE:
-                return 2
-            case Label.CLEAN:
-                return 3
+        if self is Label.REJECT:
+            return 0
+        if self is Label.REVIEW:
+            return 1
+        if self is Label.USABLE:
+            return 2
+        if self is Label.CLEAN:
+            return 3
+        raise ValueError(f"Unsupported label: {self!r}.")
 
     def min(self, other: Self) -> Self:
         return self if self.rank <= other.rank else other
@@ -245,9 +246,9 @@ class _Metrics(_Pair):
         )
 
 
-type _RuleDecision = tuple[Label, bool]
-type _Rule = Callable[[_Metrics, Profile], _RuleDecision]
-type _Callback = Callable[[_Metrics, Profile, Label, tuple[str, ...]], Label]
+_RuleDecision = tuple[Label, bool]
+_Rule = Callable[[_Metrics, Profile], _RuleDecision]
+_Callback = Callable[[_Metrics, Profile, Label, tuple[str, ...]], Label]
 
 
 @dataclass(frozen=True)
@@ -657,29 +658,27 @@ def _is_script_letter(char: str) -> bool:
 def _matches_script(char: str, script: str) -> bool:
     codepoint = ord(char)
     name = unicodedata.name(char, "")
-    match script:
-        case "cjk":
-            return (
-                0x3400 <= codepoint <= 0x4DBF
-                or 0x4E00 <= codepoint <= 0x9FFF
-                or 0xF900 <= codepoint <= 0xFAFF
-            )
-        case "latin":
-            return "LATIN" in name
-        case "hangul":
-            return "HANGUL" in name
-        case "cyrillic":
-            return "CYRILLIC" in name
-        case "arabic":
-            return "ARABIC" in name
-        case "devanagari":
-            return "DEVANAGARI" in name
-        case "thai":
-            return "THAI" in name
-        case "hebrew":
-            return "HEBREW" in name
-        case _:
-            return False
+    if script == "cjk":
+        return (
+            0x3400 <= codepoint <= 0x4DBF
+            or 0x4E00 <= codepoint <= 0x9FFF
+            or 0xF900 <= codepoint <= 0xFAFF
+        )
+    if script == "latin":
+        return "LATIN" in name
+    if script == "hangul":
+        return "HANGUL" in name
+    if script == "cyrillic":
+        return "CYRILLIC" in name
+    if script == "arabic":
+        return "ARABIC" in name
+    if script == "devanagari":
+        return "DEVANAGARI" in name
+    if script == "thai":
+        return "THAI" in name
+    if script == "hebrew":
+        return "HEBREW" in name
+    return False
 
 
 def _control_ratio(text: str) -> float:

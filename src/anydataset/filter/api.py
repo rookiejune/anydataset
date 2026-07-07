@@ -32,7 +32,7 @@ from .types import (
     _Index,
 )
 
-type _FilterApplyOptions = FilterApplyKwargs
+_FilterApplyOptions = FilterApplyKwargs
 
 _FILTER_APPLY_DEFAULTS: _FilterApplyOptions = {
     "metrics": False,

@@ -7,11 +7,11 @@ It does not own materializer, filter, provider, or cache semantics.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal
+from typing import Literal, Union
 
 from ._parallel import StartMethod
 
-type AutoStartMethod = StartMethod | Literal["auto"]
+AutoStartMethod = Union[StartMethod, Literal["auto"]]
 
 
 @dataclass(frozen=True)

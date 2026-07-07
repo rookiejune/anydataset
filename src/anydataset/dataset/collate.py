@@ -2,14 +2,15 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from enum import StrEnum, auto
+from enum import auto
 from typing import Any
 
 import torch
 
+from .._compat import StrEnum
 from ..types import item
 
-type FieldKey = (
+FieldKey = (
     item.AudioView
     | item.ImageView
     | item.TextView
@@ -84,18 +85,17 @@ def _sample_item(
     ref: item.Reference,
 ) -> item.Item:
     sample_item = sample[ref]
-    match ref[1]:
-        case item.Modality.AUDIO:
-            if not isinstance(sample_item, item.AudioItem):
-                raise TypeError(f"{ref!r} requires AudioItem samples.")
-        case item.Modality.IMAGE:
-            if not isinstance(sample_item, item.ImageItem):
-                raise TypeError(f"{ref!r} requires ImageItem samples.")
-        case item.Modality.TEXT:
-            if not isinstance(sample_item, item.TextItem):
-                raise TypeError(f"{ref!r} requires TextItem samples.")
-        case _:
-            raise TypeError(f"Unsupported sample reference: {ref!r}.")
+    if ref[1] is item.Modality.AUDIO:
+        if not isinstance(sample_item, item.AudioItem):
+            raise TypeError(f"{ref!r} requires AudioItem samples.")
+    elif ref[1] is item.Modality.IMAGE:
+        if not isinstance(sample_item, item.ImageItem):
+            raise TypeError(f"{ref!r} requires ImageItem samples.")
+    elif ref[1] is item.Modality.TEXT:
+        if not isinstance(sample_item, item.TextItem):
+            raise TypeError(f"{ref!r} requires TextItem samples.")
+    else:
+        raise TypeError(f"Unsupported sample reference: {ref!r}.")
     return sample_item
 
 
@@ -118,22 +118,21 @@ def _collate_item(
     )
 
     masks = view_masks | meta_masks
-    match ref[1]:
-        case item.Modality.AUDIO:
-            return item.AudioItem(
-                views=views,
-                meta=meta,
-            ), masks
-        case item.Modality.IMAGE:
-            return item.ImageItem(
-                views=views,
-                meta=meta,
-            ), masks
-        case item.Modality.TEXT:
-            return item.TextItem(
-                views=views,
-                meta=meta,
-            ), masks
+    if ref[1] is item.Modality.AUDIO:
+        return item.AudioItem(
+            views=views,
+            meta=meta,
+        ), masks
+    if ref[1] is item.Modality.IMAGE:
+        return item.ImageItem(
+            views=views,
+            meta=meta,
+        ), masks
+    if ref[1] is item.Modality.TEXT:
+        return item.TextItem(
+            views=views,
+            meta=meta,
+        ), masks
     raise TypeError(f"Unsupported sample reference: {ref!r}.")
 
 
@@ -145,8 +144,9 @@ def _collate_group(
 ) -> tuple[dict[Any, Any], dict[FieldRef, torch.Tensor]]:
     fields: dict[Any, Any] = {}
     masks: dict[FieldRef, torch.Tensor] = {}
+    mappings = tuple(_field_mapping(_item, group) for _item in items)
     for key in keys:
-        values = _field_values(items, group, key)
+        values = [mapping[key] for mapping in mappings]
 
         field = FieldRef(ref=ref, group=group, key=key)
         value, mask = _collate_values(values, field)
@@ -156,27 +156,14 @@ def _collate_group(
     return fields, masks
 
 
-def _field_values(
-    items: Sequence[item.Item],
-    group: FieldGroup,
-    key: Any,
-) -> list[Any]:
-    values: list[Any] = []
-    for _item in items:
-        mapping = _field_mapping(_item, group)
-        values.append(mapping[key])
-    return values
-
-
 def _field_mapping(
     item: item.Item,
     group: FieldGroup,
 ) -> Mapping[Any, Any]:
-    match group:
-        case FieldGroup.VIEWS:
-            return item.views
-        case FieldGroup.META:
-            return item.meta
+    if group is FieldGroup.VIEWS:
+        return item.views
+    if group is FieldGroup.META:
+        return item.meta
     raise TypeError(f"Unsupported field group: {group!r}.")
 
 
@@ -187,22 +174,19 @@ def _collate_values(
     if _is_waveform_field(field):
         return _collate_waveforms(values, field)
 
-    if field.group is FieldGroup.VIEWS and all(
-        isinstance(value, Mapping) for value in values
-    ):
+    if field.group is FieldGroup.VIEWS:
         mappings = [value for value in values if isinstance(value, Mapping)]
-        return _collate_mappings(mappings, field)
-    if field.group is FieldGroup.VIEWS and any(
-        isinstance(value, Mapping) for value in values
-    ):
-        raise TypeError(
-            f"Cannot collate mixed mapping and non-mapping values for {field!r}."
-        )
+        if len(mappings) == len(values):
+            return _collate_mappings(mappings, field)
+        if mappings:
+            raise TypeError(
+                f"Cannot collate mixed mapping and non-mapping values for {field!r}."
+            )
 
-    if all(isinstance(value, torch.Tensor) for value in values):
-        tensors = [value for value in values if isinstance(value, torch.Tensor)]
+    tensors = [value for value in values if isinstance(value, torch.Tensor)]
+    if len(tensors) == len(values):
         return _batch_tensors(tensors, field)
-    if any(isinstance(value, torch.Tensor) for value in values):
+    if tensors:
         raise TypeError(
             f"Cannot collate mixed tensor and non-tensor values for {field!r}."
         )

@@ -609,22 +609,21 @@ def _item_from_entry(
 ) -> item.Item:
     _, modality = sample_ref
     meta = {} if meta is None else dict(meta)
-    match modality:
-        case item.Modality.AUDIO:
-            return item.AudioItem(
-                views=views,
-                meta=_enum_keys(meta, item.AudioMeta),
-            )
-        case item.Modality.IMAGE:
-            return item.ImageItem(
-                views=views,
-                meta=_enum_keys(meta, item.ImageMeta),
-            )
-        case item.Modality.TEXT:
-            return item.TextItem(
-                views=views,
-                meta=_enum_keys(meta, item.TextMeta),
-            )
+    if modality is item.Modality.AUDIO:
+        return item.AudioItem(
+            views=views,
+            meta=_enum_keys(meta, item.AudioMeta),
+        )
+    if modality is item.Modality.IMAGE:
+        return item.ImageItem(
+            views=views,
+            meta=_enum_keys(meta, item.ImageMeta),
+        )
+    if modality is item.Modality.TEXT:
+        return item.TextItem(
+            views=views,
+            meta=_enum_keys(meta, item.TextMeta),
+        )
     raise ValueError(f"Unsupported modality: {modality!r}.")
 
 

@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from unittest import mock
 from collections.abc import Iterator, Sequence
-from enum import StrEnum, auto
+from enum import auto
 from functools import partial
 from pathlib import Path
 
@@ -21,6 +21,7 @@ from anydataset import (
     has_source,
     register_source,
 )
+from anydataset._compat import StrEnum
 from anydataset.filter import FilterDecision, FilteredDataset
 from anydataset.provider_service import ProviderServer, RemoteFilterFactory
 from anydataset.runtime import Runtime

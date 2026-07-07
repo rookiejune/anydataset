@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from enum import StrEnum, auto
+from enum import auto
 from math import isfinite
 import unicodedata
 from typing import Any, Protocol
@@ -20,6 +20,7 @@ from typing import Any, Protocol
 import torch
 from torch import Tensor
 
+from .._compat import StrEnum
 from ..filter import FilterDecision
 from ..filter.types import JsonValue
 from ..types import AudioItem, AudioView, Modality, Role, Sample, TextItem, TextView

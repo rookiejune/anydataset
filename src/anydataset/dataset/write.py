@@ -29,7 +29,7 @@ from ..store.parts import DatasetPartWriter, commit_store_parts
 from ..store.writer import DEFAULT_MAX_SHARD_SAMPLES, DatasetWriter
 from ..types.item import Modality, Role, Sample, View
 
-type DatasetFactory = Callable[[], Any]
+DatasetFactory = Callable[[], Any]
 
 
 @dataclass

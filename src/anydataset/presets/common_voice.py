@@ -4,7 +4,7 @@ import os
 import re
 from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, Union
 
 from ..dataset import AudioMeta, AudioView, TextMeta, TextView
 from ..dataset.abc import IterableAnyDataset
@@ -15,7 +15,7 @@ from ..utils import labels, sample_from_row
 
 _LANGUAGE_ROOT_FIELD = "__anydataset_root__"
 
-type Languages = str | Sequence[str]
+Languages = Union[str, Sequence[str]]
 
 _SPLITS = frozenset(
     {

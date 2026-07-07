@@ -3,12 +3,13 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass, field
-from enum import StrEnum, auto
+from enum import auto
 from pathlib import Path
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Any, Callable, Mapping, Sequence
+from typing import TYPE_CHECKING, Any, Callable, Mapping, Sequence, Union
 
 from . import item
+from .._compat import StrEnum
 from .item import (
     AudioItem,
     AudioMeta,
@@ -55,7 +56,7 @@ class Source(StrEnum):
     STORE = auto()
 
 
-type SourceKey = Source | str
+SourceKey = Union[Source, str]
 
 
 @dataclass(frozen=True)
@@ -107,28 +108,28 @@ class Task(StrEnum):
     MACHINE_TRANSLATION = auto()
 
     def schema(self) -> Schema:
-        match self:
-            case Task.IMAGE_CLASSIFICATION:
-                return {
-                    (Role.DEFAULT, Modality.IMAGE): ImageReq(
-                        views=frozenset({ImageView.PIXEL}),
-                        meta=frozenset({ImageMeta.LABEL}),
-                    )
-                }
-            case Task.AUDIO_CODEC:
-                return {
-                    (Role.DEFAULT, Modality.AUDIO): AudioReq(
-                        views=frozenset({AudioView.WAVEFORM}),
-                    )
-                }
-            case Task.MACHINE_TRANSLATION:
-                req = TextReq(
-                    views=frozenset({TextView.TEXT}),
+        if self == Task.IMAGE_CLASSIFICATION:
+            return {
+                (Role.DEFAULT, Modality.IMAGE): ImageReq(
+                    views=frozenset({ImageView.PIXEL}),
+                    meta=frozenset({ImageMeta.LABEL}),
                 )
-                return {
-                    (Role.SOURCE, Modality.TEXT): req,
-                    (Role.TARGET, Modality.TEXT): req,
-                }
+            }
+        if self == Task.AUDIO_CODEC:
+            return {
+                (Role.DEFAULT, Modality.AUDIO): AudioReq(
+                    views=frozenset({AudioView.WAVEFORM}),
+                )
+            }
+        if self == Task.MACHINE_TRANSLATION:
+            req = TextReq(
+                views=frozenset({TextView.TEXT}),
+            )
+            return {
+                (Role.SOURCE, Modality.TEXT): req,
+                (Role.TARGET, Modality.TEXT): req,
+            }
+        raise ValueError(f"Unsupported task: {self!r}.")
 
     def collate_fn(self) -> Callable[[Sequence[Sample]], Batch]:
         from ..dataset.collate import collate_fn

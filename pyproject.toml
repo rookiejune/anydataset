@@ -7,8 +7,8 @@ name = "anydataset"
 version = "1.0.0"
 description = "PyTorch-first canonical datasets, cached filters, and materialized views."
 readme = "README.md"
-requires-python = ">=3.12"
-dependencies = ["torch>=2.0", "pyarrow>=14.0"]
+requires-python = ">=3.9"
+dependencies = ["torch>=2.0", "pyarrow>=14.0", "typing_extensions>=4.0"]
 license = "MIT"
 license-files = ["LICENSE"]
 authors = [
@@ -19,6 +19,9 @@ classifiers = [
     "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Developers",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]

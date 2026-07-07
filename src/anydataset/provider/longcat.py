@@ -12,7 +12,7 @@ from ..types.item import Modality, Role
 from ..types.item import AudioView
 from .abc import AudioProvider
 
-type LongCatDecoderName = Literal[
+LongCatDecoderName = Literal[
     "16k_4codebooks",
     "24k_2codebooks",
     "24k_4codebooks",

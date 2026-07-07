@@ -24,8 +24,8 @@ from torch.utils.data import DataLoader, Dataset, IterableDataset, Sampler
 from ._logging import run_logs_dir, set_run_logs_dir
 from ._sharding import runtime_shard, validate_shard
 
-type DatasetFactory = Callable[[], Any]
-type StartMethod = Literal["fork", "spawn", "forkserver"]
+DatasetFactory = Callable[[], Any]
+StartMethod = Literal["fork", "spawn", "forkserver"]
 
 _DEFAULT_LOADER_PREFETCH_FACTOR = 2
 

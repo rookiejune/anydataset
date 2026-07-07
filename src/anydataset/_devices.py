@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
-from typing import Literal
+from typing import Literal, Union
 
-type Devices = Literal["auto"] | str | Iterable[str]
+Devices = Union[Literal["auto"], str, Iterable[str]]
 
 
 def resolve_devices(devices: Devices) -> tuple[str, ...]:

@@ -5,7 +5,7 @@ from collections.abc import Callable
 from ...types import Source, SourceKey, source_key
 from .protocol import DatasetSource
 
-type SourceFactory = Callable[[], DatasetSource]
+SourceFactory = Callable[[], DatasetSource]
 
 _SOURCE_FACTORIES: dict[str, SourceFactory] = {}
 

@@ -8,7 +8,7 @@ from typing import Any
 from ...types import Spec
 
 
-type TsvRow = Mapping[str, str]
+TsvRow = Mapping[str, str]
 
 
 class TsvSource:

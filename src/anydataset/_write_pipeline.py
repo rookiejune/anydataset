@@ -17,7 +17,7 @@ from ._parallel import StartMethod, multiprocessing_context, validate_process_va
 from ._validation import non_negative_int, optional_positive_int
 
 T = TypeVar("T")
-type WriteBackend = Literal["thread", "process"]
+WriteBackend = Literal["thread", "process"]
 
 
 class BackgroundWriteSink(Generic[T]):

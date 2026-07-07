@@ -11,12 +11,13 @@ from itertools import islice
 from pathlib import Path
 from typing import Any, Protocol
 
+from ..._compat import strict_zip
 from ..._logging import write_warning
 from ...types import Spec
 
 
-type CsvRow = Mapping[str, str]
-type JsonMapping = Mapping[str, Any]
+CsvRow = Mapping[str, str]
+JsonMapping = Mapping[str, Any]
 
 _INDEX_SCHEMA_VERSION = 1
 _INDEX_FILE = "sharded_csv_index.json"
@@ -181,7 +182,7 @@ class ShardedCsvDataset:
         files = []
         paths = self._csv_paths()
         counts = self._row_counts(paths)
-        for path, count in zip(paths, counts, strict=True):
+        for path, count in strict_zip(paths, counts):
             stop = start + count
             files.append(CsvFile(path=path, start=start, stop=stop))
             start = stop
@@ -243,7 +244,7 @@ class ShardedCsvDataset:
             return None
 
         counts = []
-        for csv_path, record in zip(paths, files, strict=True):
+        for csv_path, record in strict_zip(paths, files):
             if not isinstance(record, Mapping):
                 raise ValueError(f"Invalid sharded CSV index cache: {path}")
             if not _same_file_record(csv_path, record):
@@ -264,7 +265,7 @@ class ShardedCsvDataset:
                 "schema_version": _INDEX_SCHEMA_VERSION,
                 "files": [
                     _file_record(csv_path, count)
-                    for csv_path, count in zip(paths, counts, strict=True)
+                    for csv_path, count in strict_zip(paths, counts)
                 ],
             },
         )

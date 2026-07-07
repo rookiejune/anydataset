@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Union
 
 from .types import Preset, Source, SourceKey, Spec, source_key
 from .types.item import (
@@ -41,14 +41,14 @@ class TextMap:
     values: Mapping[TextMeta, Any] | None = None
 
 
-type FieldPath = str | tuple[str, ...]
-type AudioField = AudioView | AudioMeta | Labels
-type ImageField = ImageView | ImageMeta
-type TextField = TextView | TextMeta
-type AudioFields = Mapping[FieldPath, AudioField]
-type ImageFields = Mapping[FieldPath, ImageField]
-type TextFields = Mapping[FieldPath, TextField]
-type ItemMap = AudioMap | ImageMap | TextMap
+FieldPath = Union[str, tuple[str, ...]]
+AudioField = Union[AudioView, AudioMeta, Labels]
+ImageField = Union[ImageView, ImageMeta]
+TextField = Union[TextView, TextMeta]
+AudioFields = Mapping[FieldPath, AudioField]
+ImageFields = Mapping[FieldPath, ImageField]
+TextFields = Mapping[FieldPath, TextField]
+ItemMap = Union[AudioMap, ImageMap, TextMap]
 
 
 def labels(name: str) -> Labels:
@@ -189,19 +189,18 @@ def _load_item(
     item_map: ItemMap,
 ) -> AudioItem | ImageItem | TextItem:
     _, modality = reference
-    match modality:
-        case Modality.AUDIO:
-            if not isinstance(item_map, AudioMap):
-                raise TypeError(f"{reference!r} requires AudioMap.")
-            return load_audio(row, item_map.fields)
-        case Modality.IMAGE:
-            if not isinstance(item_map, ImageMap):
-                raise TypeError(f"{reference!r} requires ImageMap.")
-            return load_image(row, item_map.fields)
-        case Modality.TEXT:
-            if not isinstance(item_map, TextMap):
-                raise TypeError(f"{reference!r} requires TextMap.")
-            return load_text(row, item_map.fields, values=item_map.values)
+    if modality is Modality.AUDIO:
+        if not isinstance(item_map, AudioMap):
+            raise TypeError(f"{reference!r} requires AudioMap.")
+        return load_audio(row, item_map.fields)
+    if modality is Modality.IMAGE:
+        if not isinstance(item_map, ImageMap):
+            raise TypeError(f"{reference!r} requires ImageMap.")
+        return load_image(row, item_map.fields)
+    if modality is Modality.TEXT:
+        if not isinstance(item_map, TextMap):
+            raise TypeError(f"{reference!r} requires TextMap.")
+        return load_text(row, item_map.fields, values=item_map.values)
     raise TypeError(f"Unsupported sample reference: {reference!r}.")
 
 

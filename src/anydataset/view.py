@@ -2,32 +2,34 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any, Generic, Protocol, TypeVar, Union
 
 from .dataset.collate import Batch
 from .types.item import AudioView, ImageView, Reference, Role, TextView, View
 
-type ViewMap = (
-    Mapping[AudioView, Any]
-    | Mapping[ImageView, Any]
-    | Mapping[TextView, Any]
-)
+ViewT = TypeVar("ViewT", bound=View)
+
+ViewMap = Union[
+    Mapping[AudioView, Any],
+    Mapping[ImageView, Any],
+    Mapping[TextView, Any],
+]
 
 
-type ViewTransform[ViewT: View] = Callable[[Mapping[ViewT, Any]], Any]
-type BatchOutput = Sequence[Any] | Mapping[Reference, Sequence[Any]]
-type BatchViewTransform = Callable[[Batch], BatchOutput]
-type ModalityTransform = Callable[[ViewMap], Any]
-type BatchModalityTransform = Callable[[Batch], BatchOutput]
+ViewTransform = Callable[[Mapping[ViewT, Any]], Any]
+BatchOutput = Union[Sequence[Any], Mapping[Reference, Sequence[Any]]]
+BatchViewTransform = Callable[[Batch], BatchOutput]
+ModalityTransform = Callable[[ViewMap], Any]
+BatchModalityTransform = Callable[[Batch], BatchOutput]
 
 
-class ViewProvider[ViewT: View](Protocol):
+class ViewProvider(Protocol[ViewT]):
     output: ViewT
 
     def __call__(self, views: Mapping[ViewT, Any]) -> Any: ...
 
 
-class BatchViewProvider[ViewT: View](Protocol):
+class BatchViewProvider(Protocol[ViewT]):
     output: ViewT
 
     def __call__(self, views: Mapping[ViewT, Any]) -> Any: ...
@@ -35,14 +37,14 @@ class BatchViewProvider[ViewT: View](Protocol):
     def call_batch(self, batch: Batch) -> BatchOutput: ...
 
 
-class ModalityProvider[ViewT: View](Protocol):
+class ModalityProvider(Protocol[ViewT]):
     output: ViewT
     reference_role: Role | None
 
     def __call__(self, views: ViewMap) -> Any: ...
 
 
-class BatchModalityProvider[ViewT: View](Protocol):
+class BatchModalityProvider(Protocol[ViewT]):
     output: ViewT
     reference_role: Role | None
 
@@ -51,15 +53,15 @@ class BatchModalityProvider[ViewT: View](Protocol):
     def call_batch(self, batch: Batch) -> BatchOutput: ...
 
 
-type Provider = (
-    ViewProvider[AudioView]
-    | ViewProvider[ImageView]
-    | ViewProvider[TextView]
-)
+Provider = Union[
+    ViewProvider[AudioView],
+    ViewProvider[ImageView],
+    ViewProvider[TextView],
+]
 
 
 @dataclass
-class FunctionViewProvider[ViewT: View]:
+class FunctionViewProvider(Generic[ViewT]):
     output: ViewT
     transform_fn: ViewTransform[ViewT]
     batch_transform_fn: BatchViewTransform | None = None
@@ -80,7 +82,7 @@ class FunctionViewProvider[ViewT: View]:
 
 
 @dataclass
-class FunctionModalityProvider[ViewT: View]:
+class FunctionModalityProvider(Generic[ViewT]):
     output: ViewT
     transform_fn: ModalityTransform
     batch_transform_fn: BatchModalityTransform | None = None

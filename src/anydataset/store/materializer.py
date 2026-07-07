@@ -8,11 +8,12 @@ import traceback
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import Any, Literal, Union, cast
 
 from torch import distributed as dist
 from torch.utils.data import DataLoader
 
+from .._compat import strict_zip
 from .._devices import Devices, resolve_devices
 from .._logging import run_logs_dir, use_run_logs_dir
 from .._parallel import (
@@ -65,10 +66,10 @@ from .parts import (
 )
 from .writer import DEFAULT_MAX_SHARD_SAMPLES, DatasetWriter
 
-type DatasetFactory = Callable[[], Any]
-type ProviderFactory = Callable[[str], MaterializerProvider]
-type _MaterializerMode = Literal["view", "modality"]
-type _ProgressSink = multiprocessing.Queue | ProgressDashboard
+DatasetFactory = Callable[[], Any]
+ProviderFactory = Callable[[str], MaterializerProvider]
+_MaterializerMode = Literal["view", "modality"]
+_ProgressSink = Union[multiprocessing.Queue, ProgressDashboard]
 
 _PROGRESS_STAGES = ("reader", "provider", "writer")
 DEFAULT_COMMIT_SAMPLES = 32
@@ -482,12 +483,12 @@ class ViewMaterializer:
             return
 
         for batch in indexed_sample_batches(indexed, self.batch_size):
-            indexes, samples = zip(*batch, strict=True)
+            indexes, samples = strict_zip(*batch)
             outputs = tuple(
                 self._resilient_samples_with_batch_provider(samples, provider)
             )
             validate_batch_outputs(outputs, len(samples))
-            yield from zip(indexes, outputs, strict=True)
+            yield from strict_zip(indexes, outputs)
 
     def _write_resumable_indexed_batches(
         self,
@@ -543,7 +544,7 @@ class ViewMaterializer:
         if self.keep_schema is None:
             yield from outputs
             return
-        for source, output in zip(sources, outputs, strict=True):
+        for source, output in strict_zip(sources, outputs):
             yield self._output_sample(source, output)
 
     def _resilient_samples_with_batch_provider(
@@ -653,7 +654,7 @@ class _FragmentBatchWriter:
                 for index, sample in batch
             )
 
-        indexes, samples = zip(*batch, strict=True)
+        indexes, samples = strict_zip(*batch)
         outputs = tuple(
             self.materializer._resilient_samples_with_batch_provider(
                 samples,
@@ -661,7 +662,7 @@ class _FragmentBatchWriter:
             )
         )
         validate_batch_outputs(outputs, len(samples))
-        return tuple(zip(indexes, outputs, strict=True))
+        return tuple(strict_zip(indexes, outputs))
 
     def _flush_ready(
         self,

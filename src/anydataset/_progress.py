@@ -12,8 +12,10 @@ import time
 from collections.abc import Iterator
 from dataclasses import dataclass
 from queue import Empty
+from typing import TypeVar
 
 _PROGRESS_INTERVAL = 1.0
+ItemT = TypeVar("ItemT")
 
 
 @dataclass(frozen=True)
@@ -49,7 +51,7 @@ class _StageStats:
             self.pending = message.pending
 
 
-def iter_with_progress[ItemT](
+def iter_with_progress(
     items: Iterator[ItemT],
     *,
     worker_id: int,

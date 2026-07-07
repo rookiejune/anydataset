@@ -153,11 +153,10 @@ def parquet_schema(pa, fields: ParquetSchema):
 
 
 def field_type(pa, type_name: str):
-    match type_name:
-        case "int64":
-            return pa.int64()
-        case "string":
-            return pa.string()
+    if type_name == "int64":
+        return pa.int64()
+    if type_name == "string":
+        return pa.string()
     raise ValueError(f"Unsupported parquet field type: {type_name!r}.")
 
 

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable, Iterable, Iterator
-from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
@@ -147,13 +146,30 @@ def view_manifest_writer(
 
 
 def _sample_row(entry: SampleManifestEntry) -> dict[str, Any]:
-    data = asdict(entry)
-    data["items"] = _json_text(data["items"])
-    return data
+    return {
+        "sample_id": entry.sample_id,
+        "sample_index": entry.sample_index,
+        "items": _json_text(
+            tuple(
+                (
+                    (role.value, modality.value),
+                    dict(meta),
+                )
+                for (role, modality), meta in entry.items
+            )
+        ),
+    }
 
 
 def _view_row(entry: ViewManifestEntry) -> dict[str, Any]:
-    return asdict(entry)
+    return {
+        "role": entry.role.value,
+        "modality": entry.modality.value,
+        "view": entry.view.value,
+        "sample_index": entry.sample_index,
+        "shard": entry.shard,
+        "key": entry.key,
+    }
 
 
 def _sample_entry(row: dict[str, Any]) -> SampleManifestEntry:

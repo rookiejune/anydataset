@@ -6,13 +6,14 @@ import time
 import traceback
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
-from enum import StrEnum, auto
+from enum import auto
 from multiprocessing.connection import Client, Listener
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Union
 
 import torch
 
+from ._compat import StrEnum
 from ._parallel import StartMethod, multiprocessing_context, validate_process_value
 from .types.item import View
 from .view import BatchOutput, ViewMap
@@ -22,8 +23,8 @@ if TYPE_CHECKING:
 
     from .dataset.collate import Batch
 
-type ProviderAddress = str | Path | tuple[str, int]
-type ProviderFactory = Callable[[str], Any]
+ProviderAddress = Union[str, Path, tuple[str, int]]
+ProviderFactory = Callable[[str], Any]
 
 
 @dataclass(frozen=True)
@@ -249,15 +250,14 @@ def _handle_request(provider: Any, request: object) -> _ProviderResponse:
     try:
         if not isinstance(request, _ProviderRequest):
             raise TypeError("Provider server received an invalid request.")
-        match request.command:
-            case _ProviderCommand.PING:
-                return _ProviderResponse()
-            case _ProviderCommand.CALL:
-                return _ProviderResponse(value=provider(request.payload))
-            case _ProviderCommand.CALL_BATCH:
-                return _ProviderResponse(value=provider.call_batch(request.payload))
-            case _ProviderCommand.CLOSE:
-                return _ProviderResponse()
+        if request.command is _ProviderCommand.PING:
+            return _ProviderResponse()
+        if request.command is _ProviderCommand.CALL:
+            return _ProviderResponse(value=provider(request.payload))
+        if request.command is _ProviderCommand.CALL_BATCH:
+            return _ProviderResponse(value=provider.call_batch(request.payload))
+        if request.command is _ProviderCommand.CLOSE:
+            return _ProviderResponse()
     except Exception as exc:
         _clear_cuda_cache()
         return _ProviderResponse(

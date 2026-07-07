@@ -12,6 +12,7 @@ from typing import Any
 
 import torch
 
+from .._compat import strict_zip
 from ..dataset.collate import Batch, collate_fn
 from ..types.item import (
     AudioReq,
@@ -94,7 +95,7 @@ def with_batch_view_provider(
         values_by_ref = {}
     for ref, values in values_by_ref.items():
         validate_batch_outputs(values, len(samples))
-        for index, (sample, value) in enumerate(zip(samples, values, strict=True)):
+        for index, (sample, value) in enumerate(strict_zip(samples, values)):
             outputs[index][ref] = with_view(sample[ref], output, value)
     yield from outputs
 
@@ -232,13 +233,12 @@ def _input_requirement(
         views.update(sample_item.views)
         meta.update(sample_item.meta)
 
-    match ref[1]:
-        case Modality.AUDIO:
-            return AudioReq.from_iter(views, meta)
-        case Modality.IMAGE:
-            return ImageReq.from_iter(views, meta)
-        case Modality.TEXT:
-            return TextReq.from_iter(views, meta)
+    if ref[1] is Modality.AUDIO:
+        return AudioReq.from_iter(views, meta)
+    if ref[1] is Modality.IMAGE:
+        return ImageReq.from_iter(views, meta)
+    if ref[1] is Modality.TEXT:
+        return TextReq.from_iter(views, meta)
     raise TypeError(f"Unsupported sample reference: {ref!r}.")
 
 

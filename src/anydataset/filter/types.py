@@ -3,16 +3,17 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum
-from typing import NotRequired, TypedDict
+from typing import TypedDict, Union
 
+from .._compat import NotRequired
 from .._devices import Devices
 from ..dataset.abc import MapStyleABC
 from ..runtime import Runtime
 from ..types.item import Sample
 
-type JsonValue = None | bool | int | float | str | list[JsonValue] | dict[str, JsonValue]
-type FilterLabel = bool | str | Enum
-type _Index = Sequence[int]
+JsonValue = Union[None, bool, int, float, str, list["JsonValue"], dict[str, "JsonValue"]]
+FilterLabel = Union[bool, str, Enum]
+_Index = Sequence[int]
 
 
 @dataclass(frozen=True)
@@ -21,10 +22,10 @@ class FilterDecision:
     metrics: Mapping[str, JsonValue]
 
 
-type FilterOutput = FilterLabel | FilterDecision
-type FilterPredicate = Callable[[Sample], FilterOutput]
-type FilterFactory = Callable[[], FilterPredicate]
-type DatasetFactory = Callable[[], MapStyleABC]
+FilterOutput = Union[FilterLabel, FilterDecision]
+FilterPredicate = Callable[[Sample], FilterOutput]
+FilterFactory = Callable[[], FilterPredicate]
+DatasetFactory = Callable[[], MapStyleABC]
 
 
 class FilterApplyKwargs(TypedDict):

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from enum import StrEnum, auto
+from enum import auto
+
+from .._compat import StrEnum
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
