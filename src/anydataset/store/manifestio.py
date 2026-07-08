@@ -1,13 +1,12 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Iterable, Iterator
 from pathlib import Path
 from typing import Any
 
 from .._io.parquet import (
     ParquetRowWriter,
-    ParquetSchema,
     parquet_schema,
     pyarrow,
     read_int_column,

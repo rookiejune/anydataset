@@ -12,7 +12,7 @@ from .._io.atomic import replace_dir
 from .._resume import cached_completed_indexes, write_completed_index_cache
 from .._sharding import validate_shard
 from .._validation import positive_int
-from ..types.item import Modality, Role, Sample, View
+from ..types.item import Item, Modality, Role, Sample, View
 from .jsonio import read_json, write_json
 from .manifest import (
     DatasetManifest,
@@ -389,7 +389,7 @@ def _sample_manifest_entry(
     )
 
 
-def _item_entry(ref, item) -> SampleItem:
+def _item_entry(ref: tuple[Role, Modality], item: Item) -> SampleItem:
     return ref, string_key_dict(item.meta)
 
 
@@ -509,22 +509,10 @@ def _sample_indexes_for_ref(
 
 
 def _merged_sample_entries(stores: tuple[Path, ...]) -> Iterator[SampleManifestEntry]:
-    iterators = [iter(read_samples_manifest(store)) for store in stores]
-    heap: list[tuple[int, int, SampleManifestEntry]] = []
-    for store_index, entries in enumerate(iterators):
-        try:
-            entry = next(entries)
-        except StopIteration:
-            continue
-        heappush(heap, (entry.sample_index, store_index, entry))
-    while heap:
-        _sample_index, store_index, entry = heappop(heap)
-        yield entry
-        try:
-            next_entry = next(iterators[store_index])
-        except StopIteration:
-            continue
-        heappush(heap, (next_entry.sample_index, store_index, next_entry))
+    yield from _merged_iterators(
+        (read_samples_manifest(store) for store in stores),
+        _sample_entry_key,
+    )
 
 
 def _stream_sample_entries(stores: tuple[Path, ...]) -> Iterator[SampleManifestEntry]:
@@ -539,28 +527,12 @@ def _merged_view_entries(
     stores: tuple[Path, ...],
     view: tuple[Role, Modality, View],
 ) -> Iterator[ViewManifestEntry]:
-    iterators = [
-        iter(read_view_manifest(store, view))
+    entries = (
+        _validated_view_entries(read_view_manifest(store, view), view)
         for store in stores
         if view_ready_path(store, view).exists()
-    ]
-    heap: list[tuple[int, int, ViewManifestEntry]] = []
-    for store_index, entries in enumerate(iterators):
-        try:
-            entry = next(entries)
-        except StopIteration:
-            continue
-        _validate_view_entry(entry, view)
-        heappush(heap, (entry.sample_index, store_index, entry))
-    while heap:
-        _sample_index, store_index, entry = heappop(heap)
-        yield entry
-        try:
-            next_entry = next(iterators[store_index])
-        except StopIteration:
-            continue
-        _validate_view_entry(next_entry, view)
-        heappush(heap, (next_entry.sample_index, store_index, next_entry))
+    )
+    yield from _merged_iterators(entries, _view_entry_key)
 
 
 def _stream_view_entries(
@@ -618,11 +590,18 @@ def _merged_loaded_entries(
     load: Callable[[Path], tuple[T, ...]],
     key: Callable[[T], int],
 ) -> Iterator[T]:
-    loaded = [iter(load(store)) for store in stores]
+    yield from _merged_iterators((load(store) for store in stores), key)
+
+
+def _merged_iterators(
+    entries: Iterable[Iterable[T]],
+    key: Callable[[T], int],
+) -> Iterator[T]:
+    loaded = [iter(items) for items in entries]
     heap: list[tuple[int, int, T]] = []
-    for store_index, entries in enumerate(loaded):
+    for store_index, iterator in enumerate(loaded):
         try:
-            entry = next(entries)
+            entry = next(iterator)
         except StopIteration:
             continue
         heappush(heap, (key(entry), store_index, entry))
@@ -634,6 +613,15 @@ def _merged_loaded_entries(
         except StopIteration:
             continue
         heappush(heap, (key(next_entry), store_index, next_entry))
+
+
+def _validated_view_entries(
+    entries: Iterable[ViewManifestEntry],
+    view: tuple[Role, Modality, View],
+) -> Iterator[ViewManifestEntry]:
+    for entry in entries:
+        _validate_view_entry(entry, view)
+        yield entry
 
 
 def _sample_entry_key(entry: SampleManifestEntry) -> int:

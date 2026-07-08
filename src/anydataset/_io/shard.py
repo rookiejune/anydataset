@@ -47,7 +47,7 @@ class BufferedShardWriter(Generic[ItemT, BufferT]):
         return tuple(self._files)
 
     def write(self, items: Sequence[ItemT]) -> None:
-        if len(items) == 0:
+        if not items:
             return
         if self._max_shard_items is None:
             self._extend(self._buffer, items)

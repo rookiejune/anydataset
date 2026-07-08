@@ -16,8 +16,6 @@ from decimal import Decimal, InvalidOperation
 from enum import auto
 from functools import cached_property
 from math import isfinite
-from typing import Union
-
 from .._compat import Self, StrEnum
 from ..filter import FilterDecision
 from ..filter.types import JsonValue

@@ -80,7 +80,7 @@ class PartitionWriter:
 
     def write_partitions(self, partitions: Mapping[str, Sequence[int]]) -> None:
         for label, indices in partitions.items():
-            if len(indices) == 0:
+            if not indices:
                 continue
             state = self._state(label)
             state.write(indices)
@@ -144,7 +144,7 @@ class MetricsWriter:
 
 
 def merged_index(indexes: Sequence[_Index]) -> _Index:
-    if len(indexes) == 0:
+    if not indexes:
         return ()
     if len(indexes) == 1:
         return indexes[0]
@@ -152,7 +152,7 @@ def merged_index(indexes: Sequence[_Index]) -> _Index:
     heads = [0] * len(indexes)
     heap: list[tuple[int, int]] = []
     for label_index, index in enumerate(indexes):
-        if len(index) > 0:
+        if index:
             heap.append((int(index[0]), label_index))
     heapq.heapify(heap)
     while heap:

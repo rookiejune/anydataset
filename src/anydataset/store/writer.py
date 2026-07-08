@@ -75,7 +75,7 @@ class DatasetWriter:
                 if self.views is None:
                     _validate_view_sets(sample, sample_views, sample_id)
                 sample_manifest.write(
-                    _sample_manifest_entry(sample, sample_id, index, self.dataset_id)
+                    _sample_manifest_entry(sample, sample_id, index)
                 )
                 sample_count += 1
                 for view in views:
@@ -119,7 +119,6 @@ def _sample_manifest_entry(
     sample: Sample,
     sample_id: str,
     sample_index: int,
-    dataset_id: str,
 ) -> SampleManifestEntry:
     return SampleManifestEntry(
         sample_id=sample_id,
