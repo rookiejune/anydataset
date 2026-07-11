@@ -131,7 +131,11 @@ class ProviderServer:
             name=f"anydataset-provider-{self.device}",
         )
         self._process.start()
-        self._wait_ready()
+        try:
+            self._wait_ready()
+        except Exception:
+            self._cleanup_failed_start()
+            raise
         return self
 
     def stop(self) -> None:
@@ -176,6 +180,16 @@ class ProviderServer:
                         "Provider server did not become ready."
                     ) from None
                 time.sleep(0.05)
+
+    def _cleanup_failed_start(self) -> None:
+        process = self._process
+        if process is None:
+            return
+        if process.is_alive():
+            process.terminate()
+        process.join()
+        _unlink_address(_address(self.address))
+        self._process = None
 
 
 class RemoteProviderError(RuntimeError):

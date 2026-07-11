@@ -330,13 +330,14 @@ def set_single_worker_environment(
     *,
     device_env: str,
 ) -> dict[str, str | None]:
+    master_port = os.environ.get("MASTER_PORT", "0")
     return set_worker_environment(
         DeviceWorker(
             device=device,
             rank=0,
             world_size=1,
             master_addr=os.environ.get("MASTER_ADDR", "127.0.0.1"),
-            master_port=os.environ.get("MASTER_PORT", free_port()),
+            master_port=master_port,
         ),
         device_env=device_env,
     )

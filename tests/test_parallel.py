@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import pickle
 import unittest
 from dataclasses import dataclass
@@ -10,6 +11,8 @@ from anydataset._parallel import (
     MapIndexedDataset,
     SelectedIndexSampler,
     map_style_indexed_loader,
+    restore_environment,
+    set_single_worker_environment,
 )
 
 
@@ -63,6 +66,23 @@ class ParallelRuntimeTest(unittest.TestCase):
 
         self.assertEqual(rows, [(2, 2), (5, 5)])
         self.assertEqual(dataset.calls, [2, 5])
+
+    def test_single_worker_environment_does_not_bind_free_port(self):
+        with mock.patch.dict(os.environ, {}, clear=True):
+            with mock.patch(
+                "anydataset._parallel.free_port",
+                side_effect=AssertionError("free_port must not be called"),
+            ):
+                previous = set_single_worker_environment(
+                    "cpu",
+                    device_env="ANYDATASET_TEST_DEVICE",
+                )
+            try:
+                self.assertEqual(os.environ["MASTER_PORT"], "0")
+                self.assertEqual(os.environ["WORLD_SIZE"], "1")
+                self.assertEqual(os.environ["ANYDATASET_TEST_DEVICE"], "cpu")
+            finally:
+                restore_environment(previous)
 
 
 @dataclass(frozen=True)
