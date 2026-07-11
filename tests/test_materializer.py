@@ -1200,6 +1200,50 @@ class ViewMaterializerTest(unittest.TestCase):
             )
             self.assertEqual(len(stored), 4)
 
+    def test_materializer_resume_metadata_rebuilds_when_provider_changes(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = root / "target"
+            calls = root / "calls.txt"
+            samples = tuple(
+                _audio_sample(torch.tensor([[float(index)]]))
+                for index in range(4)
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "stop after first batch"):
+                ViewMaterializer(
+                    target,
+                    split="train",
+                    batch_size=2,
+                    commit_samples=2,
+                ).write(
+                    dataset_factory=_DatasetFactory(samples),
+                    provider_factory=_FailOnceBatchProviderFactory(calls),
+                    devices="cpu",
+                )
+
+            ViewMaterializer(
+                target,
+                split="train",
+                batch_size=2,
+                commit_samples=2,
+            ).write(
+                dataset_factory=_DatasetFactory(samples),
+                provider_factory=_BatchProviderFactory(offset=100),
+                devices="cpu",
+            )
+
+            stored = read_store_dataset(target)
+            self.assertEqual(len(stored), 4)
+            for index in range(4):
+                self.assertTrue(
+                    torch.equal(
+                        stored[index][Role.DEFAULT, Modality.AUDIO]
+                        .views[AudioView.LONGCAT]["semantic_codes"],
+                        torch.tensor([[index + 100]]),
+                    )
+                )
+
 
 def _source_dataset(path: Path, root: Path, samples):
     DatasetWriter(path, dataset_id="toy-audio", split="train").write(samples)
@@ -1296,8 +1340,8 @@ class _TextBatchProvider(_TextProvider):
 
 
 class _BatchProvider(_Provider):
-    def __init__(self):
-        super().__init__()
+    def __init__(self, *, offset=0):
+        super().__init__(offset=offset)
         self.batch_shapes: list[tuple[int, ...]] = []
         self.single_calls = 0
 
@@ -1313,7 +1357,12 @@ class _BatchProvider(_Provider):
             FieldRef(ref, FieldGroup.VIEWS, AudioView.WAVEFORM)
         )
         return [
-            {"semantic_codes": waveform[index, :, : int(length.item())].to(torch.int64)}
+            {
+                "semantic_codes": (
+                    waveform[index, :, : int(length.item())].to(torch.int64)
+                    + int(self.offset)
+                )
+            }
             for index, length in enumerate(lengths)
         ]
 
@@ -1533,8 +1582,10 @@ class _StaticProviderFactory:
 
 @dataclass(frozen=True)
 class _BatchProviderFactory:
+    offset: int = 0
+
     def __call__(self, device: str):
-        return _BatchProvider()
+        return _BatchProvider(offset=self.offset)
 
 
 @dataclass(frozen=True)

@@ -4,6 +4,7 @@ import logging
 import multiprocessing
 import os
 import queue
+import time
 import traceback
 from array import array
 from collections.abc import Iterable, Mapping, Sequence
@@ -175,6 +176,7 @@ def collect_ranges_parallel(
     prefetch_factor: int | None,
     runtime: Runtime,
     use_map_style_loader: bool,
+    worker_timeout: float | None = None,
 ) -> Iterable[_FilterChunk]:
     workers = min(len(devices), sample_count)
     validate_process_value(
@@ -233,6 +235,7 @@ def collect_ranges_parallel(
             commit_samples=commit_samples,
             skip_indexes=skip_indexes,
             sample_indexes=sample_indexes,
+            worker_timeout=worker_timeout,
         )
         completed = True
     finally:
@@ -406,10 +409,12 @@ def _ordered_worker_chunks(
     commit_samples: int,
     skip_indexes: frozenset[int],
     sample_indexes: Sequence[int] | None = None,
+    worker_timeout: float | None = None,
 ) -> Iterable[_FilterChunk]:
     buffers: tuple[dict[int, _FilterRow], ...] = tuple({} for _rank in range(workers))
     done: set[int] = set()
     rows: list[_FilterRow] = []
+    last_message = time.monotonic()
 
     for rank, next_index in _ordered_worker_targets(
         sample_count,
@@ -423,13 +428,15 @@ def _ordered_worker_chunks(
                 raise RuntimeError(
                     f"Filter workers finished before emitting sample {next_index}."
                 )
-            _read_worker_message(
+            last_message = _read_worker_message(
                 outputs[rank],
                 processes,
                 buffer,
                 done,
                 rank=rank,
                 validate_modulo=sample_indexes is None,
+                worker_timeout=worker_timeout,
+                last_message=last_message,
             )
         rows.append(buffer.pop(next_index))
         if len(rows) == commit_samples:
@@ -441,13 +448,15 @@ def _ordered_worker_chunks(
 
     for rank, output in enumerate(outputs):
         while rank not in done:
-            _read_worker_message(
+            last_message = _read_worker_message(
                 output,
                 processes,
                 buffers[rank],
                 done,
                 rank=rank,
                 validate_modulo=sample_indexes is None,
+                worker_timeout=worker_timeout,
+                last_message=last_message,
             )
     for buffer in buffers:
         if buffer:
@@ -487,7 +496,9 @@ def _read_worker_message(
     *,
     rank: int,
     validate_modulo: bool,
-) -> None:
+    worker_timeout: float | None,
+    last_message: float,
+) -> float:
     try:
         message = output.get(timeout=0.2)
     except queue.Empty:
@@ -501,7 +512,10 @@ def _read_worker_message(
                 f"{process.name} exited with {process.exitcode}" for process in dead
             )
             raise RuntimeError(f"Filter worker exited early: {details}.")
-        return
+        if worker_timeout is not None and time.monotonic() - last_message > worker_timeout:
+            raise TimeoutError(f"Filter worker {rank} timed out.")
+        return last_message
+    last_message = time.monotonic()
     if isinstance(message, _IndexedFilterChunk):
         if message.rank != rank:
             raise RuntimeError(
@@ -515,13 +529,14 @@ def _read_worker_message(
             if row.index in buffer:
                 raise RuntimeError(f"Duplicate filtered sample index: {row.index}.")
             buffer[row.index] = row
-        return
+        return last_message
     if not _done_message(message):
-        return
+        return last_message
     _, rank, error = message
     done.add(rank)
     if error is not None:
         raise RuntimeError(f"Filter worker {rank} failed.\n{error}")
+    return last_message
 
 
 def _chunk_from_rows(rows: Sequence[_FilterRow]) -> _FilterChunk:

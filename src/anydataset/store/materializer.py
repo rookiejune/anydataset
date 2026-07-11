@@ -5,7 +5,7 @@ import multiprocessing
 import os
 import time
 import traceback
-from collections.abc import Callable, Iterable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, Union, cast
@@ -41,10 +41,12 @@ from .._resume import (
     missing_indexes,
     pending_batch,
     prepare_resume_dir,
+    resume_dir,
     validate_completed_indexes,
 )
 from .._validation import non_negative_int, optional_positive_int, positive_int
 from .._write_pipeline import BackgroundWriteSink
+from ..cache import FileLock
 from ..dataset.abc import uses_default_indexed_shard
 from ..runtime import Runtime
 from ..types.item import Item, Sample, Schema, View
@@ -64,6 +66,7 @@ from .parts import (
     commit_store_fragments,
     completed_fragment_indexes,
 )
+from .jsonio import read_json, write_json
 from .writer import DEFAULT_MAX_SHARD_SAMPLES, DatasetWriter
 
 DatasetFactory = Callable[[], Any]
@@ -122,11 +125,12 @@ class ViewMaterializer:
         devices: Devices = "auto",
     ) -> Path:
         resolved = resolve_devices(devices)
-        return self._write_resumable(
-            dataset_factory=dataset_factory,
-            provider_factory=provider_factory,
-            devices=resolved,
-        )
+        with FileLock(_materializer_lock_path(self.output_dir)):
+            return self._write_resumable(
+                dataset_factory=dataset_factory,
+                provider_factory=provider_factory,
+                devices=resolved,
+            )
 
     def _write_resumable(
         self,
@@ -172,7 +176,17 @@ class ViewMaterializer:
         dataset = dataset_factory()
         expected = dataset_sample_count(dataset, context="resume")
         use_map_style_loader = uses_default_indexed_shard(dataset)
-        fragments_dir = prepare_resume_dir(self.output_dir, "fragments")
+        fragments_dir = prepare_materializer_resume_dir(
+            self.output_dir,
+            self._resume_metadata(
+                dataset,
+                dataset_factory=dataset_factory,
+                provider_factory=provider_factory,
+                expected=expected,
+                devices=devices,
+                use_map_style_loader=use_map_style_loader,
+            ),
+        )
         completed = validate_completed_indexes(
             completed_fragment_indexes(
                 fragments_dir,
@@ -217,10 +231,20 @@ class ViewMaterializer:
         device: str,
     ) -> Path:
         output_dir = Path(self.output_dir).expanduser()
-        fragments_dir = prepare_resume_dir(output_dir, "fragments")
         dataset = dataset_factory()
         expected = dataset_sample_count(dataset, context="resume")
         use_map_style_loader = uses_default_indexed_shard(dataset)
+        fragments_dir = prepare_materializer_resume_dir(
+            output_dir,
+            self._resume_metadata(
+                dataset,
+                dataset_factory=dataset_factory,
+                provider_factory=provider_factory,
+                expected=expected,
+                devices=(device,),
+                use_map_style_loader=use_map_style_loader,
+            ),
+        )
         completed = validate_completed_indexes(
             completed_fragment_indexes(
                 fragments_dir,
@@ -457,6 +481,45 @@ class ViewMaterializer:
     @property
     def _materializer_mode(self) -> _MaterializerMode:
         return "view"
+
+    def _resume_metadata(
+        self,
+        dataset: Any,
+        *,
+        dataset_factory: DatasetFactory,
+        provider_factory: ProviderFactory,
+        expected: int,
+        devices: tuple[str, ...],
+        use_map_style_loader: bool,
+    ) -> dict[str, object]:
+        return {
+            "schema_version": 1,
+            "materializer": {
+                "mode": self._materializer_mode,
+                "dataset_id": self._dataset_id,
+                "split": self.split,
+                "max_shard_samples": self.max_shard_samples,
+                "batch_size": self.batch_size,
+                "commit_samples": self.commit_samples,
+                "keep_schema": _metadata_value(self.keep_schema),
+            },
+            "runtime": {
+                "process_start_method": self.runtime.process_start_method,
+                "server_start_method": self.runtime.server_start_method,
+                "reader_start_method": self.runtime.reader_start_method,
+                "writer_start_method": self.runtime.writer_start_method,
+            },
+            "input": {
+                "type": f"{type(dataset).__module__}.{type(dataset).__qualname__}",
+                "factory": _callable_id(dataset_factory),
+                "sample_count": expected,
+                "use_map_style_loader": use_map_style_loader,
+            },
+            "provider": {
+                "factory": _callable_id(provider_factory),
+            },
+            "devices": list(devices),
+        }
 
     def _sample_with_provider(
         self,
@@ -743,6 +806,51 @@ def _write_fragment(job: _FragmentWriteJob) -> None:
         max_shard_samples=job.max_shard_samples,
     ).write(job.samples)
     append_completed_index_cache(job.fragments_dir, fragment_id, job.indexes)
+
+
+def prepare_materializer_resume_dir(
+    output_dir: str | Path,
+    metadata: Mapping[str, object],
+) -> Path:
+    path = resume_dir(output_dir, "fragments")
+    expected = dict(metadata)
+    if path.exists() and _stored_resume_metadata(path) != expected:
+        cleanup_resume_dir(output_dir)
+    path = prepare_resume_dir(output_dir, "fragments")
+    write_json(path / "resume.json", expected)
+    return path
+
+
+def _stored_resume_metadata(path: Path) -> Mapping[str, object] | None:
+    metadata_path = path / "resume.json"
+    if not metadata_path.is_file():
+        return None
+    data = read_json(metadata_path)
+    if not isinstance(data, Mapping):
+        raise ValueError("Materializer resume metadata must be a mapping.")
+    return data
+
+
+def _metadata_value(value: object) -> object:
+    if value is None or isinstance(value, str | int | float | bool):
+        return value
+    if isinstance(value, Mapping):
+        return {
+            str(key): _metadata_value(item)
+            for key, item in sorted(value.items(), key=lambda item: str(item[0]))
+        }
+    if isinstance(value, Sequence) and not isinstance(value, bytes | bytearray):
+        return [_metadata_value(item) for item in value]
+    return repr(value)
+
+
+def _callable_id(value: object) -> str:
+    return f"{type(value).__module__}.{type(value).__qualname__}:{repr(value)}"
+
+
+def _materializer_lock_path(output_dir: str | Path) -> Path:
+    output = Path(output_dir).expanduser()
+    return output.parent / f".{output.name}.materialize.lock"
 
 
 @dataclass(frozen=True)

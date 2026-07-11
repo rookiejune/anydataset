@@ -17,7 +17,12 @@ from .._resume import (
     log_resume_summary,
     missing_indexes,
 )
-from .._validation import non_negative_int, optional_positive_int, positive_int
+from .._validation import (
+    non_negative_int,
+    optional_positive_float,
+    optional_positive_int,
+    positive_int,
+)
 from .._write_pipeline import BackgroundWriteSink
 from ..cache import FileLock, anydataset_home
 from ..dataset.abc import (
@@ -90,6 +95,7 @@ def apply_filter(
     max_shard_samples: int | None,
     write_workers: int,
     write_prefetch: int | None,
+    worker_timeout: float | None,
     runtime: Runtime,
     dataset_factory: DatasetFactory,
 ) -> _FilterCache:
@@ -108,6 +114,7 @@ def apply_filter(
         max_shard_samples=max_shard_samples,
         write_workers=write_workers,
         write_prefetch=write_prefetch,
+        worker_timeout=worker_timeout,
         runtime=runtime,
         dataset_factory=dataset_factory,
     )
@@ -134,6 +141,7 @@ def ensure_filter(
     max_shard_samples: int | None,
     write_workers: int,
     write_prefetch: int | None,
+    worker_timeout: float | None,
     runtime: Runtime,
     dataset_factory: DatasetFactory,
 ) -> tuple[Path, Path | None]:
@@ -155,6 +163,7 @@ def ensure_filter(
     )
     write_workers = non_negative_int("write_workers", write_workers)
     write_prefetch = optional_positive_int("write_prefetch", write_prefetch)
+    worker_timeout = optional_positive_float("worker_timeout", worker_timeout)
 
     identity = filter_identity(dataset)
     base_count = dataset_sample_count(dataset, context="filter")
@@ -193,6 +202,7 @@ def ensure_filter(
             max_shard_samples=max_shard_samples,
             write_workers=write_workers,
             write_prefetch=write_prefetch,
+            worker_timeout=worker_timeout,
             runtime=runtime,
             dataset_factory=dataset_factory,
         )
@@ -411,6 +421,7 @@ def write_cache(
     max_shard_samples: int | None,
     write_workers: int,
     write_prefetch: int | None,
+    worker_timeout: float | None,
     runtime: Runtime,
     dataset_factory: DatasetFactory,
 ) -> None:
@@ -431,6 +442,7 @@ def write_cache(
             max_shard_samples=max_shard_samples,
             write_workers=write_workers,
             write_prefetch=write_prefetch,
+            worker_timeout=worker_timeout,
             runtime=runtime,
             dataset_factory=dataset_factory,
         ),
@@ -454,6 +466,7 @@ def _write_cache_tmp(
     max_shard_samples: int | None,
     write_workers: int,
     write_prefetch: int | None,
+    worker_timeout: float | None,
     runtime: Runtime,
     dataset_factory: DatasetFactory,
 ) -> None:
@@ -473,6 +486,7 @@ def _write_cache_tmp(
         max_shard_samples=max_shard_samples,
         write_workers=write_workers,
         write_prefetch=write_prefetch,
+        worker_timeout=worker_timeout,
         runtime=runtime,
         dataset_factory=dataset_factory,
     )
@@ -495,6 +509,7 @@ def write_partitions(
     max_shard_samples: int | None,
     write_workers: int,
     write_prefetch: int | None,
+    worker_timeout: float | None,
     runtime: Runtime,
     dataset_factory: DatasetFactory,
 ) -> None:
@@ -525,6 +540,7 @@ def write_partitions(
             dataset_factory=dataset_factory,
             completed=completed,
             missing=missing,
+            worker_timeout=worker_timeout,
         )
         writer.write(write_workers=write_workers, write_prefetch=write_prefetch)
         completed = completed_filter_indexes(resume_dir, expected=expected)
@@ -553,6 +569,7 @@ class _FilterResumeFragmentWriter:
     dataset_factory: DatasetFactory
     completed: frozenset[int]
     missing: tuple[int, ...]
+    worker_timeout: float | None
 
     def write(self, *, write_workers: int, write_prefetch: int | None) -> None:
         sink = BackgroundWriteSink(
@@ -602,6 +619,7 @@ class _FilterResumeFragmentWriter:
             prefetch_factor=self.prefetch_factor,
             runtime=self.runtime,
             use_map_style_loader=use_map_style_loader,
+            worker_timeout=self.worker_timeout,
         )
 
     def _job(self, chunk: _FilterChunk) -> FilterFragmentJob:

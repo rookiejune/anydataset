@@ -38,6 +38,7 @@ class FilterApplyKwargs(TypedDict):
     max_shard_samples: NotRequired[int | None]
     write_workers: NotRequired[int]
     write_prefetch: NotRequired[int | None]
+    worker_timeout: NotRequired[float | None]
     runtime: NotRequired[Runtime]
 
 

@@ -44,6 +44,32 @@ class BackgroundWriteSinkTest(unittest.TestCase):
             with sink:
                 pass
 
+    def test_background_failure_propagates_on_close(self):
+        def write(value: str) -> None:
+            if value == "bad":
+                raise RuntimeError("bad write")
+
+        with self.assertRaisesRegex(RuntimeError, "bad write"):
+            with BackgroundWriteSink(
+                write,
+                workers=1,
+                start_method="spawn",
+            ) as sink:
+                sink.submit("bad")
+
+    def test_abort_preserves_body_error(self):
+        def write(value: str) -> None:
+            raise RuntimeError(f"background failed: {value}")
+
+        with self.assertRaisesRegex(RuntimeError, "body failed"):
+            with BackgroundWriteSink(
+                write,
+                workers=1,
+                start_method="spawn",
+            ) as sink:
+                sink.submit("a")
+                raise RuntimeError("body failed")
+
 
 if __name__ == "__main__":
     unittest.main()

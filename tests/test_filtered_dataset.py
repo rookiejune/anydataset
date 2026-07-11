@@ -4,6 +4,7 @@ import json
 import math
 import os
 import tempfile
+import time
 import unittest
 from unittest import mock
 from collections.abc import Iterator, Sequence
@@ -919,6 +920,28 @@ class FilteredDatasetTest(unittest.TestCase):
             self.assertEqual(result.counts, {"accept": 3, "reject": 3})
             self.assertEqual(result.select_by("accept").indices, (0, 2, 4))
 
+    def test_rule_apply_parallel_worker_timeout(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            home = root / "home"
+            dataset_factory = partial(
+                _dataset,
+                "unit_test_filter_worker_timeout",
+                list(range(2)),
+            )
+            rule = FilterRule(
+                name="timeout",
+                factory=_SlowFilterFactory(delay=5.0),
+            )
+
+            with mock.patch.dict(os.environ, {"ANYDATASET_HOME": str(home)}):
+                with self.assertRaisesRegex(TimeoutError, "timed out"):
+                    rule.apply(
+                        dataset_factory=dataset_factory,
+                        device=("cpu:0", "cpu:1"),
+                        worker_timeout=0.1,
+                    )
+
     def test_rule_apply_writes_empty_metrics_manifest(self):
         _register_rows_source("unit_test_filter_metrics_empty")
         with tempfile.TemporaryDirectory():
@@ -1316,6 +1339,23 @@ class _FailOnceFilterFactory:
 
     def __call__(self):
         return _FailOnceFilter(self.calls, self.marker, fail_value=self.fail_value)
+
+
+class _SlowFilter:
+    def __init__(self, *, delay: float) -> None:
+        self.delay = delay
+
+    def __call__(self, sample):
+        time.sleep(self.delay)
+        return True
+
+
+class _SlowFilterFactory:
+    def __init__(self, *, delay: float) -> None:
+        self.delay = delay
+
+    def __call__(self):
+        return _SlowFilter(delay=self.delay)
 
 
 class _FailOnceMetricFilter(_FailOnceFilter):
