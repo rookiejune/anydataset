@@ -469,7 +469,7 @@ audio-to-text.
 ## Development
 
 ```bash
-/Users/zhuyin/miniconda3/envs/torch2.12/bin/python -m pytest -q
+/Users/zhuyin/miniconda3/envs/py312/bin/python -m pytest -q
 ```
 
 Additional design notes live in `docs/design.md`, filter cache details in
