@@ -66,17 +66,23 @@ class Spec:
     split: str | None = None
     version: str | None = None
     load_options: Mapping[str, Any] = field(default_factory=dict)
+    _identity: Mapping[str, Any] = field(init=False, repr=False, compare=False)
+    _id: str = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
-        if not isinstance(self.source, Source | str):
+        if not isinstance(self.source, (Source, str)):
             raise TypeError("Spec.source must be a Source or string source key.")
+        frozen_options = _freeze_mapping(self.load_options)
         object.__setattr__(
-            self, "load_options", MappingProxyType(dict(self.load_options))
+            self, "load_options", frozen_options
         )
+        identity = _identity_payload(self)
+        object.__setattr__(self, "_identity", MappingProxyType(identity))
+        object.__setattr__(self, "_id", _stable_hash(identity))
 
     @property
     def id(self) -> str:
-        return _stable_hash(_identity_payload(self))
+        return self._id
 
     @property
     def cache_relpath(self) -> Path:
@@ -86,8 +92,7 @@ class Spec:
         return hash(self.id)
 
     def to_dict(self) -> dict[str, Any]:
-        payload = _identity_payload(self)
-        return {"id": self.id, **payload}
+        return {"id": self.id, **self._identity}
 
     def __reduce__(self):
         return (
@@ -143,7 +148,7 @@ def _identity_payload(spec: Spec) -> dict[str, Any]:
         "path": spec.path,
         "split": spec.split,
         "version": spec.version,
-        "load_options": _normalize(spec.load_options),
+        "load_options": _payload_value(spec.load_options),
     }
 
 
@@ -162,16 +167,32 @@ def source_key(source: SourceKey) -> str:
     return source
 
 
-def _normalize(value: Any) -> Any:
+def _payload_value(value: Any) -> Any:
     if isinstance(value, Mapping):
-        return {str(key): _normalize(child) for key, child in value.items()}
-    if isinstance(value, tuple | list):
-        return [_normalize(child) for child in value]
-    if isinstance(value, set | frozenset):
-        return sorted(_normalize(child) for child in value)
+        return {str(key): _payload_value(child) for key, child in value.items()}
+    if isinstance(value, (tuple, list)):
+        return [_payload_value(child) for child in value]
+    if isinstance(value, (set, frozenset)):
+        return sorted(_payload_value(child) for child in value)
     if isinstance(value, StrEnum):
         return value.value
+    if isinstance(value, Path):
+        return str(value)
     return value
+
+
+def _freeze(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return _freeze_mapping(value)
+    if isinstance(value, (tuple, list)):
+        return tuple(_freeze(child) for child in value)
+    if isinstance(value, (set, frozenset)):
+        return frozenset(_freeze(child) for child in value)
+    return value
+
+
+def _freeze_mapping(value: Mapping[Any, Any]) -> MappingProxyType[str, Any]:
+    return MappingProxyType({str(key): _freeze(child) for key, child in value.items()})
 
 
 __all__ = [

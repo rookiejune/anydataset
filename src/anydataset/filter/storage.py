@@ -337,7 +337,7 @@ def write_metric_rows(path: Path, rows: Sequence[_FilterMetricsRow]) -> None:
 
 
 def _validate_json_value(value: Any) -> JsonValue:
-    if value is None or isinstance(value, bool | int | str):
+    if value is None or isinstance(value, (bool, int, str)):
         return value
     if isinstance(value, float):
         if not math.isfinite(value):

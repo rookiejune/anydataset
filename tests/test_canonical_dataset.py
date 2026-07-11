@@ -1,4 +1,5 @@
 import unittest
+from pathlib import Path
 from unittest import mock
 
 import numpy as np
@@ -58,6 +59,51 @@ class CanonicalDatasetTest(unittest.TestCase):
 
         with self.assertRaises(TypeError):
             spec.load_options["streaming"] = False
+
+    def test_spec_load_options_are_deeply_frozen(self):
+        spec = Spec(
+            source=Source.HF,
+            path="org/data",
+            load_options={
+                "files": ["a.jsonl"],
+                "options": {"streaming": True},
+            },
+        )
+
+        self.assertEqual(spec.load_options["files"], ("a.jsonl",))
+        with self.assertRaises(AttributeError):
+            spec.load_options["files"].append("b.jsonl")
+        with self.assertRaises(TypeError):
+            spec.load_options["options"]["streaming"] = False
+
+    def test_spec_id_does_not_change_when_source_options_are_mutated(self):
+        load_options = {"files": ["a.jsonl"]}
+        spec = Spec(source=Source.HF, path="org/data", load_options=load_options)
+        before = spec.id
+        values = {spec: "cached"}
+
+        load_options["files"].append("b.jsonl")
+
+        self.assertEqual(spec.id, before)
+        self.assertEqual(values[spec], "cached")
+        self.assertEqual(spec.to_dict()["load_options"]["files"], ["a.jsonl"])
+
+    def test_spec_id_accepts_path_load_options(self):
+        spec = Spec(
+            source=Source.HF,
+            path="org/data",
+            load_options={"data_dir": Path("/tmp/data")},
+        )
+
+        self.assertEqual(spec.to_dict()["load_options"]["data_dir"], "/tmp/data")
+        self.assertEqual(
+            spec.id,
+            Spec(
+                source=Source.HF,
+                path="org/data",
+                load_options={"data_dir": "/tmp/data"},
+            ).id,
+        )
 
     def test_task_schema_uses_role_modality_keys(self):
         schema = Task.AUDIO_CODEC.schema()

@@ -71,13 +71,13 @@ def _audio_path(value: Any) -> Path:
 def _audio_source(value: Any) -> BytesIO | str:
     if isinstance(value, bytes):
         return BytesIO(value)
-    if not isinstance(value, str | Path):
+    if not isinstance(value, (str, Path)):
         raise TypeError("input must be bytes or a filesystem path.")
     return str(_audio_path(value))
 
 
 def _audio_files(value: Any) -> list[Any]:
-    if isinstance(value, str | Path | bytes):
+    if isinstance(value, (str, Path, bytes)):
         return [value]
     if not isinstance(value, list):
         raise TypeError("batched audio file view must be a list of paths or bytes.")

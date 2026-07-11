@@ -183,7 +183,7 @@ def _file_payload(
     if isinstance(value, bytes):
         data = value
         suffix = ".bin"
-    elif isinstance(value, str | Path):
+    elif isinstance(value, (str, Path)):
         path = Path(value)
         if not path.is_file():
             raise FileNotFoundError(path)
@@ -219,7 +219,7 @@ def _sample_key(sample_index: int) -> str:
 def _maybe_tensor(value: Any) -> torch.Tensor | None:
     if isinstance(value, torch.Tensor):
         return value.detach().cpu().contiguous()
-    if isinstance(value, int | float | bool | list | tuple):
+    if isinstance(value, (int, float, bool, list, tuple)):
         try:
             return torch.as_tensor(value).contiguous()
         except (TypeError, ValueError):

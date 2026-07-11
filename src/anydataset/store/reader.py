@@ -536,7 +536,7 @@ def _validate_view_ref(view: tuple[item.Role, item.Modality, item.View]) -> None
         raise TypeError("store view role must be a Role.")
     if not isinstance(modality, item.Modality):
         raise TypeError("store view modality must be a Modality.")
-    if not isinstance(key, item.AudioView | item.ImageView | item.TextView):
+    if not isinstance(key, (item.AudioView, item.ImageView, item.TextView)):
         raise TypeError("store view key must be a View.")
 
 

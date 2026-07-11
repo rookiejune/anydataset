@@ -153,7 +153,7 @@ def _waveform(item: AudioItem) -> tuple[Any, int, str | None]:
     value = item.views.get(AudioView.WAVEFORM)
     if value is None:
         return None, 0, "missing_waveform"
-    if not isinstance(value, tuple | list) or len(value) != 2:
+    if not isinstance(value, (tuple, list)) or len(value) != 2:
         return None, 0, "invalid_waveform"
     audio, sample_rate = value
     if isinstance(sample_rate, bool) or not isinstance(sample_rate, int):
@@ -251,7 +251,7 @@ def _metric(metrics: Mapping[str, object], name: str) -> float:
     value = metrics[name]
     if isinstance(value, bool):
         raise TypeError(f"speech metric {name!r} must be a float.")
-    if isinstance(value, int | float):
+    if isinstance(value, (int, float)):
         output = float(value)
     elif isinstance(value, Tensor):
         if value.ndim != 0:
@@ -334,7 +334,7 @@ def _role_key(role: Role, value: str) -> str:
 
 
 def _finite_threshold(value: float, *, name: str) -> None:
-    if isinstance(value, bool) or not isinstance(value, int | float):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise TypeError(f"{name} must be a float.")
     if not isfinite(float(value)):
         raise ValueError(f"{name} must be finite.")

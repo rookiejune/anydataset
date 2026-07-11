@@ -5,7 +5,6 @@ import importlib.util
 import shutil
 import subprocess
 import sys
-import tomllib
 import venv
 from pathlib import Path
 
@@ -18,7 +17,7 @@ def main() -> None:
     args = parser.parse_args()
 
     root = Path(__file__).resolve().parents[1]
-    project = tomllib.loads((root / "pyproject.toml").read_text())["project"]
+    project = _read_project(root)
     source_version = _source_version(root)
     if source_version != project["version"]:
         raise RuntimeError(
@@ -52,6 +51,25 @@ def _run(command: list[str], root: Path) -> None:
 def _require_module(name: str) -> None:
     if importlib.util.find_spec(name) is None:
         raise RuntimeError(f"{name} is not installed; install the dev extra first.")
+
+
+def _read_project(root: Path) -> dict[str, object]:
+    return _toml_loads((root / "pyproject.toml").read_text())["project"]
+
+
+def _toml_loads(text: str) -> dict[str, object]:
+    if sys.version_info >= (3, 11):
+        import tomllib
+
+        return tomllib.loads(text)
+    try:
+        import tomli
+    except ModuleNotFoundError as exc:
+        raise RuntimeError(
+            "tomli is not installed; install the dev extra before running "
+            "release checks on Python < 3.11."
+        ) from exc
+    return tomli.loads(text)
 
 
 def _clean_build_outputs(root: Path) -> None:

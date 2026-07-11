@@ -319,15 +319,14 @@ def bench_store_reader(
     selected = ((Role.DEFAULT, Modality.AUDIO, AudioView.WAVEFORM),)
 
     start = time.perf_counter()
-    match mode:
-        case "lazy_all":
-            dataset = read_store_dataset(output_dir)
-        case "preload_all":
-            dataset = read_store_dataset(output_dir, preload=True)
-        case "preload_one":
-            dataset = read_store_dataset(output_dir, views=selected, preload=True)
-        case _:
-            raise KeyError(mode)
+    if mode == "lazy_all":
+        dataset = read_store_dataset(output_dir)
+    elif mode == "preload_all":
+        dataset = read_store_dataset(output_dir, preload=True)
+    elif mode == "preload_one":
+        dataset = read_store_dataset(output_dir, views=selected, preload=True)
+    else:
+        raise KeyError(mode)
     seconds = time.perf_counter() - start
     return Measurement(
         seconds=seconds,
@@ -523,36 +522,35 @@ def bench_writer_pipeline(
     )
 
     start = time.perf_counter()
-    match variant:
-        case "inline":
-            for job in write_jobs:
-                write_payload_job(job)
-                maybe_sleep(producer_delay_ms)
-        case "thread":
-            run_thread_writer(
-                write_jobs,
-                workers=workers,
-                prefetch=prefetch,
-                producer_delay_ms=producer_delay_ms,
-            )
-        case "process_spawn":
-            run_process_writer(
-                write_jobs,
-                workers=workers,
-                prefetch=prefetch,
-                producer_delay_ms=producer_delay_ms,
-                start_method="spawn",
-            )
-        case "process_fork":
-            run_process_writer(
-                write_jobs,
-                workers=workers,
-                prefetch=prefetch,
-                producer_delay_ms=producer_delay_ms,
-                start_method="fork",
-            )
-        case _:
-            raise KeyError(variant)
+    if variant == "inline":
+        for job in write_jobs:
+            write_payload_job(job)
+            maybe_sleep(producer_delay_ms)
+    elif variant == "thread":
+        run_thread_writer(
+            write_jobs,
+            workers=workers,
+            prefetch=prefetch,
+            producer_delay_ms=producer_delay_ms,
+        )
+    elif variant == "process_spawn":
+        run_process_writer(
+            write_jobs,
+            workers=workers,
+            prefetch=prefetch,
+            producer_delay_ms=producer_delay_ms,
+            start_method="spawn",
+        )
+    elif variant == "process_fork":
+        run_process_writer(
+            write_jobs,
+            workers=workers,
+            prefetch=prefetch,
+            producer_delay_ms=producer_delay_ms,
+            start_method="fork",
+        )
+    else:
+        raise KeyError(variant)
     seconds = time.perf_counter() - start
 
     total_bytes = sum(path.stat().st_size for path in output_dir.iterdir())

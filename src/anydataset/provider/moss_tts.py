@@ -134,7 +134,7 @@ class MossTTSProvider:
         )
 
     def _file_path(self, value: Any) -> str:
-        if isinstance(value, str | Path):
+        if isinstance(value, (str, Path)):
             return str(Path(value).expanduser())
         if isinstance(value, bytes):
             return self._bytes_path(value)
@@ -208,7 +208,7 @@ def _text_batch(value: Any) -> list[str]:
 
 
 def _file_batch(value: Any) -> list[Any]:
-    if isinstance(value, str | Path | bytes):
+    if isinstance(value, (str, Path, bytes)):
         return [value]
     if not isinstance(value, Sequence):
         raise TypeError("batched reference file view must be a sequence.")
