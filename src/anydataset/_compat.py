@@ -10,9 +10,10 @@ try:
 except ImportError:
     from typing_extensions import NotRequired, Self
 
+__all__ = ["NotRequired", "Self", "StrEnum", "strict_zip"]
+
 
 class StrEnum(str, Enum):
-    @staticmethod
     def _generate_next_value_(
         name: str,
         start: int,

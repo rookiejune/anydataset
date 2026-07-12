@@ -832,14 +832,14 @@ def _stored_resume_metadata(path: Path) -> Mapping[str, object] | None:
 
 
 def _metadata_value(value: object) -> object:
-    if value is None or isinstance(value, str | int | float | bool):
+    if value is None or isinstance(value, (str, int, float, bool)):
         return value
     if isinstance(value, Mapping):
         return {
             str(key): _metadata_value(item)
             for key, item in sorted(value.items(), key=lambda item: str(item[0]))
         }
-    if isinstance(value, Sequence) and not isinstance(value, bytes | bytearray):
+    if isinstance(value, Sequence) and not isinstance(value, (bytes, bytearray)):
         return [_metadata_value(item) for item in value]
     return repr(value)
 

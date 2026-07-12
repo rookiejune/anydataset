@@ -4,7 +4,12 @@ from collections.abc import Iterable, Mapping, Sequence
 from enum import Enum
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, Unpack
+from typing import Any
+
+try:
+    from typing import Unpack
+except ImportError:
+    from typing_extensions import Unpack
 
 from ..dataset.abc import AnyDataset, MapStyleABC, MergedDataset
 from ..runtime import Runtime

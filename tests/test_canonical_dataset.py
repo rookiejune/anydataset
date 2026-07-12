@@ -481,66 +481,55 @@ class CanonicalDatasetTest(unittest.TestCase):
             )
         )
 
-    def test_collate_fn_batches_tensor_mapping_views_by_key(self):
-        ref = (Role.DEFAULT, Modality.AUDIO)
-        schema = {
-            ref: AudioReq(
-                views=frozenset({AudioView.LONGCAT}),
-            )
-        }
-        samples = [
-            {
-                ref: AudioItem(
-                    views={
-                        AudioView.LONGCAT: {
-                            "semantic_codes": torch.tensor([1, 2, 3]),
-                            "acoustic_codes": torch.tensor(
-                                [[4, 5, 6], [7, 8, 9]]
-                            ),
-                        }
+    def test_collate_fn_batches_codec_views_by_frame(self):
+        for view in (
+            AudioView.LONGCAT,
+            AudioView.DAC,
+            AudioView.STABLE,
+            AudioView.UNICODEC,
+        ):
+            with self.subTest(view=view):
+                ref = (Role.DEFAULT, Modality.AUDIO)
+                schema = {ref: AudioReq(views=frozenset({view}))}
+                samples = [
+                    {
+                        ref: AudioItem(
+                            views={
+                                view: torch.tensor(
+                                    [[1, 4, 7], [2, 5, 8], [3, 6, 9]]
+                                )
+                            },
+                        )
                     },
-                )
-            },
-            {
-                ref: AudioItem(
-                    views={
-                        AudioView.LONGCAT: {
-                            "semantic_codes": torch.tensor([10, 11]),
-                            "acoustic_codes": torch.tensor([[12, 13], [14, 15]]),
-                        }
+                    {
+                        ref: AudioItem(
+                            views={view: torch.tensor([[10, 12, 14], [11, 13, 15]])},
+                        )
                     },
+                ]
+
+                batch = collate_fn(schema)(samples)
+
+                codes = batch.sample[ref].views[view]
+                self.assertTrue(
+                    torch.equal(
+                        codes,
+                        torch.tensor(
+                            [
+                                [[1, 4, 7], [2, 5, 8], [3, 6, 9]],
+                                [[10, 12, 14], [11, 13, 15], [0, 0, 0]],
+                            ]
+                        ),
+                    )
                 )
-            },
-        ]
+                self.assertTrue(
+                    torch.equal(
+                        batch.masks[FieldRef(ref, FieldGroup.VIEWS, view)],
+                        torch.tensor([[True, True, True], [True, True, False]]),
+                    )
+                )
 
-        batch = collate_fn(schema)(samples)
-
-        longcat = batch.sample[ref].views[AudioView.LONGCAT]
-        self.assertTrue(
-            torch.equal(
-                longcat["semantic_codes"],
-                torch.tensor([[1, 2, 3], [10, 11, 0]]),
-            )
-        )
-        self.assertTrue(
-            torch.equal(
-                longcat["acoustic_codes"],
-                torch.tensor(
-                    [
-                        [[4, 5, 6], [7, 8, 9]],
-                        [[12, 13, 0], [14, 15, 0]],
-                    ]
-                ),
-            )
-        )
-        self.assertTrue(
-            torch.equal(
-                batch.masks[FieldRef(ref, FieldGroup.VIEWS, AudioView.LONGCAT)],
-                torch.tensor([[True, True, True], [True, True, False]]),
-            )
-        )
-
-    def test_collate_fn_requires_mapping_tensors_in_sample_share_length(self):
+    def test_collate_fn_rejects_legacy_codec_mapping(self):
         ref = (Role.DEFAULT, Modality.AUDIO)
         schema = {
             ref: AudioReq(
@@ -560,7 +549,7 @@ class CanonicalDatasetTest(unittest.TestCase):
             }
         ]
 
-        with self.assertRaisesRegex(ValueError, "must share the same last dimension"):
+        with self.assertRaisesRegex(TypeError, "Codec view values must be tensors"):
             collate_fn(schema)(samples)
 
     def test_collate_fn_keeps_non_tensor_meta_as_values(self):

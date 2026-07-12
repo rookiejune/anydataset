@@ -3,21 +3,21 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import auto
-from typing import Any
+from typing import Any, Union
 
 import torch
 
 from .._compat import StrEnum
 from ..types import item
 
-FieldKey = (
-    item.AudioView
-    | item.ImageView
-    | item.TextView
-    | item.AudioMeta
-    | item.ImageMeta
-    | item.TextMeta
-)
+FieldKey = Union[
+    item.AudioView,
+    item.ImageView,
+    item.TextView,
+    item.AudioMeta,
+    item.ImageMeta,
+    item.TextMeta,
+]
 
 
 class FieldGroup(StrEnum):
@@ -173,6 +173,8 @@ def _collate_values(
 ) -> tuple[Any, torch.Tensor | None]:
     if _is_waveform_field(field):
         return _collate_waveforms(values, field)
+    if _is_codec_field(field):
+        return _collate_codec_codes(values, field)
 
     if field.group is FieldGroup.VIEWS:
         mappings = [value for value in values if isinstance(value, Mapping)]
@@ -199,6 +201,65 @@ def _is_waveform_field(field: FieldRef) -> bool:
         and field.ref[1] is item.Modality.AUDIO
         and field.key == item.AudioView.WAVEFORM
     )
+
+
+def _is_codec_field(field: FieldRef) -> bool:
+    return (
+        field.group is FieldGroup.VIEWS
+        and field.ref[1] is item.Modality.AUDIO
+        and field.key
+        in {
+            item.AudioView.LONGCAT,
+            item.AudioView.DAC,
+            item.AudioView.STABLE,
+            item.AudioView.UNICODEC,
+        }
+    )
+
+
+def _collate_codec_codes(
+    values: Sequence[Any],
+    field: FieldRef,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    if any(not isinstance(value, torch.Tensor) for value in values):
+        raise TypeError(f"Codec view values must be tensors for {field!r}.")
+
+    tensors = list(values)
+    if any(tensor.ndim != 2 for tensor in tensors):
+        raise ValueError(
+            f"Codec view values must have shape [frame, codebook] for {field!r}."
+        )
+    if any(
+        tensor.dtype == torch.bool
+        or tensor.is_floating_point()
+        or tensor.is_complex()
+        for tensor in tensors
+    ):
+        raise TypeError(f"Codec view values must contain integer ids for {field!r}.")
+
+    codebooks = tensors[0].shape[1]
+    if codebooks == 0 or any(tensor.shape[1] != codebooks for tensor in tensors):
+        raise ValueError(
+            f"Codec view values must share one non-empty codebook axis for {field!r}."
+        )
+
+    lengths = torch.tensor(
+        [tensor.shape[0] for tensor in tensors],
+        dtype=torch.int64,
+        device=tensors[0].device,
+    )
+    max_length = int(lengths.max().item())
+    batch = tensors[0].new_zeros((len(tensors), max_length, codebooks))
+    mask = torch.zeros(
+        (len(tensors), max_length),
+        dtype=torch.bool,
+        device=tensors[0].device,
+    )
+    for index, tensor in enumerate(tensors):
+        length = tensor.shape[0]
+        batch[index, :length] = tensor
+        mask[index, :length] = True
+    return batch, mask
 
 
 def _collate_mappings(

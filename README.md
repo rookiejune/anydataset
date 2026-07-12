@@ -338,7 +338,7 @@ class ToyLongCat:
 
     def __call__(self, views):
         waveform, sample_rate = views[AudioView.WAVEFORM]
-        return {"semantic_codes": waveform.to(torch.int64)}
+        return waveform.transpose(0, 1).to(torch.int64)
 
 def dataset_factory():
     return AnyDataset(Spec(source=Source.STORE, path="/data/my_anydataset"))
@@ -432,7 +432,11 @@ collated batch. File batches are loaded by the audio provider before padding,
 and their effective lengths come from the loaded waveforms because file views do
 not carry masks. The current LongCat encoder does not accept masks, so the
 provider trims output codes proportionally from each input waveform length
-before writing samples to the store.
+before writing samples to the store. Each sample stores one integer
+`[frame, codebook]` tensor. Collation produces `[batch, frame, codebook]` and a
+`[batch, frame]` mask. The dataset layer preserves the complete ordered
+codebook axis and does not assign semantic or acoustic meaning to individual
+codebooks.
 
 `ModalityMaterializer` adds a missing modality under the same role. The
 provider declares its output view; the materializer infers the output modality

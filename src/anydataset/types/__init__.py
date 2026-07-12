@@ -42,7 +42,6 @@ if TYPE_CHECKING:
 
 
 class Source(StrEnum):
-    @staticmethod
     def _generate_next_value_(
         name: str,
         start: int,

@@ -115,7 +115,7 @@ class MetricsWriter:
 
     def __init__(self, path: Path, *, max_shard_samples: int | None) -> None:
         self._path = path
-        self._shards = BufferedShardWriter[_FilterMetricsRow, list[_FilterMetricsRow]](
+        self._shards = BufferedShardWriter(
             path,
             max_shard_items=max_shard_samples,
             new_buffer=list,
@@ -258,7 +258,7 @@ class _PartitionWriteState:
         max_shard_samples: int | None,
     ) -> None:
         self._label = label
-        self._shards = BufferedShardWriter[int, array[int]](
+        self._shards = BufferedShardWriter(
             path,
             max_shard_items=max_shard_samples,
             new_buffer=_index_buffer,

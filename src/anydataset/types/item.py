@@ -64,6 +64,8 @@ class AudioView(StrEnum):
     FILE = auto()
     LONGCAT = auto()
     DAC = auto()
+    STABLE = auto()
+    UNICODEC = auto()
 
 
 @dataclass(frozen=True)
