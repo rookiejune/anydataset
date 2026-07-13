@@ -2,6 +2,7 @@ import os
 from pathlib import Path
 import tempfile
 import unittest
+from functools import partial
 from unittest import mock
 
 from anydataset import (
@@ -11,6 +12,8 @@ from anydataset import (
     has_source,
     resolve_dataset,
 )
+from anydataset.dataset.abc import uses_default_indexed_shard
+from anydataset._parallel import map_style_indexed_loader
 
 
 class ShardedCsvSourceTest(unittest.TestCase):
@@ -157,7 +160,7 @@ class ShardedCsvSourceTest(unittest.TestCase):
             self.assertEqual(dataset[-1], "two")
             self.assertEqual(list(dataset.iter_shard(2, 1)), ["one"])
 
-    def test_reuses_cached_row_counts(self):
+    def test_reuses_prepared_parquet_cache(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             shard_dir = root / "shard_0"
@@ -174,17 +177,132 @@ class ShardedCsvSourceTest(unittest.TestCase):
                 parse_fn=lambda row: row["src_text"],
             )
             self.assertEqual(len(dataset), 2)
-            index_files = list(dataset.cache_manager.root.rglob("sharded_csv_index.json"))
-            self.assertEqual(len(index_files), 1)
+            manifests = list(
+                dataset.cache_manager.root.rglob("sharded_csv_parquet.json")
+            )
+            parts = list(dataset.cache_manager.root.rglob("*.parquet"))
+            self.assertEqual(len(manifests), 1)
+            self.assertEqual(len(parts), 1)
 
             second = AnyDataset(
                 Spec(source="sharded_csv", path=tmpdir),
                 parse_fn=lambda row: row["src_text"],
             )
-            with mock.patch.object(second.dataset, "_row_count") as row_count:
+            with mock.patch(
+                "anydataset.dataset.source.sharded_csv._convert_file_job"
+            ) as convert:
                 self.assertEqual(len(second), 2)
 
-            row_count.assert_not_called()
+            convert.assert_not_called()
+
+    def test_rebuilds_changed_parquet_part(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            shard_dir = root / "shard_0"
+            shard_dir.mkdir()
+            source = shard_dir / "0.csv"
+            source.write_text("src_text\nzero\n", encoding="utf-8")
+            spec = Spec(source="sharded_csv", path=tmpdir)
+
+            first = AnyDataset(spec, parse_fn=lambda row: row["src_text"])
+            self.assertEqual(list(first), ["zero"])
+
+            source.write_text("src_text\nzero\none\n", encoding="utf-8")
+            second = AnyDataset(spec, parse_fn=lambda row: row["src_text"])
+
+            self.assertEqual(list(second), ["zero", "one"])
+            self.assertEqual(
+                len(list(second.cache_manager.root.rglob("*.parquet"))),
+                1,
+            )
+
+    def test_multiple_csv_files_use_prepare_process_pool(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            shard_dir = root / "shard_0"
+            shard_dir.mkdir()
+            (shard_dir / "0.csv").write_text("src_text\nzero\n", encoding="utf-8")
+            (shard_dir / "1.csv").write_text("src_text\none\n", encoding="utf-8")
+            dataset = AnyDataset(
+                Spec(source="sharded_csv", path=tmpdir),
+                parse_fn=lambda row: row["src_text"],
+            )
+
+            with mock.patch(
+                "anydataset.dataset.source.sharded_csv.ProcessPoolExecutor"
+            ) as executor:
+                pool = executor.return_value.__enter__.return_value
+                pool.map.side_effect = lambda function, jobs: map(function, jobs)
+
+                self.assertEqual(list(dataset), ["zero", "one"])
+
+            executor.assert_called_once()
+
+    def test_prepared_parquet_uses_default_map_style_shard(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            shard_dir = root / "shard_0"
+            shard_dir.mkdir()
+            (shard_dir / "0.csv").write_text("src_text\nzero\n", encoding="utf-8")
+            dataset = AnyDataset(
+                Spec(source="sharded_csv", path=tmpdir),
+                parse_fn=lambda row: row["src_text"],
+            )
+
+            self.assertTrue(uses_default_indexed_shard(dataset))
+
+    def test_prepared_parquet_supports_spawn_loader_workers(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            shard_dir = root / "shard_0"
+            shard_dir.mkdir()
+            (shard_dir / "0.csv").write_text(
+                "src_text\nzero\none\ntwo\nthree\n",
+                encoding="utf-8",
+            )
+            spec = Spec(source="sharded_csv", path=tmpdir)
+            factory = partial(AnyDataset, spec, parse_fn=_src_text)
+            dataset = factory()
+            dataset.prepare()
+
+            batches = map_style_indexed_loader(
+                factory,
+                sample_count=len(dataset),
+                batch_size=1,
+                num_workers=2,
+                start_method="spawn",
+            )
+
+            self.assertEqual(
+                [item for batch in batches for item in batch],
+                [(0, "zero"), (1, "one"), (2, "two"), (3, "three")],
+            )
+
+    def test_prepared_parquet_preserves_string_values(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            shard_dir = root / "shard_0"
+            shard_dir.mkdir()
+            (shard_dir / "0.csv").write_text(
+                "value,other\n,001\n",
+                encoding="utf-8",
+            )
+            dataset = AnyDataset(Spec(source="sharded_csv", path=tmpdir))
+
+            self.assertEqual(dataset[0], {"value": "", "other": "001"})
+
+    def test_prepared_parquet_supports_header_only_file(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            shard_dir = root / "shard_0"
+            shard_dir.mkdir()
+            (shard_dir / "0.csv").write_text("src_text\n", encoding="utf-8")
+            dataset = AnyDataset(Spec(source="sharded_csv", path=tmpdir))
+
+            self.assertEqual(len(dataset), 0)
+
+            second = AnyDataset(Spec(source="sharded_csv", path=tmpdir))
+            self.assertEqual(len(second), 0)
 
     def test_map_style_indexed_iteration_keeps_global_indices(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -279,6 +397,10 @@ def _single_log(home: Path, name: str) -> Path:
     if len(logs) != 1:
         raise AssertionError(f"expected one {name}, found: {logs}")
     return logs[0]
+
+
+def _src_text(row):
+    return row["src_text"]
 
 
 if __name__ == "__main__":

@@ -145,6 +145,11 @@ dataset = IterableAnyDataset(
 运行时 warning 和 worker 日志写入
 `$ANYDATASET_HOME/logs/<timestamp>-<pid>/`。
 
+内置 `sharded_csv` source 保留 CSV 作为可读的事实来源，并在
+`$ANYDATASET_HOME/cache/sources` 下为每个 CSV prepare 一个 Parquet cache part。
+prepare 使用 spawn process pool 并行转换变化文件，最后原子提交 cache manifest；
+dataset 随后通过 Parquet row group 提供 map-style 随机访问。
+
 只需要得到 `Spec` 时，也可以使用字符串 shorthand：
 
 ```python

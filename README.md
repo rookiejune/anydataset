@@ -133,6 +133,12 @@ environment variable is unset. Source prepare caches live under
 Runtime warnings and worker logs live under
 `$ANYDATASET_HOME/logs/<timestamp>-<pid>/`.
 
+The built-in `sharded_csv` source keeps CSV files as the readable source of
+truth and prepares one Parquet cache part per CSV file under
+`$ANYDATASET_HOME/cache/sources`. Preparation converts changed files in a
+spawned process pool and atomically commits the cache manifest. Dataset reads
+then use Parquet row groups for map-style random access.
+
 ## Multiple Datasets
 
 Combine already-created datasets with `MultipleAnyDataset`.

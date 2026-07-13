@@ -307,6 +307,8 @@ class AnyDataset(_Base, MapStyleABC):
 def uses_default_indexed_shard(dataset: object) -> bool:
     if isinstance(dataset, AnyDataset):
         source_dataset = dataset.dataset
+        if getattr(source_dataset, "uses_default_indexed_shard", False):
+            return True
         iter_indexed = getattr(source_dataset, "iter_indexed_shard", None)
         iter_runtime = getattr(source_dataset, "iter_indexed_runtime_shard", None)
         return not callable(iter_indexed) and not callable(iter_runtime)

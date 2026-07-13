@@ -1,26 +1,38 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 import os
+import sys
 import tempfile
 from bisect import bisect_right
+from collections import OrderedDict
 from collections.abc import Callable, Iterator, Mapping, Sequence
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
-from itertools import islice
 from pathlib import Path
 from typing import Any, Protocol
 
+import pyarrow as pa
+import pyarrow.csv as pa_csv
+import pyarrow.parquet as pq
+
 from ..._compat import strict_zip
+from ..._parallel import multiprocessing_context
 from ..._logging import write_warning
+from ...cache import FileLock
 from ...types import Spec
 
 
 CsvRow = Mapping[str, str]
 JsonMapping = Mapping[str, Any]
 
-_INDEX_SCHEMA_VERSION = 1
-_INDEX_FILE = "sharded_csv_index.json"
+_CACHE_SCHEMA_VERSION = 1
+_CACHE_MANIFEST = "sharded_csv_parquet.json"
+_CACHE_DIR = "sharded_csv_parquet"
+_PARQUET_ROW_GROUP_SIZE = 4096
+_MAX_CACHED_ROW_GROUPS = 2
 
 
 class _TextWriter(Protocol):
@@ -38,14 +50,23 @@ class CsvFile:
     path: Path
     start: int
     stop: int
+    row_groups: tuple[int, ...]
 
 
 class ShardedCsvSource:
     def prepare(self, spec: Spec, cache_path: Path) -> ShardedCsvDataset:
-        return ShardedCsvDataset(Path(spec.path), split=spec.split, cache_path=cache_path)
+        dataset = ShardedCsvDataset(
+            Path(spec.path),
+            split=spec.split,
+            cache_path=cache_path,
+        )
+        dataset.prepare()
+        return dataset
 
 
 class ShardedCsvDataset:
+    uses_default_indexed_shard = True
+
     def __init__(
         self,
         root: Path,
@@ -59,7 +80,13 @@ class ShardedCsvDataset:
         self._shards_cache: tuple[CsvShard, ...] | None = None
         self._files_cache: tuple[CsvFile, ...] | None = None
         self._file_stops_cache: tuple[int, ...] | None = None
+        self._row_group_cache: OrderedDict[
+            tuple[Path, int], tuple[dict[str, str], ...]
+        ] = OrderedDict()
         self._ignored_csv_warning_paths: set[Path] = set()
+
+    def prepare(self) -> None:
+        self._files()
 
     def __iter__(self) -> Iterator[CsvRow]:
         yield from self.shard(num_shards=1, index=0)
@@ -78,7 +105,7 @@ class ShardedCsvDataset:
         files = self._files()
         file_index = bisect_right(self._file_stops(), index)
         file = files[file_index]
-        return self._read_file_row(file.path, index - file.start)
+        return self._read_parquet_row(file, index - file.start)
 
     def shard(self, *, num_shards: int, index: int) -> Iterator[CsvRow]:
         if num_shards <= 0:
@@ -95,21 +122,8 @@ class ShardedCsvDataset:
         if start < 0 or stop < start or stop > length:
             raise ValueError("range must satisfy 0 <= start <= stop <= len(dataset).")
 
-        for file in self._files():
-            if file.stop <= start:
-                continue
-            if file.start >= stop:
-                return
-            yield_start = max(start, file.start)
-            yield_stop = min(stop, file.stop)
-            local_start = yield_start - file.start
-            local_stop = yield_stop - file.start
-            for offset, row in enumerate(
-                islice(self._read_file(file.path), local_start, local_stop),
-                start=local_start,
-            ):
-                row_index = file.start + offset
-                yield row_index, row
+        for index in range(start, stop):
+            yield index, self[index]
 
     def iter_indexed_shard(
         self,
@@ -120,19 +134,8 @@ class ShardedCsvDataset:
             raise ValueError("num_shards must be positive.")
         if shard_id < 0 or shard_id >= num_shards:
             raise ValueError("shard_id must satisfy 0 <= shard_id < num_shards.")
-
-        for file in self._files():
-            first_index = _first_shard_index(file.start, num_shards, shard_id)
-            if first_index >= file.stop:
-                continue
-            local_start = first_index - file.start
-            for offset, row in enumerate(
-                islice(self._read_file(file.path), local_start, None, num_shards),
-            ):
-                row_index = first_index + offset * num_shards
-                if row_index >= file.stop:
-                    break
-                yield row_index, row
+        for index in range(shard_id, len(self), num_shards):
+            yield index, self[index]
 
     def _base_dir(self) -> Path:
         return self.root / self.split if self.split is not None else self.root
@@ -168,23 +171,25 @@ class ShardedCsvDataset:
         with path.open("r", encoding="utf-8", newline="") as f:
             yield from csv.DictReader(f, **self._csv_options())
 
-    def _read_file_row(self, path: Path, row_index: int) -> CsvRow:
-        for index, row in enumerate(self._read_file(path)):
-            if index == row_index:
-                return row
-        raise IndexError("CSV file row count changed after indexing.")
-
     def _files(self) -> tuple[CsvFile, ...]:
         if self._files_cache is not None:
             return self._files_cache
 
+        paths = self._csv_paths()
+        records = self._prepared_records(paths)
         start = 0
         files = []
-        paths = self._csv_paths()
-        counts = self._row_counts(paths)
-        for path, count in strict_zip(paths, counts):
+        for record in records:
+            count = int(record["row_count"])
             stop = start + count
-            files.append(CsvFile(path=path, start=start, stop=stop))
+            files.append(
+                CsvFile(
+                    path=self._cache_dir() / str(record["part"]),
+                    start=start,
+                    stop=stop,
+                    row_groups=tuple(int(value) for value in record["row_groups"]),
+                )
+            )
             start = stop
 
         self._files_cache = tuple(files)
@@ -217,67 +222,109 @@ class ShardedCsvDataset:
             raise RuntimeError("CSV file index cache was not initialized.")
         return self._file_stops_cache
 
-    def _row_counts(self, paths: Sequence[Path]) -> tuple[int, ...]:
-        cached = self._read_index_cache(paths)
+    def _prepared_records(self, paths: Sequence[Path]) -> tuple[JsonMapping, ...]:
+        cached = self._read_cache(paths)
         if cached is not None:
             return cached
+        if self.cache_path is None:
+            raise ValueError("sharded_csv requires a source cache path.")
+        with FileLock(self.cache_path / ".prepare.lock"):
+            cached = self._read_cache(paths)
+            if cached is not None:
+                return cached
+            return self._build_cache(paths)
 
-        counts = tuple(self._row_count(path) for path in paths)
-        self._write_index_cache(paths, counts)
-        return counts
-
-    def _read_index_cache(self, paths: Sequence[Path]) -> tuple[int, ...] | None:
-        path = self._index_path()
+    def _read_cache(self, paths: Sequence[Path]) -> tuple[JsonMapping, ...] | None:
+        path = self._manifest_path()
         if path is None or not path.is_file():
             return None
-
         data = _read_json(path)
         if not isinstance(data, Mapping):
-            raise ValueError(f"Invalid sharded CSV index cache: {path}")
-        if data.get("schema_version") != _INDEX_SCHEMA_VERSION:
+            raise ValueError(f"Invalid sharded CSV parquet manifest: {path}")
+        if data.get("schema_version") != _CACHE_SCHEMA_VERSION:
             return None
-
-        files = data.get("files")
-        if not isinstance(files, list):
-            raise ValueError(f"Invalid sharded CSV index cache: {path}")
-        if len(files) != len(paths):
+        records = data.get("files")
+        if not isinstance(records, list) or len(records) != len(paths):
             return None
-
-        counts = []
-        for csv_path, record in strict_zip(paths, files):
-            if not isinstance(record, Mapping):
-                raise ValueError(f"Invalid sharded CSV index cache: {path}")
-            if not _same_file_record(csv_path, record):
+        validated = []
+        for source, record in strict_zip(paths, records):
+            if not isinstance(record, Mapping) or not _valid_record(
+                source,
+                record,
+                self._cache_dir(),
+            ):
                 return None
-            count = record.get("row_count")
-            if not isinstance(count, int) or count < 0:
-                raise ValueError(f"Invalid sharded CSV index cache: {path}")
-            counts.append(count)
-        return tuple(counts)
+            validated.append(record)
+        return tuple(validated)
 
-    def _write_index_cache(self, paths: Sequence[Path], counts: Sequence[int]) -> None:
-        path = self._index_path()
-        if path is None:
-            return
+    def _build_cache(self, paths: Sequence[Path]) -> tuple[JsonMapping, ...]:
+        cache_dir = self._cache_dir()
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        previous = self._previous_records()
+        records: list[JsonMapping | None] = []
+        jobs = []
+        for source in paths:
+            part = _part_name(source)
+            existing = previous.get(str(source))
+            if existing is not None and _valid_record(source, existing, cache_dir):
+                records.append(existing)
+                continue
+            records.append(None)
+            jobs.append((len(records) - 1, source, cache_dir / part))
+
+        converted = _convert_files(jobs)
+        for index, record in converted:
+            records[index] = record
+        complete = tuple(record for record in records if record is not None)
+        if len(complete) != len(paths):
+            raise RuntimeError("Sharded CSV parquet cache is incomplete.")
+        manifest = self._manifest_path()
+        if manifest is None:
+            raise ValueError("sharded_csv requires a source cache path.")
         _write_json(
-            path,
-            {
-                "schema_version": _INDEX_SCHEMA_VERSION,
-                "files": [
-                    _file_record(csv_path, count)
-                    for csv_path, count in strict_zip(paths, counts)
-                ],
-            },
+            manifest,
+            {"schema_version": _CACHE_SCHEMA_VERSION, "files": complete},
         )
+        return complete
 
-    def _index_path(self) -> Path | None:
+    def _previous_records(self) -> dict[str, JsonMapping]:
+        path = self._manifest_path()
+        if path is None or not path.is_file():
+            return {}
+        data = _read_json(path)
+        if not isinstance(data, Mapping) or data.get("schema_version") != _CACHE_SCHEMA_VERSION:
+            return {}
+        records = data.get("files")
+        if not isinstance(records, list):
+            return {}
+        return {
+            str(record["path"]): record
+            for record in records
+            if isinstance(record, Mapping) and isinstance(record.get("path"), str)
+        }
+
+    def _manifest_path(self) -> Path | None:
+        return None if self.cache_path is None else self.cache_path / _CACHE_MANIFEST
+
+    def _cache_dir(self) -> Path:
         if self.cache_path is None:
-            return None
-        return self.cache_path / _INDEX_FILE
+            raise ValueError("sharded_csv requires a source cache path.")
+        return self.cache_path / _CACHE_DIR
 
-    def _row_count(self, path: Path) -> int:
-        with path.open("r", encoding="utf-8", newline="") as f:
-            return sum(1 for _row in csv.DictReader(f, **self._csv_options()))
+    def _read_parquet_row(self, file: CsvFile, index: int) -> dict[str, str]:
+        stops = _stops(file.row_groups)
+        row_group = bisect_right(stops, index)
+        start = 0 if row_group == 0 else stops[row_group - 1]
+        key = (file.path, row_group)
+        rows = self._row_group_cache.get(key)
+        if rows is None:
+            rows = tuple(pq.ParquetFile(file.path).read_row_group(row_group).to_pylist())
+            self._row_group_cache[key] = rows
+            while len(self._row_group_cache) > _MAX_CACHED_ROW_GROUPS:
+                self._row_group_cache.popitem(last=False)
+        else:
+            self._row_group_cache.move_to_end(key)
+        return rows[index - start]
 
     def _csv_options(self) -> dict[str, Any]:
         return {}
@@ -315,17 +362,12 @@ def _csv_path_key(path: Path) -> int:
     return int(path.stem)
 
 
-def _first_shard_index(start: int, num_shards: int, shard_id: int) -> int:
-    return start + (shard_id - start % num_shards) % num_shards
-
-
-def _file_record(path: Path, row_count: int) -> dict[str, Any]:
+def _source_record(path: Path) -> dict[str, Any]:
     stat = path.stat()
     return {
         "path": str(path),
         "size": stat.st_size,
         "mtime_ns": stat.st_mtime_ns,
-        "row_count": row_count,
     }
 
 
@@ -336,6 +378,129 @@ def _same_file_record(path: Path, record: JsonMapping) -> bool:
         and record.get("size") == stat.st_size
         and record.get("mtime_ns") == stat.st_mtime_ns
     )
+
+
+def _valid_record(path: Path, record: JsonMapping, cache_dir: Path) -> bool:
+    if not _same_file_record(path, record):
+        return False
+    part = record.get("part")
+    row_count = record.get("row_count")
+    row_groups = record.get("row_groups")
+    if (
+        not isinstance(part, str)
+        or not isinstance(row_count, int)
+        or row_count < 0
+        or not isinstance(row_groups, list)
+        or any(not isinstance(value, int) or value < 0 for value in row_groups)
+        or sum(row_groups) != row_count
+    ):
+        return False
+    parquet = cache_dir / part
+    return parquet.is_file() and pq.ParquetFile(parquet).metadata.num_rows == row_count
+
+
+def _part_name(path: Path) -> str:
+    digest = hashlib.sha256(str(path).encode("utf-8")).hexdigest()
+    return f"{digest}.parquet"
+
+
+def _convert_files(
+    jobs: Sequence[tuple[int, Path, Path]],
+) -> tuple[tuple[int, JsonMapping], ...]:
+    if not jobs:
+        return ()
+    workers = min(len(jobs), os.cpu_count() or 1, 8)
+    if workers == 1:
+        converted = (_convert_file_job(job) for job in jobs)
+        return tuple(_conversion_progress(converted, total=len(jobs)))
+    with ProcessPoolExecutor(
+        max_workers=workers,
+        mp_context=multiprocessing_context("spawn"),
+    ) as executor:
+        return tuple(
+            _conversion_progress(
+                executor.map(_convert_file_job, jobs),
+                total=len(jobs),
+            )
+        )
+
+
+def _conversion_progress(
+    converted: Iterator[tuple[int, JsonMapping]],
+    *,
+    total: int,
+) -> Iterator[tuple[int, JsonMapping]]:
+    try:
+        from tqdm.auto import tqdm
+    except ImportError:
+        yield from converted
+        return
+    with tqdm(
+        converted,
+        total=total,
+        unit="file",
+        desc="prepare sharded CSV",
+        disable=not sys.stderr.isatty(),
+    ) as progress:
+        yield from progress
+
+
+def _convert_file_job(job: tuple[int, Path, Path]) -> tuple[int, JsonMapping]:
+    index, source, target = job
+    names = _csv_names(source)
+    table = pa_csv.read_csv(
+        source,
+        read_options=pa_csv.ReadOptions(use_threads=False),
+        convert_options=pa_csv.ConvertOptions(
+            column_types={name: pa.string() for name in names},
+            strings_can_be_null=False,
+        ),
+    )
+    tmp = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            delete=False,
+            dir=target.parent,
+            prefix=f".{target.name}.",
+            suffix=".tmp",
+        ) as file:
+            tmp = Path(file.name)
+        pq.write_table(table, tmp, row_group_size=_PARQUET_ROW_GROUP_SIZE)
+        os.replace(tmp, target)
+    except Exception:
+        if tmp is not None and tmp.exists():
+            tmp.unlink()
+        raise
+    parquet = pq.ParquetFile(target)
+    record = {
+        **_source_record(source),
+        "part": target.name,
+        "row_count": int(parquet.metadata.num_rows),
+        "row_groups": [
+            int(parquet.metadata.row_group(group).num_rows)
+            for group in range(parquet.metadata.num_row_groups)
+        ],
+    }
+    return index, record
+
+
+def _csv_names(path: Path) -> tuple[str, ...]:
+    with path.open("r", encoding="utf-8", newline="") as file:
+        names = next(csv.reader(file), None)
+    if names is None or not names or any(not name for name in names):
+        raise ValueError(f"CSV file must have a non-empty header: {path}")
+    if len(set(names)) != len(names):
+        raise ValueError(f"CSV file must have unique column names: {path}")
+    return tuple(names)
+
+
+def _stops(counts: Sequence[int]) -> tuple[int, ...]:
+    total = 0
+    stops = []
+    for count in counts:
+        total += count
+        stops.append(total)
+    return tuple(stops)
 
 
 def _read_json(path: Path) -> Any:

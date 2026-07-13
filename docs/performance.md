@@ -16,7 +16,8 @@
 - 默认用户数据集以 map-style 为主；streaming/iterable 数据集需要保留支持。当前
   `StoreDataset`、`FilteredDataset` 和 `MergedDataset` 这类默认 map-style shard 语义的
   materializer/filter 热路径会使用 map-style indexed loader；`AnyDataset` 仍优先保留
-  source-aware indexed shard 路径，避免把顺序 source 退化成随机访问。
+  source-aware indexed shard 路径，避免把顺序 source 退化成随机访问。`sharded_csv`
+  prepare 后使用按源文件生成的 Parquet cache，因此也走 map-style indexed loader。
 - store 格式保持稳定；reader 侧可以只读 parquet metadata 和轻量 index 列，按 row group
   懒加载 sample/view manifest 的完整行。`preload=True` 仍表示显式加载并校验所有 view
   manifest。
@@ -40,6 +41,9 @@
   sequence 接口，并按 parquet row group 懒加载完整 sample manifest 行。
 - store view manifest 先加载 `sample_index` 轻量列建立查找索引，具体 shard/key 行按
   row group 懒加载；随机读单个样本不需要把整个 view manifest 转成对象。
+- `sharded_csv` 保留 CSV 作为事实来源，prepare 阶段以 spawn process pool 并行生成
+  每文件 Parquet part；manifest 原子提交并按源文件 size/mtime 增量复用。读取侧缓存
+  Parquet row group，避免 rank 和 DataLoader worker 重复解析全部 CSV。
 - part/fragment commit 不再常驻保存 `item ref -> sample_index array`；提交时先写
   ordered sample manifest，再按 view 流式扫描 sample manifest 做覆盖校验。
 - `BackgroundWriteSink` 支持 thread 和 process backend；materializer/filter 默认使用
