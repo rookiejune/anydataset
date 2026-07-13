@@ -1,6 +1,7 @@
 import os
 from pathlib import Path
 import tempfile
+import threading
 import unittest
 from functools import partial
 from unittest import mock
@@ -14,6 +15,7 @@ from anydataset import (
 )
 from anydataset.dataset.abc import uses_default_indexed_shard
 from anydataset._parallel import map_style_indexed_loader
+from anydataset.cache import FileLock
 
 
 class ShardedCsvSourceTest(unittest.TestCase):
@@ -303,6 +305,35 @@ class ShardedCsvSourceTest(unittest.TestCase):
 
             second = AnyDataset(Spec(source="sharded_csv", path=tmpdir))
             self.assertEqual(len(second), 0)
+
+    def test_prepare_waits_for_concurrent_cache_builder(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            shard_dir = root / "shard_0"
+            shard_dir.mkdir()
+            (shard_dir / "0.csv").write_text("src_text\nzero\n", encoding="utf-8")
+            spec = Spec(source="sharded_csv", path=tmpdir)
+            dataset = AnyDataset(spec)
+            cache = dataset.cache_manager.prepare(spec)
+            entered = threading.Event()
+            release = threading.Event()
+
+            def hold_lock():
+                with FileLock(cache.lock_path):
+                    entered.set()
+                    release.wait()
+
+            holder = threading.Thread(target=hold_lock)
+            holder.start()
+            self.assertTrue(entered.wait(timeout=1))
+            timer = threading.Timer(0.1, release.set)
+            timer.start()
+            try:
+                self.assertEqual(len(dataset), 1)
+            finally:
+                release.set()
+                timer.cancel()
+                holder.join()
 
     def test_map_style_indexed_iteration_keeps_global_indices(self):
         with tempfile.TemporaryDirectory() as tmpdir:

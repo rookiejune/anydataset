@@ -7,7 +7,7 @@ from unittest import mock
 
 from anydataset import Source, Spec, anydataset_home
 from anydataset._logging import run_logs_dir, write_warning
-from anydataset.cache import CacheManager, FileLock
+from anydataset.cache import CacheManager, FileLock, FileLockError
 
 
 class CacheManagerTest(unittest.TestCase):
@@ -17,7 +17,7 @@ class CacheManagerTest(unittest.TestCase):
 
             with FileLock(path):
                 with self.assertRaisesRegex(
-                    RuntimeError,
+                    FileLockError,
                     f"File lock is already held: {path}",
                 ):
                     with FileLock(path):
@@ -35,7 +35,7 @@ class CacheManagerTest(unittest.TestCase):
                 side_effect=BlockingIOError,
             ):
                 with self.assertRaisesRegex(
-                    RuntimeError,
+                    FileLockError,
                     f"File lock is already held: {path}",
                 ):
                     with FileLock(path):

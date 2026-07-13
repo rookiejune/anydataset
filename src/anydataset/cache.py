@@ -69,6 +69,10 @@ _LOCKS: dict[str, threading.Lock] = {}
 _LOCKS_GUARD = threading.Lock()
 
 
+class FileLockError(RuntimeError):
+    pass
+
+
 class FileLock:
     def __init__(self, path: Path) -> None:
         self.path = path
@@ -77,7 +81,7 @@ class FileLock:
     def __enter__(self):
         lock = _thread_lock(self.path)
         if not lock.acquire(blocking=False):
-            raise RuntimeError(f"File lock is already held: {self.path}")
+            raise FileLockError(f"File lock is already held: {self.path}")
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             self.file = self.path.open("a+", encoding="utf-8")
@@ -87,7 +91,7 @@ class FileLock:
                     fcntl.LOCK_EX | fcntl.LOCK_NB,
                 )
             except BlockingIOError as exc:
-                raise RuntimeError(
+                raise FileLockError(
                     f"File lock is already held: {self.path}"
                 ) from exc
             return self

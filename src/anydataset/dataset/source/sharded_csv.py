@@ -6,6 +6,7 @@ import json
 import os
 import sys
 import tempfile
+import time
 from bisect import bisect_right
 from collections import OrderedDict
 from collections.abc import Callable, Iterator, Mapping, Sequence
@@ -21,7 +22,7 @@ import pyarrow.parquet as pq
 from ..._compat import strict_zip
 from ..._parallel import multiprocessing_context
 from ..._logging import write_warning
-from ...cache import FileLock
+from ...cache import FileLock, FileLockError
 from ...types import Spec
 
 
@@ -33,6 +34,8 @@ _CACHE_MANIFEST = "sharded_csv_parquet.json"
 _CACHE_DIR = "sharded_csv_parquet"
 _PARQUET_ROW_GROUP_SIZE = 4096
 _MAX_CACHED_ROW_GROUPS = 2
+_PREPARE_LOCK_TIMEOUT = 3600.0
+_PREPARE_LOCK_POLL = 0.2
 
 
 class _TextWriter(Protocol):
@@ -223,16 +226,26 @@ class ShardedCsvDataset:
         return self._file_stops_cache
 
     def _prepared_records(self, paths: Sequence[Path]) -> tuple[JsonMapping, ...]:
-        cached = self._read_cache(paths)
-        if cached is not None:
-            return cached
         if self.cache_path is None:
             raise ValueError("sharded_csv requires a source cache path.")
-        with FileLock(self.cache_path / ".prepare.lock"):
+        lock_path = self.cache_path / ".prepare.lock"
+        deadline = time.monotonic() + _PREPARE_LOCK_TIMEOUT
+        while True:
             cached = self._read_cache(paths)
             if cached is not None:
                 return cached
-            return self._build_cache(paths)
+            try:
+                with FileLock(lock_path):
+                    cached = self._read_cache(paths)
+                    if cached is not None:
+                        return cached
+                    return self._build_cache(paths)
+            except FileLockError as exc:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(
+                        f"Timed out waiting for sharded CSV prepare lock: {lock_path}"
+                    ) from exc
+                time.sleep(_PREPARE_LOCK_POLL)
 
     def _read_cache(self, paths: Sequence[Path]) -> tuple[JsonMapping, ...] | None:
         path = self._manifest_path()
