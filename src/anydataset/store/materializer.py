@@ -10,7 +10,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, Union, cast
 
-from torch import distributed as dist
 from torch.utils.data import DataLoader
 
 from .._compat import strict_zip
@@ -18,7 +17,6 @@ from .._devices import Devices, resolve_devices
 from .._logging import run_logs_dir, use_run_logs_dir
 from .._parallel import (
     DeviceWorker,
-    cuda_device,
     free_port,
     indexed_loader,
     iter_indexed_shard,
@@ -880,28 +878,6 @@ class _WorkerConfig:
     master_port: str
 
 
-def _init_worker_process_group(config: _WorkerConfig) -> bool:
-    if config.num_shards <= 1:
-        return False
-    if not dist.is_available() or dist.is_initialized():
-        return False
-    dist.init_process_group(
-        backend=_distributed_backend(config.device),
-        init_method=f"tcp://{config.master_addr}:{config.master_port}",
-        rank=config.shard_id,
-        world_size=config.num_shards,
-    )
-    return True
-
-
-def _distributed_backend(device: str) -> str:
-    return (
-        "nccl"
-        if cuda_device(device) is not None and dist.is_nccl_available()
-        else "gloo"
-    )
-
-
 def _materialize_worker(
     config: _WorkerConfig,
     dataset_factory: DatasetFactory,
@@ -928,11 +904,9 @@ def _materialize_worker(
             ),
             device_env="ANYDATASET_MATERIALIZE_DEVICE",
         )
-        process_group_created = False
         try:
             if config.runtime.uses_local_device:
                 set_torch_device(config.device)
-                process_group_created = _init_worker_process_group(config)
             provider = provider_factory(config.device)
             materializer = _worker_materializer(config)
             materializer._write_resumable_loader_batches(
@@ -952,9 +926,6 @@ def _materialize_worker(
             put_progress(progress, Progress(config.shard_id, 0, True, error))
             raise
         finally:
-            if process_group_created:
-                if dist.is_available() and dist.is_initialized():
-                    dist.destroy_process_group()
             restore_environment(env)
         logger.info("finished shard %s", config.shard_id)
         put_progress(progress, Progress(config.shard_id, 0, True, None))

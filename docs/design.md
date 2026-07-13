@@ -91,6 +91,9 @@ materializer 必须报错，不静默覆盖。
 库会把完成的 provider batch 聚合到 checkpoint chunk 后写成 ready fragment，并按全局
 `sample_index` 跳过已完成样本；所有样本覆盖后再原子提交最终 store 并清理 resume
 目录。fragment 仍使用普通 store 校验，损坏或语义不匹配时显式报错，不静默丢弃。
+多设备 materializer 只负责为每个设备启动独立进程并按 rank 分片，不初始化
+`torch.distributed` process group；需要 collective 的 provider 负责显式创建和释放
+自己的 process group，并定义各 rank 的同步契约。
 `commit_samples` 控制 checkpoint 粒度，默认是 `max(batch_size, 32)`，避免默认可续跑时
 产生过多小文件；需要更细断点时可以显式调低。
 `write_workers` 控制每个 materializer worker 内的后台写进程数，默认用一个 writer

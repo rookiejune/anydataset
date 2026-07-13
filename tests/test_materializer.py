@@ -941,6 +941,26 @@ class ViewMaterializerTest(unittest.TestCase):
                 "cpu1:text-1",
             )
 
+    def test_materializer_three_devices_do_not_initialize_distributed(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = root / "target"
+            samples = tuple(_text_sample(f"text-{index}") for index in range(5))
+
+            ViewMaterializer(target, split="train").write(
+                dataset_factory=_DatasetFactory(samples),
+                provider_factory=_IndependentTextProviderFactory(),
+                devices=("cpu:0", "cpu:1", "cpu:2"),
+            )
+
+            stored = read_store_dataset(target)
+            self.assertEqual(len(stored), 5)
+            for index in range(5):
+                self.assertEqual(
+                    stored[index][Role.DEFAULT, Modality.TEXT].views[TextView.TEXT],
+                    f"cpu:{index % 3}:text-{index}",
+                )
+
     def test_materializer_single_device_loader_workers_cover_all_samples(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -1618,6 +1638,16 @@ class _ParallelProviderFactory:
 class _ParallelTextProviderFactory:
     def __call__(self, device: str):
         return _TextProvider(prefix="cpu1" if device.endswith(":1") else "cpu0")
+
+
+@dataclass(frozen=True)
+class _IndependentTextProviderFactory:
+    def __call__(self, device: str):
+        from torch import distributed as dist
+
+        if dist.is_initialized():
+            raise RuntimeError("materializer initialized torch.distributed")
+        return _TextProvider(prefix=device)
 
 
 @dataclass(frozen=True)
