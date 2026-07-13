@@ -932,6 +932,16 @@ class ViewMaterializerTest(unittest.TestCase):
             self.assertEqual([path.name for path in logs], ["part-00000.log", "part-00001.log"])
             self.assertIn("cpu:0", logs[0].read_text(encoding="utf-8"))
             self.assertIn("cpu:1", logs[1].read_text(encoding="utf-8"))
+            self.assertIn(
+                f"worker log: {logs[0]}",
+                logs[0].read_text(encoding="utf-8"),
+            )
+            self.assertIn("loading provider on cpu:0", logs[0].read_text(encoding="utf-8"))
+            self.assertIn("loaded provider on cpu:0", logs[0].read_text(encoding="utf-8"))
+            self.assertIn(
+                "starting materialization on cpu:0",
+                logs[0].read_text(encoding="utf-8"),
+            )
             self.assertEqual(
                 stored[0][Role.DEFAULT, Modality.TEXT].views[TextView.TEXT],
                 "cpu0:text-0",

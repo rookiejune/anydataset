@@ -907,8 +907,11 @@ def _materialize_worker(
         try:
             if config.runtime.uses_local_device:
                 set_torch_device(config.device)
+            logger.info("loading provider on %s", config.device)
             provider = provider_factory(config.device)
+            logger.info("loaded provider on %s", config.device)
             materializer = _worker_materializer(config)
+            logger.info("starting materialization on %s", config.device)
             materializer._write_resumable_loader_batches(
                 provider,
                 dataset_factory=dataset_factory,
@@ -953,8 +956,9 @@ def _worker_logger(logs_dir: Path, shard_id: int) -> logging.Logger:
     logger = logging.getLogger(f"anydataset.materializer.{os.getpid()}.{shard_id}")
     logger.setLevel(logging.INFO)
     logger.propagate = False
+    path = logs_dir / f"part-{shard_id:05d}.log"
     handler = logging.FileHandler(
-        logs_dir / f"part-{shard_id:05d}.log",
+        path,
         encoding="utf-8",
     )
     handler.setFormatter(
@@ -962,6 +966,11 @@ def _worker_logger(logs_dir: Path, shard_id: int) -> logging.Logger:
     )
     logger.handlers.clear()
     logger.addHandler(handler)
+    if shard_id == 0:
+        console = logging.StreamHandler()
+        console.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+        logger.addHandler(console)
+    logger.info("worker log: %s", path)
     return logger
 
 
