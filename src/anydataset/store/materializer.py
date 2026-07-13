@@ -7,14 +7,16 @@ import time
 import traceback
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
+from functools import partial
 from pathlib import Path
+from types import BuiltinFunctionType, FunctionType, MethodType
 from typing import Any, Literal, Union, cast
 
 from torch.utils.data import DataLoader
 
 from .._compat import strict_zip
 from .._devices import Devices, resolve_devices
-from .._logging import run_logs_dir, use_run_logs_dir
+from .._logging import run_logs_dir, use_run_logs_dir, write_warning
 from .._parallel import (
     DeviceWorker,
     free_port,
@@ -39,6 +41,7 @@ from .._resume import (
     missing_indexes,
     pending_batch,
     prepare_resume_dir,
+    quarantine_resume_dir,
     resume_dir,
     validate_completed_indexes,
 )
@@ -181,7 +184,6 @@ class ViewMaterializer:
                 dataset_factory=dataset_factory,
                 provider_factory=provider_factory,
                 expected=expected,
-                devices=devices,
                 use_map_style_loader=use_map_style_loader,
             ),
         )
@@ -239,7 +241,6 @@ class ViewMaterializer:
                 dataset_factory=dataset_factory,
                 provider_factory=provider_factory,
                 expected=expected,
-                devices=(device,),
                 use_map_style_loader=use_map_style_loader,
             ),
         )
@@ -487,7 +488,6 @@ class ViewMaterializer:
         dataset_factory: DatasetFactory,
         provider_factory: ProviderFactory,
         expected: int,
-        devices: tuple[str, ...],
         use_map_style_loader: bool,
     ) -> dict[str, object]:
         return {
@@ -498,14 +498,7 @@ class ViewMaterializer:
                 "split": self.split,
                 "max_shard_samples": self.max_shard_samples,
                 "batch_size": self.batch_size,
-                "commit_samples": self.commit_samples,
                 "keep_schema": _metadata_value(self.keep_schema),
-            },
-            "runtime": {
-                "process_start_method": self.runtime.process_start_method,
-                "server_start_method": self.runtime.server_start_method,
-                "reader_start_method": self.runtime.reader_start_method,
-                "writer_start_method": self.runtime.writer_start_method,
             },
             "input": {
                 "type": f"{type(dataset).__module__}.{type(dataset).__qualname__}",
@@ -516,7 +509,6 @@ class ViewMaterializer:
             "provider": {
                 "factory": _callable_id(provider_factory),
             },
-            "devices": list(devices),
         }
 
     def _sample_with_provider(
@@ -813,7 +805,12 @@ def prepare_materializer_resume_dir(
     path = resume_dir(output_dir, "fragments")
     expected = dict(metadata)
     if path.exists() and _stored_resume_metadata(path) != expected:
-        cleanup_resume_dir(output_dir)
+        stale = quarantine_resume_dir(output_dir)
+        write_warning(
+            "materializer",
+            "Quarantined incompatible resume directory "
+            f"at {stale}; remove it after confirming it is no longer needed.",
+        )
     path = prepare_resume_dir(output_dir, "fragments")
     write_json(path / "resume.json", expected)
     return path
@@ -842,8 +839,26 @@ def _metadata_value(value: object) -> object:
     return repr(value)
 
 
-def _callable_id(value: object) -> str:
-    return f"{type(value).__module__}.{type(value).__qualname__}:{repr(value)}"
+def _callable_id(value: object) -> object:
+    if isinstance(value, partial):
+        return {
+            "type": "functools.partial",
+            "function": _callable_id(value.func),
+            "args": _metadata_value(value.args),
+            "keywords": _metadata_value(value.keywords or {}),
+        }
+    if isinstance(value, MethodType):
+        return {
+            "function": _callable_id(value.__func__),
+            "owner": _callable_id(value.__self__),
+        }
+    if isinstance(value, (FunctionType, BuiltinFunctionType)):
+        return f"{value.__module__}.{value.__qualname__}"
+
+    type_id = f"{type(value).__module__}.{type(value).__qualname__}"
+    if type(value).__repr__ is object.__repr__:
+        return type_id
+    return {"type": type_id, "value": repr(value)}
 
 
 def _materializer_lock_path(output_dir: str | Path) -> Path:

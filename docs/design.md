@@ -99,6 +99,11 @@ materializer 必须报错，不静默覆盖。
 自己的 process group，并定义各 rank 的同步契约。
 `commit_samples` 控制 checkpoint 粒度，默认是 `max(batch_size, 32)`，避免默认可续跑时
 产生过多小文件；需要更细断点时可以显式调低。
+resume metadata 与本次运行不兼容时，旧目录会先原子重命名为相邻的
+`.<output>.resume.stale-*` 目录，避免在共享文件系统上同步递归
+删除大量 fragment 阻塞新任务。运行日志会记录该目录；确认不再需要后由调用方清理。
+metadata 使用稳定的 factory 标识，并只记录影响 fragment 语义或格式的配置；device
+数量、进程启动方式和 commit 粒度可以在续跑时调整，不会使已完成 fragment 失效。
 `write_workers` 控制每个 materializer worker 内的后台写进程数，默认用一个 writer
 让 provider 计算和 fragment 落盘重叠；`write_prefetch` 控制待写任务上限。
 

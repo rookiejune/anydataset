@@ -12,6 +12,7 @@ import hashlib
 import json
 import os
 import shutil
+import time
 from collections.abc import Collection, Iterable, Sequence
 from pathlib import Path
 from typing import Any, TypeVar
@@ -50,6 +51,17 @@ def cleanup_resume_dir(output_dir: str | Path) -> None:
     root = resume_root(output_dir)
     if root.exists():
         shutil.rmtree(root)
+
+
+def quarantine_resume_dir(output_dir: str | Path) -> Path | None:
+    root = resume_root(output_dir)
+    if not root.exists():
+        return None
+
+    suffix = f"{time.time_ns()}-{os.getpid()}"
+    stale = root.with_name(f"{root.name}.stale-{suffix}")
+    root.replace(stale)
+    return stale
 
 
 def dataset_sample_count(dataset: Any, *, context: str) -> int:

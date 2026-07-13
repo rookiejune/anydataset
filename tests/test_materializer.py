@@ -2,6 +2,7 @@ import os
 import tempfile
 import unittest
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from unittest import mock
 
@@ -28,12 +29,53 @@ from anydataset.types import (
 from anydataset.store import DatasetWriter, ViewMaterializer
 from anydataset.store.jsonio import read_json
 from anydataset.store.manifestio import read_samples_manifest, read_view_manifest
+from anydataset.store.materializer import _callable_id
 from anydataset.store.paths import view_dir
 from anydataset.store.reader import read_store_dataset
 from anydataset._parallel import iter_indexed_shard
 
 
 class ViewMaterializerTest(unittest.TestCase):
+    def test_callable_id_ignores_function_memory_address(self):
+        first = partial(_factory_identity_target, 1, option="value")
+        second = partial(_factory_identity_target, 1, option="value")
+
+        self.assertEqual(_callable_id(first), _callable_id(second))
+        self.assertNotIn("0x", repr(_callable_id(first)))
+
+    def test_resume_metadata_ignores_execution_config(self):
+        target = Path("target")
+        dataset_factory = _UnpicklableDatasetFactory(4)
+        provider_factory = _ProviderFactory()
+        dataset = dataset_factory()
+        first = ViewMaterializer(
+            target,
+            commit_samples=2,
+            runtime=Runtime(process_start_method="spawn"),
+        )
+        second = ViewMaterializer(
+            target,
+            commit_samples=8,
+            runtime=Runtime(process_start_method="fork"),
+        )
+
+        self.assertEqual(
+            first._resume_metadata(
+                dataset,
+                dataset_factory=dataset_factory,
+                provider_factory=provider_factory,
+                expected=4,
+                use_map_style_loader=True,
+            ),
+            second._resume_metadata(
+                dataset,
+                dataset_factory=dataset_factory,
+                provider_factory=provider_factory,
+                expected=4,
+                use_map_style_loader=True,
+            ),
+        )
+
     def test_materializer_uses_output_dir_name_as_dataset_id(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -1273,6 +1315,9 @@ class ViewMaterializerTest(unittest.TestCase):
                         torch.tensor([[index + 100]]),
                     )
                 )
+            stale = list(root.glob(".target.resume.stale-*"))
+            self.assertEqual(len(stale), 1)
+            self.assertTrue((stale[0] / "fragments" / "resume.json").is_file())
 
 
 def _source_dataset(path: Path, root: Path, samples):
@@ -1299,6 +1344,10 @@ def _audio_sample(waveform: torch.Tensor):
             views={AudioView.WAVEFORM: (waveform, 4)},
         )
     }
+
+
+def _factory_identity_target(value: int, *, option: str):
+    return value, option
 
 
 def _text_sample(text: str):

@@ -11,6 +11,7 @@ from anydataset._resume import (
     indexes_complete,
     pending_batch,
     prepare_resume_dir,
+    quarantine_resume_dir,
     resume_root,
     validate_completed_indexes,
     write_completed_index_cache,
@@ -45,6 +46,19 @@ class ResumeHelpersTest(unittest.TestCase):
             cleanup_resume_dir(target)
 
             self.assertFalse(root.exists())
+
+    def test_quarantine_resume_dir_renames_hidden_sibling(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = Path(tmpdir) / "dataset"
+            root = resume_root(target)
+            (root / "fragments").mkdir(parents=True)
+
+            stale = quarantine_resume_dir(target)
+
+            self.assertIsNotNone(stale)
+            self.assertFalse(root.exists())
+            self.assertTrue(stale.is_dir())
+            self.assertTrue(stale.name.startswith(".dataset.resume.stale-"))
 
     def test_dataset_sample_count_reports_context(self):
         with self.assertRaisesRegex(TypeError, "filter requires a dataset with __len__"):
