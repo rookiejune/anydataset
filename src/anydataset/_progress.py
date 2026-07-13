@@ -15,6 +15,7 @@ from queue import Empty
 from typing import TypeVar
 
 _PROGRESS_INTERVAL = 1.0
+_NON_INTERACTIVE_PROGRESS_INTERVAL = 10.0
 ItemT = TypeVar("ItemT")
 
 
@@ -213,6 +214,10 @@ def _progress_bar(
     position: int = 0,
     leave: bool = True,
 ):
+    if not sys.stderr.isatty():
+        if position > 0:
+            return _NullProgressBar()
+        return _LogProgressBar(desc=desc, total=total)
     try:
         from tqdm.auto import tqdm
     except ImportError:
@@ -223,7 +228,6 @@ def _progress_bar(
         desc=desc,
         position=position,
         leave=leave,
-        disable=not sys.stderr.isatty(),
     )
 
 
@@ -286,3 +290,47 @@ class _NullProgressBar:
 
     def set_postfix_str(self, value: str) -> None:
         return None
+
+
+class _LogProgressBar:
+    def __init__(self, *, desc: str, total: int | None) -> None:
+        self.desc = desc
+        self.total = total
+        self.count = 0
+        self.postfix = ""
+        self.started_at = time.monotonic()
+        self.last_printed_at: float | None = None
+
+    def __enter__(self):
+        self._print(force=True)
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback) -> None:
+        self._print(force=True)
+
+    def update(self, count: int) -> None:
+        self.count += count
+        self._print()
+
+    def set_postfix_str(self, value: str) -> None:
+        self.postfix = value
+
+    def _print(self, *, force: bool = False) -> None:
+        now = time.monotonic()
+        if (
+            not force
+            and self.last_printed_at is not None
+            and now - self.last_printed_at < _NON_INTERACTIVE_PROGRESS_INTERVAL
+        ):
+            return
+        elapsed = max(0.0, now - self.started_at)
+        rate = self.count / elapsed if elapsed > 0 else 0.0
+        progress = f"{self.count} sample"
+        if self.total is not None:
+            percent = 100.0 if self.total == 0 else 100.0 * self.count / self.total
+            progress += f"/{self.total} ({percent:.1f}%)"
+        line = f"{self.desc}: {progress} [{elapsed:.0f}s, {rate:.1f} sample/s]"
+        if self.postfix:
+            line += f" {self.postfix}"
+        print(line, file=sys.stderr, flush=True)
+        self.last_printed_at = now
