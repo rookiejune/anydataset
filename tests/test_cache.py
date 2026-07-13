@@ -7,10 +7,43 @@ from unittest import mock
 
 from anydataset import Source, Spec, anydataset_home
 from anydataset._logging import run_logs_dir, write_warning
-from anydataset.cache import CacheManager
+from anydataset.cache import CacheManager, FileLock
 
 
 class CacheManagerTest(unittest.TestCase):
+    def test_file_lock_fails_fast_when_held_in_process(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "work.lock"
+
+            with FileLock(path):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    f"File lock is already held: {path}",
+                ):
+                    with FileLock(path):
+                        self.fail("nested lock unexpectedly succeeded")
+
+            with FileLock(path):
+                pass
+
+    def test_file_lock_reports_external_contention(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "work.lock"
+
+            with mock.patch(
+                "anydataset.cache.fcntl.flock",
+                side_effect=BlockingIOError,
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    f"File lock is already held: {path}",
+                ):
+                    with FileLock(path):
+                        self.fail("contended lock unexpectedly succeeded")
+
+            with FileLock(path):
+                pass
+
     def test_prepare_creates_stable_metadata(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             with mock.patch.dict(os.environ, {"ANYDATASET_HOME": tmpdir}):

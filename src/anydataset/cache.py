@@ -76,11 +76,20 @@ class FileLock:
 
     def __enter__(self):
         lock = _thread_lock(self.path)
-        lock.acquire()
+        if not lock.acquire(blocking=False):
+            raise RuntimeError(f"File lock is already held: {self.path}")
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             self.file = self.path.open("a+", encoding="utf-8")
-            fcntl.flock(self.file.fileno(), fcntl.LOCK_EX)
+            try:
+                fcntl.flock(
+                    self.file.fileno(),
+                    fcntl.LOCK_EX | fcntl.LOCK_NB,
+                )
+            except BlockingIOError as exc:
+                raise RuntimeError(
+                    f"File lock is already held: {self.path}"
+                ) from exc
             return self
         except Exception:
             if self.file is not None:
