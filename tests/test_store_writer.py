@@ -23,6 +23,7 @@ from anydataset.store import DatasetWriter
 from anydataset.store.parts import (
     DatasetFragmentWriter,
     DatasetPartWriter,
+    commit_fragment_part,
     commit_store_parts,
     commit_store_fragments,
     completed_fragment_indexes,
@@ -241,6 +242,32 @@ class DatasetWriterTest(unittest.TestCase):
             indexes = [entry.sample_index for entry in read_samples_manifest(output)]
             self.assertEqual(indexes, [0, 1, 2])
             self.assertTrue(dataset_ready_path(output).exists())
+
+    def test_fragment_part_allows_sparse_indexes(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            fragments = root / "fragments"
+            part = root / "part"
+            sample = audio_sample(waveform=torch.tensor([[1.0]]), sample_rate=4)
+            fragment = fragments / "batch-000000000001-000000000001-a"
+            DatasetFragmentWriter(
+                fragment,
+                dataset_id="toy-audio",
+                fragment_id=fragment.name,
+            ).write([(1, sample)])
+
+            commit_fragment_part(
+                part,
+                (fragment,),
+                dataset_id="toy-audio",
+                shard_id=1,
+                num_shards=2,
+            )
+
+            self.assertEqual(
+                [entry.sample_index for entry in read_samples_manifest(part)],
+                [1],
+            )
 
     def test_commit_parts_allows_views_for_partial_item_coverage(self):
         with tempfile.TemporaryDirectory() as tmpdir:

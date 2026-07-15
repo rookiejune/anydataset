@@ -64,8 +64,11 @@ from ._types import MaterializerProvider, ModalityProviderLike
 from ._view import with_view_provider
 from .parts import (
     DatasetFragmentWriter,
+    commit_fragment_part,
     commit_store_fragments,
+    commit_store_parts,
     completed_fragment_indexes,
+    store_fragments,
 )
 from .jsonio import read_json, write_json
 from .writer import DEFAULT_MAX_SHARD_SAMPLES, DatasetWriter
@@ -221,7 +224,7 @@ class ViewMaterializer:
             completed_count=len(completed),
             missing_indexes=missing,
         )
-        return self._commit_fragments(fragments_dir, expected)
+        return self._commit_parts(fragments_dir / ".parts")
 
     def _write_resumable_single(
         self,
@@ -307,7 +310,11 @@ class ViewMaterializer:
                 )
         return self._commit_fragments(fragments_dir, expected)
 
-    def _commit_fragments(self, fragments_dir: str | Path, expected: int) -> Path:
+    def _commit_fragments(
+        self,
+        fragments_dir: str | Path,
+        expected: int,
+    ) -> Path:
         if expected == 0:
             path = DatasetWriter(
                 self.output_dir,
@@ -323,6 +330,16 @@ class ViewMaterializer:
             dataset_id=self._dataset_id,
             split=self.split,
             expected_sample_count=expected,
+        )
+        cleanup_resume_dir(self.output_dir)
+        return path
+
+    def _commit_parts(self, parts_dir: str | Path) -> Path:
+        path = commit_store_parts(
+            self.output_dir,
+            parts_dir,
+            dataset_id=self._dataset_id,
+            split=self.split,
         )
         cleanup_resume_dir(self.output_dir)
         return path
@@ -407,6 +424,7 @@ class ViewMaterializer:
     ) -> None:
         context = multiprocessing_context(self.runtime.process_start_method)
         progress = context.Queue()
+        barrier = context.Barrier(len(devices))
         master_addr = os.environ.get("MASTER_ADDR", "127.0.0.1")
         master_port = os.environ.get("MASTER_PORT", free_port())
         workers = [
@@ -429,6 +447,7 @@ class ViewMaterializer:
                         use_map_style_loader=use_map_style_loader,
                         missing_indexes=tuple(missing_indexes),
                         fragments_dir=fragments_dir,
+                        parts_dir=fragments_dir / ".parts",
                         expected=expected,
                         logs_dir=logs_dir,
                         worker_logs_dir=worker_logs_dir,
@@ -441,6 +460,7 @@ class ViewMaterializer:
                     dataset_factory,
                     provider_factory,
                     progress,
+                    barrier,
                 ),
                 name=f"anydataset-materialize-{shard_id}",
             )
@@ -883,6 +903,7 @@ class _WorkerConfig:
     use_map_style_loader: bool
     missing_indexes: tuple[int, ...]
     fragments_dir: Path
+    parts_dir: Path
     expected: int
     logs_dir: Path
     worker_logs_dir: Path
@@ -898,6 +919,7 @@ def _materialize_worker(
     dataset_factory: DatasetFactory,
     provider_factory: ProviderFactory,
     progress: multiprocessing.Queue,
+    barrier: Any,
 ) -> None:
     with use_run_logs_dir(config.logs_dir):
         logger = _worker_logger(config.worker_logs_dir, config.shard_id)
@@ -937,6 +959,22 @@ def _materialize_worker(
                 expected=config.expected,
                 progress=progress,
                 worker_id=config.shard_id,
+            )
+            logger.info("waiting to merge shard %s fragments", config.shard_id)
+            barrier.wait()
+            fragments = store_fragments(
+                config.fragments_dir,
+                dataset_id=materializer._dataset_id,
+                split=config.split,
+            )
+            assigned = fragments[config.shard_id :: config.num_shards]
+            commit_fragment_part(
+                config.parts_dir / f"part-{config.shard_id:05d}",
+                assigned,
+                dataset_id=materializer._dataset_id,
+                split=config.split,
+                shard_id=config.shard_id,
+                num_shards=config.num_shards,
             )
         except Exception:
             error = traceback.format_exc()

@@ -49,6 +49,9 @@
 - `BackgroundWriteSink` 支持 thread 和 process backend；materializer/filter 默认使用
   thread writer，保留 provider/filter 计算和落盘重叠，同时避免把大 write job 通过
   process pipe pickle 传输。
+- 每个 materializer rank 的 writer 在 fragment 阶段结束后归并自己的 rank part；各
+  rank 通过屏障确认 fragment 写入完成，再按稳定顺序分配包括续跑产物在内的 fragment。
+  主进程最终只对 rank part 做 k-way merge、全局覆盖校验和原子发布。
 
 ## 阶段一基准
 

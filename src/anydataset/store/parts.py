@@ -269,6 +269,58 @@ def commit_store_fragments(
     )
 
 
+def commit_fragment_part(
+    output_dir: str | Path,
+    fragments: Sequence[str | Path],
+    *,
+    dataset_id: str,
+    shard_id: int,
+    num_shards: int,
+    split: str | None = None,
+) -> Path:
+    validate_shard(num_shards, shard_id)
+    roots = _validate_fragment_roots(
+        tuple(Path(path) for path in fragments),
+        dataset_id=dataset_id,
+        split=split,
+    )
+    if not roots:
+        return DatasetPartWriter(
+            output_dir,
+            dataset_id=dataset_id,
+            shard_id=shard_id,
+            num_shards=num_shards,
+            split=split,
+        ).write(())
+    views = _store_views_from_first(roots)
+
+    def write(root: Path) -> Path:
+        _commit_roots_to_tmp(
+            root,
+            roots,
+            dataset_id=dataset_id,
+            split=split,
+            stream_ordered=True,
+            views=views,
+            dense=False,
+        )
+        write_json(
+            _part_json_path(root),
+            {
+                "dataset_id": dataset_id,
+                "split": split,
+                "num_shards": num_shards,
+                "shard_id": shard_id,
+                "sample_count": sum(
+                    read_store_manifest(fragment).sample_count for fragment in roots
+                ),
+            },
+        )
+        return root
+
+    return replace_dir(output_dir, write)
+
+
 def completed_fragment_indexes(
     fragments_dir: str | Path,
     *,
@@ -300,6 +352,19 @@ def completed_fragment_indexes(
     return frozenset(indexes)
 
 
+def store_fragments(
+    fragments_dir: str | Path,
+    *,
+    dataset_id: str,
+    split: str | None = None,
+) -> tuple[Path, ...]:
+    return _fragment_roots(
+        fragments_dir,
+        dataset_id=dataset_id,
+        split=split,
+    )
+
+
 def _commit_roots_to_tmp(
     root: Path,
     stores: tuple[Path, ...],
@@ -309,12 +374,14 @@ def _commit_roots_to_tmp(
     expected_sample_count: int | None = None,
     stream_ordered: bool = False,
     views: tuple[tuple[Role, Modality, View], ...] | None = None,
+    dense: bool = True,
 ) -> Path:
     sample_count = _write_ordered_samples_manifest(
         root,
         stores,
         expected_sample_count=expected_sample_count,
         stream_ordered=stream_ordered,
+        dense=dense,
     )
     _write_committed_view_manifests(
         root,
@@ -399,6 +466,7 @@ def _write_ordered_samples_manifest(
     *,
     expected_sample_count: int | None,
     stream_ordered: bool = False,
+    dense: bool = True,
 ) -> int:
     writer = sample_manifest_writer(root)
     previous_index: int | None = None
@@ -423,7 +491,7 @@ def _write_ordered_samples_manifest(
                     f"unexpected sample_index {entry.sample_index}"
                 )
             expected_index = count - 1
-            if entry.sample_index != expected_index:
+            if dense and entry.sample_index != expected_index:
                 if expected_sample_count is not None:
                     raise ValueError(
                         "Materialized fragments coverage mismatch: "
@@ -515,7 +583,9 @@ def _merged_sample_entries(stores: tuple[Path, ...]) -> Iterator[SampleManifestE
     )
 
 
-def _stream_sample_entries(stores: tuple[Path, ...]) -> Iterator[SampleManifestEntry]:
+def _stream_sample_entries(
+    stores: tuple[Path, ...],
+) -> Iterator[SampleManifestEntry]:
     yield from _merged_loaded_entries(
         stores,
         lambda store: _sorted_entries(read_samples_manifest(store), _sample_entry_key),
