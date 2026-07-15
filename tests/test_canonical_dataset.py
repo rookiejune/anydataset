@@ -205,9 +205,10 @@ class CanonicalDatasetTest(unittest.TestCase):
         with self.assertRaises(KeyError):
             AnyDataset.resolve_sample(sample, schema)
 
-    def test_preset_create_accepts_transforms(self):
+    def test_map_preset_accepts_transforms(self):
         ref = (Role.DEFAULT, Modality.IMAGE)
-        dataset = Preset.MNIST.create(
+        dataset = AnyDataset.preset(
+            "mnist",
             transforms={
                 ref: lambda item: ImageItem(
                     views={ImageView.PIXEL: item.views[ImageView.PIXEL] + 1},
@@ -228,6 +229,12 @@ class CanonicalDatasetTest(unittest.TestCase):
             torch.equal(image.views[ImageView.PIXEL], torch.tensor([[2, 3]]))
         )
         self.assertNotIn("transforms", dataset.spec.load_options)
+
+    def test_preset_requires_matching_dataset_type(self):
+        with self.assertRaisesRegex(ValueError, "IterableAnyDataset.preset"):
+            AnyDataset.preset("wmt19")
+        with self.assertRaisesRegex(ValueError, "AnyDataset.preset"):
+            IterableAnyDataset.preset("mnist")
 
     def test_map_dataset_applies_reference_transforms(self):
         ref = (Role.DEFAULT, Modality.IMAGE)

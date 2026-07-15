@@ -6,8 +6,6 @@ from .._compat import StrEnum
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from ..dataset.abc import AnyDataset, IterableAnyDataset
-    from ..types.item import Transforms
     from . import Spec
 
 
@@ -26,14 +24,3 @@ class Preset(StrEnum):
         from ..presets.registry import preset_spec
 
         return preset_spec(self, split=split, **load_options)
-
-    def create(
-        self,
-        split: str | None = None,
-        *,
-        transforms: Transforms | None = None,
-        **load_options: Any,
-    ) -> AnyDataset | IterableAnyDataset:
-        from ..presets.registry import create_preset
-
-        return create_preset(self, split=split, transforms=transforms, **load_options)

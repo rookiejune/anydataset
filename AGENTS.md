@@ -12,7 +12,7 @@
 
 ## 开发约定
 
-- 新增内置数据集时，在 `src/anydataset/presets/` 下增加 preset class，并在 `Preset.create()` 中注册。
+- 新增内置数据集时，在 `src/anydataset/presets/` 下增加 preset class，并按数据集类型注册到 `AnyDataset.preset()` 或 `IterableAnyDataset.preset()`。
 - 具体数据集字段映射写在 preset 的 `parse_fn` 或清晰 helper 里，不写进 source 层。
 - 不新增旧式适配器、格式化器、流包装器、规格别名或模态别名。
 - 不做静默兼容旧 manifest 结构；格式变更时通过 schema version 和显式迁移处理。

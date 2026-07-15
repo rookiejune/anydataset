@@ -129,6 +129,24 @@ class _Base(ABC):
 
 
 class IterableAnyDataset(_Base, IterableDataset):
+    @classmethod
+    def preset(
+        cls,
+        preset: str | Preset,
+        split: str | None = None,
+        *,
+        transforms: Transforms | None = None,
+        **load_options: Any,
+    ) -> IterableAnyDataset:
+        from ..presets.registry import create_iterable_preset
+
+        return create_iterable_preset(
+            Preset(preset),
+            split=split,
+            transforms=transforms,
+            **load_options,
+        )
+
     def iter_rows(self) -> Iterator[Any]:
         yield from self.dataset
 
@@ -275,6 +293,24 @@ class MergedDataset(MapStyleABC):
 
 
 class AnyDataset(_Base, MapStyleABC):
+    @classmethod
+    def preset(
+        cls,
+        preset: str | Preset,
+        split: str | None = None,
+        *,
+        transforms: Transforms | None = None,
+        **load_options: Any,
+    ) -> AnyDataset:
+        from ..presets.registry import create_map_preset
+
+        return create_map_preset(
+            Preset(preset),
+            split=split,
+            transforms=transforms,
+            **load_options,
+        )
+
     def __len__(self) -> int:
         return len(self.dataset)
 

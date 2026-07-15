@@ -26,6 +26,7 @@ from anydataset import (
     AudioView,
     FilterDecision,
     FilterRule,
+    IterableAnyDataset,
     Modality,
     Preset,
     Role,
@@ -154,7 +155,9 @@ rule = FilterRule("speech_quality_v2_utmos28_chrf50_len4_peak005", quality_facto
 
 
 def fleurs_dataset():
-    return Preset.FLEURS.create(split=SPLIT, config_name=CONFIG, streaming=True)
+    return IterableAnyDataset.preset(
+        "fleurs", split=SPLIT, config_name=CONFIG, streaming=True
+    )
 
 
 def longcat_provider(device: str):
@@ -272,7 +275,9 @@ if AudioView.WAVEFORM not in audio.views or (
     transcript is None or TextView.TEXT not in transcript.views
 ):
     merged = merged.merge(
-        Preset.FLEURS.create(split=SPLIT, config_name=CONFIG, streaming=True),
+        IterableAnyDataset.preset(
+            "fleurs", split=SPLIT, config_name=CONFIG, streaming=True
+        ),
     )
 
 # Apply the named quality rule and select the accepted partition.

@@ -30,15 +30,16 @@ pip install -e '.[huggingface,audio,dev]'
 
 ## Presets
 
-Use `Preset` when a built-in dataset already knows both its source and parser.
+Use `AnyDataset.preset()` or `IterableAnyDataset.preset()` when a built-in
+dataset already knows both its source and parser.
 Built-in presets currently include `MNIST`, `CIFAR10`, `FLEURS`,
 `LIBRISPEECH_ASR`, `COMMON_VOICE`, `ESC50`, `NSYNTH`, `FSD50K`, and `WMT19`.
 
 ```python
-from anydataset import Preset
+from anydataset import IterableAnyDataset
 from anydataset.types import AudioView, Modality, Role
 
-dataset = Preset.FLEURS.create(split="validation")
+dataset = IterableAnyDataset.preset("fleurs", split="validation")
 sample = next(iter(dataset))
 
 audio = sample[Role.DEFAULT, Modality.AUDIO]
@@ -144,13 +145,13 @@ then use Parquet row groups for map-style random access.
 Combine already-created datasets with `MultipleAnyDataset`.
 
 ```python
-from anydataset import MultipleAnyDataset, Preset
+from anydataset import IterableAnyDataset, MultipleAnyDataset
 from anydataset.dataset import RoundRobinStrategy
 
 dataset = MultipleAnyDataset(
     [
-        Preset.FLEURS.create(split="train"),
-        Preset.LIBRISPEECH_ASR.create(split="train.100"),
+        IterableAnyDataset.preset("fleurs", split="train"),
+        IterableAnyDataset.preset("librispeech_asr", split="train.100"),
     ],
     strategy=RoundRobinStrategy(),
 )
@@ -252,10 +253,12 @@ Quality modules provide reusable predicates for `FilterRule`; they do not own
 dataset loading or cache naming.
 
 ```python
-from anydataset import FilterRule, Preset
+from anydataset import FilterRule, IterableAnyDataset, Preset
 from anydataset.quality.translation import Predicate as TranslationQuality
 
-dataset = Preset.WMT19.create(source_lang="zh", target_lang="en")
+dataset = IterableAnyDataset.preset(
+    "wmt19", source_lang="zh", target_lang="en"
+)
 def translation_factory():
     return TranslationQuality.from_preset(
         Preset.WMT19,

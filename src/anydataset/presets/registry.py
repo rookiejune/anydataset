@@ -82,12 +82,12 @@ def preset_spec(
     )
 
 
-def create_preset(
+def create_map_preset(
     preset: Preset,
     split: str | None = None,
     transforms: Transforms | None = None,
     **load_options: Any,
-) -> AnyDataset | IterableAnyDataset:
+) -> AnyDataset:
     if preset is Preset.MNIST:
         from .mnist import MNIST
 
@@ -96,6 +96,21 @@ def create_preset(
         from .cifar10 import CIFAR10
 
         return CIFAR10(split=split, transforms=transforms, **load_options)
+    if preset is Preset.FSD50K:
+        from .fsd50k import FSD50K
+
+        return FSD50K(split=split, transforms=transforms, **load_options)
+    raise ValueError(
+        f"Preset {preset.value!r} is iterable; use IterableAnyDataset.preset()."
+    )
+
+
+def create_iterable_preset(
+    preset: Preset,
+    split: str | None = None,
+    transforms: Transforms | None = None,
+    **load_options: Any,
+) -> IterableAnyDataset:
     if preset is Preset.FLEURS:
         from .fleurs import Fleurs
 
@@ -116,12 +131,8 @@ def create_preset(
         from .nsynth import NSynth
 
         return NSynth(split=split, transforms=transforms, **load_options)
-    if preset is Preset.FSD50K:
-        from .fsd50k import FSD50K
-
-        return FSD50K(split=split, transforms=transforms, **load_options)
     if preset is Preset.WMT19:
         from .wmt19 import WMT19
 
         return WMT19(split=split, transforms=transforms, **load_options)
-    raise ValueError(f"Unsupported preset: {preset!r}.")
+    raise ValueError(f"Preset {preset.value!r} is map-style; use AnyDataset.preset().")
