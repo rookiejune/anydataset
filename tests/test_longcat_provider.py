@@ -21,6 +21,7 @@ from anydataset.types import (
     Modality,
     Role,
 )
+from anydataset.provider.codec import CodecProvider
 from anydataset.provider.longcat import LongCatProvider
 from anydataset.store import DatasetWriter, ViewMaterializer
 from anydataset.store.manifestio import read_view_manifest
@@ -93,6 +94,53 @@ class FakeBatchedLongCatCodecLoader:
     def from_pretrained(cls, **kwargs):
         cls.calls.append(kwargs)
         return cls.codec
+
+
+class FakeCodec:
+    def __init__(self, codes: Tensor, codebook_sizes: tuple[int, ...]) -> None:
+        self.codes = codes
+        self.codebook_sizes = codebook_sizes
+
+    def eval(self) -> None:
+        return None
+
+    def encode(self, audio: Tensor, sample_rate: int) -> Tensor:
+        return self.codes.to(audio.device)
+
+
+class CodecProviderTest(unittest.TestCase):
+    def test_accepts_ids_at_each_codebook_boundary(self):
+        codes = torch.tensor([[[0, 0, 0], [3, 4, 8]]])
+        provider = CodecProvider(FakeCodec(codes, (4, 5, 9)), AudioView.STABLE)
+
+        output = provider({AudioView.WAVEFORM: (torch.zeros(4), 16000)})
+
+        self.assertTrue(torch.equal(output, codes[0]))
+
+    def test_single_rejects_negative_id_for_its_codebook(self):
+        codes = torch.tensor([[[0, 4, 8], [3, -1, 0]]])
+        provider = CodecProvider(FakeCodec(codes, (4, 5, 9)), AudioView.STABLE)
+
+        with self.assertRaisesRegex(
+            ValueError,
+            r"codebook 1 observed \[-1, 4\], expected \[0, 5\)",
+        ):
+            provider({AudioView.WAVEFORM: (torch.zeros(4), 16000)})
+
+    def test_batch_rejects_upper_bound_id_for_its_codebook(self):
+        codes = torch.tensor([[[0, 0, 0]], [[3, 5, 8]]])
+        provider = CodecProvider(FakeCodec(codes, (4, 5, 9)), AudioView.STABLE)
+
+        with self.assertRaisesRegex(
+            ValueError,
+            r"codebook 1 observed \[0, 5\], expected \[0, 5\)",
+        ):
+            provider.call_batch(
+                _provider_batch(
+                    _audio_sample(waveform=torch.zeros(4), sample_rate=16000),
+                    _audio_sample(waveform=torch.zeros(4), sample_rate=16000),
+                )
+            )
 
 
 class LongCatProviderTest(unittest.TestCase):

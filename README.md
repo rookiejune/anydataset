@@ -445,7 +445,10 @@ before writing samples to the store. Each sample stores one integer
 `[frame, codebook]` tensor. Collation produces `[batch, frame, codebook]` and a
 `[batch, frame]` mask. The dataset layer preserves the complete ordered
 codebook axis and does not assign semantic or acoustic meaning to individual
-codebooks.
+codebooks. `CodecProvider` validates every output column against the codec
+contract when it generates a view: each id in column `k` must satisfy
+`0 <= id < codebook_sizes[k]`. Store manifests do not carry `codebook_sizes`,
+so directly loaded store views are not range-checked by readers or collation.
 
 `ModalityMaterializer` adds a missing modality under the same role. The
 provider declares its output view; the materializer infers the output modality

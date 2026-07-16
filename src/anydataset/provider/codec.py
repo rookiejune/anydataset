@@ -33,7 +33,7 @@ class CodecProvider(nn.Module, AudioProvider):
         waveform, sample_rate = self._audio_batch(views)
         codes = _codes(
             self.codec.encode(waveform, sample_rate),
-            len(self.codec.codebook_sizes),
+            self.codec.codebook_sizes,
         )
         return self._tensor(codes[0])
 
@@ -64,7 +64,7 @@ class CodecProvider(nn.Module, AudioProvider):
         sample_rate = _single_sample_rate(sample_rates)
         codes = _codes(
             self.codec.encode(waveform, sample_rate),
-            len(self.codec.codebook_sizes),
+            self.codec.codebook_sizes,
         )
         return _split_codes(
             self._tensor(codes),
@@ -135,15 +135,31 @@ def _split_codes(
     ]
 
 
-def _codes(codes: torch.Tensor, codebooks: int) -> torch.Tensor:
+def _codes(codes: torch.Tensor, codebook_sizes: Sequence[int]) -> torch.Tensor:
     if not isinstance(codes, torch.Tensor):
         raise TypeError("Codec encode must return a Tensor.")
     if codes.ndim != 3:
         raise ValueError("Codec codes must have shape [batch, frame, codebook].")
+    codebooks = len(codebook_sizes)
     if codes.shape[-1] != codebooks:
         raise ValueError(f"Codec codes must contain all configured {codebooks} codebooks.")
     if codes.dtype == torch.bool or codes.is_floating_point() or codes.is_complex():
         raise TypeError("Codec codes must contain integer ids.")
+    if codes.numel() == 0:
+        return codes
+
+    minimum = codes.amin(dim=(0, 1))
+    maximum = codes.amax(dim=(0, 1))
+    limits = torch.as_tensor(codebook_sizes, dtype=torch.int64, device=codes.device)
+    invalid = (minimum < 0) | (maximum >= limits)
+    if invalid.any().item():
+        observed = torch.stack((minimum, maximum), dim=1).cpu().tolist()
+        details = "; ".join(
+            f"codebook {index} observed [{low}, {high}], expected [0, {size})"
+            for index, ((low, high), size) in enumerate(zip(observed, codebook_sizes))
+            if low < 0 or high >= size
+        )
+        raise ValueError(f"Codec code ids are outside configured ranges: {details}.")
     return codes
 
 

@@ -687,8 +687,11 @@ schema = {
 LongCat 可以作为可选 provider 使用。provider 会加载
 `anytrain.codec.longcat.LongCat`。输出 view 是整数 Tensor：单样本 shape 为
 `[frame, codebook]`，collate 后为 `[batch, frame, codebook]`，对应 mask 为
-`[batch, frame]`。公共数据层不区分 semantic / acoustic codebook；需要解释具体
-码本语义时，由下游任务按 codec 契约处理。waveform 输入的采样率来自
+`[batch, frame]`。`CodecProvider` 生成 view 时按照 codec 契约逐列检查输出，第 k 列
+的每个 id 必须满足 `0 <= id < codebook_sizes[k]`。store manifest 不保存
+`codebook_sizes`，所以 reader 和 collate 不对直接读取的 store view 重复检查值域。
+公共数据层不区分 semantic / acoustic codebook；需要解释具体码本语义时，由下游任务按
+codec 契约处理。waveform 输入的采样率来自
 `AudioView.WAVEFORM` 的 `(waveform, sample_rate)` value，file 输入的采样率来自
 `torchaudio.load()`。
 

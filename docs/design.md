@@ -67,7 +67,11 @@ base store -> provider -> delta store -> logical merge -> schema selects derived
 例如 LongCat codes 是 `AudioView.LONGCAT`。Codec view 的单样本值统一为整数 Tensor
 `[frame, codebook]`，collate 后为 `[batch, frame, codebook]`，mask 为
 `[batch, frame]`。K 个码本必须完整、有序保存；数据层不区分 semantic / acoustic
-codebook，具体码本语义属于 codec 或下游任务。旧的
+codebook。经 `CodecProvider` 生成时，第 k 列的每个 id 必须满足
+`0 <= id < codebook_sizes[k]`；provider 在输出设备上逐码本检查该值域，越界时在
+写入前显式报错。store manifest 不保存 `codebook_sizes`，因此直接读取 store 时不做该
+值域校验；已有 view 进入 collate 时也只检查通用 tensor 契约。具体码本语义属于 codec
+或下游任务。旧的
 `{"semantic_codes": ..., "acoustic_codes": ...}` mapping 不属于当前 codec view
 契约，进入 collate 时应显式报错。
 
