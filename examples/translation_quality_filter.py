@@ -205,15 +205,13 @@ def register_table_source(source: SourceKey) -> None:
 
 
 def delimiter(value: str) -> str:
-    match value:
-        case "tab" | "\\t":
-            return "\t"
-        case "comma" | ",":
-            return ","
-        case _:
-            if len(value) != 1:
-                raise ValueError("delimiter must be one character, `tab`, or `comma`.")
-            return value
+    if value in {"tab", "\\t"}:
+        return "\t"
+    if value in {"comma", ","}:
+        return ","
+    if len(value) != 1:
+        raise ValueError("delimiter must be one character, `tab`, or `comma`.")
+    return value
 
 
 def preview_metrics(rows: Any, limit: int) -> list[Mapping[str, Any]]:
