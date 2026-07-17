@@ -279,6 +279,17 @@ def multiprocessing_context(start_method: StartMethod = "spawn"):
     return multiprocessing.get_context(start_method)
 
 
+def validate_process_parent(*, context: str) -> None:
+    process = multiprocessing.current_process()
+    if not process.daemon:
+        return
+    raise RuntimeError(
+        f"{context} cannot start child processes from daemonic process "
+        f"{process.name!r}. Run it from the application main process; changing "
+        "the multiprocessing start method does not remove this restriction."
+    )
+
+
 def validate_process_value(
     name: str,
     value: object,

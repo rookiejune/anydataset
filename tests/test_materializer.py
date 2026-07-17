@@ -1,3 +1,4 @@
+import multiprocessing
 import os
 import tempfile
 import unittest
@@ -114,6 +115,62 @@ class ViewMaterializerTest(unittest.TestCase):
                 [sample.sample_index for sample in stored.samples],
                 [0, 1],
             )
+
+    def test_materializer_rejects_daemonic_parent_for_nested_workers(self):
+        process = mock.Mock()
+        process.daemon = True
+        process.name = "daemon-parent"
+        dataset_factory = mock.Mock()
+        provider_factory = mock.Mock()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            cases = (
+                (ViewMaterializer(root / "readers", num_workers=1), "cpu"),
+                (
+                    ViewMaterializer(root / "devices"),
+                    ("cpu:0", "cpu:1"),
+                ),
+            )
+            with mock.patch(
+                "anydataset._parallel.multiprocessing.current_process",
+                return_value=process,
+            ):
+                for materializer, devices in cases:
+                    with self.subTest(output_dir=materializer.output_dir):
+                        with self.assertRaisesRegex(
+                            RuntimeError,
+                            "cannot start child processes.*application main process",
+                        ):
+                            materializer.write(
+                                dataset_factory=dataset_factory,
+                                provider_factory=provider_factory,
+                                devices=devices,
+                            )
+
+        dataset_factory.assert_not_called()
+        provider_factory.assert_not_called()
+
+    def test_materializer_allows_daemonic_parent_without_child_processes(self):
+        process = mock.Mock()
+        process.daemon = True
+        process.name = "daemon-parent"
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = Path(tmpdir) / "target"
+            with mock.patch(
+                "anydataset._parallel.multiprocessing.current_process",
+                return_value=process,
+            ):
+                ViewMaterializer(target, num_workers=0).write(
+                    dataset_factory=_DatasetFactory(
+                        (_audio_sample(torch.tensor([[1.0]])),)
+                    ),
+                    provider_factory=_ProviderFactory(),
+                    devices="cpu",
+                )
+
+            self.assertEqual(len(read_store_dataset(target)), 1)
 
     def test_materializer_writes_only_provider_output_by_default(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1696,6 +1753,8 @@ class _ParallelProviderFactory:
 @dataclass(frozen=True)
 class _ParallelTextProviderFactory:
     def __call__(self, device: str):
+        if multiprocessing.current_process().daemon:
+            raise RuntimeError("materializer device process must not be daemonic")
         return _TextProvider(prefix="cpu1" if device.endswith(":1") else "cpu0")
 
 

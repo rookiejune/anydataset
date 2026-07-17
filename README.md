@@ -398,6 +398,12 @@ Multi-device materialization uses Python `spawn`, so `dataset_factory` and
 `provider_factory` must be picklable, module-level callables. Like filtering,
 multi-device materialization owns its offline worker processes and should not
 be launched from inside an existing DDP training process.
+Call `write()` from the application main process, not from a PyTorch
+`DataLoader` worker or another daemonic process. Multi-device mode creates one
+explicitly non-daemonic materializer process per device, and each materializer
+process may create `num_workers` DataLoader readers. Switching between `fork`
+and `spawn` does not remove Python's restriction on daemonic processes creating
+children.
 Pass `num_workers` to let each materializer process read samples through a
 PyTorch `DataLoader`; this is useful when `parse_fn` does CPU-heavy work such
 as file-to-waveform decoding. The materializer sets rank environment variables

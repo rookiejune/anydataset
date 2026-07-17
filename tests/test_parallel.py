@@ -13,6 +13,7 @@ from anydataset._parallel import (
     map_style_indexed_loader,
     restore_environment,
     set_single_worker_environment,
+    validate_process_parent,
 )
 
 
@@ -83,6 +84,31 @@ class ParallelRuntimeTest(unittest.TestCase):
                 self.assertEqual(os.environ["ANYDATASET_TEST_DEVICE"], "cpu")
             finally:
                 restore_environment(previous)
+
+    def test_process_parent_rejects_daemonic_process(self):
+        process = mock.Mock()
+        process.daemon = True
+        process.name = "daemon-parent"
+
+        with mock.patch(
+            "anydataset._parallel.multiprocessing.current_process",
+            return_value=process,
+        ):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "cannot start child processes.*application main process",
+            ):
+                validate_process_parent(context="materialization")
+
+    def test_process_parent_accepts_non_daemonic_process(self):
+        process = mock.Mock()
+        process.daemon = False
+
+        with mock.patch(
+            "anydataset._parallel.multiprocessing.current_process",
+            return_value=process,
+        ):
+            validate_process_parent(context="materialization")
 
 
 @dataclass(frozen=True)

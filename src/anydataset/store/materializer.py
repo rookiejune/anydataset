@@ -28,6 +28,7 @@ from .._parallel import (
     set_single_worker_environment,
     set_torch_device,
     set_worker_environment,
+    validate_process_parent,
     validate_process_value,
 )
 from .._progress import Progress, ProgressDashboard, put_progress, watch_workers
@@ -129,6 +130,13 @@ class ViewMaterializer:
         devices: Devices = "auto",
     ) -> Path:
         resolved = resolve_devices(devices)
+        if len(resolved) > 1 or self.num_workers > 0:
+            validate_process_parent(
+                context=(
+                    f"{type(self).__name__} with multiple devices or DataLoader "
+                    "workers"
+                )
+            )
         with FileLock(_materializer_lock_path(self.output_dir)):
             return self._write_resumable(
                 dataset_factory=dataset_factory,
@@ -463,6 +471,7 @@ class ViewMaterializer:
                     barrier,
                 ),
                 name=f"anydataset-materialize-{shard_id}",
+                daemon=False,
             )
             for shard_id, device in enumerate(devices)
         ]

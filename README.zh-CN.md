@@ -627,6 +627,11 @@ delta = ViewMaterializer(
 多设备 materialize 使用 Python `spawn`，所以 factory 应放在模块顶层，不能用
 lambda 或局部函数。
 
+`write()` 必须从应用主进程调用，不能从 PyTorch `DataLoader` worker 或其他 daemon
+进程调用。多设备模式会为每张卡创建一个显式 non-daemon 的 materializer 进程；每个
+materializer 进程可以再创建 `num_workers` 个 DataLoader reader。切换 `fork` 或
+`spawn` 不能解除 Python 对 daemon 进程创建子进程的限制。
+
 需要让 provider 以 batch 调模型时，给 materializer 传 `batch_size`，并在
 provider 上实现 `call_batch(batch)`。`batch` 是 `collate_fn` 返回的
 `Batch(sample, masks)`；`batch_size=1` 或 provider 没有 batch 方法时会继续走
