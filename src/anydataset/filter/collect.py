@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import logging
 import multiprocessing
 import os
 import queue
@@ -11,7 +10,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from .._logging import run_logs_dir, use_run_logs_dir
+from .._logging import run_logs_dir, use_run_logs_dir, worker_logger
 from .._parallel import (
     DeviceWorker,
     indexed_loader,
@@ -272,7 +271,7 @@ def _filter_worker(
 ) -> None:
     worker = config.worker
     with use_run_logs_dir(config.logs_dir):
-        logger = _worker_logger(config.worker_logs_dir, worker.rank)
+        logger = worker_logger("filter", config.worker_logs_dir, worker.rank)
         logger.info(
             "starting shard %s/%s on %s map_style=%s",
             worker.rank,
@@ -563,20 +562,3 @@ def _done_message(message: object) -> bool:
         and len(message) == 3
         and message[0] == _DONE
     )
-
-
-def _worker_logger(logs_dir: Path, rank: int) -> logging.Logger:
-    logs_dir.mkdir(parents=True, exist_ok=True)
-    logger = logging.getLogger(f"anydataset.filter.{os.getpid()}.{rank}")
-    logger.setLevel(logging.INFO)
-    logger.propagate = False
-    handler = logging.FileHandler(
-        logs_dir / f"part-{rank:05d}.log",
-        encoding="utf-8",
-    )
-    handler.setFormatter(
-        logging.Formatter("%(asctime)s %(levelname)s %(processName)s %(message)s")
-    )
-    logger.handlers.clear()
-    logger.addHandler(handler)
-    return logger

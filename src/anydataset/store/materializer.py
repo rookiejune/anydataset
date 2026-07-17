@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import logging
 import multiprocessing
 import os
 import time
@@ -16,7 +15,7 @@ from torch.utils.data import DataLoader
 
 from .._compat import strict_zip
 from .._devices import Devices, resolve_devices
-from .._logging import run_logs_dir, use_run_logs_dir, write_warning
+from .._logging import run_logs_dir, use_run_logs_dir, worker_logger, write_warning
 from .._parallel import (
     DeviceWorker,
     free_port,
@@ -931,7 +930,7 @@ def _materialize_worker(
     barrier: Any,
 ) -> None:
     with use_run_logs_dir(config.logs_dir):
-        logger = _worker_logger(config.worker_logs_dir, config.shard_id)
+        logger = worker_logger("materializer", config.worker_logs_dir, config.shard_id)
         logger.info(
             "starting shard %s/%s on %s missing=%s map_style=%s",
             config.shard_id,
@@ -1011,29 +1010,6 @@ def _worker_materializer(config: _WorkerConfig) -> ViewMaterializer:
         keep_schema=config.keep_schema,
         runtime=config.runtime,
     )
-
-
-def _worker_logger(logs_dir: Path, shard_id: int) -> logging.Logger:
-    logs_dir.mkdir(parents=True, exist_ok=True)
-    logger = logging.getLogger(f"anydataset.materializer.{os.getpid()}.{shard_id}")
-    logger.setLevel(logging.INFO)
-    logger.propagate = False
-    path = logs_dir / f"part-{shard_id:05d}.log"
-    handler = logging.FileHandler(
-        path,
-        encoding="utf-8",
-    )
-    handler.setFormatter(
-        logging.Formatter("%(asctime)s %(levelname)s %(processName)s %(message)s")
-    )
-    logger.handlers.clear()
-    logger.addHandler(handler)
-    if shard_id == 0:
-        console = logging.StreamHandler()
-        console.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
-        logger.addHandler(console)
-    logger.info("worker log: %s", path)
-    return logger
 
 
 def _put_stage_progress(

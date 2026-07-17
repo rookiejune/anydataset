@@ -117,6 +117,11 @@ covered. `write_workers` controls background fragment writer processes; the
 default is one writer so predicate execution can overlap with parquet writes.
 `write_prefetch` bounds pending write jobs.
 
+Cache construction reports scan and fragment-writer progress on stderr. In
+multi-device runs, each worker also writes lifecycle and failure details under
+`$ANYDATASET_HOME/logs/<timestamp>-<pid>/filter/part-xxxxx.log`; rank 0 mirrors
+its lifecycle log to stderr.
+
 `FilterRule.apply(..., device="auto")` uses one spawned process per visible CUDA
 device, or CPU single-process execution when CUDA is unavailable. Pass
 `device="cpu"` to force single-process CPU execution. Pass an iterable such as

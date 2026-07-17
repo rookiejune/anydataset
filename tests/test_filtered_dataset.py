@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import io
 import json
 import math
 import os
 import tempfile
 import time
 import unittest
+from contextlib import redirect_stderr
 from unittest import mock
 from collections.abc import Iterator, Sequence
 from enum import auto
@@ -727,6 +729,29 @@ class FilteredDatasetTest(unittest.TestCase):
             log_text = _read_filter_log()
 
         self.assertIn("reason='metrics cache is missing or incomplete'", log_text)
+
+    def test_rule_apply_reports_scan_and_writer_progress(self):
+        _register_rows_source("unit_test_filter_progress")
+        dataset = _dataset("unit_test_filter_progress", [0, 1, 2])
+        stderr = io.StringIO()
+
+        with (
+            mock.patch("anydataset._progress._NON_INTERACTIVE_PROGRESS_INTERVAL", 0.0),
+            redirect_stderr(stderr),
+        ):
+            FilterRule(
+                name="progress",
+                factory=lambda: lambda sample: True,
+            ).apply(
+                dataset_factory=lambda: dataset,
+                device="cpu",
+                commit_samples=2,
+            )
+
+        output = stderr.getvalue()
+        self.assertIn("filter samples: 3 sample/3 (100.0%)", output)
+        self.assertIn("scan=3", output)
+        self.assertIn("writer=3", output)
 
     def test_rule_apply_requires_decisions_when_metrics_enabled(self):
         _register_rows_source("unit_test_filter_metrics_required")

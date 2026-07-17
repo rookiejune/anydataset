@@ -1,12 +1,14 @@
+import io
 import json
 import os
 import tempfile
 import unittest
+from contextlib import redirect_stderr
 from pathlib import Path
 from unittest import mock
 
 from anydataset import Source, Spec, anydataset_home
-from anydataset._logging import run_logs_dir, write_warning
+from anydataset._logging import run_logs_dir, worker_logger, write_warning
 from anydataset.cache import CacheManager, FileLock, FileLockError
 
 
@@ -116,6 +118,24 @@ class CacheManagerTest(unittest.TestCase):
             logs = list((home / "logs").glob("*/source.log"))
             self.assertEqual(len(logs), 1)
             self.assertIn("WARNING careful", logs[0].read_text(encoding="utf-8"))
+
+    def test_worker_logger_writes_rank_zero_to_file_and_stderr(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            logs_dir = Path(tmpdir)
+            stderr = io.StringIO()
+            with redirect_stderr(stderr):
+                logger = worker_logger("filter", logs_dir, 0)
+                logger.info("started")
+            for handler in logger.handlers:
+                handler.close()
+            logger.handlers.clear()
+
+            text = (logs_dir / "part-00000.log").read_text(encoding="utf-8")
+
+        self.assertIn("worker log:", text)
+        self.assertIn("started", text)
+        self.assertIn("worker log:", stderr.getvalue())
+        self.assertIn("started", stderr.getvalue())
 
 
 if __name__ == "__main__":

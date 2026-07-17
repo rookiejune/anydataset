@@ -7,6 +7,7 @@ store sample-level audit metrics.
 
 from __future__ import annotations
 
+import logging
 import os
 import threading
 from contextlib import contextmanager
@@ -42,6 +43,26 @@ def write_info(source: str, message: str) -> None:
 
 def write_warning(source: str, message: str) -> None:
     _write_log(source, "WARNING", message)
+
+
+def worker_logger(source: str, logs_dir: Path, worker_id: int) -> logging.Logger:
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    logger = logging.getLogger(f"anydataset.{source}.{os.getpid()}.{worker_id}")
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
+    path = logs_dir / f"part-{worker_id:05d}.log"
+    handler = logging.FileHandler(path, encoding="utf-8")
+    handler.setFormatter(
+        logging.Formatter("%(asctime)s %(levelname)s %(processName)s %(message)s")
+    )
+    logger.handlers.clear()
+    logger.addHandler(handler)
+    if worker_id == 0:
+        console = logging.StreamHandler()
+        console.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+        logger.addHandler(console)
+    logger.info("worker log: %s", path)
+    return logger
 
 
 def _write_log(source: str, level: str, message: str) -> None:

@@ -11,6 +11,7 @@ from .._io.atomic import replace_existing_dir
 from .._devices import Devices, resolve_devices
 from .._logging import write_info
 from .._parallel import validate_process_value
+from .._progress import Progress, ProgressDashboard
 from .._resume import (
     dataset_sample_count,
     indexes_complete,
@@ -61,6 +62,7 @@ FilterBase = MapStyleABC
 _DEFAULT_MAX_SHARD_SAMPLES = 1_000_000
 _DEFAULT_COMMIT_SAMPLES = 100_000
 _FILTER_VIEW_SCHEMA_VERSION = 1
+_PROGRESS_STAGES = ("scan", "writer")
 
 
 @dataclass(frozen=True)
@@ -572,23 +574,48 @@ class _FilterResumeFragmentWriter:
     worker_timeout: float | None
 
     def write(self, *, write_workers: int, write_prefetch: int | None) -> None:
-        sink = BackgroundWriteSink(
-            write_filter_fragment_job,
-            workers=write_workers,
-            max_pending=write_prefetch,
-            start_method=self.runtime.writer_worker_start_method,
-        )
-        with sink:
-            self.write_jobs(sink)
+        with ProgressDashboard(
+            desc="filter samples",
+            total=len(self.dataset),
+            count_stage="writer",
+            initial=len(self.completed),
+            stages=_PROGRESS_STAGES,
+        ) as progress:
+            sink = BackgroundWriteSink(
+                write_filter_fragment_job,
+                workers=write_workers,
+                max_pending=write_prefetch,
+                start_method=self.runtime.writer_worker_start_method,
+                on_submit=lambda job, pending: progress.put(
+                    Progress(0, 0, False, None, stage="writer", pending=pending)
+                ),
+                on_complete=lambda job, pending, elapsed: progress.put(
+                    Progress(
+                        0,
+                        len(job.scan_indexes),
+                        False,
+                        None,
+                        stage="writer",
+                        elapsed=elapsed,
+                        pending=pending,
+                    )
+                ),
+            )
+            with sink:
+                self.write_jobs(sink, progress)
 
-    def write_jobs(self, sink: BackgroundWriteSink[FilterFragmentJob]) -> None:
-        for chunk in self._chunks():
+    def write_jobs(
+        self,
+        sink: BackgroundWriteSink[FilterFragmentJob],
+        progress: ProgressDashboard,
+    ) -> None:
+        for chunk in self._chunks(progress):
             sink.submit(self._job(chunk))
 
-    def _chunks(self) -> Iterable[_FilterChunk]:
+    def _chunks(self, progress: ProgressDashboard) -> Iterable[_FilterChunk]:
         use_map_style_loader = uses_default_indexed_shard(self.dataset)
         if len(self.devices) == 1 or len(self.dataset) == 0:
-            yield from collect_ranges(
+            chunks = collect_ranges(
                 self.dataset,
                 self.rule.factory,
                 self.devices[0],
@@ -602,10 +629,21 @@ class _FilterResumeFragmentWriter:
                 prefetch_factor=self.prefetch_factor,
                 runtime=self.runtime,
             )
+            for chunk in chunks:
+                progress.put(
+                    Progress(
+                        0,
+                        len(filter_chunk_indexes(chunk)),
+                        False,
+                        None,
+                        stage="scan",
+                    )
+                )
+                yield chunk
             return
 
         factory = parallel_dataset_factory(self.dataset_factory, self.runtime)
-        yield from collect_ranges_parallel(
+        chunks = collect_ranges_parallel(
             factory,
             self.rule.factory,
             self.devices,
@@ -621,6 +659,17 @@ class _FilterResumeFragmentWriter:
             use_map_style_loader=use_map_style_loader,
             worker_timeout=self.worker_timeout,
         )
+        for chunk in chunks:
+            progress.put(
+                Progress(
+                    0,
+                    len(filter_chunk_indexes(chunk)),
+                    False,
+                    None,
+                    stage="scan",
+                )
+            )
+            yield chunk
 
     def _job(self, chunk: _FilterChunk) -> FilterFragmentJob:
         return FilterFragmentJob(
