@@ -161,6 +161,83 @@ Every dataset exposes `iter_shard(num_shards, shard_id)` for distributed reads.
 `MultipleAnyDataset` itself is not a filter cache identity; filter or cache the
 child datasets before combining them.
 
+## DataLoader Schemas
+
+`Schema` maps each `(Role, Modality)` reference to the views and metadata that
+a training batch needs. `collate_fn(schema)` selects those fields and returns a
+`Batch`; it does not fill in missing fields implicitly.
+
+```python
+from torch.utils.data import DataLoader
+
+from anydataset.dataset import collate_fn
+from anydataset.types import AudioReq, AudioView, Modality, Role
+
+schema = {
+    (Role.DEFAULT, Modality.AUDIO): AudioReq(
+        views=frozenset({AudioView.WAVEFORM}),
+    )
+}
+
+loader = DataLoader(
+    dataset,
+    batch_size=16,
+    num_workers=4,
+    collate_fn=collate_fn(schema),
+)
+batch = next(iter(loader))
+```
+
+Use roles to distinguish multiple items with the same modality. For example, a
+machine translation schema can request source and target text independently:
+
+```python
+from anydataset.types import Modality, Role, TextReq, TextView
+
+text = TextReq(views=frozenset({TextView.TEXT}))
+schema = {
+    (Role.SOURCE, Modality.TEXT): text,
+    (Role.TARGET, Modality.TEXT): text,
+}
+```
+
+When a built-in task already describes the required fields, use its default
+schema or collator directly:
+
+```python
+from anydataset import Task
+
+schema = Task.AUDIO_CODEC.schema()
+loader = DataLoader(
+    dataset,
+    batch_size=16,
+    collate_fn=Task.AUDIO_CODEC.collate_fn(),
+)
+```
+
+`Batch.sample` has the same logical structure as one `Sample`, with each field
+batched. Tensor fields with matching shapes are stacked. If only the last
+dimension varies, the collator pads it and records valid positions in
+`Batch.masks`; non-tensor values are returned as lists.
+
+```python
+from anydataset.dataset import FieldGroup, FieldRef
+
+audio_ref = (Role.DEFAULT, Modality.AUDIO)
+waveform, sample_rate = batch.sample[audio_ref].views[AudioView.WAVEFORM]
+waveform_mask = batch.masks[
+    FieldRef(
+        ref=audio_ref,
+        group=FieldGroup.VIEWS,
+        key=AudioView.WAVEFORM,
+    )
+]
+```
+
+Schema fields must exist in every sample in the batch. Convert values to
+tensors and normalize dtype or device in the preset parser or dataset
+transforms, before collation.
+
 ## Cached Filter Partitions
 
 `FilterRule` routes a map-style dataset into cached label partitions. The

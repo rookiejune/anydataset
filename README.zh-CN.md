@@ -215,7 +215,7 @@ dataset = MultipleAnyDataset(
 分布式训练或多 worker 读取时，可以在 dataset 层做 shard：
 
 ```python
-rank_iter = dataset.shard(num_shards=8, shard_id=0)
+rank_iter = dataset.iter_shard(num_shards=8, shard_id=0)
 ```
 
 ## 用 Schema 构造 DataLoader
