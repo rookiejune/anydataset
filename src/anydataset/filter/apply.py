@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any
 from .._io.atomic import replace_existing_dir
 from .._devices import Devices, resolve_devices
 from .._logging import write_info
-from .._parallel import validate_process_value
+from .._parallel import can_select_indexes, validate_process_value
 from .._progress import Progress, ProgressDashboard
 from .._resume import (
     dataset_sample_count,
@@ -30,12 +30,12 @@ from ..dataset.abc import (
     AnyDataset,
     MapStyleABC,
     MergedDataset,
-    uses_default_indexed_shard,
 )
 from ..runtime import Runtime
 from ..store.jsonio import read_json, write_json
 from ..store.reader import StoreDataset
 from ..types import Source, Spec
+from ._options import DEFAULT_COMMIT_SAMPLES, DEFAULT_MAX_SHARD_SAMPLES
 from .collect import collect_ranges, collect_ranges_parallel
 from .resume import (
     cleanup_filter_resume_dir,
@@ -59,8 +59,6 @@ if TYPE_CHECKING:
 
 FilterBase = MapStyleABC
 
-_DEFAULT_MAX_SHARD_SAMPLES = 1_000_000
-_DEFAULT_COMMIT_SAMPLES = 100_000
 _FILTER_VIEW_SCHEMA_VERSION = 1
 _PROGRESS_STAGES = ("scan", "writer")
 
@@ -520,7 +518,7 @@ def write_partitions(
     completed = completed_filter_indexes(resume_dir, expected=expected)
     if not indexes_complete(completed, expected):
         missing = missing_indexes(completed, expected)
-        use_map_style_loader = uses_default_indexed_shard(dataset)
+        use_map_style_loader = can_select_indexes(dataset)
         log_resume_summary(
             "filter",
             expected=expected,
@@ -613,7 +611,7 @@ class _FilterResumeFragmentWriter:
             sink.submit(self._job(chunk))
 
     def _chunks(self, progress: ProgressDashboard) -> Iterable[_FilterChunk]:
-        use_map_style_loader = uses_default_indexed_shard(self.dataset)
+        use_map_style_loader = can_select_indexes(self.dataset)
         if len(self.devices) == 1 or len(self.dataset) == 0:
             chunks = collect_ranges(
                 self.dataset,

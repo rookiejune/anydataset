@@ -8,7 +8,9 @@
 - `Sample` 统一使用 `Mapping[tuple[Role, Modality], Item]`，不要恢复旧的 wrapper / `.data` 结构。
 - `AnyDataset` 表示 map-style 数据集；`IterableAnyDataset` 表示 iterable 数据集。
 - `MultipleAnyDataset` 只组合已经构造好的 dataset，迭代顺序交给 `IterationStrategy`；组合本身不作为 filter cache 身份。
-- store 的公开入口是 `DatasetWriter`、`ViewMaterializer`、`ViewRef` 和 `Source.STORE`。
+- store 的公开入口是 `DatasetWriter`、`ViewMaterializer`、
+  `ModalityMaterializer`、provider 类型和 `Source.STORE`。part、fragment、manifest
+  读写与 commit helper 都是内部实现。
 
 ## 开发约定
 

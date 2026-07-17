@@ -18,6 +18,7 @@ from .._devices import Devices, resolve_devices
 from .._logging import run_logs_dir, use_run_logs_dir, worker_logger, write_warning
 from .._parallel import (
     DeviceWorker,
+    can_select_indexes,
     free_port,
     indexed_loader,
     iter_indexed_shard,
@@ -48,9 +49,10 @@ from .._resume import (
 from .._validation import non_negative_int, optional_positive_int, positive_int
 from .._write_pipeline import BackgroundWriteSink
 from ..cache import FileLock
-from ..dataset.abc import uses_default_indexed_shard
 from ..runtime import Runtime
-from ..types.item import Item, Sample, Schema, View
+from ..types._sample import merge as merge_samples
+from ..types._sample import select as select_sample
+from ..types.item import Sample, Schema
 from ..view import Provider
 from ._batch import (
     indexed_sample_batches,
@@ -186,7 +188,7 @@ class ViewMaterializer:
         )
         dataset = dataset_factory()
         expected = dataset_sample_count(dataset, context="resume")
-        use_map_style_loader = uses_default_indexed_shard(dataset)
+        use_map_style_loader = can_select_indexes(dataset)
         fragments_dir = prepare_materializer_resume_dir(
             self.output_dir,
             self._resume_metadata(
@@ -243,7 +245,7 @@ class ViewMaterializer:
         output_dir = Path(self.output_dir).expanduser()
         dataset = dataset_factory()
         expected = dataset_sample_count(dataset, context="resume")
-        use_map_style_loader = uses_default_indexed_shard(dataset)
+        use_map_style_loader = can_select_indexes(dataset)
         fragments_dir = prepare_materializer_resume_dir(
             output_dir,
             self._resume_metadata(
@@ -393,7 +395,7 @@ class ViewMaterializer:
             if use_map_style_loader is None or sample_count is None:
                 dataset = dataset_factory()
         if use_map_style_loader is None:
-            use_map_style_loader = uses_default_indexed_shard(dataset)
+            use_map_style_loader = can_select_indexes(dataset)
         if use_map_style_loader:
             if sample_count is None:
                 sample_count = len(dataset)
@@ -1057,60 +1059,11 @@ def _missing_indexed_samples(
 
 
 def _select_sample(sample: Sample, schema: Schema) -> Sample:
-    return {
-        reference: sample[reference].select_by(requirement)
-        for reference, requirement in schema.items()
-    }
+    return select_sample(sample, schema)
 
 
 def _merge_output_samples(left: Sample, right: Sample) -> Sample:
-    result = dict(left)
-    for ref, item in right.items():
-        current = result.get(ref)
-        if current is None:
-            result[ref] = item
-            continue
-        result[ref] = _merge_output_items(current, item, ref=ref)
-    return result
-
-
-def _merge_output_items(left: Item, right: Item, *, ref: object) -> Item:
-    if type(left) is not type(right):
-        raise TypeError(f"Materialized sample item {ref!r} has incompatible types.")
-    view_conflicts = set(left.views) & set(right.views)
-    if view_conflicts:
-        view = _first_sorted_view(view_conflicts)
-        raise ValueError(
-            f"Materialized sample item {ref!r} view conflict for {view!r}."
-        )
-
-    meta = dict(left.meta)
-    for key, value in right.meta.items():
-        current = meta.get(key)
-        if key in meta and not _values_equal(current, value):
-            raise ValueError(
-                f"Materialized sample item {ref!r} metadata conflict for {key!r}."
-            )
-        meta[key] = value
-
-    return type(left)(
-        views={**left.views, **right.views},
-        meta=meta,
-    )
-
-
-def _first_sorted_view(views: set[View]) -> View:
-    return sorted(views, key=lambda view: view.value)[0]
-
-
-def _values_equal(left: Any, right: Any) -> bool:
-    equal = left == right
-    if isinstance(equal, bool):
-        return equal
-    try:
-        return bool(equal)
-    except (TypeError, ValueError, RuntimeError):
-        return left is right
+    return merge_samples(left, right, context="Materialized sample")
 
 
 def _dataset_id(output_dir: str | Path) -> str:

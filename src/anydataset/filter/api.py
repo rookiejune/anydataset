@@ -12,13 +12,11 @@ except ImportError:
     from typing_extensions import Unpack
 
 from ..dataset.abc import AnyDataset, MapStyleABC, MergedDataset
-from ..runtime import Runtime
 from ..store.reader import StoreDataset
 from ..types import Spec
 from ..types.item import Sample
+from ._options import options as apply_options
 from .apply import (
-    _DEFAULT_COMMIT_SAMPLES,
-    _DEFAULT_MAX_SHARD_SAMPLES,
     apply_filter,
     filter_base,
     filter_spec,
@@ -36,23 +34,6 @@ from .types import (
     FilterPredicate,
     _Index,
 )
-
-_FilterApplyOptions = FilterApplyKwargs
-
-_FILTER_APPLY_DEFAULTS: _FilterApplyOptions = {
-    "metrics": False,
-    "device": "auto",
-    "batch_size": 1,
-    "num_workers": 0,
-    "prefetch_factor": None,
-    "commit_samples": _DEFAULT_COMMIT_SAMPLES,
-    "max_shard_samples": _DEFAULT_MAX_SHARD_SAMPLES,
-    "write_workers": 1,
-    "write_prefetch": None,
-    "worker_timeout": None,
-    "runtime": Runtime(),
-}
-
 
 class FilterRule:
     __slots__ = ("_factory", "_name")
@@ -207,7 +188,7 @@ class FilteredDataset(MapStyleABC):
         **apply_kwargs: Unpack[FilterApplyKwargs],
     ) -> None:
         normalized = None if labels is None else normalized_labels(labels)
-        options = _apply_options(apply_kwargs)
+        options = apply_options(apply_kwargs)
         cache = apply_filter(
             FilterRule(name, factory),
             metrics=options["metrics"],
@@ -354,44 +335,6 @@ def selected_labels(
     if labels is None:
         return tuple(available)
     return normalized_labels(labels)
-
-
-def _apply_options(kwargs: FilterApplyKwargs) -> _FilterApplyOptions:
-    extra = set(kwargs) - set(_FILTER_APPLY_DEFAULTS)
-    if extra:
-        name = sorted(extra)[0]
-        raise TypeError(f"Unexpected filter apply option: {name}.")
-    return {
-        "metrics": kwargs.get("metrics", _FILTER_APPLY_DEFAULTS["metrics"]),
-        "device": kwargs.get("device", _FILTER_APPLY_DEFAULTS["device"]),
-        "batch_size": kwargs.get("batch_size", _FILTER_APPLY_DEFAULTS["batch_size"]),
-        "num_workers": kwargs.get("num_workers", _FILTER_APPLY_DEFAULTS["num_workers"]),
-        "prefetch_factor": kwargs.get(
-            "prefetch_factor",
-            _FILTER_APPLY_DEFAULTS["prefetch_factor"],
-        ),
-        "commit_samples": kwargs.get(
-            "commit_samples",
-            _FILTER_APPLY_DEFAULTS["commit_samples"],
-        ),
-        "max_shard_samples": kwargs.get(
-            "max_shard_samples",
-            _FILTER_APPLY_DEFAULTS["max_shard_samples"],
-        ),
-        "write_workers": kwargs.get(
-            "write_workers",
-            _FILTER_APPLY_DEFAULTS["write_workers"],
-        ),
-        "write_prefetch": kwargs.get(
-            "write_prefetch",
-            _FILTER_APPLY_DEFAULTS["write_prefetch"],
-        ),
-        "worker_timeout": kwargs.get(
-            "worker_timeout",
-            _FILTER_APPLY_DEFAULTS["worker_timeout"],
-        ),
-        "runtime": kwargs.get("runtime", _FILTER_APPLY_DEFAULTS["runtime"]),
-    }
 
 
 def normalized_labels(labels: FilterLabel | Sequence[FilterLabel]) -> tuple[str, ...]:

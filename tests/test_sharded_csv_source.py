@@ -13,8 +13,7 @@ from anydataset import (
     has_source,
     resolve_dataset,
 )
-from anydataset.dataset.abc import uses_default_indexed_shard
-from anydataset._parallel import map_style_indexed_loader
+from anydataset._parallel import can_select_indexes, map_style_indexed_loader
 from anydataset.cache import FileLock
 
 
@@ -240,7 +239,7 @@ class ShardedCsvSourceTest(unittest.TestCase):
 
             executor.assert_called_once()
 
-    def test_prepared_parquet_uses_default_map_style_shard(self):
+    def test_prepared_parquet_supports_index_selection(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             shard_dir = root / "shard_0"
@@ -251,7 +250,7 @@ class ShardedCsvSourceTest(unittest.TestCase):
                 parse_fn=lambda row: row["src_text"],
             )
 
-            self.assertTrue(uses_default_indexed_shard(dataset))
+            self.assertTrue(can_select_indexes(dataset))
 
     def test_prepared_parquet_supports_spawn_loader_workers(self):
         with tempfile.TemporaryDirectory() as tmpdir:

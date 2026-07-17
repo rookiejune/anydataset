@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -11,12 +11,14 @@ from torch.utils.data import Dataset, IterableDataset
 from .._parallel import iter_indexed_shard as iter_source_indexed_shard
 from .._sharding import Shard, runtime_shard, validate_shard
 from ..types import Preset, Spec
+from ..types._sample import merge as merge_samples
+from ..types._sample import select as select_sample
 from ..types.item import Modality, Role, View
 from ..utils import resolve_dataset
 
 if TYPE_CHECKING:
     from ..cache import CacheManager
-    from ..types.item import Item, Sample, Schema, Transforms
+    from ..types.item import Sample, Schema, Transforms
     from .source import DatasetSource
 
 
@@ -122,10 +124,7 @@ class _Base(ABC):
 
     @staticmethod
     def resolve_sample(sample: Sample, schema: Schema) -> Sample:
-        return {
-            reference: sample[reference].select_by(requirement)
-            for reference, requirement in schema.items()
-        }
+        return select_sample(sample, schema)
 
 
 class IterableAnyDataset(_Base, IterableDataset):
@@ -289,7 +288,11 @@ class MergedDataset(MapStyleABC):
         return _validate_lengths(self.left, self.right)
 
     def __getitem__(self, index: int) -> Sample:
-        return _merge_samples(self.left[index], self.right[index], index)
+        return merge_samples(
+            self.left[index],
+            self.right[index],
+            context=f"Merge sample {index}",
+        )
 
 
 class AnyDataset(_Base, MapStyleABC):
@@ -338,26 +341,6 @@ class AnyDataset(_Base, MapStyleABC):
             shard_id,
         ):
             yield index, self.transform_sample(self.parse_fn(row))
-
-
-def uses_default_indexed_shard(dataset: object) -> bool:
-    if isinstance(dataset, AnyDataset):
-        source_dataset = dataset.dataset
-        if getattr(source_dataset, "uses_default_indexed_shard", False):
-            return True
-        iter_indexed = getattr(source_dataset, "iter_indexed_shard", None)
-        iter_runtime = getattr(source_dataset, "iter_indexed_runtime_shard", None)
-        return not callable(iter_indexed) and not callable(iter_runtime)
-    if isinstance(dataset, MapStyleABC):
-        return type(dataset).iter_indexed_shard is MapStyleABC.iter_indexed_shard
-    iter_indexed = getattr(dataset, "iter_indexed_shard", None)
-    iter_runtime = getattr(dataset, "iter_indexed_runtime_shard", None)
-    return (
-        hasattr(dataset, "__len__")
-        and hasattr(dataset, "__getitem__")
-        and not callable(iter_indexed)
-        and not callable(iter_runtime)
-    )
 
 
 def _identity_sample(row: Any) -> Sample:
@@ -417,58 +400,3 @@ def _validate_lengths(left: Any, right: Any) -> int:
             f"merge datasets must have the same length: {left_len} != {right_len}."
         )
     return left_len
-
-
-def _merge_samples(left: Any, right: Any, index: int) -> Sample:
-    if not isinstance(left, Mapping) or not isinstance(right, Mapping):
-        raise TypeError("merge samples must be mappings.")
-
-    result = dict(left)
-    for ref, item in right.items():
-        current = result.get(ref)
-        if current is None:
-            result[ref] = item
-            continue
-        result[ref] = _merge_items(current, item, ref=ref, index=index)
-    return result
-
-
-def _merge_items(left: Item, right: Item, *, ref: Any, index: int) -> Item:
-    if type(left) is not type(right):
-        raise TypeError(
-            f"Merge sample {index} item {ref!r} has incompatible item types."
-        )
-    view_conflicts = set(left.views) & set(right.views)
-    if view_conflicts:
-        view = _first_sorted_view(view_conflicts)
-        raise ValueError(
-            f"Merge sample {index} item {ref!r} view conflict for {view!r}."
-        )
-
-    meta = dict(left.meta)
-    for key, value in right.meta.items():
-        current = meta.get(key)
-        if key in meta and not _values_equal(current, value):
-            raise ValueError(
-                f"Merge sample {index} item {ref!r} metadata conflict for {key!r}."
-            )
-        meta[key] = value
-
-    return type(left)(
-        views={**left.views, **right.views},
-        meta=meta,
-    )
-
-
-def _first_sorted_view(views: set[View]) -> View:
-    return sorted(views, key=lambda view: view.value)[0]
-
-
-def _values_equal(left: Any, right: Any) -> bool:
-    equal = left == right
-    if isinstance(equal, bool):
-        return equal
-    try:
-        return bool(equal)
-    except (TypeError, ValueError, RuntimeError):
-        return left is right

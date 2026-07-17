@@ -13,6 +13,7 @@ from pathlib import Path
 from .._logging import run_logs_dir, use_run_logs_dir, worker_logger
 from .._parallel import (
     DeviceWorker,
+    can_select_indexes,
     indexed_loader,
     map_style_indexed_loader,
     multiprocessing_context,
@@ -22,7 +23,6 @@ from .._parallel import (
     validate_process_value,
     worker_configs,
 )
-from ..dataset.abc import uses_default_indexed_shard
 from ..runtime import Runtime
 from .rules import label
 from .storage import validate_metrics
@@ -376,7 +376,7 @@ def _filter_loader(
     sample_indexes: Sequence[int] | None = None,
 ):
     if use_map_style_loader is None:
-        use_map_style_loader = uses_default_indexed_shard(dataset)
+        use_map_style_loader = can_select_indexes(dataset)
     if use_map_style_loader:
         if sample_count is None:
             sample_count = len(dataset)

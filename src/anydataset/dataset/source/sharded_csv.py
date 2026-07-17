@@ -68,8 +68,6 @@ class ShardedCsvSource:
 
 
 class ShardedCsvDataset:
-    uses_default_indexed_shard = True
-
     def __init__(
         self,
         root: Path,
