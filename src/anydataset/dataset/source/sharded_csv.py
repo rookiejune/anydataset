@@ -3,10 +3,10 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
+import multiprocessing
 import os
 import sys
 import tempfile
-import time
 from bisect import bisect_right
 from collections import OrderedDict
 from collections.abc import Callable, Iterator, Mapping, Sequence
@@ -22,7 +22,7 @@ import pyarrow.parquet as pq
 from ..._compat import strict_zip
 from ..._parallel import multiprocessing_context
 from ..._logging import write_warning
-from ...cache import FileLock, FileLockError
+from ...cache import FileLock
 from ...types import Spec
 
 
@@ -227,23 +227,18 @@ class ShardedCsvDataset:
         if self.cache_path is None:
             raise ValueError("sharded_csv requires a source cache path.")
         lock_path = self.cache_path / ".prepare.lock"
-        deadline = time.monotonic() + _PREPARE_LOCK_TIMEOUT
-        while True:
+        cached = self._read_cache(paths)
+        if cached is not None:
+            return cached
+        with FileLock(
+            lock_path,
+            wait_timeout=_PREPARE_LOCK_TIMEOUT,
+            poll_interval=_PREPARE_LOCK_POLL,
+        ):
             cached = self._read_cache(paths)
             if cached is not None:
                 return cached
-            try:
-                with FileLock(lock_path):
-                    cached = self._read_cache(paths)
-                    if cached is not None:
-                        return cached
-                    return self._build_cache(paths)
-            except FileLockError as exc:
-                if time.monotonic() >= deadline:
-                    raise TimeoutError(
-                        f"Timed out waiting for sharded CSV prepare lock: {lock_path}"
-                    ) from exc
-                time.sleep(_PREPARE_LOCK_POLL)
+            return self._build_cache(paths)
 
     def _read_cache(self, paths: Sequence[Path]) -> tuple[JsonMapping, ...] | None:
         path = self._manifest_path()
@@ -421,7 +416,7 @@ def _convert_files(
     if not jobs:
         return ()
     workers = min(len(jobs), os.cpu_count() or 1, 8)
-    if workers == 1:
+    if workers == 1 or multiprocessing.current_process().daemon:
         converted = (_convert_file_job(job) for job in jobs)
         return tuple(_conversion_progress(converted, total=len(jobs)))
     with ProcessPoolExecutor(

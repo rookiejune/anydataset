@@ -250,10 +250,19 @@ def _split_source_prefix(shorthand: str) -> tuple[SourceKey | None, str]:
 
 
 def _split_name_and_split(value: str) -> tuple[str, str | None]:
-    if ":" not in value:
-        return value, None
-    name, split = value.rsplit(":", 1)
-    return name, split or None
+    bracket_depth = 0
+    for index in range(len(value) - 1, -1, -1):
+        char = value[index]
+        if char == "]":
+            bracket_depth += 1
+            continue
+        if char == "[" and bracket_depth > 0:
+            bracket_depth -= 1
+            continue
+        if char == ":" and bracket_depth == 0:
+            name, split = value[:index], value[index + 1 :]
+            return name, split or None
+    return value, None
 
 
 def _value(row: Mapping[str, Any], field: FieldPath) -> Any:

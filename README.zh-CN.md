@@ -76,6 +76,17 @@ fleurs = IterableAnyDataset.preset("fleurs", split="train", config_name="en_us")
 当前内置 preset 包括 `MNIST`、`CIFAR10`、`FLEURS`、`LIBRISPEECH_ASR`、
 `COMMON_VOICE`、`ESC50`、`NSYNTH`、`FSD50K` 和 `WMT19`。
 
+`FSD50K` 是 map-style preset，只接受可选的 Hugging Face `revision`。revision
+默认是 `main`，同时用于文件列表、payload 下载和 source cache identity。
+
+```python
+fsd50k = AnyDataset.preset(
+    "fsd50k",
+    split="dev",
+    revision="refs/convert/parquet",
+)
+```
+
 需要显式指定来源时，使用 `Spec`：
 
 ```python
@@ -573,6 +584,8 @@ def provider_factory(device: str):
 delta = ViewMaterializer(
     output_dir="/data/my_anydataset_longcat",
     split="train",
+    input_id="my-audio-v1",
+    provider_id="toy-longcat-v1",
 ).write(
     dataset_factory=dataset_factory,
     provider_factory=provider_factory,
@@ -596,6 +609,10 @@ provider batch 会聚合成 checkpoint chunk，保留在目标目录旁边的隐
 重跑时按全局 `sample_index` 跳过，最后再原子提交最终 store。`commit_samples`
 控制 checkpoint 粒度，默认是 `max(batch_size, 32)`，避免默认可续跑时产生过多小文件；
 需要更细断点时可以显式调低。
+resume compatibility 会记录两个 factory 的自动标识。当输入快照或 provider 行为依赖
+callable 无法表达的状态（例如可变文件或 checkpoint 内容）时，用 `input_id` 和
+`provider_id` 显式给出语义版本。这两个 ID 会补充而不是替代 factory 标识；任一 ID
+变化都会隔离旧 resume 目录，不会复用不兼容的 fragment。
 和过滤一样，多设备 materialize 拥有自己的离线 worker，不应放进已经存在的 DDP
 训练进程里运行。
 如果 `parse_fn` 里有 file 到 waveform 这类 CPU 重活，可以给 materializer 传

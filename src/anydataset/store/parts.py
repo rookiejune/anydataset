@@ -40,6 +40,7 @@ from .reader import read_store_manifest, read_store_views
 from .viewwriter import ViewWriter
 from .writer import (
     DEFAULT_MAX_SHARD_SAMPLES,
+    _explicit_views,
     _sample_id,
     _sample_id_prefix,
     _sample_view_refs,
@@ -68,6 +69,7 @@ class DatasetPartWriter:
     def __post_init__(self) -> None:
         self.output_dir = Path(self.output_dir)
         validate_shard(self.num_shards, self.shard_id)
+        self.views = _explicit_views(self.views)
         self.max_shard_samples = positive_int(
             "max_shard_samples",
             self.max_shard_samples,
@@ -254,7 +256,7 @@ def commit_store_fragments(
     )
     if not fragments:
         raise ValueError(f"No materialized fragments found: {fragments_dir}")
-    views = _store_views_from_first(fragments)
+    views = _store_views(fragments)
     return replace_dir(
         output_dir,
         lambda tmp: _commit_roots_to_tmp(
@@ -263,7 +265,6 @@ def commit_store_fragments(
             dataset_id=dataset_id,
             split=split,
             expected_sample_count=expected_sample_count,
-            stream_ordered=True,
             views=views,
         ),
     )
@@ -292,7 +293,7 @@ def commit_fragment_part(
             num_shards=num_shards,
             split=split,
         ).write(())
-    views = _store_views_from_first(roots)
+    views = _store_views(roots)
 
     def write(root: Path) -> Path:
         _commit_roots_to_tmp(
@@ -300,7 +301,6 @@ def commit_fragment_part(
             roots,
             dataset_id=dataset_id,
             split=split,
-            stream_ordered=True,
             views=views,
             dense=False,
         )
@@ -372,7 +372,6 @@ def _commit_roots_to_tmp(
     dataset_id: str,
     split: str | None,
     expected_sample_count: int | None = None,
-    stream_ordered: bool = False,
     views: tuple[tuple[Role, Modality, View], ...] | None = None,
     dense: bool = True,
 ) -> Path:
@@ -380,13 +379,11 @@ def _commit_roots_to_tmp(
         root,
         stores,
         expected_sample_count=expected_sample_count,
-        stream_ordered=stream_ordered,
         dense=dense,
     )
     _write_committed_view_manifests(
         root,
         stores,
-        stream_ordered=stream_ordered,
         views=views,
     )
     _write_committed_dataset_manifest(
@@ -403,7 +400,6 @@ def _write_committed_view_manifests(
     root: Path,
     stores: tuple[Path, ...],
     *,
-    stream_ordered: bool,
     views: tuple[tuple[Role, Modality, View], ...] | None,
 ) -> None:
     for view in (views if views is not None else _store_views(stores)):
@@ -412,7 +408,6 @@ def _write_committed_view_manifests(
             stores,
             view,
             _sample_indexes_for_ref(root, view[:2]),
-            stream_ordered=stream_ordered,
         )
         if view_count != expected_view_count:
             raise ValueError(
@@ -465,19 +460,13 @@ def _write_ordered_samples_manifest(
     stores: tuple[Path, ...],
     *,
     expected_sample_count: int | None,
-    stream_ordered: bool = False,
     dense: bool = True,
 ) -> int:
     writer = sample_manifest_writer(root)
     previous_index: int | None = None
     count = 0
     try:
-        entries = (
-            _stream_sample_entries(stores)
-            if stream_ordered
-            else _merged_sample_entries(stores)
-        )
-        for count, entry in enumerate(entries, start=1):
+        for count, entry in enumerate(_merged_sample_entries(stores), start=1):
             if previous_index is not None:
                 if entry.sample_index == previous_index:
                     raise ValueError(f"Duplicate sample_index {entry.sample_index}.")
@@ -526,11 +515,9 @@ def _write_ordered_view_manifest(
     stores: tuple[Path, ...],
     view: tuple[Role, Modality, View],
     sample_indexes: Iterable[int],
-    *,
-    stream_ordered: bool = False,
 ) -> tuple[int, int]:
     writer = view_manifest_writer(root, view)
-    entries = iter(_unique_view_entries(_view_entries(stores, view, stream_ordered)))
+    entries = iter(_unique_view_entries(_merged_view_entries(stores, view)))
     current = _next_entry(entries)
     count = 0
     expected_count = 0
@@ -583,16 +570,6 @@ def _merged_sample_entries(stores: tuple[Path, ...]) -> Iterator[SampleManifestE
     )
 
 
-def _stream_sample_entries(
-    stores: tuple[Path, ...],
-) -> Iterator[SampleManifestEntry]:
-    yield from _merged_loaded_entries(
-        stores,
-        lambda store: _sorted_entries(read_samples_manifest(store), _sample_entry_key),
-        _sample_entry_key,
-    )
-
-
 def _merged_view_entries(
     stores: tuple[Path, ...],
     view: tuple[Role, Modality, View],
@@ -603,27 +580,6 @@ def _merged_view_entries(
         if view_ready_path(store, view).exists()
     )
     yield from _merged_iterators(entries, _view_entry_key)
-
-
-def _stream_view_entries(
-    stores: tuple[Path, ...],
-    view: tuple[Role, Modality, View],
-) -> Iterator[ViewManifestEntry]:
-    yield from _merged_loaded_entries(
-        tuple(store for store in stores if view_ready_path(store, view).exists()),
-        lambda store: _sorted_view_entries(store, view),
-        _view_entry_key,
-    )
-
-
-def _view_entries(
-    stores: tuple[Path, ...],
-    view: tuple[Role, Modality, View],
-    stream_ordered: bool,
-) -> Iterator[ViewManifestEntry]:
-    if stream_ordered:
-        return _stream_view_entries(stores, view)
-    return _merged_view_entries(stores, view)
 
 
 def _unique_view_entries(
@@ -639,28 +595,6 @@ def _unique_view_entries(
             raise ValueError("View manifests must be ordered by sample_index.")
         previous_index = entry.sample_index
         yield entry
-
-
-def _sorted_entries(entries: Iterable[T], key: Callable[[T], int]) -> tuple[T, ...]:
-    return tuple(sorted(entries, key=key))
-
-
-def _sorted_view_entries(
-    store: Path,
-    view: tuple[Role, Modality, View],
-) -> tuple[ViewManifestEntry, ...]:
-    entries = _sorted_entries(read_view_manifest(store, view), _view_entry_key)
-    for entry in entries:
-        _validate_view_entry(entry, view)
-    return entries
-
-
-def _merged_loaded_entries(
-    stores: tuple[Path, ...],
-    load: Callable[[Path], tuple[T, ...]],
-    key: Callable[[T], int],
-) -> Iterator[T]:
-    yield from _merged_iterators((load(store) for store in stores), key)
 
 
 def _merged_iterators(
@@ -722,14 +656,6 @@ def _store_views(stores: tuple[Path, ...]) -> tuple[tuple[Role, Modality, View],
     for store in stores:
         views.update(read_store_views(store))
     return tuple(sorted(views, key=_view_path))
-
-
-def _store_views_from_first(
-    stores: tuple[Path, ...],
-) -> tuple[tuple[Role, Modality, View], ...]:
-    if not stores:
-        return ()
-    return read_store_views(stores[0])
 
 
 def _part_roots(parts_dir: str | Path) -> tuple[Path, ...]:

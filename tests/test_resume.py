@@ -1,3 +1,4 @@
+import pickle
 import tempfile
 import unittest
 from pathlib import Path
@@ -7,8 +8,10 @@ from anydataset._resume import (
     cached_completed_indexes,
     cleanup_resume_dir,
     dataset_sample_count,
+    format_index_ranges,
     index_batch_id,
     indexes_complete,
+    missing_indexes,
     pending_batch,
     prepare_resume_dir,
     quarantine_resume_dir,
@@ -71,6 +74,41 @@ class ResumeHelpersTest(unittest.TestCase):
     def test_indexes_complete_uses_validated_cardinality(self):
         self.assertTrue(indexes_complete(validate_completed_indexes({0, 2, 1}, 3), 3))
         self.assertFalse(indexes_complete(validate_completed_indexes({0, 2}, 3), 3))
+
+    def test_missing_indexes_keeps_fresh_runs_compact(self):
+        missing = missing_indexes(frozenset(), 20_000_000)
+
+        self.assertIsInstance(missing, range)
+        self.assertEqual(len(missing), 20_000_000)
+        self.assertEqual((missing[0], missing[-1]), (0, 19_999_999))
+
+    def test_missing_indexes_uses_picklable_lazy_complement(self):
+        missing = missing_indexes(frozenset({1, 4}), 8)
+        restored = pickle.loads(pickle.dumps(missing))
+
+        self.assertEqual(tuple(restored), (0, 2, 3, 5, 6, 7))
+        self.assertEqual(restored[2], 3)
+        self.assertEqual(restored[-1], 7)
+        self.assertEqual(restored[1:5:2], (2, 5))
+
+    def test_missing_indexes_materializes_the_smaller_side(self):
+        missing = missing_indexes(frozenset({0, 1, 3, 4, 6, 7}), 8)
+
+        self.assertEqual(missing, (2, 5))
+
+    def test_missing_indexes_rejects_unvalidated_completed_indexes(self):
+        with self.assertRaisesRegex(ValueError, "outside dataset"):
+            missing_indexes(frozenset({-1}), 8)
+
+    def test_format_index_ranges_skips_large_contiguous_runs(self):
+        self.assertEqual(
+            format_index_ranges(range(20_000_000)),
+            "0-19999999",
+        )
+        self.assertEqual(
+            format_index_ranges(missing_indexes(frozenset({2, 5}), 20_000_000)),
+            "0-1,3-4,6-19999999",
+        )
 
     def test_pending_batch_skips_completed_indexes(self):
         self.assertEqual(

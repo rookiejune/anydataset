@@ -24,6 +24,15 @@ class Payload:
     data: bytes
 
 
+@dataclass
+class _OpenArchive:
+    archive: tarfile.TarFile
+    members: dict[str, tarfile.TarInfo]
+
+    def close(self) -> None:
+        self.archive.close()
+
+
 class PayloadCache:
     def __init__(self, max_open_shards: int = _DEFAULT_MAX_OPEN_SHARDS) -> None:
         if not isinstance(max_open_shards, int) or isinstance(max_open_shards, bool):
@@ -32,7 +41,7 @@ class PayloadCache:
             raise ValueError("max_open_shards must be positive.")
         self.max_open_shards = max_open_shards
         self._pid = os.getpid()
-        self._archives: OrderedDict[Path, tarfile.TarFile] = OrderedDict()
+        self._archives: OrderedDict[Path, _OpenArchive] = OrderedDict()
         self._lock = threading.RLock()
 
     def read(
@@ -44,8 +53,13 @@ class PayloadCache:
         shard_path = _payload_shard_path(root, view, entry)
         self._reset_after_fork()
         with self._lock:
-            archive = self._archive(shard_path)
-            payload = archive.extractfile(entry.key)
+            opened = self._archive(shard_path)
+            member = opened.members.get(entry.key)
+            if member is None:
+                raise KeyError(
+                    f"View shard {entry.shard!r} is missing payload {entry.key!r}."
+                )
+            payload = opened.archive.extractfile(member)
             if payload is None:
                 raise KeyError(
                     f"View shard {entry.shard!r} is missing payload {entry.key!r}."
@@ -71,21 +85,29 @@ class PayloadCache:
         except Exception:
             pass
 
-    def _archive(self, path: Path) -> tarfile.TarFile:
+    def _archive(self, path: Path) -> _OpenArchive:
         cached = self._archives.get(path)
         if cached is not None:
             self._archives.move_to_end(path)
             return cached
 
         archive = tarfile.open(path, "r")
-        self._archives[path] = archive
+        try:
+            opened = _OpenArchive(
+                archive=archive,
+                members={member.name: member for member in archive.getmembers()},
+            )
+        except Exception:
+            archive.close()
+            raise
+        self._archives[path] = opened
         self._evict()
-        return archive
+        return opened
 
     def _evict(self) -> None:
         while len(self._archives) > self.max_open_shards:
-            _path, archive = self._archives.popitem(last=False)
-            archive.close()
+            _path, opened = self._archives.popitem(last=False)
+            opened.close()
 
     def _reset_after_fork(self) -> None:
         pid = os.getpid()

@@ -46,6 +46,19 @@ class CacheManagerTest(unittest.TestCase):
             with FileLock(path):
                 pass
 
+    def test_file_lock_wait_timeout_is_explicit(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "work.lock"
+
+            with FileLock(path):
+                with self.assertRaisesRegex(TimeoutError, "Timed out waiting"):
+                    with FileLock(
+                        path,
+                        wait_timeout=0.01,
+                        poll_interval=0.001,
+                    ):
+                        self.fail("contended lock unexpectedly succeeded")
+
     def test_prepare_creates_stable_metadata(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             with mock.patch.dict(os.environ, {"ANYDATASET_HOME": tmpdir}):

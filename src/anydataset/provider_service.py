@@ -7,6 +7,7 @@ import traceback
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from enum import auto
+from multiprocessing import AuthenticationError
 from multiprocessing.connection import Client, Listener
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Union
@@ -243,21 +244,41 @@ def _serve_provider(
     listener = Listener(address, authkey=config.authkey)
     try:
         while True:
-            conn = listener.accept()
+            conn = _accept_connection(listener)
+            if conn is None:
+                continue
             try:
-                request = conn.recv()
-                response = _handle_request(provider, request)
-                conn.send(response)
-                if (
-                    isinstance(request, _ProviderRequest)
-                    and request.command is _ProviderCommand.CLOSE
-                ):
-                    return
+                should_close = _serve_connection(provider, conn)
             finally:
                 conn.close()
+            if should_close:
+                return
     finally:
         listener.close()
         _unlink_address(address)
+
+
+def _accept_connection(listener: Listener):
+    try:
+        return listener.accept()
+    except (AuthenticationError, ConnectionError, EOFError):
+        return None
+
+
+def _serve_connection(provider: Any, conn: Any) -> bool:
+    try:
+        request = conn.recv()
+    except Exception:
+        return False
+    response = _handle_request(provider, request)
+    try:
+        conn.send(response)
+    except (EOFError, OSError):
+        return False
+    return (
+        isinstance(request, _ProviderRequest)
+        and request.command is _ProviderCommand.CLOSE
+    )
 
 
 def _handle_request(provider: Any, request: object) -> _ProviderResponse:

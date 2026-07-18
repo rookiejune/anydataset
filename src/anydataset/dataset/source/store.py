@@ -8,4 +8,10 @@ from ...types import Spec
 
 class StoreSource:
     def prepare(self, spec: Spec, _cache_path: Path) -> StoreDataset:
-        return read_store_dataset(spec.path)
+        dataset = read_store_dataset(spec.path)
+        if spec.split is not None and dataset.manifest.split != spec.split:
+            raise ValueError(
+                f"Store dataset split {dataset.manifest.split!r} does not match "
+                f"requested split {spec.split!r}."
+            )
+        return dataset

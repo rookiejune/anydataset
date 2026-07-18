@@ -4,6 +4,7 @@ import fcntl
 import json
 import os
 import threading
+import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -74,11 +75,42 @@ class FileLockError(RuntimeError):
 
 
 class FileLock:
-    def __init__(self, path: Path) -> None:
+    def __init__(
+        self,
+        path: Path,
+        *,
+        wait_timeout: float | None = None,
+        poll_interval: float = 0.2,
+    ) -> None:
+        if wait_timeout is not None and wait_timeout <= 0:
+            raise ValueError("wait_timeout must be positive.")
+        if poll_interval <= 0:
+            raise ValueError("poll_interval must be positive.")
         self.path = path
+        self.wait_timeout = wait_timeout
+        self.poll_interval = poll_interval
         self.file = None
 
     def __enter__(self):
+        deadline = (
+            None
+            if self.wait_timeout is None
+            else time.monotonic() + self.wait_timeout
+        )
+        while True:
+            try:
+                return self._acquire()
+            except FileLockError as exc:
+                if deadline is None:
+                    raise
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError(
+                        f"Timed out waiting for file lock: {self.path}"
+                    ) from exc
+                time.sleep(min(self.poll_interval, remaining))
+
+    def _acquire(self):
         lock = _thread_lock(self.path)
         if not lock.acquire(blocking=False):
             raise FileLockError(f"File lock is already held: {self.path}")

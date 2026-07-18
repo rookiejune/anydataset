@@ -67,6 +67,10 @@ def main() -> None:
             repeats=args.repeats,
         ),
         "store_reader": bench_store_reader_variants(args),
+        "store_payload_read": run_repeated(
+            lambda root: bench_store_payload_read(root, args),
+            repeats=args.repeats,
+        ),
         "indexed_loader": bench_indexed_loader_variants(args),
         "filter_parallel": run_repeated(
             lambda root: bench_filter_parallel(
@@ -94,6 +98,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--store-text-views", type=int, default=2)
     parser.add_argument("--store-audio-views", type=int, default=1)
     parser.add_argument("--store-max-shard-samples", type=int, default=512)
+    parser.add_argument("--store-payload-bytes", type=int, default=4096)
     parser.add_argument("--csv-shards", type=int, default=4)
     parser.add_argument("--csv-files-per-shard", type=int, default=4)
     parser.add_argument("--csv-rows-per-file", type=int, default=2_000)
@@ -335,6 +340,42 @@ def bench_store_reader(
             "views": args.store_text_views + args.store_audio_views,
             "loaded_views": len(dataset.views._cache),
             "mode": mode,
+        },
+    )
+
+
+def bench_store_payload_read(
+    root: Path,
+    args: argparse.Namespace,
+) -> Measurement:
+    output_dir = root / "payload-reader"
+    DatasetWriter(
+        output_dir,
+        dataset_id="bench-payload-reader",
+        split="train",
+        max_shard_samples=args.store_max_shard_samples,
+    ).write(
+        synthetic_sample(index, args.store_payload_bytes)
+        for index in range(args.store_samples)
+    )
+    dataset = read_store_dataset(output_dir)
+
+    start = time.perf_counter()
+    payload_reads = 0
+    checksum = 0
+    for index in range(len(dataset)):
+        text = dataset[index][Role.DEFAULT, Modality.TEXT].views[TextView.TEXT]
+        payload_reads += 1
+        checksum += index + len(text)
+    seconds = time.perf_counter() - start
+    return Measurement(
+        seconds=seconds,
+        detail={
+            "samples": len(dataset),
+            "payload_reads": payload_reads,
+            "payload_bytes": args.store_payload_bytes,
+            "checksum": checksum,
+            "max_shard_samples": args.store_max_shard_samples,
         },
     )
 

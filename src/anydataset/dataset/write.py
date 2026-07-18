@@ -26,7 +26,7 @@ from .._parallel import (
     validate_spawn_value,
 )
 from ..store.parts import DatasetPartWriter, commit_store_parts
-from ..store.writer import DEFAULT_MAX_SHARD_SAMPLES, DatasetWriter
+from ..store.writer import DEFAULT_MAX_SHARD_SAMPLES, DatasetWriter, _explicit_views
 from ..types.item import Modality, Role, Sample, View
 
 DatasetFactory = Callable[[], Any]
@@ -47,6 +47,7 @@ class DatasetStoreWriter:
         self.output_dir = Path(self.output_dir)
         if self.dataset_id is None:
             self.dataset_id = _dataset_id(self.output_dir)
+        self.views = _explicit_views(self.views)
         self.max_shard_samples = positive_int(
             "max_shard_samples",
             self.max_shard_samples,
@@ -96,6 +97,8 @@ class DatasetStoreWriter:
             context="parallel dataset write",
         )
         output_dir = _prepare_output_dir(self.output_dir.expanduser())
+        if self.num_workers > 0:
+            _prepare_loader_dataset(dataset_factory)
         with TemporaryDirectory(
             prefix=f".{output_dir.name}-parts-",
             dir=str(output_dir.parent),
@@ -139,9 +142,12 @@ class DatasetStoreWriter:
             )
             for shard_id in range(self.num_shards)
         ]
-        for worker in workers:
-            worker.start()
+        started: list[multiprocessing.Process] = []
+        completed = False
         try:
+            for worker in workers:
+                worker.start()
+                started.append(worker)
             watch_workers(
                 workers,
                 progress,
@@ -149,15 +155,14 @@ class DatasetStoreWriter:
                 early_exit_message="Dataset write worker exited early.",
                 failure_prefix="Dataset write worker",
             )
-        except Exception:
-            for worker in workers:
-                if worker.is_alive():
-                    worker.terminate()
-            for worker in workers:
+            completed = True
+        finally:
+            if not completed:
+                for worker in started:
+                    if worker.is_alive():
+                        worker.terminate()
+            for worker in started:
                 worker.join()
-            raise
-        for worker in workers:
-            worker.join()
 
         failed = [worker for worker in workers if worker.exitcode != 0]
         if failed:
@@ -165,6 +170,13 @@ class DatasetStoreWriter:
                 f"{worker.name} exited {worker.exitcode}" for worker in failed
             )
             raise RuntimeError(f"Dataset write workers failed: {details}.")
+
+
+def _prepare_loader_dataset(dataset_factory: DatasetFactory) -> None:
+    dataset = dataset_factory()
+    prepare = getattr(dataset, "prepare", None)
+    if callable(prepare):
+        prepare()
 
 
 @dataclass(frozen=True)

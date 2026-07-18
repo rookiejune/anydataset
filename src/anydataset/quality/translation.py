@@ -448,7 +448,7 @@ def _placeholder_mismatch(metrics: _Metrics, profile: Profile) -> _RuleDecision:
 
 def _html_tag_mismatch(metrics: _Metrics, profile: Profile) -> _RuleDecision:
     return (
-        Label.REVIEW,
+        Label.REJECT,
         _counts(metrics.source_html_tags) != _counts(metrics.target_html_tags),
     )
 

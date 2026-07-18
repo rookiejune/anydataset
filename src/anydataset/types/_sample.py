@@ -3,7 +3,9 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-from .item import Item, Sample, Schema, View
+import torch
+
+from .item import Item, Sample, Schema
 
 
 def select(sample: Sample, schema: Schema) -> Sample:
@@ -54,10 +56,55 @@ def merge_items(
 
 
 def values_equal(left: Any, right: Any) -> bool:
-    equal = left == right
+    if left is right:
+        return True
+
+    if isinstance(left, torch.Tensor) or isinstance(right, torch.Tensor):
+        if not isinstance(left, torch.Tensor) or not isinstance(right, torch.Tensor):
+            return False
+        try:
+            return torch.equal(left, right)
+        except (TypeError, RuntimeError):
+            return False
+
+    if isinstance(left, Mapping) or isinstance(right, Mapping):
+        if not isinstance(left, Mapping) or not isinstance(right, Mapping):
+            return False
+        if len(left) != len(right):
+            return False
+        return all(
+            key in right and values_equal(value, right[key])
+            for key, value in left.items()
+        )
+
+    if isinstance(left, (list, tuple)) or isinstance(right, (list, tuple)):
+        if type(left) is not type(right) or len(left) != len(right):
+            return False
+        return all(
+            values_equal(l_value, r_value) for l_value, r_value in zip(left, right)
+        )
+
+    left_shape = getattr(left, "shape", None)
+    right_shape = getattr(right, "shape", None)
+    if (left_shape is None) != (right_shape is None) or left_shape != right_shape:
+        return False
+
+    try:
+        equal = left == right
+    except (TypeError, ValueError, RuntimeError):
+        return False
     if isinstance(equal, bool):
         return equal
+    if equal is NotImplemented:
+        return False
+
+    reduce = getattr(equal, "all", None)
+    if callable(reduce):
+        try:
+            equal = reduce()
+        except (TypeError, ValueError, RuntimeError):
+            return False
     try:
         return bool(equal)
     except (TypeError, ValueError, RuntimeError):
-        return left is right
+        return False

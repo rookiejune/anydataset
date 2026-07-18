@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import marshal
 import multiprocessing
 import os
 import time
@@ -8,7 +10,7 @@ from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
-from types import BuiltinFunctionType, FunctionType, MethodType
+from types import BuiltinFunctionType, CellType, FunctionType, MethodType
 from typing import Any, Literal, Union, cast
 
 from torch.utils.data import DataLoader
@@ -97,6 +99,8 @@ class ViewMaterializer:
     write_prefetch: int | None = None
     runtime: Runtime = field(default_factory=Runtime)
     keep_schema: Schema | None = None
+    input_id: str | None = None
+    provider_id: str | None = None
 
     def __post_init__(self) -> None:
         self.max_shard_samples = positive_int(
@@ -118,6 +122,8 @@ class ViewMaterializer:
             "write_prefetch",
             self.write_prefetch,
         )
+        self.input_id = _optional_semantic_id("input_id", self.input_id)
+        self.provider_id = _optional_semantic_id("provider_id", self.provider_id)
 
     @property
     def _dataset_id(self) -> str:
@@ -454,7 +460,7 @@ class ViewMaterializer:
                         mode=self._materializer_mode,
                         runtime=self.runtime,
                         use_map_style_loader=use_map_style_loader,
-                        missing_indexes=tuple(missing_indexes),
+                        missing_indexes=missing_indexes,
                         fragments_dir=fragments_dir,
                         parts_dir=fragments_dir / ".parts",
                         expected=expected,
@@ -476,9 +482,12 @@ class ViewMaterializer:
             )
             for shard_id, device in enumerate(devices)
         ]
-        for worker in workers:
-            worker.start()
+        started: list[multiprocessing.Process] = []
+        completed = False
         try:
+            for worker in workers:
+                worker.start()
+                started.append(worker)
             watch_workers(
                 workers,
                 progress,
@@ -490,15 +499,14 @@ class ViewMaterializer:
                 initial=completed_count,
                 stages=_PROGRESS_STAGES,
             )
-        except Exception:
-            for worker in workers:
-                if worker.is_alive():
-                    worker.terminate()
-            for worker in workers:
+            completed = True
+        finally:
+            if not completed:
+                for worker in started:
+                    if worker.is_alive():
+                        worker.terminate()
+            for worker in started:
                 worker.join()
-            raise
-        for worker in workers:
-            worker.join()
 
         failed = [worker for worker in workers if worker.exitcode != 0]
         if failed:
@@ -521,7 +529,7 @@ class ViewMaterializer:
         use_map_style_loader: bool,
     ) -> dict[str, object]:
         return {
-            "schema_version": 1,
+            "schema_version": 2,
             "materializer": {
                 "mode": self._materializer_mode,
                 "dataset_id": self._dataset_id,
@@ -533,11 +541,13 @@ class ViewMaterializer:
             "input": {
                 "type": f"{type(dataset).__module__}.{type(dataset).__qualname__}",
                 "factory": _callable_id(dataset_factory),
+                "semantic_id": self.input_id,
                 "sample_count": expected,
                 "use_map_style_loader": use_map_style_loader,
             },
             "provider": {
                 "factory": _callable_id(provider_factory),
+                "semantic_id": self.provider_id,
             },
         }
 
@@ -856,6 +866,16 @@ def _stored_resume_metadata(path: Path) -> Mapping[str, object] | None:
     return data
 
 
+def _optional_semantic_id(name: str, value: str | None) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise TypeError(f"{name} must be a string or None.")
+    if not value:
+        raise ValueError(f"{name} must not be empty.")
+    return value
+
+
 def _metadata_value(value: object) -> object:
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
@@ -867,6 +887,13 @@ def _metadata_value(value: object) -> object:
     if isinstance(value, Sequence) and not isinstance(value, (bytes, bytearray)):
         return [_metadata_value(item) for item in value]
     return repr(value)
+
+
+def _closure_value(cell: CellType) -> object:
+    try:
+        return cell.cell_contents
+    except ValueError:
+        return "<empty>"
 
 
 def _callable_id(value: object) -> object:
@@ -883,7 +910,20 @@ def _callable_id(value: object) -> object:
             "owner": _callable_id(value.__self__),
         }
     if isinstance(value, (FunctionType, BuiltinFunctionType)):
-        return f"{value.__module__}.{value.__qualname__}"
+        identity: dict[str, object] = {
+            "function": f"{value.__module__}.{value.__qualname__}",
+        }
+        if isinstance(value, FunctionType):
+            identity["code"] = hashlib.sha256(
+                marshal.dumps(value.__code__)
+            ).hexdigest()[:16]
+            identity["defaults"] = _metadata_value(value.__defaults__ or ())
+            identity["kwdefaults"] = _metadata_value(value.__kwdefaults__ or {})
+            identity["closure"] = [
+                _metadata_value(_closure_value(cell))
+                for cell in (value.__closure__ or ())
+            ]
+        return identity
 
     type_id = f"{type(value).__module__}.{type(value).__qualname__}"
     if type(value).__repr__ is object.__repr__:
@@ -911,7 +951,7 @@ class _WorkerConfig:
     mode: _MaterializerMode
     runtime: Runtime
     use_map_style_loader: bool
-    missing_indexes: tuple[int, ...]
+    missing_indexes: Sequence[int]
     fragments_dir: Path
     parts_dir: Path
     expected: int

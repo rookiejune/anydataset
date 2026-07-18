@@ -22,6 +22,7 @@ import torch
 from torch.utils.data import DataLoader, Dataset, IterableDataset, Sampler
 
 from ._logging import run_logs_dir, set_run_logs_dir
+from ._resume import ComplementIndexes
 from ._sharding import runtime_shard, validate_shard
 
 DatasetFactory = Callable[[], Any]
@@ -108,6 +109,14 @@ class SelectedIndexSampler(Sampler[int]):
 
     def __post_init__(self) -> None:
         validate_shard(self.num_shards, self.shard_id)
+        if isinstance(self.indexes, range):
+            if self.indexes.step <= 0:
+                raise ValueError("sample indexes must be strictly increasing.")
+            if self.indexes and self.indexes.start < 0:
+                raise ValueError("sample indexes must be non-negative.")
+            return
+        if isinstance(self.indexes, ComplementIndexes):
+            return
         previous: int | None = None
         for index in self.indexes:
             if index < 0:
@@ -117,6 +126,13 @@ class SelectedIndexSampler(Sampler[int]):
             previous = index
 
     def __iter__(self) -> Iterator[int]:
+        if isinstance(self.indexes, range):
+            return iter(self.indexes[self.shard_id :: self.num_shards])
+        if isinstance(self.indexes, ComplementIndexes):
+            return (
+                self.indexes[position]
+                for position in range(self.shard_id, len(self.indexes), self.num_shards)
+            )
         return islice(self.indexes, self.shard_id, None, self.num_shards)
 
     def __len__(self) -> int:

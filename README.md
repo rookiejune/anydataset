@@ -54,6 +54,20 @@ from anydataset import Preset
 spec = Preset.MNIST.spec(split="train")
 ```
 
+`FSD50K` is map-style and accepts only an optional Hugging Face `revision`.
+The revision defaults to `main` and is used for file discovery, payload
+downloads, and the source cache identity.
+
+```python
+from anydataset import AnyDataset
+
+fsd50k = AnyDataset.preset(
+    "fsd50k",
+    split="dev",
+    revision="refs/convert/parquet",
+)
+```
+
 String shorthands are resolved by `resolve_dataset`:
 
 ```python
@@ -436,6 +450,8 @@ def provider_factory(device: str):
 
 delta = ViewMaterializer(
     output_dir="/data/my_anydataset_longcat",
+    input_id="my-audio-v1",
+    provider_id="toy-longcat-v1",
 ).write(
     dataset_factory=dataset_factory,
     provider_factory=provider_factory,
@@ -471,6 +487,12 @@ sibling resume directory, and reruns skip completed global sample indexes
 before atomically committing the final store. `commit_samples` controls that
 checkpoint granularity and defaults to `max(batch_size, 32)` to avoid excessive
 small resume files; lower it when a workload needs finer recovery points.
+Resume compatibility includes an automatically derived identity for both
+factories. Set `input_id` and `provider_id` to explicit semantic versions when
+the input snapshot or provider behavior depends on state that the callables do
+not capture, such as mutable files or checkpoint contents. These IDs augment,
+rather than replace, the factory identities; changing either one quarantines
+the old resume directory instead of reusing incompatible fragments.
 Multi-device materialization uses Python `spawn`, so `dataset_factory` and
 `provider_factory` must be picklable, module-level callables. Like filtering,
 multi-device materialization owns its offline worker processes and should not

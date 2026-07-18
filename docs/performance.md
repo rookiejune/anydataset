@@ -22,10 +22,12 @@
   懒加载 sample/view manifest 的完整行。`preload=True` 仍表示显式加载并校验所有 view
   manifest。
 
-## 待验证假设
+## 待验证事项
 
-1. 只有 indexed loader 决策稳定后，才适合继续讨论 LBA tail flush 是否能从 object gather
-   改成 metadata-only flush。
+1. 在目标 Linux 机器上用真实 store/materializer 输入验证 server 模式的 fork
+   reader/writer 行为；直接持有 torch/CUDA/provider 状态的本地路径继续使用 spawn。
+2. 基于 map-style indexed loader 已提供的稳定全局 sample index，验证 distributed LBA
+   tail flush 能否从 object gather 改成 metadata-only flush。
 
 ## 已落地
 
@@ -52,6 +54,15 @@
 - 每个 materializer rank 的 writer 在 fragment 阶段结束后归并自己的 rank part；各
   rank 通过屏障确认 fragment 写入完成，再按稳定顺序分配包括续跑产物在内的 fragment。
   主进程最终只对 rank part 做 k-way merge、全局覆盖校验和原子发布。
+- 新任务的 missing index 使用 `range`；续跑中 missing 较少时只物化 missing tuple，
+  completed 较少时使用保存已完成下标的可 pickle lazy complement，避免按样本总数建立
+  大型 Python tuple。
+- `PayloadCache` 对已打开的 tar shard 做进程内 LRU 缓存，并在每个打开的 archive 上缓存
+  `payload key -> TarInfo` 映射；连续随机读取不再反复打开 tar 或线性扫描 member。该索引
+  不持久化，archive 被淘汰或进程退出后随句柄释放。
+- materializer resume metadata 除自动 factory 标识外，还接受显式 `input_id` 和
+  `provider_id` 语义版本。它们共同决定 fragment 是否可复用，避免 mutable input 或模型
+  checkpoint 变化后错误续跑。
 
 ## 阶段一基准
 
@@ -61,11 +72,14 @@
 PYTHONPATH=src python scripts/benchmark_hot_paths.py
 ```
 
-`scripts/benchmark_hot_paths.py` 覆盖三组热路径：
+`scripts/benchmark_hot_paths.py` 覆盖七组热路径：
 
 - `store_commit`: 多 part store 提交成本。
 - `sharded_csv`: 物理 CSV 分片的 indexed shard 读取成本。
+- `store_reader`: lazy/preload manifest 的 store 打开成本。
+- `store_payload_read`: 打开 store 后逐样本执行 tar 定位、payload 读取和 UTF-8 解码的成本。
 - `indexed_loader`: 当前 runtime iterable loader 和正式 map-style indexed loader 实现。
+- `filter_parallel`: 多 device filter 扫描、partition cache 写入和提交成本。
 - `writer_pipeline`: inline、thread、spawn process 和 fork process 后台写入对比。
 
 `indexed_loader` 默认候选：
@@ -82,6 +96,7 @@ PYTHONPATH=src python scripts/benchmark_hot_paths.py
 PYTHONPATH=src python scripts/benchmark_hot_paths.py \
   --repeats 1 \
   --store-samples 32 \
+  --store-payload-bytes 256 \
   --csv-rows-per-file 32 \
   --indexed-samples 128 \
   --indexed-num-workers 0
@@ -101,6 +116,8 @@ PYTHONPATH=src python scripts/benchmark_hot_paths.py \
 ## 判断标准
 
 - 每个候选必须输出相同的 selected sample count 和 index checksum。
+- `store_payload_read` 必须输出与样本数相同的 `payload_reads`；该项单独衡量真实 payload
+  读取，不能用只执行 `read_store_dataset()` 的 `store_reader` 打开时间替代。
 - `map_spawn` 必须能通过 spawn worker 重建 dataset，证明 wrapper serialization 不携带
   已构造 dataset cache。
 - 如果 `map_default` 或 `map_fork` 只在特定平台快，默认实现仍要保留显式可控的 start

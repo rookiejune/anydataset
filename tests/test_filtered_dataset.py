@@ -4,7 +4,9 @@ import io
 import json
 import math
 import os
+import pickle
 import tempfile
+import threading
 import time
 import unittest
 from contextlib import redirect_stderr
@@ -15,6 +17,7 @@ from functools import partial
 from pathlib import Path
 
 import torch
+from torch.utils.data import DataLoader
 
 from anydataset import (
     AnyDataset,
@@ -160,6 +163,57 @@ class FilteredDatasetTest(unittest.TestCase):
 
         self.assertEqual(_values(result.select_by("accept")), [2, 3])
         self.assertEqual(calls, [])
+
+    def test_concurrent_cold_cache_waits_and_reuses_result(self):
+        _register_rows_source("unit_test_filter_concurrent_cache")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home = Path(tmpdir) / "home"
+            dataset = _dataset("unit_test_filter_concurrent_cache", [0, 1])
+            entered = threading.Event()
+            release = threading.Event()
+            calls = []
+            results = []
+            errors = []
+
+            def predicate_factory():
+                def predicate(sample):
+                    calls.append(_value(sample))
+                    if len(calls) == 1:
+                        entered.set()
+                        if not release.wait(timeout=5):
+                            raise TimeoutError("test predicate was not released")
+                    return True
+
+                return predicate
+
+            rule = FilterRule("concurrent", predicate_factory)
+
+            def apply():
+                try:
+                    results.append(
+                        rule.apply(dataset_factory=lambda: dataset, device="cpu")
+                    )
+                except Exception as exc:
+                    errors.append(exc)
+
+            with mock.patch.dict(os.environ, {"ANYDATASET_HOME": str(home)}):
+                first = threading.Thread(target=apply)
+                first.start()
+                self.assertTrue(entered.wait(timeout=5))
+                second = threading.Thread(target=apply)
+                second.start()
+                time.sleep(0.05)
+                self.assertTrue(second.is_alive())
+                release.set()
+                first.join(timeout=10)
+                second.join(timeout=10)
+
+            self.assertFalse(first.is_alive())
+            self.assertFalse(second.is_alive())
+            self.assertEqual(errors, [])
+            self.assertEqual(calls, [0, 1])
+            self.assertEqual(len(results), 2)
+            self.assertEqual(results[0].cache_path, results[1].cache_path)
 
     def test_rule_apply_resumes_from_completed_chunks(self):
         _register_rows_source("unit_test_filter_resume")
@@ -438,6 +492,61 @@ class FilteredDatasetTest(unittest.TestCase):
             ]
 
         self.assertEqual(shard, [(1, 2, 2)])
+
+    def test_filtered_dataset_pickle_rebuilds_cache_from_factory(self):
+        dataset_factory = partial(
+            _unpicklable_dataset,
+            "unit_test_filter_pickle",
+            list(range(4)),
+        )
+        filtered = (
+            FilterRule(
+                name="even",
+                factory=_metric_factory,
+            )
+            .apply(
+                dataset_factory=dataset_factory,
+                metrics=True,
+                device="cpu",
+            )
+            .select_by("accept")
+        )
+
+        restored_cache = pickle.loads(pickle.dumps(filtered._cache))
+        restored = pickle.loads(pickle.dumps(filtered))
+
+        self.assertEqual(restored_cache.labels, ("accept", "reject"))
+        self.assertEqual(restored.cache_path, filtered.cache_path)
+        self.assertEqual(restored.metrics_path, filtered.metrics_path)
+        self.assertEqual(_values(restored), [0, 2])
+        self.assertEqual(len(list(restored.iter_metrics())), 4)
+
+    def test_filtered_dataset_spawn_loader_reads_selected_samples(self):
+        dataset_factory = partial(
+            _unpicklable_dataset,
+            "unit_test_filter_spawn_loader",
+            list(range(4)),
+        )
+        filtered = (
+            FilterRule(
+                name="even",
+                factory=_mod_three_factory,
+            )
+            .apply(
+                dataset_factory=dataset_factory,
+                device="cpu",
+            )
+            .select_by("zero", "two")
+        )
+
+        loader = DataLoader(
+            filtered,
+            batch_size=None,
+            num_workers=1,
+            multiprocessing_context="spawn",
+        )
+
+        self.assertEqual([_value(sample) for sample in loader], [0, 2, 3])
 
     def test_result_and_filtered_dataset_attributes_are_read_only(self):
         _register_rows_source("unit_test_filter_readonly")
@@ -909,6 +1018,79 @@ class FilteredDatasetTest(unittest.TestCase):
             ]
 
             self.assertEqual(indexes, [2, 5, 9])
+
+    def test_collect_ranges_parallel_cleans_workers_after_partial_start(self):
+        context = mock.Mock()
+        first = mock.Mock()
+        first.is_alive.return_value = True
+        second = mock.Mock()
+        second.start.side_effect = RuntimeError("start failed")
+        context.Process.side_effect = (first, second)
+        dataset_factory = partial(
+            _dataset,
+            "unit_test_filter_partial_start",
+            [0, 1],
+        )
+
+        with mock.patch(
+            "anydataset.filter.collect.multiprocessing_context",
+            return_value=context,
+        ):
+            chunks = collect_ranges_parallel(
+                dataset_factory,
+                _true_factory,
+                ("cpu:0", "cpu:1"),
+                False,
+                1,
+                sample_count=2,
+                batch_size=1,
+                num_workers=0,
+                prefetch_factor=None,
+                runtime=Runtime(),
+                use_map_style_loader=True,
+            )
+            with self.assertRaisesRegex(RuntimeError, "start failed"):
+                next(iter(chunks))
+
+        first.terminate.assert_called_once_with()
+        first.join.assert_called_once_with()
+        second.join.assert_not_called()
+
+    def test_collect_ranges_parallel_keeps_compact_sample_indexes(self):
+        context = mock.Mock()
+        process = mock.Mock()
+        process.start.side_effect = RuntimeError("stop before worker start")
+        context.Process.return_value = process
+        sample_indexes = range(20_000_000)
+        dataset_factory = partial(
+            _dataset,
+            "unit_test_filter_compact_indexes",
+            [0],
+        )
+
+        with mock.patch(
+            "anydataset.filter.collect.multiprocessing_context",
+            return_value=context,
+        ):
+            chunks = collect_ranges_parallel(
+                dataset_factory,
+                _true_factory,
+                ("cpu",),
+                False,
+                1,
+                sample_count=len(sample_indexes),
+                sample_indexes=sample_indexes,
+                batch_size=1,
+                num_workers=0,
+                prefetch_factor=None,
+                runtime=Runtime(),
+                use_map_style_loader=True,
+            )
+            with self.assertRaisesRegex(RuntimeError, "before worker start"):
+                next(iter(chunks))
+
+        config = context.Process.call_args.kwargs["args"][4]
+        self.assertIs(config.sample_indexes, sample_indexes)
 
     def test_rule_apply_parallel_resume_skips_completed_predicates(self):
         with tempfile.TemporaryDirectory() as tmpdir:

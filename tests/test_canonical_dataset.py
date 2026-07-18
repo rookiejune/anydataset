@@ -1,3 +1,4 @@
+import pickle
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -15,7 +16,7 @@ from anydataset import (
     Task,
     resolve_dataset,
 )
-from anydataset.dataset import FieldGroup, FieldRef, collate_fn
+from anydataset.dataset import FieldGroup, FieldRef, MergedDataset, collate_fn
 from anydataset.types import (
     AudioItem,
     AudioMeta,
@@ -43,11 +44,18 @@ class CanonicalDatasetTest(unittest.TestCase):
 
     def test_spec_id_is_stable_physical_identity(self):
         spec = Preset.FSD50K.spec(split="dev")
-        same = Spec(source=Source.HF, path="Fhrozen/FSD50k", split="dev")
+        same = Spec(
+            source=Source.HF,
+            path="Fhrozen/FSD50k",
+            split="dev",
+            load_options={"revision": "main"},
+        )
         different = Spec(source=Source.HF, path="Fhrozen/FSD50k", split="train")
+        different_revision = Preset.FSD50K.spec(split="dev", revision="v1")
 
         self.assertEqual(spec.id, same.id)
         self.assertNotEqual(spec.id, different.id)
+        self.assertNotEqual(spec.id, different_revision.id)
         self.assertEqual(spec.to_dict()["id"], spec.id)
 
     def test_spec_load_options_are_frozen(self):
@@ -75,6 +83,21 @@ class CanonicalDatasetTest(unittest.TestCase):
             spec.load_options["files"].append("b.jsonl")
         with self.assertRaises(TypeError):
             spec.load_options["options"]["streaming"] = False
+
+    def test_spec_nested_load_options_are_picklable_and_remain_frozen(self):
+        spec = Spec(
+            source=Source.HF,
+            path="org/data",
+            load_options={"data_files": {"train": ["a.jsonl"]}},
+        )
+
+        restored = pickle.loads(pickle.dumps(spec))
+
+        self.assertEqual(restored, spec)
+        self.assertEqual(restored.id, spec.id)
+        self.assertEqual(restored.load_options["data_files"]["train"], ("a.jsonl",))
+        with self.assertRaises(TypeError):
+            restored.load_options["data_files"]["train"] = ("b.jsonl",)
 
     def test_spec_id_does_not_change_when_source_options_are_mutated(self):
         load_options = {"files": ["a.jsonl"]}
@@ -446,6 +469,24 @@ class CanonicalDatasetTest(unittest.TestCase):
             )
         )
 
+    def test_collate_fn_is_picklable(self):
+        ref = (Role.DEFAULT, Modality.AUDIO)
+        collator = pickle.loads(pickle.dumps(Task.AUDIO_CODEC.collate_fn()))
+
+        batch = collator(
+            [
+                {
+                    ref: AudioItem(
+                        views={AudioView.WAVEFORM: (torch.tensor([1.0]), 16000)},
+                    )
+                }
+            ]
+        )
+
+        waveform, sample_rates = batch.sample[ref].views[AudioView.WAVEFORM]
+        self.assertTrue(torch.equal(waveform, torch.tensor([[1.0]])))
+        self.assertTrue(torch.equal(sample_rates, torch.tensor([16000])))
+
     def test_collate_fn_batches_numpy_waveforms(self):
         ref = (Role.DEFAULT, Modality.AUDIO)
         samples = [
@@ -558,6 +599,85 @@ class CanonicalDatasetTest(unittest.TestCase):
 
         with self.assertRaisesRegex(TypeError, "Codec view values must be tensors"):
             collate_fn(schema)(samples)
+
+    def test_collate_fn_rejects_mixed_codec_dtypes(self):
+        ref = (Role.DEFAULT, Modality.AUDIO)
+        schema = {ref: AudioReq(views=frozenset({AudioView.LONGCAT}))}
+        samples = [
+            {
+                ref: AudioItem(
+                    views={AudioView.LONGCAT: torch.tensor([[1]], dtype=torch.int8)},
+                )
+            },
+            {
+                ref: AudioItem(
+                    views={AudioView.LONGCAT: torch.tensor([[300]], dtype=torch.int64)},
+                )
+            },
+        ]
+
+        with self.assertRaisesRegex(TypeError, "share one dtype"):
+            collate_fn(schema)(samples)
+
+    def test_collate_fn_rejects_mixed_codec_devices(self):
+        ref = (Role.DEFAULT, Modality.AUDIO)
+        schema = {ref: AudioReq(views=frozenset({AudioView.LONGCAT}))}
+        samples = [
+            {ref: AudioItem(views={AudioView.LONGCAT: torch.tensor([[1]])})},
+            {
+                ref: AudioItem(
+                    views={
+                        AudioView.LONGCAT: torch.empty(
+                            (1, 1),
+                            dtype=torch.int64,
+                            device="meta",
+                        )
+                    },
+                )
+            },
+        ]
+
+        with self.assertRaisesRegex(ValueError, "share one device"):
+            collate_fn(schema)(samples)
+
+    def test_merge_accepts_equal_nested_tensor_and_array_metadata(self):
+        ref = (Role.DEFAULT, Modality.AUDIO)
+        left = {
+            ref: AudioItem(
+                meta={
+                    AudioMeta.LABELS: {
+                        "tensor": torch.tensor([1, 2]),
+                        "array": np.array([3, 4]),
+                        "nested": [torch.tensor([5]), np.array([6])],
+                    }
+                }
+            )
+        }
+        right = {
+            ref: AudioItem(
+                meta={
+                    AudioMeta.LABELS: {
+                        "tensor": torch.tensor([1, 2]),
+                        "array": np.array([3, 4]),
+                        "nested": [torch.tensor([5]), np.array([6])],
+                    }
+                }
+            )
+        }
+
+        merged = MergedDataset([left], [right])[0]
+
+        labels = merged[ref].meta[AudioMeta.LABELS]
+        self.assertTrue(torch.equal(labels["tensor"], torch.tensor([1, 2])))
+        self.assertTrue(np.array_equal(labels["array"], np.array([3, 4])))
+
+    def test_merge_rejects_unequal_nested_array_metadata(self):
+        ref = (Role.DEFAULT, Modality.AUDIO)
+        left = {ref: AudioItem(meta={AudioMeta.LABELS: {"array": np.array([1, 2])}})}
+        right = {ref: AudioItem(meta={AudioMeta.LABELS: {"array": np.array([1, 3])}})}
+
+        with self.assertRaisesRegex(ValueError, "metadata conflict"):
+            MergedDataset([left], [right])[0]
 
     def test_collate_fn_keeps_non_tensor_meta_as_values(self):
         ref = (Role.DEFAULT, Modality.AUDIO)

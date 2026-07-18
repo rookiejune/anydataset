@@ -24,7 +24,7 @@ from .apply import (
     make_filtered_dataset_factory,
 )
 from .rules import label, unique_labels, validate_string
-from .storage import merged_index, read_metrics
+from .storage import merged_index, read_metrics, read_partitions
 from .types import (
     DatasetFactory,
     FilterApplyKwargs,
@@ -129,6 +129,17 @@ class _FilterCache:
             f"cache_path={self.cache_path!r}, "
             f"metrics_path={self.metrics_path!r}"
             ")"
+        )
+
+    def __reduce__(self):
+        return (
+            _restore_filter_cache,
+            (
+                self.dataset_factory,
+                self.rule.name,
+                self.cache_path,
+                self.metrics_path,
+            ),
         )
 
     @property
@@ -266,6 +277,9 @@ class FilteredDataset(MapStyleABC):
             ")"
         )
 
+    def __reduce__(self):
+        return _restore_filtered_dataset, (self._cache, self.labels)
+
     @property
     def base(self) -> AnyDataset | StoreDataset | MergedDataset | FilteredDataset:
         return self._cache.base
@@ -326,6 +340,33 @@ class FilteredDataset(MapStyleABC):
 
     def __getitem__(self, index: int) -> Sample:
         return filter_universe(self.base)[self._indices[index]]
+
+
+def _restore_filter_cache(
+    dataset_factory: DatasetFactory,
+    rule_name: str,
+    cache_path: Path,
+    metrics_path: Path | None,
+) -> _FilterCache:
+    return _FilterCache(
+        dataset_factory(),
+        read_partitions(cache_path),
+        FilterRule(rule_name, _unavailable_filter_factory),
+        cache_path,
+        dataset_factory=dataset_factory,
+        metrics_path=metrics_path,
+    )
+
+
+def _restore_filtered_dataset(
+    cache: _FilterCache,
+    labels: tuple[str, ...],
+) -> FilteredDataset:
+    return FilteredDataset._from_cache(cache, labels=labels)
+
+
+def _unavailable_filter_factory() -> FilterPredicate:
+    raise RuntimeError("cached filtered dataset cannot rebuild its upstream rule.")
 
 
 def selected_labels(

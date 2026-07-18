@@ -40,6 +40,7 @@ class ResolverTest(unittest.TestCase):
         self.assertEqual(preset.source, Source.HF)
         self.assertEqual(preset.path, "Fhrozen/FSD50k")
         self.assertEqual(preset.split, "dev")
+        self.assertEqual(preset.load_options["revision"], "main")
 
         explicit = Spec(source=Source.STORE, path="/tmp/data")
 
@@ -64,6 +65,24 @@ class ResolverTest(unittest.TestCase):
             with self.subTest(shorthand=shorthand):
                 spec = resolve_dataset(shorthand)
                 self.assertEqual((spec.source, spec.path, spec.split), expected)
+
+    def test_resolves_huggingface_split_slices(self):
+        cases = {
+            "hf://org/name:train[:10%]": "train[:10%]",
+            "hf://org/name:train[10%:20%]": "train[10%:20%]",
+        }
+
+        for shorthand, split in cases.items():
+            with self.subTest(shorthand=shorthand):
+                spec = resolve_dataset(shorthand)
+                self.assertEqual(spec.path, "org/name")
+                self.assertEqual(spec.split, split)
+
+    def test_split_parser_keeps_colons_in_source_paths(self):
+        spec = resolve_dataset("store://C:/datasets/audio:train")
+
+        self.assertEqual(spec.path, "C:/datasets/audio")
+        self.assertEqual(spec.split, "train")
 
     def test_builtin_audio_dataset_split_can_be_overridden(self):
         spec = resolve_dataset("fleurs:validation")

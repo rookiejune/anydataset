@@ -90,7 +90,11 @@ class Predicate:
             audio, sample_rate, audio_warning = _waveform(item)
             reference_text, text_warning = _reference_text(sample, role)
             if audio_warning is not None:
-                warnings.append(_role_key(role, audio_warning))
+                output = _role_key(role, audio_warning)
+                if audio_warning == "non_finite_waveform":
+                    flags.append(output)
+                else:
+                    warnings.append(output)
             if text_warning is not None:
                 warnings.append(_role_key(role, text_warning))
             if audio_warning is not None or text_warning is not None:
@@ -160,6 +164,12 @@ def _waveform(item: AudioItem) -> tuple[Any, int, str | None]:
         return None, 0, "invalid_sample_rate"
     if sample_rate <= 0:
         return None, 0, "invalid_sample_rate"
+    try:
+        wave = torch.as_tensor(audio)
+    except (TypeError, ValueError):
+        return None, 0, "invalid_waveform"
+    if not bool(torch.isfinite(wave).all().item()):
+        return None, 0, "non_finite_waveform"
     return audio, sample_rate, None
 
 

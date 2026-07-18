@@ -41,6 +41,14 @@ class Batch:
         return field_lengths(self, field)
 
 
+@dataclass(frozen=True)
+class _Collator:
+    schema: item.Schema
+
+    def __call__(self, samples: Sequence[item.Sample]) -> Batch:
+        return _collate_samples(samples, self.schema)
+
+
 def field_lengths(batch: Batch, field: FieldRef) -> torch.Tensor:
     try:
         mask = batch.masks[field]
@@ -57,10 +65,7 @@ def field_lengths(batch: Batch, field: FieldRef) -> torch.Tensor:
 def collate_fn(
     schema: item.Schema,
 ) -> Callable[[Sequence[item.Sample]], Batch]:
-    def collate(samples: Sequence[item.Sample]) -> Batch:
-        return _collate_samples(samples, schema)
-
-    return collate
+    return _Collator(dict(schema))
 
 
 def _collate_samples(
@@ -236,6 +241,13 @@ def _collate_codec_codes(
         for tensor in tensors
     ):
         raise TypeError(f"Codec view values must contain integer ids for {field!r}.")
+
+    dtype = tensors[0].dtype
+    if any(tensor.dtype != dtype for tensor in tensors):
+        raise TypeError(f"Codec view values must share one dtype for {field!r}.")
+    device = tensors[0].device
+    if any(tensor.device != device for tensor in tensors):
+        raise ValueError(f"Codec view values must share one device for {field!r}.")
 
     codebooks = tensors[0].shape[1]
     if codebooks == 0 or any(tensor.shape[1] != codebooks for tensor in tensors):

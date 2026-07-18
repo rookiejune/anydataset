@@ -13,6 +13,7 @@ meant to be used with `FilterRule`.
   `(role, Modality.TEXT)` with `TextView.TEXT`.
 - Missing waveform or same-role text is recorded as an audit warning. It does
   not reject the sample by itself.
+- A waveform containing NaN or infinity is rejected before evaluator execution.
 
 ## Labels
 
@@ -61,6 +62,7 @@ Each metrics payload includes:
 
 - `decision`: normalized label.
 - `flags`: role-prefixed threshold failures such as `default_utmos_low`.
+- `flags` also records hard input failures such as `default_non_finite_waveform`.
 - `warnings`: role-prefixed skipped-input warnings such as
   `source_missing_text`.
 - `audio_count`: number of audio items in the sample.

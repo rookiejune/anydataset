@@ -6,7 +6,7 @@ import wave
 from functools import partial
 from pathlib import Path
 from typing import Any, Iterator
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import quote, urlsplit, urlunsplit
 from urllib.request import Request, urlopen
 
 import torch
@@ -28,8 +28,15 @@ class FSD50K(AnyDataset):
         transforms: Transforms | None = None,
         **load_options: Any,
     ) -> None:
+        extra = set(load_options) - {"revision"}
+        if extra:
+            name = min(extra)
+            raise TypeError(f"Unexpected FSD50K load option: {name}.")
+        revision = load_options.get("revision", "main")
+        if not isinstance(revision, str) or not revision:
+            raise ValueError("FSD50K revision must be a non-empty string.")
         super().__init__(
-            spec=preset_spec(Preset.FSD50K, split=split, **load_options),
+            spec=preset_spec(Preset.FSD50K, split=split, revision=revision),
             parse_fn=partial(
                 sample_from_row,
                 audio={
@@ -45,18 +52,20 @@ class FSD50K(AnyDataset):
 
         cache = self.cache_manager.prepare(self.spec)
         split = self.spec.split or "dev"
+        revision = str(self.spec.load_options["revision"])
         if split not in _VALID_SPLITS:
             raise ValueError("FSD50K split must be `dev` or `eval`.")
 
         manifest_path = cache.cache_path / f"{split}_files.json"
         if not manifest_path.exists():
-            files = _list_files(self.spec.path, split)
+            files = _list_files(self.spec.path, split, revision)
             _write_json(manifest_path, files)
         else:
             files = json.loads(manifest_path.read_text(encoding="utf-8"))
 
         self._dataset = {
             "repo_id": self.spec.path,
+            "revision": revision,
             "split": split,
             "files": files,
             "cache_path": cache.cache_path,
@@ -92,10 +101,10 @@ def _row_for(state: dict[str, Any], index: int) -> dict[str, Any]:
     }
 
 
-def _list_files(repo_id: str, split: str) -> list[str]:
+def _list_files(repo_id: str, split: str, revision: str) -> list[str]:
     endpoint = os.environ.get("HF_ENDPOINT", "https://huggingface.co").rstrip("/")
     url = (
-        f"{endpoint}/api/datasets/{repo_id}/tree/main/clips/{split}"
+        f"{endpoint}/api/datasets/{repo_id}/tree/{quote(revision, safe='')}/clips/{split}"
         "?recursive=true&expand=false&limit=1000"
     )
     files: list[str] = []
@@ -151,6 +160,7 @@ def _download_file(state: dict[str, Any], file_name: str) -> str:
     return hf_hub_download(
         repo_id=state["repo_id"],
         repo_type="dataset",
+        revision=state["revision"],
         filename=file_name,
         cache_dir=str(Path(state["cache_path"]) / "hf"),
     )

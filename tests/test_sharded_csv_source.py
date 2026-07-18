@@ -239,6 +239,31 @@ class ShardedCsvSourceTest(unittest.TestCase):
 
             executor.assert_called_once()
 
+    def test_daemon_worker_prepares_multiple_files_inline(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            shard_dir = root / "shard_0"
+            shard_dir.mkdir()
+            (shard_dir / "0.csv").write_text("src_text\nzero\n", encoding="utf-8")
+            (shard_dir / "1.csv").write_text("src_text\none\n", encoding="utf-8")
+            dataset = AnyDataset(
+                Spec(source="sharded_csv", path=tmpdir),
+                parse_fn=_src_text,
+            )
+
+            with (
+                mock.patch(
+                    "anydataset.dataset.source.sharded_csv.multiprocessing.current_process"
+                ) as current_process,
+                mock.patch(
+                    "anydataset.dataset.source.sharded_csv.ProcessPoolExecutor"
+                ) as executor,
+            ):
+                current_process.return_value.daemon = True
+                self.assertEqual(list(dataset), ["zero", "one"])
+
+            executor.assert_not_called()
+
     def test_prepared_parquet_supports_index_selection(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

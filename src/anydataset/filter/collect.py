@@ -66,7 +66,7 @@ class _FilterWorkerConfig:
     sample_count: int
     use_map_style_loader: bool
     skip_indexes: frozenset[int]
-    sample_indexes: tuple[int, ...] | None
+    sample_indexes: Sequence[int] | None
     logs_dir: Path
     worker_logs_dir: Path
 
@@ -212,7 +212,7 @@ def collect_ranges_parallel(
                     sample_count=sample_count,
                     use_map_style_loader=use_map_style_loader,
                     skip_indexes=skip_indexes,
-                    sample_indexes=tuple(sample_indexes) if sample_indexes is not None else None,
+                    sample_indexes=sample_indexes,
                     logs_dir=logs_dir,
                     worker_logs_dir=worker_logs_dir,
                 ),
@@ -222,10 +222,12 @@ def collect_ranges_parallel(
         )
         for rank, worker in enumerate(worker_configs(devices[:workers]))
     ]
-    for process in processes:
-        process.start()
+    started: list[multiprocessing.Process] = []
     completed = False
     try:
+        for process in processes:
+            process.start()
+            started.append(process)
         yield from _ordered_worker_chunks(
             outputs,
             processes,
@@ -239,10 +241,10 @@ def collect_ranges_parallel(
         completed = True
     finally:
         if not completed:
-            for process in processes:
+            for process in started:
                 if process.is_alive():
                     process.terminate()
-        for process in processes:
+        for process in started:
             process.join()
     failed = [process for process in processes if process.exitcode != 0]
     if failed:

@@ -30,7 +30,11 @@ from anydataset.store.parts import (
 )
 from anydataset.store.writer import DEFAULT_MAX_SHARD_SAMPLES
 from anydataset.store.jsonio import read_json
-from anydataset.store.manifest import DatasetManifest, ViewManifestEntry
+from anydataset.store.manifest import (
+    DatasetManifest,
+    SampleManifestEntry,
+    ViewManifestEntry,
+)
 from anydataset.store.manifestio import (
     read_samples_manifest,
     read_view_manifest,
@@ -147,6 +151,39 @@ class DatasetWriterTest(unittest.TestCase):
         self.assertEqual(writer.max_shard_samples, 100_000)
         self.assertEqual(DEFAULT_MAX_SHARD_SAMPLES, 100_000)
 
+    def test_explicit_views_are_strictly_validated(self):
+        view = (Role.DEFAULT, Modality.AUDIO, AudioView.WAVEFORM)
+        cases = (
+            ([view], TypeError, "views must be a tuple"),
+            ((view[:2],), TypeError, "views entries"),
+            ((("default", Modality.AUDIO, AudioView.WAVEFORM),), TypeError, "role"),
+            (((Role.DEFAULT, "audio", AudioView.WAVEFORM),), TypeError, "modality"),
+            (
+                ((Role.DEFAULT, Modality.AUDIO, TextView.TEXT),),
+                TypeError,
+                "AudioView",
+            ),
+        )
+
+        for views, error, message in cases:
+            with self.subTest(views=views):
+                with self.assertRaisesRegex(error, message):
+                    DatasetWriter("unused", dataset_id="toy", views=views)
+
+    def test_writers_reject_duplicate_explicit_views(self):
+        view = (Role.DEFAULT, Modality.AUDIO, AudioView.WAVEFORM)
+
+        with self.assertRaisesRegex(ValueError, "Duplicate store view"):
+            DatasetWriter("unused", dataset_id="toy", views=(view, view))
+        with self.assertRaisesRegex(ValueError, "Duplicate store view"):
+            DatasetPartWriter(
+                "unused",
+                dataset_id="toy",
+                shard_id=0,
+                num_shards=1,
+                views=(view, view),
+            )
+
     def test_explicit_view_must_exist_on_each_sample(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             output = Path(tmpdir) / "dataset"
@@ -242,6 +279,108 @@ class DatasetWriterTest(unittest.TestCase):
             indexes = [entry.sample_index for entry in read_samples_manifest(output)]
             self.assertEqual(indexes, [0, 1, 2])
             self.assertTrue(dataset_ready_path(output).exists())
+
+    def test_fragment_manifest_merge_reads_one_row_per_store_lazily(self):
+        stores = (Path("fragment-a"), Path("fragment-b"))
+        consumed = {store: 0 for store in stores}
+
+        def entries(store, indexes):
+            for index in indexes:
+                consumed[store] += 1
+                yield SampleManifestEntry(
+                    sample_id=f"sample-{index}",
+                    sample_index=index,
+                    items=(),
+                )
+
+        manifests = {
+            stores[0]: entries(stores[0], (0, 2)),
+            stores[1]: entries(stores[1], (1, 3)),
+        }
+        with mock.patch.object(
+            store_parts,
+            "read_samples_manifest",
+            side_effect=manifests.__getitem__,
+        ):
+            merged = store_parts._merged_sample_entries(stores)
+
+            self.assertEqual(next(merged).sample_index, 0)
+
+        self.assertEqual(consumed, {stores[0]: 1, stores[1]: 1})
+
+    def test_fragment_commits_preserve_views_from_all_fragments(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            fragments = root / "fragments"
+            output = root / "dataset"
+            part = root / "part"
+            source_view = (Role.SOURCE, Modality.AUDIO, AudioView.WAVEFORM)
+            target_view = (Role.TARGET, Modality.AUDIO, AudioView.WAVEFORM)
+            source_fragment = fragments / "batch-000000000000-000000000000-a"
+            target_fragment = fragments / "batch-000000000001-000000000001-b"
+
+            DatasetFragmentWriter(
+                source_fragment,
+                dataset_id="paired-audio",
+                fragment_id=source_fragment.name,
+            ).write(
+                [
+                    (
+                        0,
+                        {
+                            (Role.SOURCE, Modality.AUDIO): AudioItem(
+                                views={AudioView.WAVEFORM: (torch.tensor([[1.0]]), 4)}
+                            )
+                        },
+                    )
+                ]
+            )
+            DatasetFragmentWriter(
+                target_fragment,
+                dataset_id="paired-audio",
+                fragment_id=target_fragment.name,
+            ).write(
+                [
+                    (
+                        1,
+                        {
+                            (Role.TARGET, Modality.AUDIO): AudioItem(
+                                views={AudioView.WAVEFORM: (torch.tensor([[2.0]]), 4)}
+                            )
+                        },
+                    )
+                ]
+            )
+
+            commit_store_fragments(
+                output,
+                fragments,
+                dataset_id="paired-audio",
+                expected_sample_count=2,
+            )
+            commit_fragment_part(
+                part,
+                (source_fragment, target_fragment),
+                dataset_id="paired-audio",
+                shard_id=0,
+                num_shards=1,
+            )
+
+            for store in (output, part):
+                self.assertEqual(
+                    [
+                        entry.sample_index
+                        for entry in read_view_manifest(store, source_view)
+                    ],
+                    [0],
+                )
+                self.assertEqual(
+                    [
+                        entry.sample_index
+                        for entry in read_view_manifest(store, target_view)
+                    ],
+                    [1],
+                )
 
     def test_fragment_part_allows_sparse_indexes(self):
         with tempfile.TemporaryDirectory() as tmpdir:

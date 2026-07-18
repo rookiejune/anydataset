@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import hashlib
+import os
+import tempfile
 from array import array
 from bisect import bisect_left, bisect_right
 from collections import OrderedDict
@@ -8,6 +11,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from ..cache import anydataset_home
 from ..dataset.abc import MapStyleABC
 from ..types import item
 from .jsonio import read_json
@@ -32,9 +36,15 @@ from .manifestio import (
 from .paths import (
     dataset_json_path,
     dataset_ready_path,
+    samples_parquet_path,
     view_ready_path,
+    view_shard_path,
 )
 from .payload import PayloadCache, payload_value, read_payload_bytes
+
+_FileCacheKey = tuple[tuple[item.Role, item.Modality, item.View], str, str]
+_StatFingerprint = tuple[int, int, int, int, int]
+_SAMPLE_INDEX_VALIDATION_VERSION = 1
 
 
 @dataclass(frozen=True)
@@ -43,7 +53,11 @@ class StoreDataset(MapStyleABC):
     manifest: DatasetManifest
     samples: SampleManifestSequence
     views: StoreViews
-    _files: dict[str, Path] = field(default_factory=dict, compare=False, repr=False)
+    _files: dict[_FileCacheKey, Path] = field(
+        default_factory=dict,
+        compare=False,
+        repr=False,
+    )
     _payloads: PayloadCache = field(
         default_factory=PayloadCache,
         compare=False,
@@ -501,6 +515,12 @@ def _validate_view_dir(
 
 
 def _validate_sample_manifest_index(root: Path, sample_count: int) -> None:
+    path = samples_parquet_path(root)
+    fingerprint = _stat_fingerprint(path.stat())
+    marker = _sample_index_validation_path(root, sample_count, fingerprint)
+    if marker.is_file():
+        return
+
     sample_ids: set[str] = set()
     count = 0
     for index, (sample_index, sample_id) in enumerate(read_sample_manifest_index(root)):
@@ -514,6 +534,32 @@ def _validate_sample_manifest_index(root: Path, sample_count: int) -> None:
         count += 1
     if count != sample_count:
         raise ValueError("sample manifest row count must match dataset.json sample_count.")
+    if _stat_fingerprint(path.stat()) != fingerprint:
+        raise ValueError("Sample manifest changed while validating index.")
+    _atomic_write_bytes(marker, b"valid\n")
+
+
+def _sample_index_validation_path(
+    root: Path,
+    sample_count: int,
+    fingerprint: _StatFingerprint,
+) -> Path:
+    validation_id = hashlib.sha256(
+        "\0".join(
+            (
+                str(_SAMPLE_INDEX_VALIDATION_VERSION),
+                str(sample_count),
+                *(str(value) for value in fingerprint),
+            )
+        ).encode("utf-8")
+    ).hexdigest()
+    return (
+        anydataset_home()
+        / "cache"
+        / "store-validation"
+        / _store_id(root)
+        / f"{validation_id}.ready"
+    )
 
 
 def _validate_sample_entry(sample: SampleManifestEntry, index: int) -> None:
@@ -644,28 +690,86 @@ def _cached_file_payload(
     entry: ViewManifestEntry,
     view: StoreView,
 ) -> Path:
-    cached = dataset._files.get(entry.key)
+    cache_key = (view.view, entry.shard, entry.key)
+    cached = dataset._files.get(cache_key)
     if cached is not None:
         return cached
 
-    data = read_payload_bytes(dataset.root, view.view, entry, cache=dataset._payloads)
-    return _cache_file_payload(dataset, entry, data)
-
-
-def _cache_file_payload(
-    dataset: StoreDataset,
-    entry: ViewManifestEntry,
-    data: bytes,
-) -> Path:
-    target = _file_cache_path(dataset.root, entry)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_bytes(data)
-    dataset._files[entry.key] = target
+    target = _file_cache_path(dataset.root, view.view, entry)
+    if not target.is_file():
+        data = read_payload_bytes(
+            dataset.root, view.view, entry, cache=dataset._payloads
+        )
+        _atomic_write_bytes(target, data)
+    dataset._files[cache_key] = target
     return target
 
 
-def _file_cache_path(root: Path, entry: ViewManifestEntry) -> Path:
-    return root / ".cache" / "files" / entry.key
+def _file_cache_path(
+    root: Path,
+    view: tuple[item.Role, item.Modality, item.View],
+    entry: ViewManifestEntry,
+) -> Path:
+    role, modality, key = view
+    shard = view_shard_path(root, view, entry.shard)
+    device, inode, size, modified, changed = _stat_fingerprint(shard.stat())
+    payload_id = hashlib.sha256(
+        (
+            f"{entry.shard}\0{entry.key}\0{device}\0{inode}\0{size}\0"
+            f"{modified}\0{changed}"
+        ).encode("utf-8")
+    ).hexdigest()
+    suffix = Path(entry.key).suffix or ".bin"
+    return (
+        anydataset_home()
+        / "cache"
+        / "store-files"
+        / _store_id(root)
+        / role.value
+        / modality.value
+        / key.value
+        / f"{payload_id}{suffix}"
+    )
+
+
+def _store_id(root: Path) -> str:
+    return hashlib.sha256(os.fsencode(root.expanduser().resolve())).hexdigest()
+
+
+def _stat_fingerprint(stat: os.stat_result) -> _StatFingerprint:
+    return (
+        stat.st_dev,
+        stat.st_ino,
+        stat.st_size,
+        stat.st_mtime_ns,
+        stat.st_ctime_ns,
+    )
+
+
+def _atomic_write_bytes(path: Path, data: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            "wb",
+            delete=False,
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+        ) as file:
+            tmp = Path(file.name)
+            file.write(data)
+            file.flush()
+            os.fsync(file.fileno())
+        if tmp is None:
+            raise RuntimeError(
+                "Atomic file cache write did not create a temporary file."
+            )
+        os.replace(tmp, path)
+    except Exception:
+        if tmp is not None and tmp.exists():
+            tmp.unlink()
+        raise
 
 
 def _enum_keys(values: Mapping[str, Any], enum_type):

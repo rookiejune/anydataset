@@ -116,6 +116,43 @@ class ViewMaterializerTest(unittest.TestCase):
                 [0, 1],
             )
 
+    def test_materializer_cleans_workers_after_partial_start(self):
+        context = mock.Mock()
+        first = mock.Mock()
+        first.is_alive.return_value = True
+        second = mock.Mock()
+        second.start.side_effect = RuntimeError("start failed")
+        context.Process.side_effect = (first, second)
+        materializer = ViewMaterializer("output")
+
+        with (
+            mock.patch(
+                "anydataset.store.materializer.multiprocessing_context",
+                return_value=context,
+            ),
+            mock.patch(
+                "anydataset.store.materializer.free_port",
+                return_value="1234",
+            ),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "start failed"):
+                materializer._run_parallel_parts(
+                    dataset_factory=_DatasetFactory(()),
+                    provider_factory=_ProviderFactory(),
+                    devices=("cpu:0", "cpu:1"),
+                    logs_dir=Path("logs"),
+                    worker_logs_dir=Path("worker-logs"),
+                    fragments_dir=Path("fragments"),
+                    expected=1,
+                    use_map_style_loader=True,
+                    completed_count=0,
+                    missing_indexes=range(1),
+                )
+
+        first.terminate.assert_called_once_with()
+        first.join.assert_called_once_with()
+        second.join.assert_not_called()
+
     def test_materializer_rejects_daemonic_parent_for_nested_workers(self):
         process = mock.Mock()
         process.daemon = True
@@ -483,7 +520,7 @@ class ViewMaterializerTest(unittest.TestCase):
                 ],
             )
 
-            ViewMaterializer(target).write(
+            ViewMaterializer(target, split="train").write(
                 dataset_factory=_DatasetFactory(dataset),
                 provider_factory=_ProviderFactory(offset=10),
                 devices="cpu",
@@ -535,7 +572,7 @@ class ViewMaterializerTest(unittest.TestCase):
                 ],
             )
 
-            ViewMaterializer(target).write(
+            ViewMaterializer(target, split="train").write(
                 dataset_factory=_DatasetFactory(dataset),
                 provider_factory=_ProviderFactory(offset=10),
                 devices="cpu",
@@ -585,6 +622,7 @@ class ViewMaterializerTest(unittest.TestCase):
 
             ViewMaterializer(
                 target,
+                split="train",
                 keep_schema={
                     (Role.DEFAULT, Modality.TEXT): TextReq(
                         views=frozenset({TextView.TEXT}),
@@ -630,6 +668,7 @@ class ViewMaterializerTest(unittest.TestCase):
 
             ViewMaterializer(
                 target,
+                split="train",
                 keep_schema={
                     (Role.DEFAULT, Modality.AUDIO): AudioReq(
                         views=frozenset({AudioView.WAVEFORM})

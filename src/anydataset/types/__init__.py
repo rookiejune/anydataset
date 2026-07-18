@@ -101,7 +101,7 @@ class Spec:
                 self.path,
                 self.split,
                 self.version,
-                dict(self.load_options),
+                _thaw(self.load_options),
             ),
         )
 
@@ -187,6 +187,16 @@ def _freeze(value: Any) -> Any:
         return tuple(_freeze(child) for child in value)
     if isinstance(value, (set, frozenset)):
         return frozenset(_freeze(child) for child in value)
+    return value
+
+
+def _thaw(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {key: _thaw(child) for key, child in value.items()}
+    if isinstance(value, tuple):
+        return tuple(_thaw(child) for child in value)
+    if isinstance(value, frozenset):
+        return frozenset(_thaw(child) for child in value)
     return value
 
 

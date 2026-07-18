@@ -13,9 +13,11 @@ import json
 import os
 import shutil
 import time
+from bisect import bisect_right
 from collections.abc import Collection, Iterable, Sequence
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, TypeVar
+from typing import Any, Iterator, TypeVar
 
 from ._logging import write_info
 
@@ -91,8 +93,55 @@ def indexes_complete(indexes: frozenset[int], expected: int) -> bool:
     return len(indexes) == expected
 
 
-def missing_indexes(completed: frozenset[int], expected: int) -> tuple[int, ...]:
-    return tuple(index for index in range(expected) if index not in completed)
+def missing_indexes(completed: frozenset[int], expected: int) -> Sequence[int]:
+    validate_completed_indexes(completed, expected)
+    missing_count = expected - len(completed)
+    if not completed:
+        return range(expected)
+    if missing_count <= len(completed):
+        return tuple(index for index in range(expected) if index not in completed)
+    return ComplementIndexes(expected, tuple(sorted(completed)))
+
+
+@dataclass(frozen=True)
+class ComplementIndexes(Sequence[int]):
+    expected: int
+    completed: tuple[int, ...]
+
+    def __len__(self) -> int:
+        return self.expected - len(self.completed)
+
+    def __iter__(self) -> Iterator[int]:
+        completed = iter(self.completed)
+        current = next(completed, None)
+        for index in range(self.expected):
+            if index == current:
+                current = next(completed, None)
+                continue
+            yield index
+
+    def __getitem__(self, index: int | slice) -> int | tuple[int, ...]:
+        if isinstance(index, slice):
+            positions = range(len(self))[index]
+            return tuple(self[position] for position in positions)
+        if index < 0:
+            index += len(self)
+        if index < 0 or index >= len(self):
+            raise IndexError("missing index out of range.")
+
+        low = index
+        high = index + len(self.completed)
+        while low < high:
+            candidate = (low + high) // 2
+            missing_through_candidate = candidate + 1 - bisect_right(
+                self.completed,
+                candidate,
+            )
+            if missing_through_candidate > index:
+                high = candidate
+            else:
+                low = candidate + 1
+        return low
 
 
 def pending_batch(
@@ -118,26 +167,22 @@ def format_index_ranges(indexes: Sequence[int], *, limit: int = 8) -> str:
         return f"{start}-{end}"
 
     ranges: list[str] = []
-    start: int | None = None
-    previous: int | None = None
-    truncated = False
-    for index in indexes:
-        if start is None:
-            start = index
-            previous = index
-            continue
-        if previous is not None and index == previous + 1:
-            previous = index
-            continue
-        ranges.append(format_range(start, previous))
-        start = index
-        previous = index
-        if len(ranges) == limit:
-            truncated = True
-            break
-    if start is not None and len(ranges) < limit:
-        ranges.append(format_range(start, previous))
-    if truncated:
+    position = 0
+    while position < len(indexes) and len(ranges) < limit:
+        start = indexes[position]
+        delta = start - position
+        low = position + 1
+        high = len(indexes)
+        while low < high:
+            middle = (low + high) // 2
+            if indexes[middle] - middle == delta:
+                low = middle + 1
+            else:
+                high = middle
+        end_position = low - 1
+        ranges.append(format_range(start, indexes[end_position]))
+        position = low
+    if position < len(indexes):
         ranges.append("...")
     return ",".join(ranges)
 

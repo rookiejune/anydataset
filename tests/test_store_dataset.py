@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import os
+import shutil
 import tempfile
 import unittest
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from unittest import mock
 
@@ -27,12 +29,24 @@ from anydataset.store.manifest import (
     SampleManifestEntry,
     STORE_SCHEMA_VERSION,
 )
-from anydataset.store.manifestio import write_samples_manifest
-from anydataset.store.paths import dataset_ready_path, view_dir, view_manifest_parquet_path
+from anydataset.store.manifestio import (
+    read_sample_manifest_index,
+    write_samples_manifest,
+)
+from anydataset.store.paths import (
+    dataset_ready_path,
+    samples_parquet_path,
+    view_dir,
+    view_manifest_parquet_path,
+)
 from anydataset.store.reader import read_store_dataset, read_store_manifest
 
 
 class StoreSourceTest(unittest.TestCase):
+    def test_dataset_store_writer_validates_views_at_construction(self):
+        with self.assertRaisesRegex(TypeError, "views must be a tuple"):
+            DatasetStoreWriter("unused", views=[])
+
     def test_anydataset_reads_dataset_written_by_writer(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -99,6 +113,40 @@ class StoreSourceTest(unittest.TestCase):
         self.assertTrue(torch.equal(loaded_waveform, waveform))
         self.assertEqual(sample_rate, 4)
 
+    def test_store_source_rejects_requested_split_mismatch(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            output = root / "dataset"
+            DatasetWriter(output, dataset_id="toy-audio", split="train").write(
+                [_audio_sample(waveform=torch.tensor([[1.0]]))]
+            )
+            dataset = AnyDataset(
+                Spec(source=Source.STORE, path=str(output), split="validation"),
+            )
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "split 'train' does not match requested split 'validation'",
+            ):
+                dataset.prepare()
+
+    def test_store_source_rejects_requested_split_when_manifest_has_none(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            output = root / "dataset"
+            DatasetWriter(output, dataset_id="toy-audio").write(
+                [_audio_sample(waveform=torch.tensor([[1.0]]))]
+            )
+            dataset = AnyDataset(
+                Spec(source=Source.STORE, path=str(output), split="train"),
+            )
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "split None does not match requested split 'train'",
+            ):
+                dataset.prepare()
+
     def test_file_view_is_extracted_to_cache_and_reused(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -111,17 +159,104 @@ class StoreSourceTest(unittest.TestCase):
             dataset = AnyDataset(
                 Spec(source=Source.STORE, path=str(output)),
             )
+            dataset.prepare()
 
-            file_view = Path(dataset[0][Role.DEFAULT, Modality.AUDIO].views[AudioView.FILE])
+            with mock.patch(
+                "anydataset.store.reader.os.replace",
+                wraps=os.replace,
+            ) as replace:
+                file_view = Path(
+                    dataset[0][Role.DEFAULT, Modality.AUDIO].views[AudioView.FILE]
+                )
+            cached_dataset = AnyDataset(
+                Spec(source=Source.STORE, path=str(output)),
+            )
             with mock.patch(
                 "anydataset.store.reader.read_payload_bytes",
                 side_effect=AssertionError("cache miss"),
             ):
-                cached = Path(dataset[0][Role.DEFAULT, Modality.AUDIO].views[AudioView.FILE])
+                cached = Path(
+                    cached_dataset[0][Role.DEFAULT, Modality.AUDIO].views[
+                        AudioView.FILE
+                    ]
+                )
 
+            self.assertEqual(replace.call_count, 1)
             self.assertTrue(file_view.is_file())
+            self.assertTrue(
+                file_view.is_relative_to(Path(os.environ["ANYDATASET_HOME"]))
+            )
+            self.assertFalse((output / ".cache").exists())
             self.assertEqual(file_view.read_bytes(), b"RIFF-data")
             self.assertEqual(cached, file_view)
+
+    def test_file_view_cache_separates_roles_for_read_only_store(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            source = root / "source.wav"
+            target = root / "target.wav"
+            source.write_bytes(b"SOURCE")
+            target.write_bytes(b"TARGET")
+            output = root / "dataset"
+            DatasetWriter(output, dataset_id="paired-files").write(
+                [
+                    {
+                        (Role.SOURCE, Modality.AUDIO): AudioItem(
+                            views={AudioView.FILE: str(source)}
+                        ),
+                        (Role.TARGET, Modality.AUDIO): AudioItem(
+                            views={AudioView.FILE: str(target)}
+                        ),
+                    }
+                ]
+            )
+
+            output.chmod(0o555)
+            try:
+                sample = read_store_dataset(output)[0]
+            finally:
+                output.chmod(0o755)
+
+            cached_source = Path(
+                sample[Role.SOURCE, Modality.AUDIO].views[AudioView.FILE]
+            )
+            cached_target = Path(
+                sample[Role.TARGET, Modality.AUDIO].views[AudioView.FILE]
+            )
+            self.assertNotEqual(cached_source, cached_target)
+            self.assertEqual(cached_source.read_bytes(), b"SOURCE")
+            self.assertEqual(cached_target.read_bytes(), b"TARGET")
+            self.assertFalse((output / ".cache").exists())
+
+    def test_file_view_cache_changes_when_store_is_rebuilt_at_same_path(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            source = root / "source.wav"
+            output = root / "dataset"
+            source.write_bytes(b"OLD")
+            DatasetWriter(output, dataset_id="rebuilt-file").write(
+                [_audio_sample(file=str(source), sample_rate=16000)]
+            )
+            first = Path(
+                read_store_dataset(output)[0][Role.DEFAULT, Modality.AUDIO].views[
+                    AudioView.FILE
+                ]
+            )
+
+            shutil.rmtree(output)
+            source.write_bytes(b"NEW-CONTENT")
+            DatasetWriter(output, dataset_id="rebuilt-file").write(
+                [_audio_sample(file=str(source), sample_rate=16000)]
+            )
+            second = Path(
+                read_store_dataset(output)[0][Role.DEFAULT, Modality.AUDIO].views[
+                    AudioView.FILE
+                ]
+            )
+
+            self.assertNotEqual(first, second)
+            self.assertEqual(first.read_bytes(), b"OLD")
+            self.assertEqual(second.read_bytes(), b"NEW-CONTENT")
 
     def test_reader_reuses_open_payload_shard(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -494,6 +629,58 @@ class StoreSourceTest(unittest.TestCase):
             ]
             self.assertEqual(values, [0.0, 1.0, 2.0, 3.0, 4.0])
 
+    def test_dataset_write_prepares_sharded_csv_before_loader_workers(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            source = root / "csv" / "shard_0"
+            source.mkdir(parents=True)
+            (source / "0.csv").write_text("value\n0\n", encoding="utf-8")
+            (source / "1.csv").write_text("value\n1\n", encoding="utf-8")
+            output = root / "parallel-csv"
+
+            DatasetStoreWriter(
+                output,
+                dataset_id="parallel-csv",
+                num_workers=1,
+            ).write(dataset_factory=_CsvAudioFactory(root / "csv"))
+
+            dataset = read_store_dataset(output)
+            values = [
+                float(
+                    dataset[index][Role.DEFAULT, Modality.AUDIO]
+                    .views[AudioView.WAVEFORM][0][0, 0]
+                )
+                for index in range(len(dataset))
+            ]
+            self.assertEqual(values, [0.0, 1.0])
+
+    def test_parallel_write_cleans_workers_after_partial_start(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            context = mock.Mock()
+            first = mock.Mock()
+            first.is_alive.return_value = True
+            second = mock.Mock()
+            second.start.side_effect = RuntimeError("start failed")
+            context.Process.side_effect = (first, second)
+            writer = DatasetStoreWriter(
+                Path(tmpdir) / "output",
+                num_shards=2,
+            )
+
+            with (
+                mock.patch(
+                    "anydataset.dataset.write.multiprocessing_context",
+                    return_value=context,
+                ),
+                mock.patch("anydataset.dataset.write.free_port", return_value="1234"),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "start failed"):
+                    writer._run_parts(_RangeAudioFactory(1), Path(tmpdir) / "parts")
+
+            first.terminate.assert_called_once_with()
+            first.join.assert_called_once_with()
+            second.join.assert_not_called()
+
     def test_schema_selects_requested_views(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -567,6 +754,66 @@ class StoreSourceTest(unittest.TestCase):
 
             with self.assertRaises(ValueError):
                 read_store_dataset(output)
+
+    def test_reader_reuses_sample_index_validation(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output = Path(tmpdir) / "dataset"
+            DatasetWriter(output, dataset_id="toy-audio").write(
+                [_audio_sample(waveform=torch.tensor([[1.0]]))]
+            )
+
+            with mock.patch(
+                "anydataset.store.reader.read_sample_manifest_index",
+                wraps=read_sample_manifest_index,
+            ) as read_index:
+                for _ in range(3):
+                    read_store_dataset(output)
+
+            self.assertEqual(read_index.call_count, 1)
+
+    def test_reader_revalidates_rewritten_sample_manifest(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output = Path(tmpdir) / "dataset"
+            DatasetWriter(output, dataset_id="toy-audio").write(
+                [
+                    _audio_sample(waveform=torch.tensor([[1.0]])),
+                    _audio_sample(waveform=torch.tensor([[2.0]])),
+                ]
+            )
+            read_store_dataset(output)
+
+            write_samples_manifest(
+                output,
+                [
+                    SampleManifestEntry(sample_id="same", sample_index=0),
+                    SampleManifestEntry(sample_id="same", sample_index=1),
+                ],
+            )
+
+            with self.assertRaisesRegex(ValueError, "Duplicate sample_id 'same'"):
+                read_store_dataset(output)
+
+    def test_reader_rejects_sample_manifest_changed_during_validation(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output = Path(tmpdir) / "dataset"
+            DatasetWriter(output, dataset_id="toy-audio").write(
+                [_audio_sample(waveform=torch.tensor([[1.0]]))]
+            )
+
+            def changing_index(root):
+                yield from read_sample_manifest_index(root)
+                path = samples_parquet_path(root)
+                path.write_bytes(path.read_bytes() + b"changed")
+
+            with mock.patch(
+                "anydataset.store.reader.read_sample_manifest_index",
+                side_effect=changing_index,
+            ):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "Sample manifest changed while validating index",
+                ):
+                    read_store_dataset(output)
 
     def test_reader_rejects_view_manifest_with_missing_sample(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -647,6 +894,21 @@ class _RangeAudioFactory:
 
     def __call__(self):
         return _RangeAudioDataset(self.count)
+
+
+@dataclass(frozen=True)
+class _CsvAudioFactory:
+    root: Path
+
+    def __call__(self):
+        return AnyDataset(
+            Spec(source="sharded_csv", path=str(self.root)),
+            parse_fn=_csv_audio_sample,
+        )
+
+
+def _csv_audio_sample(row):
+    return _audio_sample(waveform=[[float(row["value"])]])
 
 
 def _drop_last_parquet_row(path: Path) -> None:

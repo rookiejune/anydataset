@@ -257,6 +257,19 @@ class SpeechQualityTest(unittest.TestCase):
         self.assertEqual(decision.metrics["checked_count"], 0)
         self.assertEqual(evaluator.calls, [])
 
+    def test_rejects_non_finite_waveform_before_evaluation(self):
+        evaluator = FakeSpeechEvaluator([])
+        predicate = Predicate(evaluator=evaluator)
+
+        decision = predicate(
+            _sample(torch.tensor([[0.0, float("nan")]]), 16000, "hello")
+        )
+
+        self.assertEqual(decision.label, Label.REJECT)
+        self.assertEqual(decision.metrics["flags"], ["default_non_finite_waveform"])
+        self.assertEqual(decision.metrics["checked_count"], 0)
+        self.assertEqual(evaluator.calls, [])
+
     def test_accepts_sample_without_audio_and_records_warning(self):
         evaluator = FakeSpeechEvaluator([])
         predicate = Predicate(evaluator=evaluator)

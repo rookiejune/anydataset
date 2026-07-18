@@ -15,6 +15,7 @@ from anydataset._parallel import (
     set_single_worker_environment,
     validate_process_parent,
 )
+from anydataset._resume import missing_indexes
 
 
 class ParallelRuntimeTest(unittest.TestCase):
@@ -29,6 +30,34 @@ class ParallelRuntimeTest(unittest.TestCase):
 
         self.assertEqual(list(sampler), [5, 12])
         self.assertEqual(len(sampler), 2)
+
+    def test_selected_index_sampler_accepts_compact_range(self):
+        sampler = SelectedIndexSampler(
+            range(20_000_000),
+            num_shards=4,
+            shard_id=3,
+        )
+
+        self.assertEqual(len(sampler), 5_000_000)
+        self.assertEqual(next(iter(sampler)), 3)
+
+    def test_selected_index_sampler_does_not_scan_lazy_complement(self):
+        indexes = missing_indexes(frozenset({1, 4}), 20_000_000)
+
+        with mock.patch.object(
+            type(indexes),
+            "__iter__",
+            side_effect=AssertionError("lazy complement was scanned"),
+        ):
+            sampler = SelectedIndexSampler(indexes, num_shards=2, shard_id=0)
+            first = next(iter(sampler))
+
+        self.assertEqual(len(sampler), 9_999_999)
+        self.assertEqual(first, 0)
+
+    def test_selected_index_sampler_rejects_descending_range(self):
+        with self.assertRaisesRegex(ValueError, "strictly increasing"):
+            SelectedIndexSampler(range(4, -1, -1), num_shards=1, shard_id=0)
 
     def test_map_indexed_dataset_drops_cached_dataset_when_pickled(self):
         dataset = _UnpicklableDataset(3)

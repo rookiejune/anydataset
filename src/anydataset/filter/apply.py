@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -35,7 +35,6 @@ from ..runtime import Runtime
 from ..store.jsonio import read_json, write_json
 from ..store.reader import StoreDataset
 from ..types import Source, Spec
-from ._options import DEFAULT_COMMIT_SAMPLES, DEFAULT_MAX_SHARD_SAMPLES
 from .collect import collect_ranges, collect_ranges_parallel
 from .resume import (
     cleanup_filter_resume_dir,
@@ -61,6 +60,8 @@ FilterBase = MapStyleABC
 
 _FILTER_VIEW_SCHEMA_VERSION = 1
 _PROGRESS_STAGES = ("scan", "writer")
+_CACHE_LOCK_TIMEOUT = 3600.0
+_CACHE_LOCK_POLL = 0.2
 
 
 @dataclass(frozen=True)
@@ -176,7 +177,11 @@ def ensure_filter(
         return cache_path, metric_path
 
     lock_path = filter_lock_path(rule, identity)
-    with FileLock(lock_path):
+    with FileLock(
+        lock_path,
+        wait_timeout=_CACHE_LOCK_TIMEOUT,
+        poll_interval=_CACHE_LOCK_POLL,
+    ):
         reason = not_ready_reason(cache_path, expected, metrics=metrics)
         if reason is None:
             return cache_path, metric_path
@@ -568,7 +573,7 @@ class _FilterResumeFragmentWriter:
     runtime: Runtime
     dataset_factory: DatasetFactory
     completed: frozenset[int]
-    missing: tuple[int, ...]
+    missing: Sequence[int]
     worker_timeout: float | None
 
     def write(self, *, write_workers: int, write_prefetch: int | None) -> None:
