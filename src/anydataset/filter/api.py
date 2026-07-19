@@ -23,6 +23,7 @@ from .apply import (
     filter_universe,
     make_filtered_dataset_factory,
 )
+from .generations import GenerationLease, lease_filter_generation
 from .rules import label, unique_labels, validate_string
 from .storage import merged_index, read_metrics, read_partitions
 from .types import (
@@ -93,6 +94,7 @@ class _FilterCache:
         "_indexes",
         "_input_id",
         "_labels",
+        "_lease",
         "_metrics_path",
         "_rule",
     )
@@ -104,12 +106,18 @@ class _FilterCache:
         rule: FilterRule,
         cache_path: Path,
         dataset_factory: DatasetFactory,
+        lease: GenerationLease,
         metrics_path: Path | None = None,
         input_id: str | None = None,
     ) -> None:
         base = filter_base(base)
         if not isinstance(rule, FilterRule):
             raise TypeError("rule must be a FilterRule.")
+        cache_path = Path(cache_path)
+        if not isinstance(lease, GenerationLease):
+            raise TypeError("lease must be a GenerationLease.")
+        if lease.path != cache_path:
+            raise ValueError("lease must pin the filter cache generation.")
         normalized = {key: indices for key, indices in partitions.items()}
         self._base = base
         self._indexes = MappingProxyType(normalized)
@@ -119,7 +127,8 @@ class _FilterCache:
         )
         self._dataset_factory = dataset_factory
         self._rule = rule
-        self._cache_path = Path(cache_path)
+        self._cache_path = cache_path
+        self._lease = lease
         self._metrics_path = None if metrics_path is None else Path(metrics_path)
         self._input_id = input_id
 
@@ -258,28 +267,33 @@ class FilteredDataset(MapStyleABC):
         return instance
 
     @classmethod
-    def _from_partitions(
+    def _from_generation(
         cls,
         base: AnyDataset | StoreDataset | MergedDataset | FilteredDataset,
         rule: FilterRule,
         cache_path: Path,
-        partitions: Mapping[str, _Index],
         labels: Sequence[str],
         *,
         dataset_factory: DatasetFactory,
         metrics_path: Path | None = None,
         input_id: str | None = None,
     ) -> FilteredDataset:
-        cache = _FilterCache(
-            base,
-            partitions,
-            rule,
-            cache_path,
-            dataset_factory=dataset_factory,
-            metrics_path=metrics_path,
-            input_id=input_id,
-        )
-        return cls._from_cache(cache, labels=tuple(labels))
+        generation = lease_filter_generation(cache_path)
+        try:
+            cache = _FilterCache(
+                base,
+                read_partitions(generation.path),
+                rule,
+                generation.path,
+                lease=generation.lease,
+                dataset_factory=dataset_factory,
+                metrics_path=metrics_path,
+                input_id=input_id,
+            )
+            return cls._from_cache(cache, labels=tuple(labels))
+        except Exception:
+            generation.lease.close()
+            raise
 
     def __repr__(self) -> str:
         return (
@@ -368,15 +382,21 @@ def _restore_filter_cache(
     metrics_path: Path | None,
     input_id: str | None,
 ) -> _FilterCache:
-    return _FilterCache(
-        dataset_factory(),
-        read_partitions(cache_path),
-        FilterRule(rule_name, _unavailable_filter_factory),
-        cache_path,
-        dataset_factory=dataset_factory,
-        metrics_path=metrics_path,
-        input_id=input_id,
-    )
+    generation = lease_filter_generation(cache_path)
+    try:
+        return _FilterCache(
+            dataset_factory(),
+            read_partitions(generation.path),
+            FilterRule(rule_name, _unavailable_filter_factory),
+            generation.path,
+            lease=generation.lease,
+            dataset_factory=dataset_factory,
+            metrics_path=metrics_path,
+            input_id=input_id,
+        )
+    except Exception:
+        generation.lease.close()
+        raise
 
 
 def _restore_filtered_dataset(

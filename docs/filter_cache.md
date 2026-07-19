@@ -78,17 +78,21 @@ $ANYDATASET_HOME/
     filters/
       <dataset_hash>/
         <rule_hash>/
-          rule.json
-          partitions.json
-          partitions/
-            <label_hash>/
-              part-000000.parquet
-              part-000001.parquet
-          metrics/
-            metrics.json
-            shards/
-              part-000000.parquet
-          .ready
+          current.json
+          generations/
+            <generation_id>/
+              rule.json
+              partitions.json
+              partitions/
+                <label_hash>/
+                  part-000000.parquet
+                  part-000001.parquet
+              metrics/
+                metrics.json
+                shards/
+                  part-000000.parquet
+              .lease
+              .ready
     sources/
       <spec_id>/
         metadata.json
@@ -136,18 +140,44 @@ covered. `write_workers` controls background fragment writer threads; the
 default is one writer so predicate execution can overlap with parquet writes.
 `write_prefetch` bounds pending write jobs.
 
-The current commit replaces a ready cache directory at the same logical path.
-A live single-label view keeps partition shards lazy, so construction verifies
-that the manifest and ready marker stay unchanged while recording shard file
-fingerprints. If an unloaded shard belongs to a cache generation that has since
-been replaced, the view raises an explicit stale-snapshot error instead of
-combining its old shard offsets with the new file contents. It also rejects shard
-row counts that differ from the manifest.
+Each completed cache is published as a new immutable generation. The writer
+first atomically renames the completed generation into `generations/`, then
+atomically replaces `current.json`. Readers resolve that pointer once and expose
+the resolved generation as `FilteredDataset.cache_path`; metrics and partition
+reads therefore stay on the same snapshot even when another call publishes a
+new generation.
 
-These checks detect replacement; they do not keep the old snapshot available.
-Stable long-lived views require immutable cache generations, an atomic current
-generation pointer, and a reader lease or cleanup contract. Recreate the filtered
-dataset after a stale-snapshot error.
+Every live filtered cache and exported `dataset_factory` holds a shared OS file
+lock on the generation's `.lease` file. Publication and
+`cleanup_filter_generations(filtered.cache_path)` take the rule writer lock and
+only delete non-current generations whose lease can be locked exclusively.
+Process exit releases a lease in the kernel, so cleanup does not depend on a PID
+file, heartbeat, or timeout. Cleanup also runs after a successful publication;
+leased generations are retained and can be collected by a later publication or
+an explicit cleanup call.
+
+```python
+from anydataset.filter import cleanup_filter_generations
+
+removed = cleanup_filter_generations(filtered.cache_path)
+```
+
+A serialized pickle is a reference to its exact generation, not a persistent
+lease. A live object or exported factory pins the generation, including while it
+is being pickled or sent to a worker, but bytes stored for later restoration do
+not. Callers that retain dormant pickles must defer explicit cleanup. Direct
+mutation of generation files is outside the cache contract; shard fingerprints
+still detect such mutation, and actual shard row counts are checked against the
+manifest.
+
+Single-label selections retain their shard-lazy file index. Multiple selected
+labels use a lazy sorted merge: constructing the view and reading its length do
+not load partition shards, while indexed access incrementally loads and memoizes
+only the merge prefix needed so far.
+
+Caches written by the earlier same-directory layout have no `current.json` and
+are treated as cache misses. They are not silently opened as generations;
+generation cleanup only manages children of `generations/`.
 
 Cache construction reports scan and fragment-writer progress on stderr. In
 multi-device runs, each worker also writes lifecycle and failure details under
@@ -214,6 +244,14 @@ Metrics are stored as parquet shards with fixed columns:
 - `index`: global sample-space index.
 - `label`: normalized filter label.
 - `metrics`: canonical JSON text.
+
+This three-column schema is the public cache contract. The JSON payload remains
+the extension point; metric-specific promoted columns would couple cache schema
+versions to application rules. `iter_metrics()` is also the export boundary for
+databases, object stores, or custom analytics. Filter construction does not call
+pluggable external sinks because retries and resume replay would otherwise need
+an exactly-once side-effect protocol. Add a versioned cache schema only when a
+concrete query workload cannot be served by this representation.
 
 `metrics=True` is part of the cache readiness check. If a partition cache exists
 without `metrics/metrics.json`, the rule is rebuilt so

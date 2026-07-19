@@ -44,6 +44,9 @@ dev = [
 Repository = "https://github.com/rookiejune/anydataset"
 Issues = "https://github.com/rookiejune/anydataset/issues"
 
+[project.scripts]
+anydataset-store = "anydataset.store.maintenance:main"
+
 [tool.setuptools.packages.find]
 where = ["src"]
 

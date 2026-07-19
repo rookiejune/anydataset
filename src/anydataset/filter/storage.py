@@ -5,9 +5,10 @@ import json
 import math
 from array import array
 from bisect import bisect_right
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from threading import Lock
 from typing import Any
 
 from .._io.parquet import read_rows, write_columns
@@ -168,7 +169,7 @@ def merged_index(indexes: Sequence[_Index]) -> _Index:
         return ()
     if len(indexes) == 1:
         return indexes[0]
-    return array("q", heapq.merge(*indexes))
+    return _MergedIndex(indexes)
 
 
 def validate_metrics(metrics: Mapping[str, JsonValue]) -> Mapping[str, JsonValue]:
@@ -274,6 +275,57 @@ class _FileIndex(Sequence[int]):
                 )
             self._shards[index] = shard
         return shard
+
+
+class _MergedIndex(Sequence[int]):
+    __slots__ = ("_count", "_error", "_indexes", "_iterator", "_lock", "_values")
+
+    def __init__(self, indexes: Sequence[_Index]) -> None:
+        self._indexes = tuple(indexes)
+        self._count = sum(len(index) for index in self._indexes)
+        self._values = array("q")
+        self._iterator: Iterator[int] | None = None
+        self._error: Exception | None = None
+        self._lock = Lock()
+
+    def __len__(self) -> int:
+        return self._count
+
+    def __getitem__(self, index: int | slice) -> int | tuple[int, ...]:
+        if isinstance(index, slice):
+            start, stop, step = index.indices(len(self))
+            return tuple(self[position] for position in range(start, stop, step))
+        if index < 0:
+            index += len(self)
+        if index < 0 or index >= len(self):
+            raise IndexError("filter index out of range.")
+        self._ensure(index + 1)
+        return int(self._values[index])
+
+    def __iter__(self) -> Iterator[int]:
+        for index in range(len(self)):
+            yield self[index]
+
+    def _ensure(self, count: int) -> None:
+        if len(self._values) >= count:
+            return
+        with self._lock:
+            if self._error is not None:
+                raise self._error
+            if self._iterator is None:
+                self._iterator = iter(heapq.merge(*self._indexes))
+            try:
+                while len(self._values) < count:
+                    self._values.append(next(self._iterator))
+            except StopIteration as exc:
+                error = ValueError(
+                    "Merged filter partitions ended before their manifest counts."
+                )
+                self._error = error
+                raise error from exc
+            except Exception as exc:
+                self._error = exc
+                raise
 
 
 def _partition_snapshot(path: Path) -> tuple[_FileFingerprint, _FileFingerprint]:

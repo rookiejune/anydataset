@@ -10,7 +10,14 @@ from ..view import (
     ViewTransform,
 )
 from ..runtime import Runtime
+from ._files import (
+    StoreFilesInUseError,
+    StoreFilesLease,
+    cleanup_store_files,
+    lease_store_files,
+)
 from .materializer import ModalityMaterializer, ViewMaterializer
+from .migration import migrate_store
 from .writer import DatasetWriter
 
 __all__ = [
@@ -24,7 +31,12 @@ __all__ = [
     "ModalityTransform",
     "Provider",
     "Runtime",
+    "StoreFilesInUseError",
+    "StoreFilesLease",
     "ViewMaterializer",
     "ViewProvider",
     "ViewTransform",
+    "cleanup_store_files",
+    "lease_store_files",
+    "migrate_store",
 ]

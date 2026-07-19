@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +15,16 @@ class HuggingFaceSource:
 class HuggingFaceDiskSource:
     def prepare(self, spec: types.Spec, cache_path: Path) -> Any:
         return prepare_hf_disk(spec)
+
+    def iter_indexed_shard(
+        self,
+        dataset: Any,
+        *,
+        num_shards: int,
+        shard_id: int,
+    ) -> Iterator[tuple[int, Any]]:
+        for sample_index in range(shard_id, len(dataset), num_shards):
+            yield sample_index, dataset[sample_index]
 
 
 def prepare_hf(spec: types.Spec, cache_path: Path) -> Any:

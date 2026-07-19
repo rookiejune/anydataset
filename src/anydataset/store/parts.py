@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import os
 import shutil
-import tarfile
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -16,6 +15,7 @@ from .._resume import cached_completed_indexes, write_completed_index_cache
 from .._sharding import validate_shard
 from .._validation import positive_int
 from ..types.item import Item, Modality, Role, Sample, View
+from ._integrity import validate_store_payloads
 from .jsonio import read_json, write_json
 from .manifest import (
     DatasetManifest,
@@ -234,7 +234,7 @@ def commit_store_parts(
         raise ValueError(f"No materialized parts found: {parts_dir}")
     _validate_parts(parts, dataset_id, split)
     views = _store_views(parts)
-    _validate_store_payloads(parts)
+    validate_store_payloads(parts)
     with _bounded_store_roots(
         output_dir,
         parts,
@@ -271,7 +271,7 @@ def commit_store_fragments(
     if not fragments:
         raise ValueError(f"No materialized fragments found: {fragments_dir}")
     views = _store_views(fragments)
-    _validate_store_payloads(fragments)
+    validate_store_payloads(fragments)
     with _bounded_store_roots(
         output_dir,
         fragments,
@@ -315,7 +315,7 @@ def commit_fragment_part(
             split=split,
         ).write(())
     views = _store_views(roots)
-    _validate_store_payloads(roots)
+    validate_store_payloads(roots)
     sample_count = sum(read_store_manifest(fragment).sample_count for fragment in roots)
 
     with _bounded_store_roots(
@@ -911,57 +911,6 @@ def _validate_fragment_id(value: str) -> None:
         raise ValueError("fragment_id must be a non-empty path segment.")
     if "/" in value:
         raise ValueError("fragment_id cannot contain '/'.")
-
-
-def _validate_store_payloads(stores: tuple[Path, ...]) -> None:
-    for store in stores:
-        for view in read_store_views(store):
-            _validate_store_view_payloads(store, view)
-
-
-def _validate_store_view_payloads(
-    root: Path,
-    view: tuple[Role, Modality, View],
-) -> None:
-    keys_by_shard: dict[str, set[str]] = {}
-    for entry in _validated_view_entries(read_view_manifest(root, view), view):
-        if not isinstance(entry.shard, str) or Path(entry.shard).name != entry.shard:
-            raise ValueError(
-                f"View {_view_path(view)} has invalid shard name {entry.shard!r}."
-            )
-        if not isinstance(entry.key, str) or Path(entry.key).name != entry.key:
-            raise ValueError(
-                f"View {_view_path(view)} has invalid payload key {entry.key!r}."
-            )
-        keys = keys_by_shard.setdefault(entry.shard, set())
-        if entry.key in keys:
-            raise ValueError(
-                f"View {_view_path(view)} shard {entry.shard!r} "
-                f"has duplicate payload key {entry.key!r}."
-            )
-        keys.add(entry.key)
-
-    while keys_by_shard:
-        shard, expected = keys_by_shard.popitem()
-        path = view_shard_path(root, view, shard)
-        if not path.is_file():
-            raise FileNotFoundError(
-                f"View {_view_path(view)} is missing referenced shard {path}."
-            )
-        try:
-            with tarfile.open(path, "r") as archive:
-                missing = set(expected)
-                for member in archive:
-                    if member.isfile():
-                        missing.discard(member.name)
-        except tarfile.TarError as exc:
-            raise ValueError(f"View shard is not a valid tar archive: {path}") from exc
-        if missing:
-            key = min(missing)
-            raise ValueError(
-                f"View {_view_path(view)} shard {shard!r} "
-                f"is missing payload {key!r}."
-            )
 
 
 def _validate_copied_view_shards(

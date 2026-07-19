@@ -4,7 +4,7 @@ import types
 import unittest
 from unittest import mock
 
-from anydataset import AnyDataset, Source, Spec
+from anydataset import AnyDataset, IterableAnyDataset, Source, Spec
 
 
 class HuggingFaceDatasetTest(unittest.TestCase):
@@ -62,6 +62,26 @@ class HuggingFaceDatasetTest(unittest.TestCase):
                 prepared = dataset.prepare()
 
         self.assertEqual(prepared, [{"value": 2}])
+
+    def test_disk_source_supports_native_global_index_sharding(self):
+        fake_datasets = types.ModuleType("datasets")
+
+        class DatasetDict(dict):
+            pass
+
+        fake_datasets.DatasetDict = DatasetDict
+        fake_datasets.load_from_disk = lambda *args, **kwargs: [
+            {"value": index} for index in range(5)
+        ]
+        with tempfile.TemporaryDirectory():
+            dataset = IterableAnyDataset(
+                Spec(source=Source.HF_DISK, path="/tmp/saved_dataset"),
+                parse_fn=lambda row: row["value"],
+            )
+            with mock.patch.dict(sys.modules, {"datasets": fake_datasets}):
+                rows = list(dataset.iter_indexed_shard(2, 1))
+
+        self.assertEqual(rows, [(1, 1), (3, 3)])
 
     def test_prepare_requires_split_for_dataset_dict(self):
         fake_datasets = types.ModuleType("datasets")

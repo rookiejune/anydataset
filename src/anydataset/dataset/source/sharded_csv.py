@@ -68,6 +68,15 @@ class ShardedCsvSource:
         dataset.prepare()
         return dataset
 
+    def iter_indexed_shard(
+        self,
+        dataset: ShardedCsvDataset,
+        *,
+        num_shards: int,
+        shard_id: int,
+    ) -> Iterator[tuple[int, CsvRow]]:
+        yield from dataset.iter_indexed_shard(num_shards, shard_id)
+
 
 class ShardedCsvDataset:
     def __init__(

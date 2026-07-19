@@ -169,11 +169,18 @@ class IterableAnyDataset(_Base, IterableDataset):
         num_shards: int,
         shard_id: int,
     ) -> Iterator[tuple[int, Sample]]:
+        from .source.protocol import native_indexed_shard
+
         validate_shard(num_shards, shard_id)
         dataset = self.dataset
-        iter_indexed = getattr(dataset, "iter_indexed_shard", None)
-        if callable(iter_indexed):
-            for index, row in iter_indexed(num_shards, shard_id):
+        indexed = native_indexed_shard(
+            self.source,
+            dataset,
+            num_shards=num_shards,
+            shard_id=shard_id,
+        )
+        if indexed is not None:
+            for index, row in indexed:
                 yield index, self.transform_sample(self.parse_fn(row))
             return
 

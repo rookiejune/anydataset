@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+from collections.abc import Iterator
 from pathlib import Path
 
 from ...store.reader import StoreDataset, read_store_dataset
 from ...types import Spec
+from ...types.item import Sample
 from .protocol import validate_load_options
 
 
@@ -17,3 +19,12 @@ class StoreSource:
                 f"requested split {spec.split!r}."
             )
         return dataset
+
+    def iter_indexed_shard(
+        self,
+        dataset: StoreDataset,
+        *,
+        num_shards: int,
+        shard_id: int,
+    ) -> Iterator[tuple[int, Sample]]:
+        yield from dataset.iter_indexed_shard(num_shards, shard_id)

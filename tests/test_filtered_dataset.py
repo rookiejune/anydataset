@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import gc
 import io
 import json
 import math
+import multiprocessing
 import os
 import pickle
 import tempfile
@@ -28,7 +30,11 @@ from anydataset import (
     register_source,
 )
 from anydataset._compat import StrEnum
-from anydataset.filter import FilterDecision, FilteredDataset
+from anydataset.filter import (
+    FilterDecision,
+    FilteredDataset,
+    cleanup_filter_generations,
+)
 from anydataset.filter.resume import (
     iter_filter_fragment_chunks,
     write_filter_fragment,
@@ -46,7 +52,7 @@ from anydataset.types import (
     TextView,
 )
 from anydataset.filter.collect import collect_ranges_parallel
-from anydataset.filter.storage import write_index_rows
+from anydataset.filter.storage import read_index_rows, write_index_rows
 from anydataset.store import DatasetWriter
 from anydataset.store.jsonio import read_json as read_store_json
 
@@ -91,6 +97,28 @@ class FilteredDatasetTest(unittest.TestCase):
         self.assertEqual(selected.labels, ("review", "reject"))
         self.assertEqual(_values(selected), [1, 2, 3])
         self.assertEqual(selected.indices, (1, 2, 3))
+
+    def test_multi_label_index_merges_shards_lazily(self):
+        _register_rows_source("unit_test_filter_lazy_merge")
+        dataset = _dataset("unit_test_filter_lazy_merge", list(range(6)))
+        result = FilterRule("mod_three", _mod_three_factory).apply(
+            dataset_factory=lambda: dataset,
+            device="cpu",
+            max_shard_samples=1,
+        )
+
+        with mock.patch(
+            "anydataset.filter.storage.read_index_rows",
+            wraps=read_index_rows,
+        ) as read:
+            selected = result.select_by("zero", "two")
+
+            self.assertEqual(len(selected), 4)
+            self.assertEqual(read.call_count, 0)
+            self.assertEqual(selected.global_index(0), 0)
+            self.assertEqual(read.call_count, 2)
+            self.assertEqual(selected.indices, (0, 2, 3, 5))
+            self.assertEqual(read.call_count, 4)
 
     def test_select_unknown_label_returns_empty_dataset(self):
         _register_rows_source("unit_test_filter_unknown")
@@ -221,6 +249,12 @@ class FilteredDatasetTest(unittest.TestCase):
             self.assertEqual(calls, [0, 1])
             self.assertEqual(len(results), 2)
             self.assertEqual(results[0].cache_path, results[1].cache_path)
+            pointer = json.loads(
+                (results[0].cache_path.parents[1] / "current.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(pointer["generation"], results[0].cache_path.name)
 
     def test_rule_apply_rechecks_if_cache_snapshot_disappears(self):
         _register_rows_source("unit_test_filter_snapshot_recheck")
@@ -247,11 +281,11 @@ class FilteredDatasetTest(unittest.TestCase):
         ):
             restored = rule.apply(dataset_factory=lambda: dataset, device="cpu")
 
-        self.assertEqual(restored.cache_path, first.cache_path)
+        self.assertNotEqual(restored.cache_path, first.cache_path)
         self.assertEqual(_values(restored), [0])
         self.assertEqual(calls, [0, 0])
 
-    def test_live_lazy_index_rejects_replaced_cache_snapshot(self):
+    def test_live_lazy_index_keeps_immutable_generation(self):
         _register_rows_source("unit_test_filter_live_snapshot")
         dataset = _dataset("unit_test_filter_live_snapshot", [0, 1, 2, 3])
         rule = FilterRule(
@@ -269,16 +303,181 @@ class FilteredDatasetTest(unittest.TestCase):
                     max_shard_samples=2,
                 )
                 self.assertEqual(live.global_index(0), 0)
+                live_path = live.cache_path
 
-                rule.apply(
+                current = rule.apply(
                     dataset_factory=lambda: dataset,
                     metrics=True,
                     device="cpu",
                     max_shard_samples=3,
                 )
 
-                with self.assertRaisesRegex(RuntimeError, "snapshot changed"):
-                    live.global_index(2)
+                self.assertNotEqual(current.cache_path, live_path)
+                self.assertEqual(live.global_index(2), 2)
+                self.assertTrue(live_path.is_dir())
+                self.assertNotIn(
+                    live_path,
+                    cleanup_filter_generations(current.cache_path),
+                )
+
+    def test_generation_cleanup_waits_for_live_factory(self):
+        _register_rows_source("unit_test_filter_generation_cleanup")
+        dataset = _dataset("unit_test_filter_generation_cleanup", [0, 1])
+        rule = FilterRule("all", _true_factory)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with mock.patch.dict(os.environ, {"ANYDATASET_HOME": tmpdir}):
+                first = rule.apply(dataset_factory=lambda: dataset, device="cpu")
+                old_path = first.cache_path
+                factory = first.dataset_factory
+                current_pointer = old_path.parents[1] / "current.json"
+                current_pointer.unlink()
+                current = rule.apply(dataset_factory=lambda: dataset, device="cpu")
+
+                del first
+                gc.collect()
+                self.assertEqual(cleanup_filter_generations(current.cache_path), ())
+                restored = factory()
+                self.assertEqual(_values(restored), [0, 1])
+
+                del restored
+                del factory
+                gc.collect()
+                removed = cleanup_filter_generations(current.cache_path)
+
+                self.assertEqual(removed, (old_path,))
+                self.assertFalse(old_path.exists())
+
+    def test_publish_collects_unleased_generation(self):
+        _register_rows_source("unit_test_filter_generation_publish_cleanup")
+        dataset = _dataset("unit_test_filter_generation_publish_cleanup", [0])
+        rule = FilterRule("all", _true_factory)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with mock.patch.dict(os.environ, {"ANYDATASET_HOME": tmpdir}):
+                old_path = rule.apply(
+                    dataset_factory=lambda: dataset,
+                    device="cpu",
+                ).cache_path
+                gc.collect()
+                (old_path.parents[1] / "current.json").unlink()
+
+                current = rule.apply(dataset_factory=lambda: dataset, device="cpu")
+
+                self.assertNotEqual(current.cache_path, old_path)
+                self.assertFalse(old_path.exists())
+
+    @unittest.skipUnless("fork" in multiprocessing.get_all_start_methods(), "requires fork")
+    def test_fork_child_close_does_not_release_parent_generation_lease(self):
+        _register_rows_source("unit_test_filter_fork_generation_lease")
+        dataset = _dataset("unit_test_filter_fork_generation_lease", [0, 1])
+        rule = FilterRule("all", _metric_factory)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with mock.patch.dict(os.environ, {"ANYDATASET_HOME": tmpdir}):
+                first = rule.apply(dataset_factory=lambda: dataset, device="cpu")
+                old_path = first.cache_path
+                context = multiprocessing.get_context("fork")
+                closed = context.Event()
+                process = context.Process(
+                    target=_close_filter_generation_lease,
+                    args=(first, closed),
+                )
+                process.start()
+                self.assertTrue(closed.wait(timeout=5))
+                process.join(timeout=5)
+                self.assertEqual(process.exitcode, 0)
+
+                current = rule.apply(
+                    dataset_factory=lambda: dataset,
+                    metrics=True,
+                    device="cpu",
+                )
+
+                self.assertNotEqual(current.cache_path, old_path)
+                self.assertTrue(old_path.is_dir())
+                self.assertEqual(first.global_index(1), 1)
+
+                del first
+                gc.collect()
+                self.assertEqual(
+                    cleanup_filter_generations(current.cache_path),
+                    (old_path,),
+                )
+
+    @unittest.skipUnless("fork" in multiprocessing.get_all_start_methods(), "requires fork")
+    def test_fork_parent_close_does_not_release_child_generation_lease(self):
+        _register_rows_source("unit_test_filter_fork_child_generation_lease")
+        dataset = _dataset("unit_test_filter_fork_child_generation_lease", [0, 1])
+        rule = FilterRule("all", _metric_factory)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with mock.patch.dict(os.environ, {"ANYDATASET_HOME": tmpdir}):
+                first = rule.apply(dataset_factory=lambda: dataset, device="cpu")
+                old_path = first.cache_path
+                context = multiprocessing.get_context("fork")
+                ready = context.Event()
+                release = context.Event()
+                process = context.Process(
+                    target=_use_filter_generation_after_release,
+                    args=(first, ready, release),
+                )
+                process.start()
+                self.assertTrue(ready.wait(timeout=5))
+
+                current = rule.apply(
+                    dataset_factory=lambda: dataset,
+                    metrics=True,
+                    device="cpu",
+                )
+                del first
+                gc.collect()
+
+                self.assertNotEqual(current.cache_path, old_path)
+                self.assertEqual(cleanup_filter_generations(current.cache_path), ())
+
+                release.set()
+                process.join(timeout=5)
+                self.assertEqual(process.exitcode, 0)
+                self.assertEqual(
+                    cleanup_filter_generations(current.cache_path),
+                    (old_path,),
+                )
+
+    def test_metrics_iterator_keeps_its_generation(self):
+        _register_rows_source("unit_test_filter_metrics_generation")
+        dataset = _dataset("unit_test_filter_metrics_generation", [0, 1])
+        rule = FilterRule("metrics", _metric_factory)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with mock.patch.dict(os.environ, {"ANYDATASET_HOME": tmpdir}):
+                first = rule.apply(
+                    dataset_factory=lambda: dataset,
+                    metrics=True,
+                    device="cpu",
+                )
+                old_path = first.cache_path
+                (old_path.parents[1] / "current.json").unlink()
+                current = rule.apply(
+                    dataset_factory=lambda: dataset,
+                    metrics=True,
+                    device="cpu",
+                )
+
+                rows = first.iter_metrics()
+                del first
+                gc.collect()
+                first_row = next(rows)
+
+                self.assertNotEqual(current.cache_path, old_path)
+                self.assertEqual(cleanup_filter_generations(current.cache_path), ())
+                self.assertEqual(
+                    [row["index"] for row in (first_row, *rows)],
+                    [0, 1],
+                )
+                self.assertTrue(old_path.is_dir())
+
+                del rows
+                gc.collect()
+                self.assertEqual(
+                    cleanup_filter_generations(current.cache_path),
+                    (old_path,),
+                )
 
     def test_lazy_index_validates_actual_shard_count(self):
         _register_rows_source("unit_test_filter_shard_count")
@@ -456,8 +655,9 @@ class FilteredDatasetTest(unittest.TestCase):
             self.assertEqual(result.counts, {"accept": 2, "reject": 2})
             self.assertEqual(result.select_by("accept").indices, (0, 2))
             self.assertIn("ranges=2-3", log_text)
+            cache_root = result.cache_path.parents[1]
             self.assertFalse(
-                (result.cache_path.parent / f".{result.cache_path.name}.resume").exists()
+                (cache_root.parent / f".{cache_root.name}.resume").exists()
             )
 
     def test_rule_apply_resumes_metrics_chunks(self):
@@ -730,7 +930,8 @@ class FilteredDatasetTest(unittest.TestCase):
             device="cpu",
         )
 
-        restored = filtered.dataset_factory()
+        factory = pickle.loads(pickle.dumps(filtered.dataset_factory))
+        restored = factory()
 
         self.assertEqual(restored.metrics_path, filtered.metrics_path)
         self.assertEqual(list(restored.iter_metrics()), list(filtered.iter_metrics()))
@@ -809,7 +1010,12 @@ class FilteredDatasetTest(unittest.TestCase):
             metadata = json.loads((result.cache_path / "rule.json").read_text(encoding="utf-8"))
             manifest = json.loads((result.cache_path / "partitions.json").read_text(encoding="utf-8"))
 
-        self.assertEqual(result.cache_path.parents[1], anydataset_home() / "cache" / "filters")
+        cache_root = result.cache_path.parents[1]
+        current = json.loads((cache_root / "current.json").read_text(encoding="utf-8"))
+        self.assertEqual(result.cache_path.parents[3], anydataset_home() / "cache" / "filters")
+        self.assertEqual(result.cache_path.parent.name, "generations")
+        self.assertEqual(current["schema_version"], 1)
+        self.assertEqual(current["generation"], result.cache_path.name)
         self.assertEqual(metadata["schema_version"], 5)
         self.assertEqual(metadata["base"]["identity"]["type"], "anydataset.dataset.abc.AnyDataset")
         self.assertEqual(metadata["base"]["spec_id"], dataset.spec.id)
@@ -1050,7 +1256,7 @@ class FilteredDatasetTest(unittest.TestCase):
             log_text = _read_filter_log()
 
         self.assertIn("building filter cache", log_text)
-        self.assertIn("reason='ready marker is missing'", log_text)
+        self.assertIn("reason='current generation pointer is missing'", log_text)
         self.assertIn("rule='log_reason'", log_text)
 
     def test_rule_apply_logs_metrics_rebuild_reason(self):
@@ -1783,6 +1989,19 @@ def _filter_worker_logs(home: Path) -> list[Path]:
     if len(logs) != 2:
         raise AssertionError(f"expected two filter worker logs, found: {logs}")
     return logs
+
+
+def _close_filter_generation_lease(dataset, closed) -> None:
+    dataset._cache._lease.close()
+    closed.set()
+
+
+def _use_filter_generation_after_release(dataset, ready, release) -> None:
+    ready.set()
+    if not release.wait(timeout=5):
+        raise TimeoutError("filter generation lease was not released")
+    if dataset.global_index(1) != 1:
+        raise AssertionError("forked filter dataset returned the wrong index")
 
 
 class _UnpicklableAnyDataset(AnyDataset):

@@ -14,6 +14,7 @@ from typing import Any
 from ..cache import anydataset_home
 from ..dataset.abc import MapStyleABC
 from ..types import item
+from ._files import StoreFilesLease, lease_store_files, payload_path
 from .jsonio import read_json
 from .manifest import (
     DatasetManifest,
@@ -37,7 +38,6 @@ from .paths import (
     samples_parquet_path,
     view_manifest_parquet_path,
     view_ready_path,
-    view_shard_path,
 )
 from .payload import PayloadCache, payload_value, read_payload_bytes
 
@@ -54,6 +54,11 @@ class StoreDataset(MapStyleABC):
     manifest: DatasetManifest
     samples: SampleManifestSequence
     views: StoreViews
+    _file_lease: StoreFilesLease | None = field(
+        default=None,
+        compare=False,
+        repr=False,
+    )
     _payloads: PayloadCache = field(
         default_factory=PayloadCache,
         compare=False,
@@ -357,7 +362,7 @@ def read_store_dataset(
     *,
     preload: bool = False,
 ) -> StoreDataset:
-    root = Path(root).expanduser()
+    root = Path(root).expanduser().resolve()
     _validate_dataset_root(root)
     manifest = read_store_manifest(root)
     samples_path = samples_parquet_path(root)
@@ -380,11 +385,20 @@ def read_store_dataset(
     store_views = StoreViews(root, samples, selected_views)
     if preload:
         store_views.preload()
+    file_lease = (
+        lease_store_files(root)
+        if any(
+            modality is item.Modality.AUDIO and key == item.AudioView.FILE
+            for _role, modality, key in selected_views
+        )
+        else None
+    )
     return StoreDataset(
         root=root,
         manifest=manifest,
         samples=samples,
         views=store_views,
+        _file_lease=file_lease,
     )
 
 
@@ -396,9 +410,15 @@ def read_store_manifest(root: str | Path) -> DatasetManifest:
         raise ValueError("Store dataset manifest must be a JSON object.")
     version = data.get("schema_version")
     if type(version) is not int or version != STORE_SCHEMA_VERSION:
+        migration = (
+            " Use anydataset.store.migrate_store(source, output) for a schema-v1 "
+            "store."
+            if version is None or (type(version) is int and version == 1)
+            else ""
+        )
         raise ValueError(
             "Unsupported store schema_version: "
-            f"{version!r}; expected {STORE_SCHEMA_VERSION}."
+            f"{version!r}; expected {STORE_SCHEMA_VERSION}.{migration}"
         )
     return _dataset_manifest(data)
 
@@ -727,42 +747,31 @@ def _cached_file_payload(
     entry: ViewManifestEntry,
     view: StoreView,
 ) -> Path:
-    target = _file_cache_path(dataset.root, view.view, entry)
+    lease = dataset._file_lease
+    if lease is None or not lease.active:
+        raise RuntimeError("Store FILE view reader does not hold a cache lease.")
+    target = payload_path(
+        dataset.root,
+        view.view,
+        entry,
+        cache_path=lease.cache_path,
+    )
     if not target.is_file():
         data = read_payload_bytes(
             dataset.root, view.view, entry, cache=dataset._payloads
         )
-        if _file_cache_path(dataset.root, view.view, entry) != target:
+        if (
+            payload_path(
+                dataset.root,
+                view.view,
+                entry,
+                cache_path=lease.cache_path,
+            )
+            != target
+        ):
             raise ValueError("View shard changed while caching file payload.")
         _atomic_write_bytes(target, data)
     return target
-
-
-def _file_cache_path(
-    root: Path,
-    view: tuple[item.Role, item.Modality, item.View],
-    entry: ViewManifestEntry,
-) -> Path:
-    role, modality, key = view
-    shard = view_shard_path(root, view, entry.shard)
-    device, inode, size, modified, changed = _stat_fingerprint(shard.stat())
-    payload_id = hashlib.sha256(
-        (
-            f"{entry.shard}\0{entry.key}\0{device}\0{inode}\0{size}\0"
-            f"{modified}\0{changed}"
-        ).encode("utf-8")
-    ).hexdigest()
-    suffix = Path(entry.key).suffix or ".bin"
-    return (
-        anydataset_home()
-        / "cache"
-        / "store-files"
-        / _store_id(root)
-        / role.value
-        / modality.value
-        / key.value
-        / f"{payload_id}{suffix}"
-    )
 
 
 def _store_id(root: Path) -> str:

@@ -18,16 +18,26 @@
   materializer/filter 热路径会使用 map-style indexed loader；`AnyDataset` 仍优先保留
   source-aware indexed shard 路径，避免把顺序 source 退化成随机访问。`sharded_csv`
   prepare 后使用按源文件生成的 Parquet cache，因此也走 map-style indexed loader。
+- iterable source 只有显式实现全局 indexed-sharding 契约时才会走 source-native 路径；
+  契约要求返回原始全局 `sample_index`，并由入口校验已产出值的稠密 modulo 序列。HF
+  streaming 和 TSV 无法通过公开 API 保留该索引，因此继续使用完整流 modulo fallback。
 - store 格式保持稳定；reader 侧可以只读 parquet metadata 和轻量 index 列，按 row group
   懒加载 sample/view manifest 的完整行。`preload=True` 仍表示显式加载并校验所有 view
   manifest。
 
-## 待验证事项
+## 运行时验证结论
 
-1. 在目标 Linux 机器上用真实 store/materializer 输入验证 server 模式的 fork
-   reader/writer 行为；直接持有 torch/CUDA/provider 状态的本地路径继续使用 spawn。
-2. 基于 map-style indexed loader 已提供的稳定全局 sample index，验证 distributed LBA
-   tail flush 能否从 object gather 改成 metadata-only flush。
+- 真实 LongCat 请求中，一次 Unix socket `PING` 的中位数是 0.135 ms；persistent
+  connection 能省掉的只会更少，不足以抵消新增的 owner、fork、重连和 shutdown 状态。
+  `ProviderServer` 保持一请求一连接。
+- server-owned provider 配合 fork reader 的 materializer 和 filter 路径已在目标 Linux
+  Python 3.9 环境通过。
+- `length-based-batching-adapter` 已在存在稳定 index 时使用 `index_metadata` final flush，
+  无 index 时才回退 `object_gather`，anydataset 不再新增重复集成层。
+
+环境、命令和完整测量见
+[`001_runtime_followups.md`](experiments/results/001_runtime_followups.md)。真实 provider
+入口是 `scripts/benchmark_provider_server.py`。
 
 ## 已落地
 
@@ -36,7 +46,11 @@
 - wrapper 可以在当前进程复用已构造 dataset；spawn 序列化时丢弃该缓存，让 worker 通过
   `dataset_factory` 懒加载重建。
 - `ViewMaterializer` 和多设备 `FilterRule` 对默认 map-style shard 语义的数据集使用该
-  loader；有自定义 `iter_indexed_shard` 的数据集继续走 runtime indexed loader。
+  loader；source 显式提供全局 indexed shard 的 iterable dataset 继续走 runtime indexed
+  loader。
+- `IterableAnyDataset` 的原生 indexed 路径由 source opt-in，不直接信任 raw dataset 的
+  `shard()` 或局部 indexed 方法。内建 `hf-disk`、`store` 和 `sharded_csv` 通过随机访问
+  实现该路径，避免每个逻辑 shard 重扫全部输入。
 - server 模式下 reader/writer worker 默认用 fork；无 server 的本地路径保持 spawn，避免
   本地 torch/CUDA/provider 状态被 worker 继承。
 - `StoreDataset` 打开时不再把 `samples.parquet` 全量转成 Python tuple；`samples` 保留
@@ -131,9 +145,3 @@ PYTHONPATH=src python scripts/benchmark_hot_paths.py \
   method，不能把平台差异藏进静默兼容逻辑。
 - remote fork 默认只适用于 provider/filter 已经隔离到 server 的 reader/writer worker 路径；
   local provider 路径继续使用 spawn。
-
-## 暂不处理
-
-- 不在阶段一接入 LBA 或修改 distributed tail flush。
-- 不在阶段一重写 filter partition cache 生命周期；lazy index loading 继续和 cache
-  snapshot 设计一起讨论。

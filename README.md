@@ -141,6 +141,21 @@ dataset = IterableAnyDataset(
 )
 ```
 
+Iterable sources that can select rows without scanning the full stream may also
+implement `iter_indexed_shard(dataset, *, num_shards, shard_id)`. This source
+method must yield `(sample_index, row)` tuples for the exact dense global modulo
+shard: indexes start at `shard_id` and advance by `num_shards`. Anydataset
+validates tuple shape and index progression before filter or materializer code
+sees the rows; the source remains responsible for complete coverage and the
+row-to-index association. A raw dataset `shard()` or `iter_indexed_shard()`
+method alone is not sufficient, because a locally enumerated native shard does
+not preserve global indexes.
+
+The built-in `hf-disk`, `store`, and `sharded_csv` sources provide this indexed
+path through random access. TSV and Hugging Face streaming datasets use the
+full-stream modulo fallback because their public shard APIs do not propagate
+original global row indexes.
+
 Caches are rooted at `ANYDATASET_HOME`, or `~/.cache/anydataset` when the
 environment variable is unset. Source prepare caches live under
 `$ANYDATASET_HOME/cache/sources/<spec_id>`, and filter partitions live under
@@ -429,6 +444,45 @@ dataset = AnyDataset(
 )
 restored = dataset[0]
 ```
+
+Readers accept only store `schema_version: 2`. The preceding canonical store
+format used the same sample manifest and directory layout, but had no dataset
+schema version and keyed view manifests by `sample_id`. Migrate that format
+offline into a new directory; the source is never modified, and the destination
+is published only after its manifests, coverage, shards, and payload keys pass
+the v2 checks:
+
+```bash
+anydataset-store migrate /data/my_anydataset_v1 /data/my_anydataset_v2
+```
+
+Older layouts or v1 manifests that do not exactly match that canonical schema
+must be re-materialized with `DatasetWriter`; migration does not guess missing
+fields or alignment.
+
+`AudioView.FILE` payloads are extracted under
+`$ANYDATASET_HOME/cache/store-files`. A reader that selected the file view holds
+a shared lease for its lifetime, so cleanup cannot invalidate a returned path
+while that reader remains reachable. Hold an explicit lease when the path must
+outlive the reader, then clean that physical store when no reader or explicit
+lease is active:
+
+```python
+from anydataset.store import cleanup_store_files, lease_store_files
+
+with lease_store_files("/data/my_anydataset"):
+    retained_path = dataset[0][Role.DEFAULT, Modality.AUDIO].views[AudioView.FILE]
+    del dataset
+    consume(retained_path)
+
+cleanup_store_files("/data/my_anydataset")
+```
+
+The equivalent maintenance command is
+`anydataset-store cleanup-files /data/my_anydataset`. Cleanup raises instead of
+deleting leased files, including when the reader is in another process. There
+is no automatic eviction; after an explicit cleanup, later access extracts the
+payload again.
 
 Views are stored under `{role}/{modality}/{view}/`; payloads live in that
 view directory's `shards/` files. `ViewMaterializer` writes derived views to a

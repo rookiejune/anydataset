@@ -428,6 +428,29 @@ class ShardedCsvSourceTest(unittest.TestCase):
             self.assertEqual(list(dataset.iter_indexed_range(1, 3)), [(1, "one"), (2, "two")])
             self.assertEqual(list(dataset.iter_indexed_shard(2, 1)), [(1, "one")])
 
+    def test_iterable_source_native_shard_keeps_global_indices(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            shard_dir = root / "shard_0"
+            shard_dir.mkdir()
+            (shard_dir / "0.csv").write_text(
+                "src_text\n"
+                "zero\n"
+                "one\n"
+                "two\n",
+                encoding="utf-8",
+            )
+
+            dataset = IterableAnyDataset(
+                Spec(source="sharded_csv", path=tmpdir),
+                parse_fn=lambda row: row["src_text"],
+            )
+
+            self.assertEqual(
+                list(dataset.iter_indexed_shard(2, 1)),
+                [(1, "one")],
+            )
+
     def test_reads_split_physical_shard_csv(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

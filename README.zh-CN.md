@@ -191,6 +191,18 @@ dataset = IterableAnyDataset(
 )
 ```
 
+能够跳过全流扫描的 iterable source 可以额外实现
+`iter_indexed_shard(dataset, *, num_shards, shard_id)`。该 source 方法必须为精确的
+全局 modulo shard 产出 `(sample_index, row)`：索引从 `shard_id` 开始，每次增加
+`num_shards`。anydataset 会在 filter 或 materializer 使用前校验 tuple 结构和索引步进；
+完整覆盖以及 row 与 index 的对应关系仍由 source 负责。只有 raw dataset 的 `shard()`
+或 `iter_indexed_shard()` 不足以启用该路径，因为原生 shard 内的局部枚举不能保留全局
+索引。
+
+内建 `hf-disk`、`store` 和 `sharded_csv` source 通过随机访问提供 indexed 路径。TSV
+和 Hugging Face streaming 的公开 shard API 不携带原始全局行索引，因此明确保留全流
+modulo fallback。
+
 ## 组合数据集
 
 `MultipleAnyDataset` 可以把多个数据集组合成一个 iterable dataset。组合后的迭代顺序由 strategy 决定。
@@ -543,6 +555,38 @@ dataset = AnyDataset(
 )
 ```
 
+reader 只接受 `schema_version: 2`。上一版 canonical store 使用相同的 sample
+manifest 和目录布局，但 dataset manifest 没有版本号，view manifest 使用
+`sample_id` 对齐。该格式必须离线迁移到新目录；源目录保持不变，目标目录只有在
+manifest、覆盖范围、shard 和 payload key 全部通过 v2 校验后才会原子发布：
+
+```bash
+anydataset-store migrate /data/my_anydataset_v1 /data/my_anydataset_v2
+```
+
+更早的目录布局，或不完整匹配该 canonical schema 的 v1 manifest，不做猜测式迁移，
+必须用 `DatasetWriter` 从原始 canonical dataset 重新物化。
+
+`AudioView.FILE` payload 会解包到 `$ANYDATASET_HOME/cache/store-files`。选择了 file
+view 的 reader 在自身生命周期内自动持有共享 lease，因此只要 reader 仍可达，cleanup
+就不能让已经返回的路径失效。如果路径需要比 reader 活得更久，显式持有 lease；确认没有
+reader 或显式 lease 后，再按物理 store 清理：
+
+```python
+from anydataset.store import cleanup_store_files, lease_store_files
+
+with lease_store_files("/data/my_anydataset"):
+    retained_path = dataset[0][Role.DEFAULT, Modality.AUDIO].views[AudioView.FILE]
+    del dataset
+    consume(retained_path)
+
+cleanup_store_files("/data/my_anydataset")
+```
+
+等价命令是 `anydataset-store cleanup-files /data/my_anydataset`。即使活动 reader 位于
+其他进程，cleanup 也会显式报错而不是删除 leased 文件。该缓存不做自动淘汰；显式清理后，
+下一次访问会重新解包。
+
 训练时需要哪些 view，仍然由 schema 指定：
 
 ```python
@@ -762,7 +806,8 @@ python -m pytest -q
 设计说明在 [docs/design.md](docs/design.md)，filter cache 细节在
 [docs/filter_cache.md](docs/filter_cache.md)，质量过滤说明在
 [docs/translation_quality.md](docs/translation_quality.md) 和
-[docs/speech_quality.md](docs/speech_quality.md)，待办事项在 [todo.md](todo.md)。
+[docs/speech_quality.md](docs/speech_quality.md)，性能验证结果在
+[docs/experiments/results/](docs/experiments/results/)。
 
 ## 发布
 

@@ -3,11 +3,10 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from .._io.atomic import replace_existing_dir
 from .._devices import Devices, resolve_devices
 from .._logging import write_info
 from .._parallel import can_select_indexes, validate_process_value
@@ -36,6 +35,17 @@ from ..store.jsonio import read_json, write_json
 from ..store.reader import StoreDataset
 from ..types import Source, Spec
 from .collect import collect_ranges, collect_ranges_parallel
+from .generations import (
+    FilterGeneration,
+    GenerationLease,
+    GenerationUnavailable,
+    cleanup_filter_generations_locked,
+    create_filter_generation,
+    filter_cache_root,
+    filter_generation_lock_path,
+    lease_current_filter_generation,
+    lease_filter_generation,
+)
 from .resume import (
     cleanup_filter_resume_dir,
     completed_filter_indexes,
@@ -73,19 +83,32 @@ class _FilteredDatasetFactory:
     cache_path: Path
     metrics_path: Path | None
     input_id: str | None
+    lease: GenerationLease = field(repr=False, compare=False)
 
     def __call__(self) -> FilterBase:
         from .api import FilteredDataset, FilterRule
 
-        return FilteredDataset._from_partitions(
+        return FilteredDataset._from_generation(
             self.base(),
             FilterRule(self.rule_name, _unavailable_filter_factory),
             self.cache_path,
-            read_partitions(self.cache_path),
             self.labels,
             dataset_factory=self.base,
             metrics_path=self.metrics_path,
             input_id=self.input_id,
+        )
+
+    def __reduce__(self):
+        return (
+            _restore_filtered_dataset_factory,
+            (
+                self.base,
+                self.rule_name,
+                self.labels,
+                self.cache_path,
+                self.metrics_path,
+                self.input_id,
+            ),
         )
 
 
@@ -109,7 +132,7 @@ def apply_filter(
     from .api import _FilterCache
 
     dataset = filter_base(dataset_factory())
-    cache_path, metric_path = ensure_filter(
+    generation = ensure_filter(
         dataset,
         rule,
         input_id=input_id,
@@ -126,15 +149,20 @@ def apply_filter(
         runtime=runtime,
         dataset_factory=dataset_factory,
     )
-    return _FilterCache(
-        dataset,
-        read_partitions(cache_path),
-        rule,
-        cache_path,
-        metrics_path=metric_path,
-        dataset_factory=dataset_factory,
-        input_id=input_id,
-    )
+    try:
+        return _FilterCache(
+            dataset,
+            read_partitions(generation.path),
+            rule,
+            generation.path,
+            lease=generation.lease,
+            metrics_path=metrics_path(generation.path) if metrics else None,
+            dataset_factory=dataset_factory,
+            input_id=input_id,
+        )
+    except Exception:
+        generation.lease.close()
+        raise
 
 
 def ensure_filter(
@@ -154,7 +182,7 @@ def ensure_filter(
     worker_timeout: float | None,
     runtime: Runtime,
     dataset_factory: DatasetFactory,
-) -> tuple[Path, Path | None]:
+) -> FilterGeneration:
     from .api import FilterRule
 
     dataset = filter_base(dataset)
@@ -179,11 +207,14 @@ def ensure_filter(
     base_count = dataset_sample_count(dataset, context="filter")
     expected = metadata(identity, base_count, rule)
     cache_path = filter_path(rule, identity)
-    metric_path = metrics_path(cache_path) if metrics else None
 
-    reason = not_ready_reason(cache_path, expected, metrics=metrics)
-    if reason is None:
-        return cache_path, metric_path
+    generation, reason = ready_filter_generation(
+        cache_path,
+        expected,
+        metrics=metrics,
+    )
+    if generation is not None:
+        return generation
 
     lock_path = filter_lock_path(rule, identity)
     with FileLock(
@@ -191,9 +222,13 @@ def ensure_filter(
         wait_timeout=_CACHE_LOCK_TIMEOUT,
         poll_interval=_CACHE_LOCK_POLL,
     ):
-        reason = not_ready_reason(cache_path, expected, metrics=metrics)
-        if reason is None:
-            return cache_path, metric_path
+        generation, reason = ready_filter_generation(
+            cache_path,
+            expected,
+            metrics=metrics,
+        )
+        if generation is not None:
+            return generation
         log_filter_cache_miss(
             cache_path,
             rule,
@@ -202,7 +237,7 @@ def ensure_filter(
             metrics=metrics,
             reason=reason,
         )
-        write_cache(
+        return write_cache(
             cache_path,
             expected,
             dataset,
@@ -220,7 +255,6 @@ def ensure_filter(
             runtime=runtime,
             dataset_factory=dataset_factory,
         )
-        return cache_path, metric_path
 
 
 def filter_base(dataset: object) -> FilterBase:
@@ -264,7 +298,7 @@ def filter_identity(
             "base": filter_identity(dataset.base, input_id=dataset.input_id),
             "rule": {"name": dataset.rule.name},
             "labels": list(dataset.labels),
-            "cache_key": dataset.cache_path.name,
+            "cache_key": filter_cache_root(dataset.cache_path).name,
             "sample_count": len(dataset),
         }
         return _with_input_id(identity, input_id)
@@ -376,8 +410,7 @@ def filter_lock_path(
     rule: FilterRule,
     identity: Mapping[str, Any],
 ) -> Path:
-    path = filter_path(rule, identity)
-    return path.with_name(f".{path.name}.lock")
+    return filter_generation_lock_path(filter_path(rule, identity))
 
 
 def filter_identity_key(identity: Mapping[str, Any]) -> str:
@@ -395,8 +428,31 @@ def metrics_path(cache_path: Path) -> Path:
     return cache_path / "metrics"
 
 
+def ready_filter_generation(
+    path: Path,
+    expected: Mapping[str, Any],
+    *,
+    metrics: bool,
+) -> tuple[FilterGeneration | None, str | None]:
+    try:
+        generation = lease_current_filter_generation(path)
+    except FileNotFoundError:
+        return None, "current generation pointer is missing"
+    except (GenerationUnavailable, TypeError, ValueError) as exc:
+        return None, f"current generation pointer is invalid: {exc}"
+    reason = not_ready_reason(generation.path, expected, metrics=metrics)
+    if reason is not None:
+        generation.lease.close()
+        return None, reason
+    return generation, None
+
+
 def is_ready(path: Path, expected: Mapping[str, Any], *, metrics: bool) -> bool:
-    return not_ready_reason(path, expected, metrics=metrics) is None
+    generation, _ = ready_filter_generation(path, expected, metrics=metrics)
+    if generation is None:
+        return False
+    generation.lease.close()
+    return True
 
 
 def not_ready_reason(path: Path, expected: Mapping[str, Any], *, metrics: bool) -> str | None:
@@ -480,8 +536,8 @@ def write_cache(
     worker_timeout: float | None,
     runtime: Runtime,
     dataset_factory: DatasetFactory,
-) -> None:
-    replace_existing_dir(
+) -> FilterGeneration:
+    generation = create_filter_generation(
         path,
         lambda tmp: _write_cache_tmp(
             tmp,
@@ -503,7 +559,13 @@ def write_cache(
             dataset_factory=dataset_factory,
         ),
     )
-    cleanup_filter_resume_dir(path)
+    try:
+        cleanup_filter_resume_dir(path)
+        cleanup_filter_generations_locked(path)
+        return generation
+    except Exception:
+        generation.lease.close()
+        raise
 
 
 def _write_cache_tmp(
@@ -797,13 +859,51 @@ def make_filtered_dataset_factory(
     metrics_path: Path | None,
     input_id: str | None,
 ) -> _FilteredDatasetFactory:
+    return _make_filtered_dataset_factory(
+        base,
+        rule.name,
+        labels,
+        cache_path,
+        metrics_path,
+        input_id,
+    )
+
+
+def _make_filtered_dataset_factory(
+    base: DatasetFactory,
+    rule_name: str,
+    labels: tuple[str, ...],
+    cache_path: Path,
+    metrics_path: Path | None,
+    input_id: str | None,
+) -> _FilteredDatasetFactory:
+    generation = lease_filter_generation(cache_path)
     return _FilteredDatasetFactory(
         base=base,
-        rule_name=rule.name,
+        rule_name=rule_name,
         labels=labels,
         cache_path=Path(cache_path),
         metrics_path=None if metrics_path is None else Path(metrics_path),
         input_id=input_id,
+        lease=generation.lease,
+    )
+
+
+def _restore_filtered_dataset_factory(
+    base: DatasetFactory,
+    rule_name: str,
+    labels: tuple[str, ...],
+    cache_path: Path,
+    metrics_path: Path | None,
+    input_id: str | None,
+) -> _FilteredDatasetFactory:
+    return _make_filtered_dataset_factory(
+        base,
+        rule_name,
+        labels,
+        cache_path,
+        metrics_path,
+        input_id,
     )
 
 
