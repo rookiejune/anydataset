@@ -101,6 +101,25 @@ sorted child identities, so merge input order does not split the cache. A
 `MultipleAnyDataset` is not a filter cache identity; filter or cache the child
 datasets independently before combining them.
 
+Library-owned merged children such as `AnyDataset`, `StoreDataset`, and another
+`FilteredDataset` have stable automatic identities. A merge containing an
+external map-style child such as a list or application dataset must also pass a
+non-empty `input_id`:
+
+```python
+filtered = rule.apply(
+    dataset_factory=merged_dataset_factory,
+    input_id="base-plus-local-annotations-v3",
+)
+```
+
+`input_id` is the caller-managed semantic version of the entire filter input
+snapshot. It supplements the automatic child class, physical `Spec`, and sample
+count identity; it does not replace them. Change it when external child content
+or ordering changes. The stored ID survives `FilteredDataset.dataset_factory`,
+pickle reconstruction, and chained filters. `FilterRule.name` still versions
+the predicate contract, while `input_id` versions input state.
+
 `rule.json` stores the base physical `Spec` id or filtered-view lineage, scanned
 sample count, and rule name. When those values do not match, the rule is
 recomputed. `partitions.json` stores labels, counts, and shard parquet file
@@ -113,9 +132,22 @@ writer; the default is 100,000. Cache construction writes those bounded batches
 incrementally, so it does not need to hold every accepted index in one Python
 object before writing. Cache construction keeps completed chunks in a hidden
 resume directory and replays them into the final cache after all samples are
-covered. `write_workers` controls background fragment writer processes; the
+covered. `write_workers` controls background fragment writer threads; the
 default is one writer so predicate execution can overlap with parquet writes.
 `write_prefetch` bounds pending write jobs.
+
+The current commit replaces a ready cache directory at the same logical path.
+A live single-label view keeps partition shards lazy, so construction verifies
+that the manifest and ready marker stay unchanged while recording shard file
+fingerprints. If an unloaded shard belongs to a cache generation that has since
+been replaced, the view raises an explicit stale-snapshot error instead of
+combining its old shard offsets with the new file contents. It also rejects shard
+row counts that differ from the manifest.
+
+These checks detect replacement; they do not keep the old snapshot available.
+Stable long-lived views require immutable cache generations, an atomic current
+generation pointer, and a reader lease or cleanup contract. Recreate the filtered
+dataset after a stale-snapshot error.
 
 Cache construction reports scan and fragment-writer progress on stderr. In
 multi-device runs, each worker also writes lifecycle and failure details under

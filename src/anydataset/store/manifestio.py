@@ -9,16 +9,11 @@ from .._io.parquet import (
     ParquetRowWriter,
     parquet_schema,
     pyarrow,
-    read_int_column,
-    read_int_string_columns,
-    read_row_group,
-    read_rows,
-    row_count,
-    row_groups,
 )
 from ..types.item import Modality, Role, View
 from .manifest import (
     SampleManifestEntry,
+    STORE_SCHEMA_VERSION,
     ViewManifestEntry,
     view_from_dict,
 )
@@ -30,16 +25,28 @@ def samples_manifest_exists(root: str | Path) -> bool:
 
 
 def read_samples_manifest(root: str | Path) -> Iterator[SampleManifestEntry]:
-    for row in _read_parquet_rows(samples_parquet_path(root)):
+    for row in _read_manifest_rows(
+        samples_parquet_path(root),
+        _SAMPLE_SCHEMA,
+        kind="sample",
+    ):
         yield _sample_entry(row)
 
 
 def sample_manifest_row_count(root: str | Path) -> int:
-    return row_count(samples_parquet_path(root))
+    return sample_manifest_layout(root)[0]
 
 
 def sample_manifest_row_groups(root: str | Path) -> tuple[int, ...]:
-    return row_groups(samples_parquet_path(root))
+    return sample_manifest_layout(root)[1]
+
+
+def sample_manifest_layout(root: str | Path) -> tuple[int, tuple[int, ...]]:
+    return _manifest_layout(
+        samples_parquet_path(root),
+        _SAMPLE_SCHEMA,
+        kind="sample",
+    )
 
 
 def read_samples_manifest_row_group(
@@ -48,16 +55,33 @@ def read_samples_manifest_row_group(
 ) -> tuple[SampleManifestEntry, ...]:
     return tuple(
         _sample_entry(row)
-        for row in _read_parquet_row_group(samples_parquet_path(root), row_group)
+        for row in _read_manifest_rows(
+            samples_parquet_path(root),
+            _SAMPLE_SCHEMA,
+            kind="sample",
+            row_group=row_group,
+        )
     )
 
 
 def read_sample_manifest_index(root: str | Path) -> Iterator[tuple[int, str]]:
-    yield from read_int_string_columns(
+    parquet = _validated_parquet(
         samples_parquet_path(root),
-        int_column="sample_index",
-        string_column="sample_id",
+        _SAMPLE_SCHEMA,
+        kind="sample",
     )
+    for batch in parquet.iter_batches(
+        batch_size=4096,
+        columns=["sample_index", "sample_id"],
+    ):
+        indexes = batch.column(0)
+        sample_ids = batch.column(1)
+        for position in range(len(indexes)):
+            sample_index = indexes[position].as_py()
+            sample_id = sample_ids[position].as_py()
+            if sample_index is None or sample_id is None:
+                raise ValueError("Sample manifest index columns cannot contain nulls.")
+            yield int(sample_index), str(sample_id)
 
 
 def write_samples_manifest(
@@ -86,14 +110,25 @@ def view_manifest_row_count(
     root: str | Path,
     view: tuple[Role, Modality, View],
 ) -> int:
-    return row_count(view_manifest_parquet_path(root, view))
+    return view_manifest_layout(root, view)[0]
 
 
 def view_manifest_row_groups(
     root: str | Path,
     view: tuple[Role, Modality, View],
 ) -> tuple[int, ...]:
-    return row_groups(view_manifest_parquet_path(root, view))
+    return view_manifest_layout(root, view)[1]
+
+
+def view_manifest_layout(
+    root: str | Path,
+    view: tuple[Role, Modality, View],
+) -> tuple[int, tuple[int, ...]]:
+    return _manifest_layout(
+        view_manifest_parquet_path(root, view),
+        _VIEW_SCHEMA,
+        kind="view",
+    )
 
 
 def read_view_manifest_row_group(
@@ -217,16 +252,12 @@ def _read_view_manifest_rows(
     row_group: int | None = None,
 ) -> Iterator[dict[str, Any]]:
     path = view_manifest_parquet_path(root, view)
-    sample_index_by_id = None
-    if not _has_column(path, "sample_index"):
-        sample_index_by_id = _sample_index_by_id(root)
-    rows = (
-        _read_parquet_rows(path)
-        if row_group is None
-        else _read_parquet_row_group(path, row_group)
+    yield from _read_manifest_rows(
+        path,
+        _VIEW_SCHEMA,
+        kind="view",
+        row_group=row_group,
     )
-    for row in rows:
-        yield _view_manifest_row(row, sample_index_by_id)
 
 
 def _read_view_manifest_indexes(
@@ -234,60 +265,66 @@ def _read_view_manifest_indexes(
     view: tuple[Role, Modality, View],
 ) -> Iterator[int]:
     path = view_manifest_parquet_path(root, view)
-    if _has_column(path, "sample_index"):
-        yield from read_int_column(path, "sample_index")
-        return
-    sample_index_by_id = _sample_index_by_id(root)
-    for row in _read_parquet_rows(path, columns=["sample_id"]):
-        yield _view_manifest_row(row, sample_index_by_id)["sample_index"]
+    parquet = _validated_parquet(path, _VIEW_SCHEMA, kind="view")
+    for batch in parquet.iter_batches(batch_size=4096, columns=["sample_index"]):
+        indexes = batch.column(0)
+        for position in range(len(indexes)):
+            sample_index = indexes[position].as_py()
+            if sample_index is None:
+                raise ValueError("View manifest sample_index cannot contain nulls.")
+            yield int(sample_index)
 
 
-def _view_manifest_row(
-    row: dict[str, Any],
-    sample_index_by_id: dict[str, int] | None,
-) -> dict[str, Any]:
-    row = dict(row)
-    sample_id = row.pop("sample_id", None)
-    if "sample_index" not in row:
-        if sample_index_by_id is None or sample_id is None:
-            raise ValueError("legacy view manifest entries must contain sample_id.")
-        row["sample_index"] = sample_index_by_id[str(sample_id)]
-    return row
-
-
-def _sample_index_by_id(root: str | Path) -> dict[str, int]:
-    return {
-        sample_id: sample_index
-        for sample_index, sample_id in read_sample_manifest_index(root)
-    }
-
-
-def _has_column(path: str | Path, name: str) -> bool:
-    _, pq = pyarrow()
-    return name in pq.ParquetFile(path).schema_arrow.names
-
-
-def _read_parquet_rows(
-    path: Path,
+def _manifest_layout(
+    path: str | Path,
+    fields: tuple[tuple[str, str], ...],
     *,
-    columns: list[str] | None = None,
-) -> Iterator[dict[str, Any]]:
-    for row in read_rows(path, columns=columns):
-        yield _decode_row(row)
+    kind: str,
+) -> tuple[int, tuple[int, ...]]:
+    parquet = _validated_parquet(path, fields, kind=kind)
+    metadata = parquet.metadata
+    return int(metadata.num_rows), tuple(
+        int(metadata.row_group(index).num_rows)
+        for index in range(metadata.num_row_groups)
+    )
 
 
-def _read_parquet_row_group(
-    path: Path,
-    row_group: int,
+def _validated_parquet(
+    path: str | Path,
+    fields: tuple[tuple[str, str], ...],
     *,
-    columns: list[str] | None = None,
+    kind: str,
+):
+    pa, pq = pyarrow()
+    parquet = pq.ParquetFile(path)
+    actual = parquet.schema_arrow
+    expected = parquet_schema(pa, fields)
+    if not actual.equals(expected, check_metadata=False):
+        raise ValueError(
+            f"Store schema {STORE_SCHEMA_VERSION} {kind} manifest schema "
+            "does not match expected fields."
+        )
+    return parquet
+
+
+def _read_manifest_rows(
+    path: str | Path,
+    fields: tuple[tuple[str, str], ...],
+    *,
+    kind: str,
+    row_group: int | None = None,
 ) -> Iterator[dict[str, Any]]:
-    for row in read_row_group(path, row_group, columns=columns):
+    parquet = _validated_parquet(path, fields, kind=kind)
+    if row_group is None:
+        rows = (
+            row
+            for batch in parquet.iter_batches(batch_size=4096)
+            for row in batch.to_pylist()
+        )
+    else:
+        rows = iter(parquet.read_row_group(row_group).to_pylist())
+    for row in rows:
         yield _decode_row(row)
-
-
-def _schema(pa, fields: tuple[tuple[str, str], ...]):
-    return parquet_schema(pa, fields)
 
 
 _SAMPLE_SCHEMA = (

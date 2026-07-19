@@ -48,6 +48,7 @@ from .storage import (
     MetricsWriter,
     PartitionWriter,
     metrics_ready,
+    partition_count,
     partition_files,
     read_partitions,
 )
@@ -58,7 +59,7 @@ if TYPE_CHECKING:
 
 FilterBase = MapStyleABC
 
-_FILTER_VIEW_SCHEMA_VERSION = 1
+_FILTER_VIEW_SCHEMA_VERSION = 2
 _PROGRESS_STAGES = ("scan", "writer")
 _CACHE_LOCK_TIMEOUT = 3600.0
 _CACHE_LOCK_POLL = 0.2
@@ -70,6 +71,8 @@ class _FilteredDatasetFactory:
     rule_name: str
     labels: tuple[str, ...]
     cache_path: Path
+    metrics_path: Path | None
+    input_id: str | None
 
     def __call__(self) -> FilterBase:
         from .api import FilteredDataset, FilterRule
@@ -81,12 +84,15 @@ class _FilteredDatasetFactory:
             read_partitions(self.cache_path),
             self.labels,
             dataset_factory=self.base,
+            metrics_path=self.metrics_path,
+            input_id=self.input_id,
         )
 
 
 def apply_filter(
     rule: FilterRule,
     *,
+    input_id: str | None,
     metrics: bool,
     device: Devices,
     batch_size: int,
@@ -106,6 +112,7 @@ def apply_filter(
     cache_path, metric_path = ensure_filter(
         dataset,
         rule,
+        input_id=input_id,
         metrics=metrics,
         device=device,
         batch_size=batch_size,
@@ -126,6 +133,7 @@ def apply_filter(
         cache_path,
         metrics_path=metric_path,
         dataset_factory=dataset_factory,
+        input_id=input_id,
     )
 
 
@@ -133,6 +141,7 @@ def ensure_filter(
     dataset: FilterBase,
     rule: FilterRule,
     *,
+    input_id: str | None,
     metrics: bool,
     device: Devices,
     batch_size: int,
@@ -166,7 +175,7 @@ def ensure_filter(
     write_prefetch = optional_positive_int("write_prefetch", write_prefetch)
     worker_timeout = optional_positive_float("worker_timeout", worker_timeout)
 
-    identity = filter_identity(dataset)
+    identity = filter_identity(dataset, input_id=input_id)
     base_count = dataset_sample_count(dataset, context="filter")
     expected = metadata(identity, base_count, rule)
     cache_path = filter_path(rule, identity)
@@ -243,49 +252,80 @@ def filter_spec(dataset: FilterBase) -> Spec:
     raise TypeError("dataset must be an AnyDataset, StoreDataset, or MergedDataset.")
 
 
-def filter_identity(dataset: FilterBase) -> dict[str, Any]:
+def filter_identity(
+    dataset: FilterBase,
+    *,
+    input_id: str | None = None,
+) -> dict[str, Any]:
     if _is_filtered_dataset(dataset):
-        return {
+        identity = {
             "view_schema_version": _FILTER_VIEW_SCHEMA_VERSION,
             "kind": "filtered",
-            "base": filter_identity(dataset.base),
+            "base": filter_identity(dataset.base, input_id=dataset.input_id),
             "rule": {"name": dataset.rule.name},
             "labels": list(dataset.labels),
             "cache_key": dataset.cache_path.name,
             "sample_count": len(dataset),
         }
+        return _with_input_id(identity, input_id)
     if isinstance(dataset, MergedDataset):
         children = sorted(
-            (dataset_identity(child) for child in merged_children(dataset)),
+            (
+                dataset_identity(child, allow_external=input_id is not None)
+                for child in merged_children(dataset)
+            ),
             key=filter_identity_key,
         )
-        return {
+        identity = {
             "view_schema_version": _FILTER_VIEW_SCHEMA_VERSION,
             "kind": "merged",
             "children": children,
             "sample_count": len(dataset),
         }
+        return _with_input_id(identity, input_id)
     spec = filter_spec(dataset)
-    return {
+    identity = {
         "kind": "physical",
         "type": f"{type(dataset).__module__}.{type(dataset).__qualname__}",
         "spec_id": spec.id,
         "spec": spec.to_dict(),
     }
+    return _with_input_id(identity, input_id)
 
 
-def dataset_identity(dataset: Any) -> dict[str, Any]:
-    if isinstance(dataset, MapStyleABC):
+def dataset_identity(
+    dataset: Any,
+    *,
+    allow_external: bool,
+) -> dict[str, Any]:
+    if (
+        isinstance(dataset, (AnyDataset, StoreDataset, MergedDataset))
+        or _is_filtered_dataset(dataset)
+    ):
         return filter_identity(dataset)
     if not hasattr(dataset, "__len__") or not hasattr(dataset, "__getitem__"):
         raise TypeError("merged dataset inputs must be map-style datasets.")
+    if not allow_external:
+        dataset_type = f"{type(dataset).__module__}.{type(dataset).__qualname__}"
+        raise TypeError(
+            "input_id is required when a merged dataset contains an external "
+            f"map-style child: {dataset_type}."
+        )
     return {
         "view_schema_version": _FILTER_VIEW_SCHEMA_VERSION,
         "kind": "map_style",
         "type": f"{type(dataset).__module__}.{type(dataset).__qualname__}",
         "sample_count": len(dataset),
-        "object_id": id(dataset),
     }
+
+
+def _with_input_id(
+    identity: dict[str, Any],
+    input_id: str | None,
+) -> dict[str, Any]:
+    if input_id is not None:
+        identity["input_id"] = input_id
+    return identity
 
 
 def merged_children(dataset: MergedDataset) -> tuple[Any, ...]:
@@ -368,14 +408,25 @@ def not_ready_reason(path: Path, expected: Mapping[str, Any], *, metrics: bool) 
     manifest_path = path / "partitions.json"
     if not manifest_path.is_file():
         return "partition manifest is missing"
-    if metadata_mismatch(read_json(metadata_path), expected):
+    try:
+        actual = read_json(metadata_path)
+        manifest = read_json(manifest_path)
+    except FileNotFoundError:
+        return "cache snapshot changed during readiness check"
+    if metadata_mismatch(actual, expected):
         return "rule metadata does not match current dataset identity"
-    manifest = read_json(manifest_path)
+    expected_count = int(expected["base"]["sample_count"])
+    if partition_count(manifest) != expected_count:
+        return "partition sample count does not match current dataset"
     for relpath in partition_files(manifest):
         if not (path / relpath).is_file():
             return f"partition shard is missing: {relpath}"
-    if metrics and not metrics_ready(metrics_path(path)):
-        return "metrics cache is missing or incomplete"
+    if metrics:
+        try:
+            if not metrics_ready(metrics_path(path), expected_count=expected_count):
+                return "metrics cache is missing or incomplete"
+        except FileNotFoundError:
+            return "cache snapshot changed during readiness check"
     return None
 
 
@@ -707,7 +758,7 @@ def replay_filter_resume_fragments(
         else None
     )
     try:
-        for chunk in iter_filter_fragment_chunks(resume_dir):
+        for chunk in iter_filter_fragment_chunks(resume_dir, metrics=metrics):
             write_filter_chunk(writer, metrics_writer, chunk, metrics=metrics)
         writer.close()
         if metrics_writer is not None:
@@ -743,12 +794,16 @@ def make_filtered_dataset_factory(
     rule: FilterRule,
     labels: tuple[str, ...],
     cache_path: Path,
+    metrics_path: Path | None,
+    input_id: str | None,
 ) -> _FilteredDatasetFactory:
     return _FilteredDatasetFactory(
         base=base,
         rule_name=rule.name,
         labels=labels,
         cache_path=Path(cache_path),
+        metrics_path=None if metrics_path is None else Path(metrics_path),
+        input_id=input_id,
     )
 
 

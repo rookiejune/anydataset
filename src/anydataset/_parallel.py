@@ -27,6 +27,7 @@ from ._sharding import runtime_shard, validate_shard
 
 DatasetFactory = Callable[[], Any]
 StartMethod = Literal["fork", "spawn", "forkserver"]
+_START_METHODS = frozenset({"fork", "spawn", "forkserver"})
 
 _DEFAULT_LOADER_PREFETCH_FACTOR = 2
 
@@ -119,6 +120,8 @@ class SelectedIndexSampler(Sampler[int]):
             return
         previous: int | None = None
         for index in self.indexes:
+            if isinstance(index, bool) or not isinstance(index, int):
+                raise ValueError("sample indexes must be integers.")
             if index < 0:
                 raise ValueError("sample indexes must be non-negative.")
             if previous is not None and index <= previous:
@@ -293,6 +296,26 @@ def worker_configs(
 
 def multiprocessing_context(start_method: StartMethod = "spawn"):
     return multiprocessing.get_context(start_method)
+
+
+def validate_start_method(
+    name: str,
+    value: str | None,
+    *,
+    auto: bool = False,
+    optional: bool = False,
+) -> None:
+    if value is None:
+        if optional:
+            return
+        raise TypeError(f"{name} must be a string.")
+    if not isinstance(value, str):
+        expected = "a string or None" if optional else "a string"
+        raise TypeError(f"{name} must be {expected}.")
+    allowed = _START_METHODS | ({"auto"} if auto else set())
+    if value not in allowed:
+        names = ", ".join(sorted(allowed))
+        raise ValueError(f"{name} must be one of: {names}.")
 
 
 def validate_process_parent(*, context: str) -> None:

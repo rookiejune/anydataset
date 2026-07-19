@@ -36,7 +36,9 @@ class _Base(ABC):
         self._cache_manager = None
         self._dataset = None
         self._source: DatasetSource | None = None
-        self.parse_fn = parse_fn or _identity_sample
+        if parse_fn is not None and not callable(parse_fn):
+            raise TypeError("parse_fn must be callable or None.")
+        self.parse_fn = _identity_sample if parse_fn is None else parse_fn
         self.transforms = None if transforms is None else dict(transforms)
 
     def prepare(self) -> Any:
@@ -68,21 +70,16 @@ class _Base(ABC):
         return self._source
 
     def __getstate__(self) -> dict[str, Any]:
-        return {
-            "spec": self.spec,
-            "parse_fn": self.parse_fn,
-            "transforms": self.transforms,
-            "source": self.source,
-        }
+        state = dict(self.__dict__)
+        state["_cache_manager"] = None
+        state["_dataset"] = None
+        state["_source"] = self.source
+        return state
 
     def __setstate__(self, state: dict[str, Any]) -> None:
-        self.spec = state["spec"]
+        self.__dict__.update(state)
         self._cache_manager = None
         self._dataset = None
-        self._source = state["source"]
-        self.parse_fn = state["parse_fn"]
-        transforms = state["transforms"]
-        self.transforms = None if transforms is None else dict(transforms)
 
     def __iter__(self) -> Iterator[Sample]:
         shard = runtime_shard()
@@ -161,7 +158,7 @@ class IterableAnyDataset(_Base, IterableDataset):
         validate_shard(num_shards, shard_id)
         dataset = self.dataset
         shard = getattr(dataset, "shard", None)
-        if shard is not None:
+        if callable(shard):
             yield from shard(num_shards=num_shards, index=shard_id)
             return
 

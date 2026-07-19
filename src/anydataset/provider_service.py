@@ -15,7 +15,13 @@ from typing import TYPE_CHECKING, Any, Union
 import torch
 
 from ._compat import StrEnum
-from ._parallel import StartMethod, multiprocessing_context, validate_process_value
+from ._parallel import (
+    StartMethod,
+    multiprocessing_context,
+    validate_process_value,
+    validate_start_method,
+)
+from ._validation import optional_positive_float, positive_float
 from .types.item import View
 from .view import BatchOutput, ViewMap
 
@@ -108,6 +114,17 @@ class ProviderServer:
     startup_timeout: float | None = 120.0
     shutdown_timeout: float = 10.0
     _process: BaseProcess | None = field(default=None, init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        validate_start_method("start_method", self.start_method)
+        self.startup_timeout = optional_positive_float(
+            "startup_timeout",
+            self.startup_timeout,
+        )
+        self.shutdown_timeout = positive_float(
+            "shutdown_timeout",
+            self.shutdown_timeout,
+        )
 
     def start(self) -> ProviderServer:
         if self._process is not None:
@@ -273,7 +290,11 @@ def _serve_connection(provider: Any, conn: Any) -> bool:
     response = _handle_request(provider, request)
     try:
         conn.send(response)
-    except (EOFError, OSError):
+    except Exception as exc:
+        try:
+            conn.send(_ProviderResponse(error=_provider_error(exc)))
+        except Exception:
+            pass
         return False
     return (
         isinstance(request, _ProviderRequest)
@@ -293,16 +314,31 @@ def _handle_request(provider: Any, request: object) -> _ProviderResponse:
             return _ProviderResponse(value=provider.call_batch(request.payload))
         if request.command is _ProviderCommand.CLOSE:
             return _ProviderResponse()
+        raise TypeError(f"Unsupported provider command: {request.command!r}.")
     except Exception as exc:
-        _clear_cuda_cache()
-        return _ProviderResponse(
-            error=_ProviderError(
-                type_name=type(exc).__name__,
-                message=str(exc),
-                traceback=traceback.format_exc(),
+        error = _provider_error(exc)
+        try:
+            _clear_cuda_cache()
+        except Exception as cleanup_exc:
+            cleanup = _provider_error(cleanup_exc)
+            error = _ProviderError(
+                type_name=error.type_name,
+                message=error.message,
+                traceback=(
+                    f"{error.traceback}\n"
+                    f"Provider cleanup raised {cleanup.type_name}: {cleanup.message}\n"
+                    f"{cleanup.traceback}"
+                ),
             )
-        )
-    raise TypeError(f"Unsupported provider command: {request.command!r}.")
+        return _ProviderResponse(error=error)
+
+
+def _provider_error(exc: Exception) -> _ProviderError:
+    return _ProviderError(
+        type_name=type(exc).__name__,
+        message=str(exc),
+        traceback=traceback.format_exc(),
+    )
 
 
 def _request(

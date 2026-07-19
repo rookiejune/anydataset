@@ -5,12 +5,14 @@ import unittest
 
 from anydataset import (
     AnyDataset,
+    Source,
     Spec,
     has_source,
     register_source,
     resolve_dataset,
 )
 from anydataset.dataset.source import for_source
+from anydataset.dataset.source.store import StoreSource
 
 
 class ListSource:
@@ -49,9 +51,23 @@ class SourceRegistryTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             register_source("unit_test_duplicate", ListSource)
 
+    def test_rejects_non_callable_source_factory(self):
+        with self.assertRaisesRegex(TypeError, "factory must be callable"):
+            register_source("unit_test_invalid_factory", None)
+
     def test_unknown_source_fails_when_resolved(self):
         with self.assertRaises(KeyError):
             for_source("unit_test_missing")
+
+    def test_store_source_rejects_unknown_load_options_before_io(self):
+        spec = Spec(
+            source=Source.STORE,
+            path="missing-store",
+            load_options={"unknown": True},
+        )
+
+        with self.assertRaisesRegex(TypeError, "Unexpected store load option: unknown"):
+            StoreSource().prepare(spec, Path("unused-cache"))
 
 
 if __name__ == "__main__":

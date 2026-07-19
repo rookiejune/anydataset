@@ -4,10 +4,12 @@ from pathlib import Path
 
 from ...store.reader import StoreDataset, read_store_dataset
 from ...types import Spec
+from .protocol import validate_load_options
 
 
 class StoreSource:
     def prepare(self, spec: Spec, _cache_path: Path) -> StoreDataset:
+        validate_load_options(spec, (), source="store")
         dataset = read_store_dataset(spec.path)
         if spec.split is not None and dataset.manifest.split != spec.split:
             raise ValueError(

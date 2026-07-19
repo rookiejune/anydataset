@@ -409,6 +409,40 @@ class ViewMaterializerTest(unittest.TestCase):
                     devices="cpu",
                 )
 
+    def test_materializer_rejects_string_batch_provider_outputs(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            with self.assertRaisesRegex(TypeError, "non-string sequence"):
+                ViewMaterializer(root / "target", batch_size=2).write(
+                    dataset_factory=_DatasetFactory(
+                        (
+                            _audio_sample(torch.tensor([[1.0]])),
+                            _audio_sample(torch.tensor([[2.0]])),
+                        )
+                    ),
+                    provider_factory=_StaticProviderFactory(
+                        _StringBatchProvider()
+                    ),
+                    devices="cpu",
+                )
+
+    def test_materializer_rejects_plain_string_batch_reference_keys(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            with self.assertRaisesRegex(TypeError, "reference keys"):
+                ViewMaterializer(root / "target", batch_size=2).write(
+                    dataset_factory=_DatasetFactory(
+                        (
+                            _audio_sample(torch.tensor([[1.0]])),
+                            _audio_sample(torch.tensor([[2.0]])),
+                        )
+                    ),
+                    provider_factory=_StaticProviderFactory(
+                        _StringRefBatchProvider()
+                    ),
+                    devices="cpu",
+                )
+
     def test_materializer_splits_oom_batch_and_recaptures_padding(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -1556,6 +1590,21 @@ class _MultiRoleBatchProvider(_Provider):
 class _BadBatchProvider(_Provider):
     def call_batch(self, batch):
         return [{"semantic_codes": torch.tensor([[1]])}]
+
+
+class _StringBatchProvider(_Provider):
+    def call_batch(self, batch):
+        return "ab"
+
+
+class _StringRefBatchProvider(_Provider):
+    def call_batch(self, batch):
+        return {
+            ("default", "audio"): [
+                {"semantic_codes": torch.tensor([[1]])},
+                {"semantic_codes": torch.tensor([[2]])},
+            ]
+        }
 
 
 class _SplitOnOomBatchProvider(_BatchProvider):

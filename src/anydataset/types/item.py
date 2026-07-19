@@ -70,7 +70,17 @@ class AudioView(StrEnum):
 
 @dataclass(frozen=True)
 class AudioItem(_Item[AudioView, AudioMeta]):
-    pass
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "views",
+            _enum_mapping("AudioItem.views", self.views, AudioView),
+        )
+        object.__setattr__(
+            self,
+            "meta",
+            _enum_mapping("AudioItem.meta", self.meta, AudioMeta),
+        )
 
 
 class ImageMeta(StrEnum):
@@ -83,7 +93,17 @@ class ImageView(StrEnum):
 
 @dataclass(frozen=True)
 class ImageItem(_Item[ImageView, ImageMeta]):
-    pass
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "views",
+            _enum_mapping("ImageItem.views", self.views, ImageView),
+        )
+        object.__setattr__(
+            self,
+            "meta",
+            _enum_mapping("ImageItem.meta", self.meta, ImageMeta),
+        )
 
 
 class TextMeta(StrEnum):
@@ -96,7 +116,17 @@ class TextView(StrEnum):
 
 @dataclass(frozen=True)
 class TextItem(_Item[TextView, TextMeta]):
-    pass
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "views",
+            _enum_mapping("TextItem.views", self.views, TextView),
+        )
+        object.__setattr__(
+            self,
+            "meta",
+            _enum_mapping("TextItem.meta", self.meta, TextMeta),
+        )
 
 
 @dataclass(frozen=True)
@@ -105,7 +135,18 @@ class AudioReq(
         AudioView,
         AudioMeta,
     ]
-): ...
+):
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "views",
+            _enum_keys("AudioReq.views", self.views, AudioView),
+        )
+        object.__setattr__(
+            self,
+            "meta",
+            _enum_keys("AudioReq.meta", self.meta, AudioMeta),
+        )
 
 
 @dataclass(frozen=True)
@@ -114,7 +155,18 @@ class ImageReq(
         ImageView,
         ImageMeta,
     ]
-): ...
+):
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "views",
+            _enum_keys("ImageReq.views", self.views, ImageView),
+        )
+        object.__setattr__(
+            self,
+            "meta",
+            _enum_keys("ImageReq.meta", self.meta, ImageMeta),
+        )
 
 
 @dataclass(frozen=True)
@@ -123,7 +175,37 @@ class TextReq(
         TextView,
         TextMeta,
     ]
-): ...
+):
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "views",
+            _enum_keys("TextReq.views", self.views, TextView),
+        )
+        object.__setattr__(
+            self,
+            "meta",
+            _enum_keys("TextReq.meta", self.meta, TextMeta),
+        )
+
+
+def _enum_mapping(name: str, value: object, key_type: type[KeyT]) -> Mapping[KeyT, Any]:
+    if not isinstance(value, Mapping):
+        raise TypeError(f"{name} must be a mapping.")
+    output = dict(value)
+    if any(not isinstance(key, key_type) for key in output):
+        raise TypeError(f"{name} keys must be {key_type.__name__} values.")
+    return output
+
+
+def _enum_keys(name: str, value: object, key_type: type[KeyT]) -> frozenset[KeyT]:
+    try:
+        output = frozenset(value)
+    except TypeError as exc:
+        raise TypeError(f"{name} must be an iterable of {key_type.__name__} values.") from exc
+    if any(not isinstance(key, key_type) for key in output):
+        raise TypeError(f"{name} must contain {key_type.__name__} values.")
+    return output
 
 
 View = Union[AudioView, ImageView, TextView]

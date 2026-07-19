@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import operator
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Union
@@ -19,6 +20,7 @@ from .types.item import (
     TextView,
     Sample,
 )
+from ._validation import positive_int
 
 @dataclass(frozen=True)
 class AudioMap:
@@ -131,13 +133,13 @@ def load_audio(row: Mapping[str, Any], fields: AudioFields) -> AudioItem:
                 waveform, sample_rate = _audio(value)
                 if sample_rate is None:
                     raise ValueError("audio waveform views require sample_rate.")
-                views[key] = (waveform, sample_rate)
+                _assign(views, key, (waveform, sample_rate), target="audio view")
                 continue
-            views[key] = value
+            _assign(views, key, value, target="audio view")
         elif isinstance(key, AudioMeta):
-            meta[key] = value
+            _assign(meta, key, value, target="audio metadata")
         elif isinstance(key, Labels):
-            label_values[key.name] = value
+            _assign(label_values, key.name, value, target="audio label")
         else:
             raise TypeError(f"Unsupported audio field key: {key!r}.")
 
@@ -155,9 +157,9 @@ def load_image(row: Mapping[str, Any], fields: ImageFields) -> ImageItem:
     for field, key in fields.items():
         value = _value(row, field)
         if isinstance(key, ImageView):
-            views[key] = value
+            _assign(views, key, value, target="image view")
         elif isinstance(key, ImageMeta):
-            meta[key] = value
+            _assign(meta, key, value, target="image metadata")
         else:
             raise TypeError(f"Unsupported image field key: {key!r}.")
     return ImageItem(views=views, meta=meta)
@@ -175,9 +177,9 @@ def load_text(
     for field, key in fields.items():
         value = _value(row, field)
         if isinstance(key, TextView):
-            views[key] = value
+            _assign(views, key, value, target="text view")
         elif isinstance(key, TextMeta):
-            meta[key] = value
+            _assign(meta, key, value, target="text metadata")
         else:
             raise TypeError(f"Unsupported text field key: {key!r}.")
     return TextItem(views=views, meta=meta)
@@ -244,8 +246,9 @@ def _split_source_prefix(shorthand: str) -> tuple[SourceKey | None, str]:
         from .dataset.source import has_source
 
         source, body = shorthand.split("://", 1)
-        if has_source(source):
-            return source, body
+        if not has_source(source):
+            raise KeyError(f"Unknown dataset source: {source!r}.")
+        return source, body
     return None, shorthand
 
 
@@ -260,9 +263,20 @@ def _split_name_and_split(value: str) -> tuple[str, str | None]:
             bracket_depth -= 1
             continue
         if char == ":" and bracket_depth == 0:
+            if _windows_drive_colon(value, index):
+                continue
             name, split = value[:index], value[index + 1 :]
-            return name, split or None
+            return name, split
     return value, None
+
+
+def _windows_drive_colon(value: str, index: int) -> bool:
+    return (
+        index == 1
+        and len(value) > 2
+        and value[0].isalpha()
+        and value[2] in {"/", "\\"}
+    )
 
 
 def _value(row: Mapping[str, Any], field: FieldPath) -> Any:
@@ -301,4 +315,26 @@ def _maybe_decode_audio(audio: Any) -> tuple[Any, int] | None:
 def _maybe_int(value: Any) -> int | None:
     if value is None:
         return None
-    return int(value)
+    if isinstance(value, bool):
+        raise TypeError("audio sampling_rate must be a positive integer.")
+    if isinstance(value, str):
+        try:
+            result = int(value)
+        except ValueError as exc:
+            raise TypeError(
+                "audio sampling_rate must be a positive integer."
+            ) from exc
+    else:
+        try:
+            result = operator.index(value)
+        except TypeError as exc:
+            raise TypeError(
+                "audio sampling_rate must be a positive integer."
+            ) from exc
+    return positive_int("audio sampling_rate", result)
+
+
+def _assign(mapping: dict[Any, Any], key: Any, value: Any, *, target: str) -> None:
+    if key in mapping:
+        raise ValueError(f"Duplicate {target} target: {key!r}.")
+    mapping[key] = value

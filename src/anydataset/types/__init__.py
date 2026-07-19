@@ -71,6 +71,17 @@ class Spec:
     def __post_init__(self) -> None:
         if not isinstance(self.source, (Source, str)):
             raise TypeError("Spec.source must be a Source or string source key.")
+        if not isinstance(self.path, str):
+            raise TypeError("Spec.path must be a string.")
+        if not self.path:
+            raise ValueError("Spec.path must not be empty.")
+        for name, value in (("split", self.split), ("version", self.version)):
+            if value is not None and not isinstance(value, str):
+                raise TypeError(f"Spec.{name} must be a string or None.")
+            if value == "":
+                raise ValueError(f"Spec.{name} must not be empty.")
+        if not isinstance(self.load_options, Mapping):
+            raise TypeError("Spec.load_options must be a mapping.")
         frozen_options = _freeze_mapping(self.load_options)
         object.__setattr__(
             self, "load_options", frozen_options
@@ -201,7 +212,12 @@ def _thaw(value: Any) -> Any:
 
 
 def _freeze_mapping(value: Mapping[Any, Any]) -> MappingProxyType[str, Any]:
-    return MappingProxyType({str(key): _freeze(child) for key, child in value.items()})
+    output: dict[str, Any] = {}
+    for key, child in value.items():
+        if not isinstance(key, str):
+            raise TypeError("Spec load option keys must be strings.")
+        output[key] = _freeze(child)
+    return MappingProxyType(output)
 
 
 __all__ = [

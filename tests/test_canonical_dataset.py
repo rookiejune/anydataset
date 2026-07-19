@@ -27,11 +27,52 @@ from anydataset.types import (
     Modality,
     Role,
     TextView,
+    TextItem,
+    TextMeta,
+    TextReq,
 )
 from anydataset.presets import WMT19
 
 
 class CanonicalDatasetTest(unittest.TestCase):
+    def test_dataset_uses_falsey_callable_parser(self):
+        dataset = AnyDataset(
+            Spec(source=Source.HF, path="unused"),
+            parse_fn=_FalseyParser(),
+        )
+        dataset._dataset = [{"value": 3}]
+
+        self.assertEqual(dataset[0], {"parsed": 3})
+
+    def test_dataset_rejects_non_callable_parser(self):
+        with self.assertRaisesRegex(TypeError, "parse_fn"):
+            AnyDataset(Spec(source=Source.HF, path="unused"), parse_fn=0)
+
+    def test_dataset_pickle_preserves_subclass_state_and_drops_cached_data(self):
+        dataset = _StatefulAnyDataset(Spec(source=Source.HF, path="unused"))
+        dataset.extra = "needed"
+        dataset._dataset = [{"cached": True}]
+
+        restored = pickle.loads(pickle.dumps(dataset))
+
+        self.assertEqual(restored.extra, "needed")
+        self.assertIsNone(restored._dataset)
+        self.assertIsNone(restored._cache_manager)
+
+    def test_items_and_requirements_reject_cross_modality_keys(self):
+        cases = (
+            lambda: AudioItem(views={TextView.TEXT: "wrong"}),
+            lambda: ImageItem(meta={TextMeta.LANG: "wrong"}),
+            lambda: TextItem(views={ImageView.PIXEL: "wrong"}),
+            lambda: AudioReq(views=frozenset({TextView.TEXT})),
+            lambda: TextReq(meta=frozenset({AudioMeta.LABEL})),
+        )
+
+        for create in cases:
+            with self.subTest(create=create):
+                with self.assertRaises(TypeError):
+                    create()
+
     def test_resolves_preset_to_spec(self):
         spec = resolve_dataset("fleurs:validation")
 
@@ -67,6 +108,25 @@ class CanonicalDatasetTest(unittest.TestCase):
 
         with self.assertRaises(TypeError):
             spec.load_options["streaming"] = False
+
+    def test_spec_rejects_invalid_physical_fields(self):
+        cases = (
+            ({"path": Path("data")}, TypeError, "Spec.path"),
+            ({"path": ""}, ValueError, "Spec.path"),
+            ({"path": "data", "split": ""}, ValueError, "Spec.split"),
+            ({"path": "data", "version": 1}, TypeError, "Spec.version"),
+            ({"path": "data", "load_options": []}, TypeError, "load_options"),
+            (
+                {"path": "data", "load_options": {"nested": {1: "value"}}},
+                TypeError,
+                "keys must be strings",
+            ),
+        )
+
+        for kwargs, error, message in cases:
+            with self.subTest(kwargs=kwargs):
+                with self.assertRaisesRegex(error, message):
+                    Spec(source=Source.HF, **kwargs)
 
     def test_spec_load_options_are_deeply_frozen(self):
         spec = Spec(
@@ -346,6 +406,17 @@ class CanonicalDatasetTest(unittest.TestCase):
         ]
         dataset.iter_rows = lambda: (
             {"value": index} for index, _ in enumerate(dataset.dataset)
+        )
+
+        self.assertEqual(list(dataset.iter_shard(2, 1)), [1, 3])
+
+    def test_iterable_dataset_ignores_non_callable_shard_attribute(self):
+        dataset = IterableAnyDataset(
+            spec=Spec(source=Source.HF, path="/tmp/missing"),
+            parse_fn=lambda row: row["value"],
+        )
+        dataset._dataset = _RowsWithShardAttribute(
+            [{"value": index} for index in range(4)]
         )
 
         self.assertEqual(list(dataset.iter_shard(2, 1)), [1, 3])
@@ -748,6 +819,28 @@ class _ShardableRows:
             for row_index, row in enumerate(self.rows)
             if row_index % num_shards == index
         )
+
+
+class _RowsWithShardAttribute:
+    shard = "metadata"
+
+    def __init__(self, rows):
+        self.rows = rows
+
+    def __iter__(self):
+        yield from self.rows
+
+
+class _FalseyParser:
+    def __bool__(self):
+        return False
+
+    def __call__(self, row):
+        return {"parsed": row["value"]}
+
+
+class _StatefulAnyDataset(AnyDataset):
+    pass
 
 
 def _map_dataset(rows):

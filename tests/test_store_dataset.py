@@ -23,7 +23,7 @@ from anydataset.types import (
     TextView,
 )
 from anydataset.store import DatasetWriter
-from anydataset.store.jsonio import write_json
+from anydataset.store.jsonio import read_json, write_json
 from anydataset.store.manifest import (
     DatasetManifest,
     SampleManifestEntry,
@@ -31,6 +31,7 @@ from anydataset.store.manifest import (
 )
 from anydataset.store.manifestio import (
     read_sample_manifest_index,
+    read_view_manifest_indexes,
     write_samples_manifest,
 )
 from anydataset.store.paths import (
@@ -92,6 +93,38 @@ class StoreSourceTest(unittest.TestCase):
 
             self.assertEqual(manifest.dataset_id, "toy-audio")
             self.assertEqual(manifest.sample_count, 1)
+
+    def test_read_store_manifest_rejects_missing_schema_version(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output = Path(tmpdir) / "dataset"
+            DatasetWriter(output, dataset_id="toy-audio").write(
+                [_audio_sample(waveform=torch.tensor([[1.0]]))]
+            )
+            manifest = read_json(output / "dataset.json")
+            del manifest["schema_version"]
+            write_json(output / "dataset.json", manifest)
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "Unsupported store schema_version: None; expected 2",
+            ):
+                read_store_manifest(output)
+
+    def test_read_store_manifest_rejects_non_integer_sample_count(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output = Path(tmpdir) / "dataset"
+            DatasetWriter(output, dataset_id="toy-audio").write(
+                [_audio_sample(waveform=torch.tensor([[1.0]]))]
+            )
+            manifest = read_json(output / "dataset.json")
+            manifest["sample_count"] = 1.0
+            write_json(output / "dataset.json", manifest)
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "sample_count must be a non-negative integer",
+            ):
+                read_store_manifest(output)
 
     def test_anydataset_reads_store_shorthand(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -190,6 +223,25 @@ class StoreSourceTest(unittest.TestCase):
             self.assertEqual(file_view.read_bytes(), b"RIFF-data")
             self.assertEqual(cached, file_view)
 
+    def test_file_view_cache_recovers_after_cached_file_is_removed(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            source = root / "source.wav"
+            source.write_bytes(b"RIFF-data")
+            output = root / "dataset"
+            DatasetWriter(output, dataset_id="file-audio").write(
+                [_audio_sample(file=str(source), sample_rate=16000)]
+            )
+            dataset = read_store_dataset(output)
+            ref = (Role.DEFAULT, Modality.AUDIO)
+            cached = Path(dataset[0][ref].views[AudioView.FILE])
+            cached.unlink()
+
+            restored = Path(dataset[0][ref].views[AudioView.FILE])
+
+            self.assertEqual(restored, cached)
+            self.assertEqual(restored.read_bytes(), b"RIFF-data")
+
     def test_file_view_cache_separates_roles_for_read_only_store(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -257,6 +309,33 @@ class StoreSourceTest(unittest.TestCase):
             self.assertNotEqual(first, second)
             self.assertEqual(first.read_bytes(), b"OLD")
             self.assertEqual(second.read_bytes(), b"NEW-CONTENT")
+
+    def test_file_view_cache_does_not_reuse_stale_open_shard_after_rebuild(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            source = root / "source.wav"
+            output = root / "dataset"
+            source.write_bytes(b"OLD")
+            DatasetWriter(output, dataset_id="rebuilt-file").write(
+                [_audio_sample(file=str(source), sample_rate=16000)]
+            )
+            old_dataset = read_store_dataset(output)
+            ref = (Role.DEFAULT, Modality.AUDIO)
+            old_cache = Path(old_dataset[0][ref].views[AudioView.FILE])
+
+            shutil.rmtree(output)
+            source.write_bytes(b"NEW-CONTENT")
+            DatasetWriter(output, dataset_id="rebuilt-file").write(
+                [_audio_sample(file=str(source), sample_rate=16000)]
+            )
+            old_cache.unlink()
+            refreshed = Path(old_dataset[0][ref].views[AudioView.FILE])
+            new_dataset = read_store_dataset(output)
+            reused = Path(new_dataset[0][ref].views[AudioView.FILE])
+
+            self.assertEqual(refreshed.read_bytes(), b"NEW-CONTENT")
+            self.assertEqual(reused, refreshed)
+            self.assertEqual(reused.read_bytes(), b"NEW-CONTENT")
 
     def test_reader_reuses_open_payload_shard(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -715,6 +794,16 @@ class StoreSourceTest(unittest.TestCase):
             with self.assertRaises(FileNotFoundError):
                 read_store_dataset(output)
 
+    def test_reader_requires_dataset_ready_marker_to_be_a_file(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output = Path(tmpdir) / "dataset"
+            _write_empty_dataset(output)
+            dataset_ready_path(output).unlink()
+            dataset_ready_path(output).mkdir()
+
+            with self.assertRaisesRegex(ValueError, "dataset is not ready"):
+                read_store_dataset(output)
+
     def test_reader_rejects_invalid_view_path(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -831,6 +920,60 @@ class StoreSourceTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 read_store_dataset(output, preload=True)
 
+    def test_reader_rejects_view_manifest_changed_while_loading_index(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output = Path(tmpdir) / "dataset"
+            DatasetWriter(output, dataset_id="toy-audio").write(
+                [_audio_sample(waveform=torch.tensor([[1.0]]))]
+            )
+            view = (Role.DEFAULT, Modality.AUDIO, AudioView.WAVEFORM)
+            path = view_manifest_parquet_path(output, view)
+            dataset = read_store_dataset(output)
+
+            def changing_indexes(root, selected_view):
+                yield from read_view_manifest_indexes(root, selected_view)
+                path.write_bytes(path.read_bytes() + b"changed")
+
+            with mock.patch(
+                "anydataset.store.reader.read_view_manifest_indexes",
+                side_effect=changing_indexes,
+            ):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "View manifest changed while loading index",
+                ):
+                    dataset.views[view]
+
+    def test_reader_rejects_legacy_view_manifest_without_sample_index(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output = Path(tmpdir) / "dataset"
+            DatasetWriter(output, dataset_id="toy-audio").write(
+                [_audio_sample(waveform=torch.tensor([[1.0]]))]
+            )
+            view = (Role.DEFAULT, Modality.AUDIO, AudioView.WAVEFORM)
+            _rewrite_view_manifest_as_legacy(output, view)
+            dataset = read_store_dataset(output)
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "Store schema 2 view manifest schema does not match expected fields",
+            ):
+                dataset[0]
+
+    def test_reader_rejects_sample_manifest_with_wrong_column_types(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output = Path(tmpdir) / "dataset"
+            DatasetWriter(output, dataset_id="toy-audio").write(
+                [_audio_sample(waveform=torch.tensor([[1.0]]))]
+            )
+            _rewrite_sample_indexes_as_float(output)
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "Store schema 2 sample manifest schema does not match expected fields",
+            ):
+                read_store_dataset(output)
+
 
 def _audio_sample(
     waveform=None,
@@ -930,6 +1073,28 @@ def _rewrite_sample_manifest_one_row_per_group(root: Path) -> None:
     finally:
         writer.close()
     path.with_suffix(".tmp").replace(path)
+
+
+def _rewrite_view_manifest_as_legacy(root: Path, view) -> None:
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    path = view_manifest_parquet_path(root, view)
+    table = pq.read_table(path).drop(["sample_index"])
+    sample_ids = [sample_id for _index, sample_id in read_sample_manifest_index(root)]
+    table = table.append_column("sample_id", pa.array(sample_ids))
+    pq.write_table(table, path)
+
+
+def _rewrite_sample_indexes_as_float(root: Path) -> None:
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    path = samples_parquet_path(root)
+    table = pq.read_table(path)
+    column = table.schema.get_field_index("sample_index")
+    indexes = pa.array(table["sample_index"].to_pylist(), type=pa.float64())
+    pq.write_table(table.set_column(column, "sample_index", indexes), path)
 
 
 if __name__ == "__main__":

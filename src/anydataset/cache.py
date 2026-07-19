@@ -10,6 +10,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from ._validation import optional_positive_float, positive_float
+
 if TYPE_CHECKING:
     from .types import Spec
 
@@ -82,13 +84,9 @@ class FileLock:
         wait_timeout: float | None = None,
         poll_interval: float = 0.2,
     ) -> None:
-        if wait_timeout is not None and wait_timeout <= 0:
-            raise ValueError("wait_timeout must be positive.")
-        if poll_interval <= 0:
-            raise ValueError("poll_interval must be positive.")
         self.path = path
-        self.wait_timeout = wait_timeout
-        self.poll_interval = poll_interval
+        self.wait_timeout = optional_positive_float("wait_timeout", wait_timeout)
+        self.poll_interval = positive_float("poll_interval", poll_interval)
         self.file = None
 
     def __enter__(self):

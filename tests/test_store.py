@@ -145,7 +145,7 @@ class StoreTest(unittest.TestCase):
             write_view_manifest(root, view, [payload])
 
             with mock.patch(
-                "anydataset.store.manifestio._read_parquet_rows",
+                "anydataset.store.manifestio._read_manifest_rows",
                 side_effect=AssertionError("row dicts materialized"),
             ):
                 sample_index = tuple(read_sample_manifest_index(root))

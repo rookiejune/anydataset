@@ -27,24 +27,25 @@ from .manifestio import (
     read_samples_manifest_row_group,
     read_view_manifest_indexes,
     read_view_manifest_row_group,
-    sample_manifest_row_count,
-    sample_manifest_row_groups,
+    sample_manifest_layout,
     samples_manifest_exists,
-    view_manifest_row_count,
-    view_manifest_row_groups,
+    view_manifest_layout,
 )
 from .paths import (
     dataset_json_path,
     dataset_ready_path,
     samples_parquet_path,
+    view_manifest_parquet_path,
     view_ready_path,
     view_shard_path,
 )
 from .payload import PayloadCache, payload_value, read_payload_bytes
 
-_FileCacheKey = tuple[tuple[item.Role, item.Modality, item.View], str, str]
 _StatFingerprint = tuple[int, int, int, int, int]
-_SAMPLE_INDEX_VALIDATION_VERSION = 1
+_SAMPLE_INDEX_VALIDATION_VERSION = 2
+_DATASET_MANIFEST_FIELDS = frozenset(
+    {"dataset_id", "sample_count", "schema_version", "split"}
+)
 
 
 @dataclass(frozen=True)
@@ -53,11 +54,6 @@ class StoreDataset(MapStyleABC):
     manifest: DatasetManifest
     samples: SampleManifestSequence
     views: StoreViews
-    _files: dict[_FileCacheKey, Path] = field(
-        default_factory=dict,
-        compare=False,
-        repr=False,
-    )
     _payloads: PayloadCache = field(
         default_factory=PayloadCache,
         compare=False,
@@ -179,11 +175,14 @@ class ViewEntryIndex:
         *,
         sample_count: int,
     ) -> ViewEntryIndex:
-        row_count = view_manifest_row_count(root, view)
-        row_groups = view_manifest_row_groups(root, view)
+        path = view_manifest_parquet_path(root, view)
+        fingerprint = _stat_fingerprint(path.stat())
+        row_count, row_groups = view_manifest_layout(root, view)
         sample_indexes = array("q", read_view_manifest_indexes(root, view))
         if len(sample_indexes) != row_count:
             raise ValueError("View manifest row count changed while loading index.")
+        if _stat_fingerprint(path.stat()) != fingerprint:
+            raise ValueError("View manifest changed while loading index.")
         _validate_view_indexes(view, sample_indexes, sample_count)
         return cls(
             root,
@@ -361,16 +360,20 @@ def read_store_dataset(
     root = Path(root).expanduser()
     _validate_dataset_root(root)
     manifest = read_store_manifest(root)
-    actual_sample_count = sample_manifest_row_count(root)
+    samples_path = samples_parquet_path(root)
+    fingerprint = _stat_fingerprint(samples_path.stat())
+    actual_sample_count, row_groups = sample_manifest_layout(root)
     if actual_sample_count != manifest.sample_count:
         raise ValueError(
             "sample manifest row count must match dataset.json sample_count."
         )
-    _validate_sample_manifest_index(root, manifest.sample_count)
+    _validate_sample_manifest_index(root, manifest.sample_count, fingerprint)
+    if _stat_fingerprint(samples_path.stat()) != fingerprint:
+        raise ValueError("Sample manifest changed while opening store.")
     samples = SampleManifestSequence(
         root,
         count=manifest.sample_count,
-        row_groups=sample_manifest_row_groups(root),
+        row_groups=row_groups,
     )
 
     selected_views = _select_views(_discover_views(root), views)
@@ -389,15 +392,46 @@ def read_store_manifest(root: str | Path) -> DatasetManifest:
     root = Path(root).expanduser()
     _validate_dataset_root(root)
     data = read_json(dataset_json_path(root))
+    if not isinstance(data, Mapping):
+        raise ValueError("Store dataset manifest must be a JSON object.")
     version = data.get("schema_version")
-    if version is None:
-        data = {**data, "schema_version": 1}
-    elif version != STORE_SCHEMA_VERSION:
+    if type(version) is not int or version != STORE_SCHEMA_VERSION:
         raise ValueError(
             "Unsupported store schema_version: "
             f"{version!r}; expected {STORE_SCHEMA_VERSION}."
         )
-    return DatasetManifest(**data)
+    return _dataset_manifest(data)
+
+
+def _dataset_manifest(data: Mapping[str, Any]) -> DatasetManifest:
+    fields = frozenset(data)
+    missing = _DATASET_MANIFEST_FIELDS - fields
+    if missing:
+        raise ValueError(
+            f"Store dataset manifest is missing field {sorted(missing)[0]!r}."
+        )
+    unsupported = fields - _DATASET_MANIFEST_FIELDS
+    if unsupported:
+        raise ValueError(
+            "Store dataset manifest has unsupported field "
+            f"{sorted(unsupported)[0]!r}."
+        )
+
+    dataset_id = data["dataset_id"]
+    if not isinstance(dataset_id, str):
+        raise ValueError("Store dataset_id must be a string.")
+    sample_count = data["sample_count"]
+    if type(sample_count) is not int or sample_count < 0:
+        raise ValueError("Store sample_count must be a non-negative integer.")
+    split = data["split"]
+    if split is not None and not isinstance(split, str):
+        raise ValueError("Store split must be a string or None.")
+    return DatasetManifest(
+        dataset_id=dataset_id,
+        sample_count=sample_count,
+        schema_version=STORE_SCHEMA_VERSION,
+        split=split,
+    )
 
 
 def read_store_views(root: str | Path) -> tuple[tuple[item.Role, item.Modality, item.View], ...]:
@@ -409,7 +443,7 @@ def read_store_views(root: str | Path) -> tuple[tuple[item.Role, item.Modality, 
 def _validate_dataset_root(root: Path) -> None:
     if not root.is_dir():
         raise FileNotFoundError(root)
-    if not dataset_ready_path(root).exists():
+    if not dataset_ready_path(root).is_file():
         raise ValueError(f"Store dataset is not ready: {root}")
     if not dataset_json_path(root).is_file():
         raise FileNotFoundError(dataset_json_path(root))
@@ -514,9 +548,12 @@ def _validate_view_dir(
         raise FileNotFoundError(path / "manifest.parquet")
 
 
-def _validate_sample_manifest_index(root: Path, sample_count: int) -> None:
+def _validate_sample_manifest_index(
+    root: Path,
+    sample_count: int,
+    fingerprint: _StatFingerprint,
+) -> None:
     path = samples_parquet_path(root)
-    fingerprint = _stat_fingerprint(path.stat())
     marker = _sample_index_validation_path(root, sample_count, fingerprint)
     if marker.is_file():
         return
@@ -690,18 +727,14 @@ def _cached_file_payload(
     entry: ViewManifestEntry,
     view: StoreView,
 ) -> Path:
-    cache_key = (view.view, entry.shard, entry.key)
-    cached = dataset._files.get(cache_key)
-    if cached is not None:
-        return cached
-
     target = _file_cache_path(dataset.root, view.view, entry)
     if not target.is_file():
         data = read_payload_bytes(
             dataset.root, view.view, entry, cache=dataset._payloads
         )
+        if _file_cache_path(dataset.root, view.view, entry) != target:
+            raise ValueError("View shard changed while caching file payload.")
         _atomic_write_bytes(target, data)
-    dataset._files[cache_key] = target
     return target
 
 

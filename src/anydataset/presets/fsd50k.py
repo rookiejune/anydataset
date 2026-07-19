@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import wave
+from collections.abc import Mapping
 from functools import partial
 from pathlib import Path
 from typing import Any, Iterator
@@ -12,6 +13,7 @@ from urllib.request import Request, urlopen
 import torch
 
 from .._sharding import validate_shard
+from ..cache import FileLock
 from ..dataset import AudioView
 from ..dataset.abc import AnyDataset
 from ..types import Preset
@@ -28,6 +30,8 @@ class FSD50K(AnyDataset):
         transforms: Transforms | None = None,
         **load_options: Any,
     ) -> None:
+        if split is not None and split not in _VALID_SPLITS:
+            raise ValueError("FSD50K split must be `dev` or `eval`.")
         extra = set(load_options) - {"revision"}
         if extra:
             name = min(extra)
@@ -53,15 +57,20 @@ class FSD50K(AnyDataset):
         cache = self.cache_manager.prepare(self.spec)
         split = self.spec.split or "dev"
         revision = str(self.spec.load_options["revision"])
-        if split not in _VALID_SPLITS:
-            raise ValueError("FSD50K split must be `dev` or `eval`.")
 
         manifest_path = cache.cache_path / f"{split}_files.json"
-        if not manifest_path.exists():
-            files = _list_files(self.spec.path, split, revision)
-            _write_json(manifest_path, files)
-        else:
-            files = json.loads(manifest_path.read_text(encoding="utf-8"))
+        with FileLock(cache.lock_path, wait_timeout=3600.0):
+            if not manifest_path.exists():
+                files = _manifest_files(
+                    _list_files(self.spec.path, split, revision),
+                    split,
+                )
+                _write_json(manifest_path, files)
+            else:
+                files = _manifest_files(
+                    json.loads(manifest_path.read_text(encoding="utf-8")),
+                    split,
+                )
 
         self._dataset = {
             "repo_id": self.spec.path,
@@ -108,17 +117,49 @@ def _list_files(repo_id: str, split: str, revision: str) -> list[str]:
         "?recursive=true&expand=false&limit=1000"
     )
     files: list[str] = []
+    seen_urls: set[str] = set()
     while url:
+        if url in seen_urls:
+            raise RuntimeError("FSD50K Hub pagination returned a repeated URL.")
+        seen_urls.add(url)
         request = Request(url, headers={"User-Agent": "anydataset"})
         with urlopen(request, timeout=60) as response:
             rows = json.loads(response.read().decode("utf-8"))
+            if not isinstance(rows, list) or any(
+                not isinstance(row, Mapping) for row in rows
+            ):
+                raise ValueError("FSD50K Hub tree response must be a list of mappings.")
             for row in rows:
                 path = row.get("path")
-                if path and row.get("type") == "file" and path.endswith(".wav"):
+                if row.get("type") != "file":
+                    continue
+                if not isinstance(path, str):
+                    raise ValueError("FSD50K Hub file entries must contain a path.")
+                if path.endswith(".wav"):
                     files.append(path)
             next_url = response.headers.get("Link")
         url = _next_link_url(next_url, endpoint)
     return sorted(files)
+
+
+def _manifest_files(value: object, split: str) -> list[str]:
+    if not isinstance(value, list) or not value:
+        raise ValueError("FSD50K file manifest must be a non-empty list.")
+    prefix = f"clips/{split}/"
+    files = []
+    for file_name in value:
+        if (
+            not isinstance(file_name, str)
+            or not file_name.startswith(prefix)
+            or not file_name.endswith(".wav")
+        ):
+            raise ValueError(
+                f"FSD50K file manifest entries must be WAV paths under {prefix}."
+            )
+        files.append(file_name)
+    if len(set(files)) != len(files):
+        raise ValueError("FSD50K file manifest entries must be unique.")
+    return files
 
 
 def _next_link_url(link_header: str | None, endpoint: str) -> str | None:

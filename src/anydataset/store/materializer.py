@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import marshal
 import multiprocessing
 import os
@@ -8,11 +9,13 @@ import time
 import traceback
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
+from enum import Enum
 from functools import partial
 from pathlib import Path
 from types import BuiltinFunctionType, CellType, FunctionType, MethodType
 from typing import Any, Literal, Union, cast
 
+import torch
 from torch.utils.data import DataLoader
 
 from .._compat import strict_zip
@@ -529,7 +532,7 @@ class ViewMaterializer:
         use_map_style_loader: bool,
     ) -> dict[str, object]:
         return {
-            "schema_version": 2,
+            "schema_version": 3,
             "materializer": {
                 "mode": self._materializer_mode,
                 "dataset_id": self._dataset_id,
@@ -876,17 +879,81 @@ def _optional_semantic_id(name: str, value: str | None) -> str | None:
     return value
 
 
-def _metadata_value(value: object) -> object:
+def _metadata_value(
+    value: object,
+    active: set[int] | None = None,
+) -> object:
+    if isinstance(value, Enum):
+        return {
+            "type": _type_id(value),
+            "value": _metadata_value(value.value, active),
+        }
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
-    if isinstance(value, Mapping):
+    if isinstance(value, Path):
+        return {"type": _type_id(value), "value": str(value)}
+    if isinstance(value, (bytes, bytearray)):
+        payload = bytes(value)
         return {
-            str(key): _metadata_value(item)
-            for key, item in sorted(value.items(), key=lambda item: str(item[0]))
+            "type": _type_id(value),
+            "size": len(payload),
+            "sha256": hashlib.sha256(payload).hexdigest(),
+        }
+    if isinstance(value, torch.Tensor):
+        return _tensor_value(value)
+    if isinstance(value, range):
+        return {
+            "type": _type_id(value),
+            "start": value.start,
+            "stop": value.stop,
+            "step": value.step,
+        }
+    if active is None:
+        active = set()
+    if callable(value):
+        return _callable_identity(value, active)
+
+    marker = id(value)
+    if marker in active:
+        return {"type": _type_id(value), "recursive": True}
+    active.add(marker)
+    try:
+        return _metadata_object(value, active)
+    finally:
+        active.remove(marker)
+
+
+def _metadata_object(value: object, active: set[int]) -> object:
+    if isinstance(value, Mapping):
+        items = [
+            [
+                _metadata_value(key, active),
+                _metadata_value(item, active),
+            ]
+            for key, item in value.items()
+        ]
+        items.sort(key=_metadata_sort_key)
+        return {"type": _type_id(value), "items": items}
+    if isinstance(value, (set, frozenset)):
+        items = [_metadata_value(item, active) for item in value]
+        return {
+            "type": _type_id(value),
+            "items": sorted(items, key=_metadata_sort_key),
         }
     if isinstance(value, Sequence) and not isinstance(value, (bytes, bytearray)):
-        return [_metadata_value(item) for item in value]
-    return repr(value)
+        return {
+            "type": _type_id(value),
+            "items": [_metadata_value(item, active) for item in value],
+        }
+    state = _instance_state(value)
+    if state is not None:
+        return {
+            "type": _type_id(value),
+            "state": _metadata_digest(state, active),
+        }
+    if type(value).__repr__ is object.__repr__:
+        return _type_id(value)
+    return {"type": _type_id(value), "value": repr(value)}
 
 
 def _closure_value(cell: CellType) -> object:
@@ -897,17 +964,32 @@ def _closure_value(cell: CellType) -> object:
 
 
 def _callable_id(value: object) -> object:
+    return _callable_identity(value, set())
+
+
+def _callable_identity(value: object, active: set[int]) -> object:
+    marker = id(value)
+    if marker in active:
+        return {"type": _type_id(value), "recursive": True}
+    active.add(marker)
+    try:
+        return _callable_value(value, active)
+    finally:
+        active.remove(marker)
+
+
+def _callable_value(value: object, active: set[int]) -> object:
     if isinstance(value, partial):
         return {
             "type": "functools.partial",
-            "function": _callable_id(value.func),
-            "args": _metadata_value(value.args),
-            "keywords": _metadata_value(value.keywords or {}),
+            "function": _callable_identity(value.func, active),
+            "args": _metadata_digest(value.args, active),
+            "keywords": _metadata_digest(value.keywords or {}, active),
         }
     if isinstance(value, MethodType):
         return {
-            "function": _callable_id(value.__func__),
-            "owner": _callable_id(value.__self__),
+            "function": _callable_identity(value.__func__, active),
+            "owner": _metadata_digest(value.__self__, active),
         }
     if isinstance(value, (FunctionType, BuiltinFunctionType)):
         identity: dict[str, object] = {
@@ -917,18 +999,137 @@ def _callable_id(value: object) -> object:
             identity["code"] = hashlib.sha256(
                 marshal.dumps(value.__code__)
             ).hexdigest()[:16]
-            identity["defaults"] = _metadata_value(value.__defaults__ or ())
-            identity["kwdefaults"] = _metadata_value(value.__kwdefaults__ or {})
+            identity["defaults"] = _metadata_digest(
+                value.__defaults__ or (),
+                active,
+            )
+            identity["kwdefaults"] = _metadata_digest(
+                value.__kwdefaults__ or {},
+                active,
+            )
             identity["closure"] = [
-                _metadata_value(_closure_value(cell))
+                _metadata_digest(_closure_value(cell), active)
                 for cell in (value.__closure__ or ())
             ]
         return identity
 
-    type_id = f"{type(value).__module__}.{type(value).__qualname__}"
+    if isinstance(value, type):
+        identity = {"class": f"{value.__module__}.{value.__qualname__}"}
+        for name in ("__init__", "__call__"):
+            member = value.__dict__.get(name)
+            if callable(member):
+                identity[name] = _callable_identity(member, active)
+        return identity
+
+    type_id = _type_id(value)
+    identity = {
+        "type": type_id,
+        "call": _callable_identity(type(value).__call__, active),
+    }
+    state = _instance_state(value)
+    if state is not None:
+        identity["state"] = _metadata_digest(state, active)
+        return identity
     if type(value).__repr__ is object.__repr__:
-        return type_id
-    return {"type": type_id, "value": repr(value)}
+        return identity
+    identity["value"] = repr(value)
+    return identity
+
+
+def _instance_state(value: object) -> dict[str, object] | None:
+    try:
+        state = dict(vars(value))
+    except TypeError:
+        state = {}
+    for cls in type(value).__mro__:
+        slots = cls.__dict__.get("__slots__", ())
+        if isinstance(slots, str):
+            slots = (slots,)
+        for name in slots:
+            if name in {"__dict__", "__weakref__"} or name in state:
+                continue
+            try:
+                state[name] = getattr(value, name)
+            except AttributeError:
+                continue
+    return state or None
+
+
+def _type_id(value: object) -> str:
+    return f"{type(value).__module__}.{type(value).__qualname__}"
+
+
+def _metadata_digest(value: object, active: set[int]) -> str:
+    payload = json.dumps(
+        _metadata_value(value, active),
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _metadata_sort_key(value: object) -> str:
+    return json.dumps(
+        value,
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def _tensor_value(value: torch.Tensor) -> dict[str, object]:
+    metadata: dict[str, object] = {
+        "type": _type_id(value),
+        "dtype": str(value.dtype),
+        "layout": str(value.layout),
+        "shape": list(value.shape),
+    }
+    if value.device.type == "meta":
+        metadata["content"] = "meta"
+        return metadata
+    if value.is_quantized:
+        metadata["sha256"] = _dense_tensor_digest(value.int_repr())
+        metadata["qscheme"] = str(value.qscheme())
+        if value.qscheme() in {torch.per_tensor_affine, torch.per_tensor_symmetric}:
+            metadata["scale"] = value.q_scale()
+            metadata["zero_point"] = value.q_zero_point()
+        else:
+            metadata["axis"] = value.q_per_channel_axis()
+            metadata["scales"] = _dense_tensor_digest(
+                value.q_per_channel_scales()
+            )
+            metadata["zero_points"] = _dense_tensor_digest(
+                value.q_per_channel_zero_points()
+            )
+        return metadata
+    if value.layout == torch.strided:
+        metadata["sha256"] = _dense_tensor_digest(value)
+        return metadata
+    try:
+        sparse = value.detach().cpu().to_sparse_coo().coalesce()
+    except (NotImplementedError, RuntimeError) as exc:
+        raise TypeError(
+            "Callable identity cannot fingerprint this Tensor layout."
+        ) from exc
+    metadata["indices"] = _dense_tensor_digest(sparse.indices())
+    metadata["values"] = _dense_tensor_digest(sparse.values())
+    return metadata
+
+
+def _dense_tensor_digest(value: torch.Tensor) -> str:
+    try:
+        tensor = value.detach().resolve_conj().resolve_neg().cpu().contiguous()
+        raw = tensor.reshape(-1).view(torch.uint8)
+    except (NotImplementedError, RuntimeError) as exc:
+        raise TypeError(
+            "Callable identity cannot fingerprint this Tensor dtype."
+        ) from exc
+    digest = hashlib.sha256()
+    chunk_size = 1024 * 1024
+    for start in range(0, raw.numel(), chunk_size):
+        digest.update(raw[start : start + chunk_size].numpy().tobytes())
+    return digest.hexdigest()
 
 
 def _materializer_lock_path(output_dir: str | Path) -> Path:

@@ -15,11 +15,27 @@ from anydataset import (
 )
 from anydataset._parallel import can_select_indexes, map_style_indexed_loader
 from anydataset.cache import FileLock
+from anydataset.dataset.source.sharded_csv import CsvShard, _missing_shard_ranges
 
 
 class ShardedCsvSourceTest(unittest.TestCase):
     def test_registered_as_builtin_source(self):
         self.assertTrue(has_source("sharded_csv"))
+
+    def test_rejects_unknown_load_options(self):
+        dataset = AnyDataset(
+            Spec(
+                source="sharded_csv",
+                path="unused",
+                load_options={"unknown": True},
+            )
+        )
+
+        with self.assertRaisesRegex(
+            TypeError,
+            "Unexpected sharded_csv load option: unknown",
+        ):
+            dataset.prepare()
 
     def test_resolves_registered_source_shorthand(self):
         spec = resolve_dataset("sharded_csv:///tmp/data:train")
@@ -77,6 +93,38 @@ class ShardedCsvSourceTest(unittest.TestCase):
             )
 
             self.assertEqual(list(dataset), ["two", "ten"])
+
+    def test_rejects_equivalent_numeric_csv_file_names(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            shard = Path(tmpdir) / "shard_0"
+            shard.mkdir()
+            (shard / "1.csv").write_text("value\none\n", encoding="utf-8")
+            (shard / "01.csv").write_text("value\ntwo\n", encoding="utf-8")
+            dataset = AnyDataset(Spec(source="sharded_csv", path=tmpdir))
+
+            with self.assertRaisesRegex(ValueError, "file indexes must be unique"):
+                dataset.prepare()
+
+    def test_rejects_equivalent_numeric_shard_names(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            (root / "shard_1").mkdir()
+            (root / "shard_01").mkdir()
+            dataset = AnyDataset(Spec(source="sharded_csv", path=tmpdir))
+
+            with self.assertRaisesRegex(ValueError, "directory indexes must be unique"):
+                dataset.prepare()
+
+    def test_large_missing_shard_gap_is_represented_compactly(self):
+        shards = (
+            CsvShard(0, Path("shard_0")),
+            CsvShard(1_000_000_000, Path("shard_1000000000")),
+        )
+
+        self.assertEqual(
+            _missing_shard_ranges(shards),
+            ((1, 999_999_999),),
+        )
 
     def test_ignores_non_numeric_csv_file_names(self):
         with tempfile.TemporaryDirectory() as tmpdir:

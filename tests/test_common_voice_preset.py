@@ -89,6 +89,22 @@ class CommonVoicePresetTest(unittest.TestCase):
             with self.assertRaisesRegex(FileNotFoundError, "fr"):
                 Preset.COMMON_VOICE.spec(root=root, languages=("fr",))
 
+    def test_rejects_invalid_explicit_languages(self):
+        cases = (
+            (("en", "en"), ValueError, "Duplicate Common Voice language"),
+            (("en", 1), TypeError, "must contain strings"),
+            (("en", ""), ValueError, "empty strings"),
+        )
+
+        for languages, error, message in cases:
+            with self.subTest(languages=languages):
+                with self.assertRaisesRegex(error, message):
+                    Preset.COMMON_VOICE.spec(root="unused", languages=languages)
+
+    def test_rejects_empty_split(self):
+        with self.assertRaisesRegex(ValueError, "split"):
+            Preset.COMMON_VOICE.spec(split="")
+
     def test_missing_auto_version_fails_clearly(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             with self.assertRaisesRegex(FileNotFoundError, "cv-corpus"):

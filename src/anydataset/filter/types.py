@@ -29,6 +29,7 @@ DatasetFactory = Callable[[], MapStyleABC]
 
 
 class FilterApplyKwargs(TypedDict):
+    input_id: NotRequired[str | None]
     metrics: NotRequired[bool]
     device: NotRequired[Devices]
     batch_size: NotRequired[int]

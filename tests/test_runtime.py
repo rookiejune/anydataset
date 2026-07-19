@@ -28,6 +28,19 @@ class RuntimeTest(unittest.TestCase):
         self.assertEqual(runtime.reader_worker_start_method, "spawn")
         self.assertEqual(runtime.writer_worker_start_method, "spawn")
 
+    def test_rejects_invalid_start_methods_at_construction(self):
+        cases = (
+            {"process_start_method": "auto"},
+            {"server_start_method": "auto"},
+            {"reader_start_method": "invalid"},
+            {"writer_start_method": "invalid"},
+        )
+
+        for kwargs in cases:
+            with self.subTest(kwargs=kwargs):
+                with self.assertRaisesRegex(ValueError, "must be one of"):
+                    Runtime(**kwargs)
+
 
 if __name__ == "__main__":
     unittest.main()

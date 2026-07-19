@@ -24,6 +24,7 @@ from ..._parallel import multiprocessing_context
 from ..._logging import write_warning
 from ...cache import FileLock
 from ...types import Spec
+from .protocol import validate_load_options
 
 
 CsvRow = Mapping[str, str]
@@ -58,6 +59,7 @@ class CsvFile:
 
 class ShardedCsvSource:
     def prepare(self, spec: Spec, cache_path: Path) -> ShardedCsvDataset:
+        validate_load_options(spec, (), source="sharded_csv")
         dataset = ShardedCsvDataset(
             Path(spec.path),
             split=spec.split,
@@ -149,11 +151,19 @@ class ShardedCsvDataset:
         if not base.exists():
             raise FileNotFoundError(f"Missing sharded CSV directory: {base}")
 
-        shards = [
-            CsvShard(index=index, path=path)
-            for path in base.iterdir()
-            if path.is_dir() and (index := _shard_index(path)) is not None
-        ]
+        shards = []
+        by_index: dict[int, Path] = {}
+        for path in base.iterdir():
+            if not path.is_dir() or (index := _shard_index(path)) is None:
+                continue
+            previous = by_index.get(index)
+            if previous is not None:
+                raise ValueError(
+                    "Sharded CSV directory indexes must be unique: "
+                    f"{previous.name} and {path.name} both resolve to {index}."
+                )
+            by_index[index] = path
+            shards.append(CsvShard(index=index, path=path))
         if not shards:
             raise FileNotFoundError(f"No shard_* directories found under: {base}")
         ordered = tuple(sorted(shards, key=lambda shard: shard.index))
@@ -358,10 +368,15 @@ def _split_csv_paths(path: Path) -> tuple[tuple[Path, ...], tuple[Path, ...]]:
             paths.append(child)
         else:
             ignored.append(child)
-    return (
-        tuple(sorted(paths, key=_csv_path_key)),
-        tuple(sorted(ignored, key=lambda child: child.name)),
-    )
+    ordered = tuple(sorted(paths, key=_csv_path_key))
+    for previous, current in zip(ordered, ordered[1:]):
+        if _csv_path_key(previous) == _csv_path_key(current):
+            raise ValueError(
+                "Numeric CSV file indexes must be unique: "
+                f"{previous.name} and {current.name} both resolve to "
+                f"{_csv_path_key(current)}."
+            )
+    return ordered, tuple(sorted(ignored, key=lambda child: child.name))
 
 
 def _csv_path_key(path: Path) -> int:
@@ -552,15 +567,31 @@ def _atomic_write(path: Path, write: Callable[[_TextWriter], None]) -> None:
 
 
 def _warn_missing_shards(base: Path, shards: Sequence[CsvShard]) -> None:
-    indices = {shard.index for shard in shards}
-    missing = [index for index in range(max(indices) + 1) if index not in indices]
+    missing = _missing_shard_ranges(shards)
     if not missing:
         return
 
-    missing_names = ", ".join(f"shard_{index}" for index in missing)
+    missing_names = ", ".join(
+        f"shard_{start}"
+        if start == stop
+        else f"shard_{start}..shard_{stop}"
+        for start, stop in missing
+    )
     _write_warning(
         f"Missing sharded CSV directories under {base}: {missing_names}."
     )
+
+
+def _missing_shard_ranges(
+    shards: Sequence[CsvShard],
+) -> tuple[tuple[int, int], ...]:
+    missing = []
+    previous = -1
+    for shard in shards:
+        if shard.index > previous + 1:
+            missing.append((previous + 1, shard.index - 1))
+        previous = shard.index
+    return tuple(missing)
 
 
 def _write_warning(message: str) -> None:

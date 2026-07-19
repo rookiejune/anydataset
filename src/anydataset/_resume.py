@@ -79,9 +79,15 @@ def dataset_sample_count(dataset: Any, *, context: str) -> int:
 
 
 def validate_completed_indexes(indexes: Iterable[int], expected: int) -> frozenset[int]:
-    completed = frozenset(indexes)
+    _validate_expected(expected)
+    if isinstance(indexes, frozenset):
+        completed = indexes
+    else:
+        completed = frozenset(_validated_completed_indexes(indexes))
     extra: int | None = None
     for index in completed:
+        if isinstance(index, bool) or not isinstance(index, int):
+            raise ValueError("Completed fragment indexes must be integers.")
         if index < 0 or index >= expected:
             extra = index if extra is None else min(extra, index)
     if extra is not None:
@@ -107,6 +113,18 @@ def missing_indexes(completed: frozenset[int], expected: int) -> Sequence[int]:
 class ComplementIndexes(Sequence[int]):
     expected: int
     completed: tuple[int, ...]
+
+    def __post_init__(self) -> None:
+        _validate_expected(self.expected)
+        previous: int | None = None
+        for index in self.completed:
+            if isinstance(index, bool) or not isinstance(index, int):
+                raise ValueError("completed indexes must be integers.")
+            if index < 0 or index >= self.expected:
+                raise ValueError("completed index is outside expected range.")
+            if previous is not None and index <= previous:
+                raise ValueError("completed indexes must be strictly increasing.")
+            previous = index
 
     def __len__(self) -> int:
         return self.expected - len(self.completed)
@@ -306,6 +324,20 @@ def _read_completed_index_entries(path: Path) -> dict[str, tuple[int, ...]]:
 
 
 def _completed_index(value: object) -> int:
-    if not isinstance(value, int):
+    if isinstance(value, bool) or not isinstance(value, int):
         raise ValueError("Completed index cache entries must be integers.")
     return value
+
+
+def _validate_expected(expected: int) -> None:
+    if isinstance(expected, bool) or not isinstance(expected, int):
+        raise TypeError("expected sample count must be an integer.")
+    if expected < 0:
+        raise ValueError("expected sample count must be non-negative.")
+
+
+def _validated_completed_indexes(indexes: Iterable[int]) -> Iterator[int]:
+    for index in indexes:
+        if isinstance(index, bool) or not isinstance(index, int):
+            raise ValueError("Completed fragment indexes must be integers.")
+        yield index

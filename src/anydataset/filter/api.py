@@ -91,6 +91,7 @@ class _FilterCache:
         "_counts",
         "_dataset_factory",
         "_indexes",
+        "_input_id",
         "_labels",
         "_metrics_path",
         "_rule",
@@ -104,6 +105,7 @@ class _FilterCache:
         cache_path: Path,
         dataset_factory: DatasetFactory,
         metrics_path: Path | None = None,
+        input_id: str | None = None,
     ) -> None:
         base = filter_base(base)
         if not isinstance(rule, FilterRule):
@@ -119,6 +121,7 @@ class _FilterCache:
         self._rule = rule
         self._cache_path = Path(cache_path)
         self._metrics_path = None if metrics_path is None else Path(metrics_path)
+        self._input_id = input_id
 
     def __repr__(self) -> str:
         return (
@@ -139,6 +142,7 @@ class _FilterCache:
                 self.rule.name,
                 self.cache_path,
                 self.metrics_path,
+                self.input_id,
             ),
         )
 
@@ -173,6 +177,10 @@ class _FilterCache:
         return self._metrics_path
 
     @property
+    def input_id(self) -> str | None:
+        return self._input_id
+
+    @property
     def dataset_factory(self) -> DatasetFactory:
         return self._dataset_factory
 
@@ -202,6 +210,7 @@ class FilteredDataset(MapStyleABC):
         options = apply_options(apply_kwargs)
         cache = apply_filter(
             FilterRule(name, factory),
+            input_id=options["input_id"],
             metrics=options["metrics"],
             device=options["device"],
             batch_size=options["batch_size"],
@@ -232,6 +241,8 @@ class FilteredDataset(MapStyleABC):
             cache.rule,
             normalized,
             cache.cache_path,
+            cache.metrics_path,
+            cache.input_id,
         )
 
     @classmethod
@@ -256,6 +267,8 @@ class FilteredDataset(MapStyleABC):
         labels: Sequence[str],
         *,
         dataset_factory: DatasetFactory,
+        metrics_path: Path | None = None,
+        input_id: str | None = None,
     ) -> FilteredDataset:
         cache = _FilterCache(
             base,
@@ -263,6 +276,8 @@ class FilteredDataset(MapStyleABC):
             rule,
             cache_path,
             dataset_factory=dataset_factory,
+            metrics_path=metrics_path,
+            input_id=input_id,
         )
         return cls._from_cache(cache, labels=tuple(labels))
 
@@ -322,6 +337,10 @@ class FilteredDataset(MapStyleABC):
         return self._cache.metrics_path
 
     @property
+    def input_id(self) -> str | None:
+        return self._cache.input_id
+
+    @property
     def dataset_factory(self) -> DatasetFactory:
         return self._dataset_factory
 
@@ -347,6 +366,7 @@ def _restore_filter_cache(
     rule_name: str,
     cache_path: Path,
     metrics_path: Path | None,
+    input_id: str | None,
 ) -> _FilterCache:
     return _FilterCache(
         dataset_factory(),
@@ -355,6 +375,7 @@ def _restore_filter_cache(
         cache_path,
         dataset_factory=dataset_factory,
         metrics_path=metrics_path,
+        input_id=input_id,
     )
 
 

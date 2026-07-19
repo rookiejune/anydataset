@@ -13,6 +13,20 @@ from anydataset.cache import CacheManager, FileLock, FileLockError
 
 
 class CacheManagerTest(unittest.TestCase):
+    def test_file_lock_rejects_invalid_timing_options(self):
+        path = Path("unused.lock")
+        cases = (
+            ({"wait_timeout": float("nan")}, ValueError, "finite"),
+            ({"wait_timeout": True}, TypeError, "number"),
+            ({"poll_interval": float("inf")}, ValueError, "finite"),
+            ({"poll_interval": 0}, ValueError, "positive"),
+        )
+
+        for kwargs, error, message in cases:
+            with self.subTest(kwargs=kwargs):
+                with self.assertRaisesRegex(error, message):
+                    FileLock(path, **kwargs)
+
     def test_file_lock_fails_fast_when_held_in_process(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "work.lock"

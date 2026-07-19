@@ -40,6 +40,30 @@ class TsvSourceTest(unittest.TestCase):
 
             self.assertEqual(list(dataset), ["hello", "tea"])
 
+    def test_rejects_unknown_load_options(self):
+        dataset = IterableAnyDataset(
+            Spec(
+                source="tsv",
+                path="unused",
+                load_options={"unknown": True},
+            )
+        )
+
+        with self.assertRaisesRegex(TypeError, "Unexpected TSV load option: unknown"):
+            dataset.prepare()
+
+    def test_rejects_non_string_encoding(self):
+        dataset = IterableAnyDataset(
+            Spec(
+                source="tsv",
+                path="unused",
+                load_options={"encoding": None},
+            )
+        )
+
+        with self.assertRaisesRegex(TypeError, "TSV encoding must be a string"):
+            dataset.prepare()
+
     def test_reads_split_tsv_subdirs_in_order(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

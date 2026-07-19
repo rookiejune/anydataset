@@ -82,7 +82,7 @@ def preset_spec(
 
     return replace(
         spec,
-        split=split or spec.split,
+        split=spec.split if split is None else split,
         load_options={**spec.load_options, **load_options},
     )
 

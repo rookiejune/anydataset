@@ -84,6 +84,18 @@ class ResolverTest(unittest.TestCase):
         self.assertEqual(spec.path, "C:/datasets/audio")
         self.assertEqual(spec.split, "train")
 
+    def test_split_parser_keeps_windows_drive_path_without_split(self):
+        spec = resolve_dataset("store://C:/datasets/audio")
+
+        self.assertEqual(spec.path, "C:/datasets/audio")
+        self.assertIsNone(spec.split)
+
+    def test_empty_explicit_splits_are_rejected(self):
+        with self.assertRaisesRegex(ValueError, "Spec.split"):
+            Preset.MNIST.spec(split="")
+        with self.assertRaisesRegex(ValueError, "Spec.split"):
+            resolve_dataset("hf://org/data:")
+
     def test_builtin_audio_dataset_split_can_be_overridden(self):
         spec = resolve_dataset("fleurs:validation")
 
@@ -93,6 +105,12 @@ class ResolverTest(unittest.TestCase):
     def test_unknown_dataset_requires_explicit_source(self):
         with self.assertRaises(KeyError):
             resolve_dataset("missing:train")
+
+    def test_unregistered_source_shorthand_is_not_parsed_as_preset(self):
+        for shorthand in ("missing:///tmp/data", "mnist://anything"):
+            with self.subTest(shorthand=shorthand):
+                with self.assertRaisesRegex(KeyError, "Unknown dataset source"):
+                    resolve_dataset(shorthand)
 
 
 if __name__ == "__main__":

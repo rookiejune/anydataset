@@ -16,7 +16,9 @@ from decimal import Decimal, InvalidOperation
 from enum import auto
 from functools import cached_property
 from math import isfinite
+
 from .._compat import Self, StrEnum
+from .._validation import positive_float, positive_int
 from ..filter import FilterDecision
 from ..filter.types import JsonValue
 from ..types import Modality, Preset, Role, Sample, TextItem, TextMeta, TextView
@@ -113,6 +115,57 @@ class Profile:
     def __post_init__(self) -> None:
         self.source_lang = _lang_code(self.source_lang)
         self.target_lang = _lang_code(self.target_lang)
+        self.min_chars = positive_int("min_chars", self.min_chars)
+        self.min_script_chars = positive_int(
+            "min_script_chars",
+            self.min_script_chars,
+        )
+        self.max_repeated_run = positive_int(
+            "max_repeated_run",
+            self.max_repeated_run,
+        )
+        self.reject_min_ratio = positive_float(
+            "reject_min_ratio",
+            self.reject_min_ratio,
+        )
+        self.review_min_ratio = positive_float(
+            "review_min_ratio",
+            self.review_min_ratio,
+        )
+        self.review_max_ratio = positive_float(
+            "review_max_ratio",
+            self.review_max_ratio,
+        )
+        self.reject_max_ratio = positive_float(
+            "reject_max_ratio",
+            self.reject_max_ratio,
+        )
+        if not (
+            self.reject_min_ratio
+            <= self.review_min_ratio
+            <= self.review_max_ratio
+            <= self.reject_max_ratio
+        ):
+            raise ValueError(
+                "length ratios must satisfy reject_min_ratio <= review_min_ratio "
+                "<= review_max_ratio <= reject_max_ratio."
+            )
+        self.reject_script_ratio = _unit_ratio(
+            "reject_script_ratio",
+            self.reject_script_ratio,
+        )
+        self.min_script_ratio = _unit_ratio(
+            "min_script_ratio",
+            self.min_script_ratio,
+        )
+        if self.reject_script_ratio > self.min_script_ratio:
+            raise ValueError(
+                "reject_script_ratio must be <= min_script_ratio."
+            )
+        self.max_control_ratio = _unit_ratio(
+            "max_control_ratio",
+            self.max_control_ratio,
+        )
 
 
 @dataclass
@@ -256,8 +309,18 @@ class Bicleaner:
     high_score: float = 0.7
 
     def __post_init__(self) -> None:
-        if not isfinite(self.usable_score) or not isfinite(self.high_score):
-            raise ValueError("bicleaner thresholds must be finite.")
+        if not callable(self.scorer):
+            raise TypeError("bicleaner scorer must be callable.")
+        object.__setattr__(
+            self,
+            "usable_score",
+            _unit_ratio("bicleaner usable_score", self.usable_score),
+        )
+        object.__setattr__(
+            self,
+            "high_score",
+            _unit_ratio("bicleaner high_score", self.high_score),
+        )
         if self.usable_score > self.high_score:
             raise ValueError("bicleaner usable_score must be <= high_score.")
 
@@ -268,9 +331,10 @@ class Bicleaner:
         label: Label,
         flags: tuple[str, ...],
     ) -> Label:
-        score = self.scorer(metrics.source, metrics.target)
-        if not isfinite(score):
-            raise ValueError("bicleaner scorer must return a finite score.")
+        score = _unit_ratio(
+            "bicleaner scorer output",
+            self.scorer(metrics.source, metrics.target),
+        )
         metrics.scores["bicleaner_score"] = score
         if score < self.usable_score:
             return Label.REJECT
@@ -716,7 +780,26 @@ def _callback_key(callback: _Callback) -> str:
 
 
 def _lang_code(lang: str) -> str:
-    return lang.lower().replace("_", "-").split("-", 1)[0]
+    if not isinstance(lang, str):
+        raise TypeError("language code must be a string.")
+    code = lang.lower().replace("_", "-").split("-", 1)[0]
+    if not code:
+        raise ValueError("language code must not be empty.")
+    return code
+
+
+def _unit_ratio(name: str, value: float) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise TypeError(f"{name} must be a number.")
+    try:
+        result = float(value)
+    except OverflowError as exc:
+        raise ValueError(f"{name} must be finite.") from exc
+    if not isfinite(result):
+        raise ValueError(f"{name} must be finite.")
+    if result < 0 or result > 1:
+        raise ValueError(f"{name} must be between 0 and 1.")
+    return result
 
 
 __all__ = ["Bicleaner", "Label", "Predicate", "Profile", "Scorer"]

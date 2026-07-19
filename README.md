@@ -292,6 +292,15 @@ label by default. Use `select_by(...)` to derive a label view over the same
 cache. `FilterRule.apply(...)` is a convenience wrapper that forwards its
 `name` and `factory` to `FilteredDataset`.
 
+Filter cache identity is automatic for physical datasets and library-owned
+merged children. If a merged dataset contains an external map-style child such
+as a list or application dataset, pass a non-empty `input_id` to `apply()` or
+`FilteredDataset(...)`. The ID versions the entire input snapshot and augments
+the automatic class, `Spec`, and sample-count identity. Change it when external
+content or ordering changes; `FilterRule.name` continues to version predicate
+semantics. The ID is preserved by the filtered `dataset_factory`, pickle, and
+chained filters.
+
 `FilterRule` stores a zero-argument factory, and the factory builds the
 predicate inside the process that will execute it. `device="auto"` uses one
 spawned process per visible CUDA device and falls back to CPU single-process
@@ -508,7 +517,7 @@ PyTorch `DataLoader`; this is useful when `parse_fn` does CPU-heavy work such
 as file-to-waveform decoding. The materializer sets rank environment variables
 for its device workers, and datasets combine rank and DataLoader worker state
 inside their runtime shard logic so each sample is covered once.
-`write_workers` controls background fragment writer processes inside each
+`write_workers` controls background fragment writer threads inside each
 materializer worker; the default is one writer so provider execution can
 overlap with store writes. `write_prefetch` bounds pending write jobs.
 

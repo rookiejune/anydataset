@@ -18,17 +18,32 @@ from .types import JsonValue, _FilterMetricsRow, _Index
 
 
 def read_partitions(path: Path) -> dict[str, _Index]:
-    manifest = read_json(path / "partitions.json")
-    return {
-        str(item["label"]): _FileIndex(
-            tuple(
-                _IndexFile(path / file["file"], int(file["count"]))
-                for file in item["files"]
-            ),
-            int(item["count"]),
-        )
-        for item in manifest["partitions"]
-    }
+    path = Path(path)
+    try:
+        before = _partition_snapshot(path)
+        manifest = read_json(path / "partitions.json")
+        partitions: dict[str, _Index] = {}
+        for item in manifest["partitions"]:
+            label = str(item["label"])
+            if label in partitions:
+                raise ValueError(f"Duplicate filter partition label: {label!r}.")
+            partitions[label] = _FileIndex(
+                tuple(
+                    _IndexFile(
+                        path / file["file"],
+                        int(file["count"]),
+                        _fingerprint(path / file["file"]),
+                    )
+                    for file in item["files"]
+                ),
+                int(item["count"]),
+            )
+        after = _partition_snapshot(path)
+    except FileNotFoundError as exc:
+        raise _snapshot_changed(path) from exc
+    if before != after:
+        raise _snapshot_changed(path)
+    return partitions
 
 
 def partition_files(manifest: Mapping[str, Any]) -> Iterable[str]:
@@ -40,7 +55,11 @@ def partition_files(manifest: Mapping[str, Any]) -> Iterable[str]:
             yield str(file["file"])
 
 
-def metrics_ready(path: Path) -> bool:
+def partition_count(manifest: Mapping[str, Any]) -> int:
+    return sum(int(item["count"]) for item in manifest["partitions"])
+
+
+def metrics_ready(path: Path, *, expected_count: int) -> bool:
     manifest_path = path / "metrics.json"
     if not manifest_path.is_file():
         return False
@@ -49,7 +68,8 @@ def metrics_ready(path: Path) -> bool:
         return False
     files = list(metrics_files(manifest))
     file_count = sum(int(file["count"]) for file in manifest["files"])
-    if file_count != int(manifest["count"]):
+    count = int(manifest["count"])
+    if file_count != count or count != expected_count:
         return False
     return all((path / relpath).is_file() for relpath in files)
 
@@ -148,23 +168,7 @@ def merged_index(indexes: Sequence[_Index]) -> _Index:
         return ()
     if len(indexes) == 1:
         return indexes[0]
-    output = array("q")
-    heads = [0] * len(indexes)
-    heap: list[tuple[int, int]] = []
-    for label_index, index in enumerate(indexes):
-        if index:
-            heap.append((int(index[0]), label_index))
-    heapq.heapify(heap)
-    while heap:
-        value, label_index = heapq.heappop(heap)
-        output.append(value)
-        heads[label_index] += 1
-        head = heads[label_index]
-        index = indexes[label_index]
-        if head >= len(index):
-            continue
-        heapq.heappush(heap, (int(index[head]), label_index))
-    return output
+    return array("q", heapq.merge(*indexes))
 
 
 def validate_metrics(metrics: Mapping[str, JsonValue]) -> Mapping[str, JsonValue]:
@@ -179,9 +183,19 @@ def validate_metrics(metrics: Mapping[str, JsonValue]) -> Mapping[str, JsonValue
 
 
 @dataclass(frozen=True)
+class _FileFingerprint:
+    device: int
+    inode: int
+    size: int
+    modified_ns: int
+    changed_ns: int
+
+
+@dataclass(frozen=True)
 class _IndexFile:
     path: Path
     count: int
+    fingerprint: _FileFingerprint
 
 
 class _FileIndex(Sequence[int]):
@@ -242,9 +256,43 @@ class _FileIndex(Sequence[int]):
     def _shard(self, index: int) -> array[int]:
         shard = self._shards[index]
         if shard is None:
-            shard = read_index_rows(self._files[index].path)
+            file = self._files[index]
+            try:
+                before = _fingerprint(file.path)
+                if before != file.fingerprint:
+                    raise _snapshot_changed(file.path)
+                shard = read_index_rows(file.path)
+                after = _fingerprint(file.path)
+            except FileNotFoundError as exc:
+                raise _snapshot_changed(file.path) from exc
+            if before != after or after != file.fingerprint:
+                raise _snapshot_changed(file.path)
+            if len(shard) != file.count:
+                raise ValueError(
+                    "Filter partition shard row count does not match its manifest: "
+                    f"{file.path}."
+                )
             self._shards[index] = shard
         return shard
+
+
+def _partition_snapshot(path: Path) -> tuple[_FileFingerprint, _FileFingerprint]:
+    return _fingerprint(path / "partitions.json"), _fingerprint(path / ".ready")
+
+
+def _fingerprint(path: Path) -> _FileFingerprint:
+    stat = path.stat()
+    return _FileFingerprint(
+        device=stat.st_dev,
+        inode=stat.st_ino,
+        size=stat.st_size,
+        modified_ns=stat.st_mtime_ns,
+        changed_ns=stat.st_ctime_ns,
+    )
+
+
+def _snapshot_changed(path: Path) -> RuntimeError:
+    return RuntimeError(f"Filter cache snapshot changed while reading {path}.")
 
 
 class _PartitionWriteState:

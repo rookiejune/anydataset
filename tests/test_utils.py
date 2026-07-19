@@ -67,6 +67,46 @@ class PresetCommonTest(unittest.TestCase):
                 audio={"audio": AudioView.WAVEFORM},
             )
 
+    def test_sample_from_row_rejects_invalid_audio_sample_rate(self):
+        cases = (
+            (16000.5, TypeError),
+            (True, TypeError),
+            (0, ValueError),
+            (-1, ValueError),
+        )
+
+        for sample_rate, error in cases:
+            with self.subTest(sample_rate=sample_rate):
+                with self.assertRaisesRegex(error, "sampling_rate"):
+                    sample_from_row(
+                        {
+                            "audio": {
+                                "array": [0.1, 0.2],
+                                "sampling_rate": sample_rate,
+                            }
+                        },
+                        audio={"audio": AudioView.WAVEFORM},
+                    )
+
+    def test_sample_from_row_rejects_duplicate_field_targets(self):
+        with self.assertRaisesRegex(ValueError, "Duplicate text view target"):
+            sample_from_row(
+                {"first": "hello", "second": "world"},
+                text={
+                    "first": TextView.TEXT,
+                    "second": TextView.TEXT,
+                },
+            )
+        with self.assertRaisesRegex(ValueError, "Duplicate text metadata target"):
+            sample_from_row(
+                {"text": "hello", "lang": "fr"},
+                text={
+                    "text": TextView.TEXT,
+                    "lang": TextMeta.LANG,
+                },
+                text_values={TextMeta.LANG: "en"},
+            )
+
     def test_sample_from_row_maps_wmt19_style_translation_roles(self):
         sample = sample_from_row(
             {

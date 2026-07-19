@@ -9,7 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal, Union
 
-from ._parallel import StartMethod
+from ._parallel import StartMethod, validate_start_method
 
 AutoStartMethod = Union[StartMethod, Literal["auto"]]
 
@@ -20,6 +20,24 @@ class Runtime:
     server_start_method: StartMethod | None = None
     reader_start_method: AutoStartMethod = "auto"
     writer_start_method: AutoStartMethod = "auto"
+
+    def __post_init__(self) -> None:
+        validate_start_method("process_start_method", self.process_start_method)
+        validate_start_method(
+            "server_start_method",
+            self.server_start_method,
+            optional=True,
+        )
+        validate_start_method(
+            "reader_start_method",
+            self.reader_start_method,
+            auto=True,
+        )
+        validate_start_method(
+            "writer_start_method",
+            self.writer_start_method,
+            auto=True,
+        )
 
     @property
     def uses_local_device(self) -> bool:

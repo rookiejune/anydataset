@@ -3,6 +3,7 @@ from __future__ import annotations
 import random
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
+from math import isfinite
 from typing import Iterator, Protocol
 
 from torch.utils.data import IterableDataset
@@ -78,6 +79,8 @@ class WeightedRandomStrategy:
         weights = tuple(float(weight) for weight in self.weights)
         if len(weights) != count:
             raise ValueError("weights length must match datasets length.")
+        if any(not isfinite(weight) for weight in weights):
+            raise ValueError("weights must be finite.")
         if any(weight < 0 for weight in weights):
             raise ValueError("weights must be non-negative.")
         if not any(weight > 0 for weight in weights):
@@ -86,10 +89,13 @@ class WeightedRandomStrategy:
 
 
 def _cumulative_weights(weights: Sequence[float]) -> list[float]:
+    if not weights:
+        return []
+    scale = max(weights)
     total = 0.0
     output = []
     for weight in weights:
-        total += weight
+        total += weight / scale
         output.append(total)
     return output
 

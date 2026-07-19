@@ -59,6 +59,10 @@ class ParallelRuntimeTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "strictly increasing"):
             SelectedIndexSampler(range(4, -1, -1), num_shards=1, shard_id=0)
 
+    def test_selected_index_sampler_rejects_non_integer_indexes(self):
+        with self.assertRaisesRegex(ValueError, "must be integers"):
+            SelectedIndexSampler((1, "2"), num_shards=1, shard_id=0)
+
     def test_map_indexed_dataset_drops_cached_dataset_when_pickled(self):
         dataset = _UnpicklableDataset(3)
         wrapper = MapIndexedDataset(_DatasetFactory(3), dataset=dataset)

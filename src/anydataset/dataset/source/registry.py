@@ -14,6 +14,8 @@ def register_source(source: SourceKey, factory: SourceFactory) -> None:
     key = source_key(source)
     if key in _SOURCE_FACTORIES:
         raise ValueError(f"Dataset source {key!r} is already registered.")
+    if not callable(factory):
+        raise TypeError("Dataset source factory must be callable.")
     _SOURCE_FACTORIES[key] = factory
 
 

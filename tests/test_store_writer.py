@@ -29,7 +29,7 @@ from anydataset.store.parts import (
     completed_fragment_indexes,
 )
 from anydataset.store.writer import DEFAULT_MAX_SHARD_SAMPLES
-from anydataset.store.jsonio import read_json
+from anydataset.store.jsonio import read_json, write_json
 from anydataset.store.manifest import (
     DatasetManifest,
     SampleManifestEntry,
@@ -307,6 +307,48 @@ class DatasetWriterTest(unittest.TestCase):
             self.assertEqual(next(merged).sample_index, 0)
 
         self.assertEqual(consumed, {stores[0]: 1, stores[1]: 1})
+
+    def test_fragment_commit_bounds_manifest_merge_fan_in(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            fragments = root / "fragments"
+            output = root / "dataset"
+            view = (Role.DEFAULT, Modality.AUDIO, AudioView.WAVEFORM)
+            for index in range(5):
+                fragment = fragments / f"batch-{index:012d}-{index:012d}-a"
+                DatasetFragmentWriter(
+                    fragment,
+                    dataset_id="toy-audio",
+                    fragment_id=fragment.name,
+                ).write(
+                    [
+                        (
+                            index,
+                            audio_sample(
+                                waveform=torch.tensor([[float(index)]]),
+                                sample_rate=4,
+                            ),
+                        )
+                    ]
+                )
+
+            with mock.patch.object(store_parts, "_MERGE_FAN_IN", 2):
+                commit_store_fragments(
+                    output,
+                    fragments,
+                    dataset_id="toy-audio",
+                    expected_sample_count=5,
+                )
+
+            self.assertEqual(
+                [entry.sample_index for entry in read_samples_manifest(output)],
+                list(range(5)),
+            )
+            self.assertEqual(
+                [entry.sample_index for entry in read_view_manifest(output, view)],
+                list(range(5)),
+            )
+            self.assertFalse(any(root.glob(".dataset-merge-*")))
 
     def test_fragment_commits_preserve_views_from_all_fragments(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -608,6 +650,105 @@ class DatasetWriterTest(unittest.TestCase):
                     split="train",
                 )
 
+    def test_commit_parts_rejects_part_without_store_schema_version(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            parts = root / "parts"
+            part = parts / "part-00000"
+            DatasetPartWriter(
+                part,
+                dataset_id="toy-audio",
+                shard_id=0,
+                num_shards=1,
+            ).write(
+                [
+                    (
+                        0,
+                        audio_sample(
+                            waveform=torch.tensor([[1.0]]),
+                            sample_rate=4,
+                        ),
+                    )
+                ]
+            )
+            manifest = read_json(dataset_json_path(part))
+            del manifest["schema_version"]
+            write_json(dataset_json_path(part), manifest)
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "Unsupported store schema_version: None; expected 2",
+            ):
+                commit_store_parts(
+                    root / "output",
+                    parts,
+                    dataset_id="toy-audio",
+                )
+
+    def test_commit_parts_rejects_declared_sample_count_mismatch(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            parts = root / "parts"
+            part = parts / "part-00000"
+            DatasetPartWriter(
+                part,
+                dataset_id="toy-audio",
+                shard_id=0,
+                num_shards=1,
+            ).write(
+                [
+                    (
+                        0,
+                        audio_sample(
+                            waveform=torch.tensor([[1.0]]),
+                            sample_rate=4,
+                        ),
+                    )
+                ]
+            )
+            for path in (dataset_json_path(part), part / "part.json"):
+                data = read_json(path)
+                data["sample_count"] = 2
+                write_json(path, data)
+
+            with self.assertRaisesRegex(ValueError, "sample manifest row count"):
+                commit_store_parts(
+                    root / "output",
+                    parts,
+                    dataset_id="toy-audio",
+                )
+
+    def test_commit_parts_rejects_missing_view_shard(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            parts, part, view, entry = _single_audio_part(root)
+            view_shard_path(part, view, entry.shard).unlink()
+
+            with self.assertRaisesRegex(FileNotFoundError, "missing referenced shard"):
+                commit_store_parts(
+                    root / "output",
+                    parts,
+                    dataset_id="toy-audio",
+                )
+
+            self.assertFalse((root / "output").exists())
+
+    def test_commit_parts_rejects_missing_view_payload(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            parts, part, view, entry = _single_audio_part(root)
+            with tarfile.open(view_shard_path(part, view, entry.shard), "w"):
+                pass
+
+            with self.assertRaisesRegex(ValueError, "missing payload"):
+                commit_store_parts(
+                    root / "output",
+                    parts,
+                    dataset_id="toy-audio",
+                )
+
+            self.assertFalse((root / "output").exists())
+
     def test_link_or_copy_falls_back_to_copy(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -619,6 +760,29 @@ class DatasetWriterTest(unittest.TestCase):
                 store_parts._link_or_copy(source, target)
 
             self.assertEqual(target.read_bytes(), b"payload")
+
+
+def _single_audio_part(root: Path):
+    parts = root / "parts"
+    part = parts / "part-00000"
+    view = (Role.DEFAULT, Modality.AUDIO, AudioView.WAVEFORM)
+    DatasetPartWriter(
+        part,
+        dataset_id="toy-audio",
+        shard_id=0,
+        num_shards=1,
+    ).write(
+        [
+            (
+                0,
+                audio_sample(
+                    waveform=torch.tensor([[1.0]]),
+                    sample_rate=4,
+                ),
+            )
+        ]
+    )
+    return parts, part, view, next(read_view_manifest(part, view))
 
 
 def audio_sample(

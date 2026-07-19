@@ -4,6 +4,7 @@ import unittest
 from pathlib import Path
 
 from anydataset._resume import (
+    ComplementIndexes,
     append_completed_index_cache,
     cached_completed_indexes,
     cleanup_resume_dir,
@@ -99,6 +100,20 @@ class ResumeHelpersTest(unittest.TestCase):
     def test_missing_indexes_rejects_unvalidated_completed_indexes(self):
         with self.assertRaisesRegex(ValueError, "outside dataset"):
             missing_indexes(frozenset({-1}), 8)
+
+    def test_missing_indexes_rejects_negative_expected_count(self):
+        with self.assertRaisesRegex(ValueError, "non-negative"):
+            missing_indexes(frozenset(), -1)
+
+    def test_completed_indexes_reject_boolean_values(self):
+        with self.assertRaisesRegex(ValueError, "integers"):
+            validate_completed_indexes((True,), 2)
+
+    def test_complement_indexes_enforces_compact_sequence_invariants(self):
+        with self.assertRaisesRegex(ValueError, "strictly increasing"):
+            ComplementIndexes(4, (2, 1))
+        with self.assertRaisesRegex(ValueError, "outside expected range"):
+            ComplementIndexes(4, (4,))
 
     def test_format_index_ranges_skips_large_contiguous_runs(self):
         self.assertEqual(

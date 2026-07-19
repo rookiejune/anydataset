@@ -108,9 +108,13 @@ def _filter_fragment_dirs(path: Path) -> tuple[Path, ...]:
     )
 
 
-def iter_filter_fragment_chunks(path: Path) -> Iterable[_FilterChunk]:
+def iter_filter_fragment_chunks(
+    path: Path,
+    *,
+    metrics: bool,
+) -> Iterable[_FilterChunk]:
     for fragment in filter_fragments(path):
-        yield _read_fragment_chunk(fragment)
+        yield _read_fragment_chunk(fragment, metrics=metrics)
 
 
 def _write_fragment(
@@ -172,17 +176,52 @@ def _stored_resume_metadata(path: Path) -> Mapping[str, object] | None:
     return read_json(metadata_path)
 
 
-def _read_fragment_chunk(path: Path) -> _FilterChunk:
+def _read_fragment_chunk(path: Path, *, metrics: bool) -> _FilterChunk:
     data = _read_fragment_manifest(path)
+    scan_count = _fragment_scan_count(data)
     partitions: dict[str, array[int]] = {}
+    labels_by_index: dict[int, str] = {}
     for item in _fragment_partitions(data):
         label = str(item["label"])
+        if label in partitions:
+            raise ValueError(
+                f"Duplicate filter resume fragment partition label: {label!r}."
+            )
         indexes = read_index_rows(path / str(item["file"]))
         if int(item["count"]) != len(indexes):
             raise ValueError(f"Filter resume fragment {path} partition count mismatch.")
         partitions[label] = indexes
-    metrics = tuple(_fragment_metric_rows(path, data))
-    return _FilterChunk(partitions=partitions, metrics=metrics)
+        for index in indexes:
+            if index in labels_by_index:
+                raise ValueError(
+                    f"Filter resume fragment {path} has duplicate partition "
+                    f"index {index}."
+                )
+            labels_by_index[index] = label
+    if len(labels_by_index) != scan_count:
+        raise ValueError(
+            f"Filter resume fragment {path} partition rows do not match scan_count."
+        )
+    metric_rows = tuple(_fragment_metric_rows(path, data))
+    expected_metrics = scan_count if metrics else 0
+    if len(metric_rows) != expected_metrics:
+        raise ValueError(
+            f"Filter resume fragment {path} metrics rows do not match scan_count."
+        )
+    if metrics:
+        metrics_by_index: dict[int, str] = {}
+        for row in metric_rows:
+            if row.index in metrics_by_index:
+                raise ValueError(
+                    f"Filter resume fragment {path} has duplicate metrics "
+                    f"index {row.index}."
+                )
+            metrics_by_index[row.index] = row.label
+        if metrics_by_index != labels_by_index:
+            raise ValueError(
+                f"Filter resume fragment {path} metrics do not match partitions."
+            )
+    return _FilterChunk(partitions=partitions, metrics=metric_rows)
 
 
 def _fragment_metric_rows(
@@ -228,12 +267,19 @@ def _fragment_scan_indexes(path: Path) -> tuple[int, ...]:
     if not isinstance(raw, list):
         raise ValueError("Filter resume fragment scan_indexes must be a list.")
     indexes = tuple(_scan_index(value) for value in raw)
-    if data.get("scan_count") != len(indexes):
+    if _fragment_scan_count(data) != len(indexes):
         raise ValueError("Filter resume fragment scan_count mismatch.")
     stored = tuple(int(index) for index in read_index_rows(path / _INDEXES_FILE))
     if indexes != stored:
         raise ValueError("Filter resume fragment index file mismatch.")
     return indexes
+
+
+def _fragment_scan_count(data: Mapping[str, object]) -> int:
+    value = data.get("scan_count")
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError("Filter resume fragment scan_count must be non-negative.")
+    return value
 
 
 def _read_fragment_manifest(path: Path) -> Mapping[str, object]:

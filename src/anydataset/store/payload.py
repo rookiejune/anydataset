@@ -16,6 +16,7 @@ from .manifest import ViewManifestEntry
 from .paths import view_shard_path
 
 _DEFAULT_MAX_OPEN_SHARDS = 8
+_StatFingerprint = tuple[int, int, int, int, int]
 
 
 @dataclass(frozen=True)
@@ -28,6 +29,7 @@ class Payload:
 class _OpenArchive:
     archive: tarfile.TarFile
     members: dict[str, tarfile.TarInfo]
+    fingerprint: _StatFingerprint
 
     def close(self) -> None:
         self.archive.close()
@@ -67,6 +69,7 @@ class PayloadCache:
             return payload.read()
 
     def close(self) -> None:
+        self._reset_after_fork()
         with self._lock:
             archives = tuple(self._archives.values())
             self._archives.clear()
@@ -86,16 +89,26 @@ class PayloadCache:
             pass
 
     def _archive(self, path: Path) -> _OpenArchive:
+        fingerprint = _stat_fingerprint(path.stat())
         cached = self._archives.get(path)
         if cached is not None:
-            self._archives.move_to_end(path)
-            return cached
+            if cached.fingerprint == fingerprint:
+                self._archives.move_to_end(path)
+                return cached
+            del self._archives[path]
+            cached.close()
 
         archive = tarfile.open(path, "r")
         try:
+            opened_fingerprint = _stat_fingerprint(
+                os.fstat(archive.fileobj.fileno())
+            )
+            if opened_fingerprint != _stat_fingerprint(path.stat()):
+                raise ValueError(f"View shard changed while opening: {path}")
             opened = _OpenArchive(
                 archive=archive,
                 members={member.name: member for member in archive.getmembers()},
+                fingerprint=opened_fingerprint,
             )
         except Exception:
             archive.close()
@@ -114,10 +127,21 @@ class PayloadCache:
         if pid == self._pid:
             return
         archives = tuple(self._archives.values())
-        self._archives.clear()
+        self._archives = OrderedDict()
+        self._lock = threading.RLock()
         self._pid = pid
         for archive in archives:
             archive.close()
+
+
+def _stat_fingerprint(stat: os.stat_result) -> _StatFingerprint:
+    return (
+        stat.st_dev,
+        stat.st_ino,
+        stat.st_size,
+        stat.st_mtime_ns,
+        stat.st_ctime_ns,
+    )
 
 
 def payload_for_view(

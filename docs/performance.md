@@ -41,6 +41,9 @@
   本地 torch/CUDA/provider 状态被 worker 继承。
 - `StoreDataset` 打开时不再把 `samples.parquet` 全量转成 Python tuple；`samples` 保留
   sequence 接口，并按 parquet row group 懒加载完整 sample manifest 行。
+- sample/view manifest 的 schema、row count 和 row-group layout 由同一个
+  `ParquetFile` 读取；sample index 的全量一致性校验按 store path 和文件 fingerprint
+  缓存，后续打开不再重复扫描，同时仍会拒绝打开过程中发生变化的 manifest。
 - store view manifest 先加载 `sample_index` 轻量列建立查找索引，具体 shard/key 行按
   row group 懒加载；随机读单个样本不需要把整个 view manifest 转成对象。
 - `sharded_csv` 保留 CSV 作为事实来源，prepare 阶段以 spawn process pool 并行生成
@@ -48,6 +51,9 @@
   Parquet row group，避免 rank 和 DataLoader worker 重复解析全部 CSV。
 - part/fragment commit 不再常驻保存 `item ref -> sample_index array`；提交时先写
   ordered sample manifest，再按 view 流式扫描 sample manifest 做覆盖校验。
+- 大量 part/fragment 的 manifest 使用固定 fan-in 的分层归并，打开的 parquet 文件数不再
+  随输入数线性增长。最终发布 `.ready` 前还会核对声明的 sample 行数、view shard tar
+  文件，以及 manifest 引用的全部 payload key。
 - `BackgroundWriteSink` 支持 thread 和 process backend；materializer/filter 默认使用
   thread writer，保留 provider/filter 计算和落盘重叠，同时避免把大 write job 通过
   process pipe pickle 传输。
@@ -59,7 +65,8 @@
   大型 Python tuple。
 - `PayloadCache` 对已打开的 tar shard 做进程内 LRU 缓存，并在每个打开的 archive 上缓存
   `payload key -> TarInfo` 映射；连续随机读取不再反复打开 tar 或线性扫描 member。该索引
-  不持久化，archive 被淘汰或进程退出后随句柄释放。
+  不持久化，archive 被淘汰或进程退出后随句柄释放；同一路径的 shard fingerprint 变化时
+  再次访问会关闭旧句柄，避免 store 重建后复用旧 payload。
 - materializer resume metadata 除自动 factory 标识外，还接受显式 `input_id` 和
   `provider_id` 语义版本。它们共同决定 fragment 是否可复用，避免 mutable input 或模型
   checkpoint 变化后错误续跑。

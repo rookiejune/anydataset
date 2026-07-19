@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from ...types import Spec
+from .protocol import validate_load_options
 
 
 TsvRow = Mapping[str, str]
@@ -13,10 +14,18 @@ TsvRow = Mapping[str, str]
 
 class TsvSource:
     def prepare(self, spec: Spec, cache_path: Path) -> TsvDataset:
+        validate_load_options(
+            spec,
+            {"encoding", "root_field", "subdirs"},
+            source="TSV",
+        )
         return TsvDataset(
             Path(spec.path),
             split=spec.split,
-            encoding=str(spec.load_options.get("encoding", "utf-8")),
+            encoding=_required_str(
+                spec.load_options.get("encoding", "utf-8"),
+                "encoding",
+            ),
             subdirs=_optional_str_sequence(spec.load_options.get("subdirs"), "subdirs"),
             root_field=_optional_str(spec.load_options.get("root_field"), "root_field"),
         )
@@ -90,6 +99,13 @@ def _optional_str(value: Any, name: str) -> str | None:
     if not value:
         raise ValueError(f"TSV {name} must not be empty.")
     return value
+
+
+def _required_str(value: Any, name: str) -> str:
+    result = _optional_str(value, name)
+    if result is None:
+        raise TypeError(f"TSV {name} must be a string.")
+    return result
 
 
 def _optional_str_sequence(value: Any, name: str) -> tuple[str, ...] | None:

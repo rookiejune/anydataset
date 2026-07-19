@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import os
 import shutil
+import tarfile
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from heapq import heappop, heappush
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import TypeVar
 
 from .._io.atomic import replace_dir
@@ -26,6 +29,7 @@ from .manifest import (
 from .manifestio import (
     read_samples_manifest,
     read_view_manifest,
+    sample_manifest_row_count,
     sample_manifest_writer,
     view_manifest_writer,
 )
@@ -53,6 +57,7 @@ from .writer import (
 T = TypeVar("T")
 
 IndexedSample = tuple[int, Sample]
+_MERGE_FAN_IN = 32
 
 
 @dataclass
@@ -228,15 +233,24 @@ def commit_store_parts(
     if not parts:
         raise ValueError(f"No materialized parts found: {parts_dir}")
     _validate_parts(parts, dataset_id, split)
-    return replace_dir(
+    views = _store_views(parts)
+    _validate_store_payloads(parts)
+    with _bounded_store_roots(
         output_dir,
-        lambda tmp: _commit_roots_to_tmp(
-            tmp,
-            parts,
-            dataset_id=dataset_id,
-            split=split,
-        ),
-    )
+        parts,
+        dataset_id=dataset_id,
+        split=split,
+    ) as roots:
+        return replace_dir(
+            output_dir,
+            lambda tmp: _commit_roots_to_tmp(
+                tmp,
+                roots,
+                dataset_id=dataset_id,
+                split=split,
+                views=views,
+            ),
+        )
 
 
 def commit_store_fragments(
@@ -257,17 +271,24 @@ def commit_store_fragments(
     if not fragments:
         raise ValueError(f"No materialized fragments found: {fragments_dir}")
     views = _store_views(fragments)
-    return replace_dir(
+    _validate_store_payloads(fragments)
+    with _bounded_store_roots(
         output_dir,
-        lambda tmp: _commit_roots_to_tmp(
-            tmp,
-            fragments,
-            dataset_id=dataset_id,
-            split=split,
-            expected_sample_count=expected_sample_count,
-            views=views,
-        ),
-    )
+        fragments,
+        dataset_id=dataset_id,
+        split=split,
+    ) as roots:
+        return replace_dir(
+            output_dir,
+            lambda tmp: _commit_roots_to_tmp(
+                tmp,
+                roots,
+                dataset_id=dataset_id,
+                split=split,
+                expected_sample_count=expected_sample_count,
+                views=views,
+            ),
+        )
 
 
 def commit_fragment_part(
@@ -294,31 +315,37 @@ def commit_fragment_part(
             split=split,
         ).write(())
     views = _store_views(roots)
+    _validate_store_payloads(roots)
+    sample_count = sum(read_store_manifest(fragment).sample_count for fragment in roots)
 
-    def write(root: Path) -> Path:
-        _commit_roots_to_tmp(
-            root,
-            roots,
-            dataset_id=dataset_id,
-            split=split,
-            views=views,
-            dense=False,
-        )
-        write_json(
-            _part_json_path(root),
-            {
-                "dataset_id": dataset_id,
-                "split": split,
-                "num_shards": num_shards,
-                "shard_id": shard_id,
-                "sample_count": sum(
-                    read_store_manifest(fragment).sample_count for fragment in roots
-                ),
-            },
-        )
-        return root
+    with _bounded_store_roots(
+        output_dir,
+        roots,
+        dataset_id=dataset_id,
+        split=split,
+    ) as merged:
+        def write(root: Path) -> Path:
+            _commit_roots_to_tmp(
+                root,
+                merged,
+                dataset_id=dataset_id,
+                split=split,
+                views=views,
+                dense=False,
+            )
+            write_json(
+                _part_json_path(root),
+                {
+                    "dataset_id": dataset_id,
+                    "split": split,
+                    "num_shards": num_shards,
+                    "shard_id": shard_id,
+                    "sample_count": sample_count,
+                },
+            )
+            return root
 
-    return replace_dir(output_dir, write)
+        return replace_dir(output_dir, write)
 
 
 def completed_fragment_indexes(
@@ -365,6 +392,48 @@ def store_fragments(
     )
 
 
+@contextmanager
+def _bounded_store_roots(
+    output_dir: str | Path,
+    stores: tuple[Path, ...],
+    *,
+    dataset_id: str,
+    split: str | None,
+) -> Iterator[tuple[Path, ...]]:
+    if len(stores) <= _MERGE_FAN_IN:
+        yield stores
+        return
+
+    output = Path(output_dir)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with TemporaryDirectory(
+        prefix=f".{output.name}-merge-",
+        dir=str(output.parent),
+    ) as tmpdir:
+        current = stores
+        level = 0
+        while len(current) > _MERGE_FAN_IN:
+            merged: list[Path] = []
+            for run, start in enumerate(range(0, len(current), _MERGE_FAN_IN)):
+                batch = current[start : start + _MERGE_FAN_IN]
+                path = Path(tmpdir) / f"level-{level:03d}-run-{run:06d}"
+
+                def write(root: Path, batch: tuple[Path, ...] = batch) -> Path:
+                    return _commit_roots_to_tmp(
+                        root,
+                        batch,
+                        dataset_id=dataset_id,
+                        split=split,
+                        views=_store_views(batch),
+                        dense=False,
+                    )
+
+                merged.append(replace_dir(path, write))
+            current = tuple(merged)
+            level += 1
+        yield current
+
+
 def _commit_roots_to_tmp(
     root: Path,
     stores: tuple[Path, ...],
@@ -403,7 +472,7 @@ def _write_committed_view_manifests(
     views: tuple[tuple[Role, Modality, View], ...] | None,
 ) -> None:
     for view in (views if views is not None else _store_views(stores)):
-        view_count, expected_view_count = _write_ordered_view_manifest(
+        view_count, expected_view_count, shards = _write_ordered_view_manifest(
             root,
             stores,
             view,
@@ -416,6 +485,7 @@ def _write_committed_view_manifests(
             )
         for store in stores:
             _copy_view_shards(store, root, view)
+        _validate_copied_view_shards(root, view, shards)
         view_ready_path(root, view).touch()
 
 
@@ -515,12 +585,13 @@ def _write_ordered_view_manifest(
     stores: tuple[Path, ...],
     view: tuple[Role, Modality, View],
     sample_indexes: Iterable[int],
-) -> tuple[int, int]:
+) -> tuple[int, int, frozenset[str]]:
     writer = view_manifest_writer(root, view)
     entries = iter(_unique_view_entries(_merged_view_entries(stores, view)))
     current = _next_entry(entries)
     count = 0
     expected_count = 0
+    shards: set[str] = set()
     try:
         for sample_index in sample_indexes:
             expected_count += 1
@@ -540,6 +611,7 @@ def _write_ordered_view_manifest(
                     f"{sample_index}."
                 )
             writer.write(current)
+            shards.add(current.shard)
             count += 1
             current = _next_entry(entries)
         if current is not None:
@@ -551,7 +623,7 @@ def _write_ordered_view_manifest(
     except Exception:
         writer.abort()
         raise
-    return count, expected_count
+    return count, expected_count, frozenset(shards)
 
 
 def _sample_indexes_for_ref(
@@ -726,10 +798,24 @@ def _validate_parts(
     shard_ids: set[int] = set()
     for part in parts:
         data = read_json(_part_json_path(part))
+        manifest = read_store_manifest(part)
         if data.get("dataset_id") != dataset_id:
             raise ValueError(f"Part {part} dataset_id does not match {dataset_id!r}.")
         if data.get("split") != split:
             raise ValueError(f"Part {part} split does not match {split!r}.")
+        if manifest.dataset_id != data.get("dataset_id"):
+            raise ValueError(
+                f"Part {part} store manifest dataset_id does not match metadata."
+            )
+        if manifest.split != data.get("split"):
+            raise ValueError(
+                f"Part {part} store manifest split does not match metadata."
+            )
+        if manifest.sample_count != data.get("sample_count"):
+            raise ValueError(
+                f"Part {part} store manifest sample_count does not match metadata."
+            )
+        _validate_manifest_sample_count(part, manifest.sample_count, kind="Part")
         part_num_shards = int(data["num_shards"])
         shard_id = int(data["shard_id"])
         validate_shard(part_num_shards, shard_id)
@@ -755,9 +841,27 @@ def _validate_fragment(path: Path, dataset_id: str, split: str | None) -> None:
         raise ValueError(f"Fragment {path} id does not match its directory name.")
     indexes = _fragment_sample_indexes(data)
     manifest = read_store_manifest(path)
+    if manifest.dataset_id != data.get("dataset_id"):
+        raise ValueError(
+            f"Fragment {path} store manifest dataset_id does not match metadata."
+        )
+    if manifest.split != data.get("split"):
+        raise ValueError(
+            f"Fragment {path} store manifest split does not match metadata."
+        )
     if manifest.sample_count != len(indexes):
         raise ValueError(f"Fragment {path} sample indexes do not match its metadata.")
+    _validate_manifest_sample_count(path, manifest.sample_count, kind="Fragment")
     _validate_fragment_sample_manifest(path, indexes)
+
+
+def _validate_manifest_sample_count(path: Path, expected: int, *, kind: str) -> None:
+    actual = sample_manifest_row_count(path)
+    if actual != expected:
+        raise ValueError(
+            f"{kind} {path} sample manifest row count {actual} "
+            f"does not match declared sample_count {expected}."
+        )
 
 
 def _validate_fragment_sample_manifest(path: Path, indexes: tuple[int, ...]) -> None:
@@ -807,6 +911,70 @@ def _validate_fragment_id(value: str) -> None:
         raise ValueError("fragment_id must be a non-empty path segment.")
     if "/" in value:
         raise ValueError("fragment_id cannot contain '/'.")
+
+
+def _validate_store_payloads(stores: tuple[Path, ...]) -> None:
+    for store in stores:
+        for view in read_store_views(store):
+            _validate_store_view_payloads(store, view)
+
+
+def _validate_store_view_payloads(
+    root: Path,
+    view: tuple[Role, Modality, View],
+) -> None:
+    keys_by_shard: dict[str, set[str]] = {}
+    for entry in _validated_view_entries(read_view_manifest(root, view), view):
+        if not isinstance(entry.shard, str) or Path(entry.shard).name != entry.shard:
+            raise ValueError(
+                f"View {_view_path(view)} has invalid shard name {entry.shard!r}."
+            )
+        if not isinstance(entry.key, str) or Path(entry.key).name != entry.key:
+            raise ValueError(
+                f"View {_view_path(view)} has invalid payload key {entry.key!r}."
+            )
+        keys = keys_by_shard.setdefault(entry.shard, set())
+        if entry.key in keys:
+            raise ValueError(
+                f"View {_view_path(view)} shard {entry.shard!r} "
+                f"has duplicate payload key {entry.key!r}."
+            )
+        keys.add(entry.key)
+
+    while keys_by_shard:
+        shard, expected = keys_by_shard.popitem()
+        path = view_shard_path(root, view, shard)
+        if not path.is_file():
+            raise FileNotFoundError(
+                f"View {_view_path(view)} is missing referenced shard {path}."
+            )
+        try:
+            with tarfile.open(path, "r") as archive:
+                missing = set(expected)
+                for member in archive:
+                    if member.isfile():
+                        missing.discard(member.name)
+        except tarfile.TarError as exc:
+            raise ValueError(f"View shard is not a valid tar archive: {path}") from exc
+        if missing:
+            key = min(missing)
+            raise ValueError(
+                f"View {_view_path(view)} shard {shard!r} "
+                f"is missing payload {key!r}."
+            )
+
+
+def _validate_copied_view_shards(
+    root: Path,
+    view: tuple[Role, Modality, View],
+    shards: Iterable[str],
+) -> None:
+    for shard in shards:
+        path = view_shard_path(root, view, shard)
+        if not path.is_file():
+            raise FileNotFoundError(
+                f"View {_view_path(view)} is missing copied shard {path}."
+            )
 
 
 def _copy_view_shards(

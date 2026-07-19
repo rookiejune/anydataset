@@ -108,7 +108,7 @@ def common_voice_spec(
         languages=languages,
         langs=langs,
     )
-    resolved_split = split or "train"
+    resolved_split = "train" if split is None else split
     if resolved_split not in _SPLITS:
         valid = ", ".join(sorted(_SPLITS))
         raise ValueError(f"Common Voice split must be one of: {valid}.")
@@ -285,9 +285,20 @@ def _requested_languages(
     if isinstance(value, str):
         result = (value,)
     else:
+        if not isinstance(value, Sequence):
+            raise TypeError("Common Voice languages must be a string sequence.")
         result = tuple(value)
     if not result:
         raise ValueError("Common Voice languages must not be empty.")
+    seen: set[str] = set()
+    for item in result:
+        if not isinstance(item, str):
+            raise TypeError("Common Voice languages must contain strings.")
+        if not item:
+            raise ValueError("Common Voice languages must not contain empty strings.")
+        if item in seen:
+            raise ValueError(f"Duplicate Common Voice language: {item!r}.")
+        seen.add(item)
     return result
 
 

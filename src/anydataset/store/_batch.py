@@ -267,7 +267,12 @@ def _ref_batch_outputs(
     provider_kind: str,
 ) -> Mapping[tuple[Role, Modality], Sequence[Any]]:
     if len(refs) == 1 and not isinstance(values, Mapping):
-        validate_batch_outputs(values, sample_count)
+        _validate_ref_outputs(
+            values,
+            refs[0],
+            sample_count,
+            provider_kind=provider_kind,
+        )
         return {refs[0]: values}
     if not isinstance(values, Mapping):
         raise TypeError(
@@ -275,6 +280,8 @@ def _ref_batch_outputs(
             "a mapping from reference to outputs."
         )
 
+    for ref in values:
+        _validate_ref(ref, provider_kind=provider_kind)
     expected = set(refs)
     actual = set(values)
     if actual != expected:
@@ -291,13 +298,44 @@ def _ref_batch_outputs(
         )
 
     for ref, outputs in values.items():
-        if isinstance(outputs, Mapping) or not isinstance(outputs, Sequence):
-            raise TypeError(
-                f"Batch {provider_kind} provider outputs for {_ref_name(ref)} "
-                "must be a sequence."
-            )
-        validate_batch_outputs(outputs, sample_count)
+        _validate_ref_outputs(
+            outputs,
+            ref,
+            sample_count,
+            provider_kind=provider_kind,
+        )
     return values
+
+
+def _validate_ref(ref: object, *, provider_kind: str) -> None:
+    if (
+        not isinstance(ref, tuple)
+        or len(ref) != 2
+        or not isinstance(ref[0], Role)
+        or not isinstance(ref[1], Modality)
+    ):
+        raise TypeError(
+            f"Batch {provider_kind} provider reference keys must be "
+            "(Role, Modality) tuples."
+        )
+
+
+def _validate_ref_outputs(
+    outputs: object,
+    ref: tuple[Role, Modality],
+    sample_count: int,
+    *,
+    provider_kind: str,
+) -> None:
+    if (
+        isinstance(outputs, (str, bytes, bytearray, Mapping))
+        or not isinstance(outputs, Sequence)
+    ):
+        raise TypeError(
+            f"Batch {provider_kind} provider outputs for {_ref_name(ref)} "
+            "must be a non-string sequence."
+        )
+    validate_batch_outputs(outputs, sample_count)
 
 
 def _ref_name(ref: tuple[Role, Modality]) -> str:

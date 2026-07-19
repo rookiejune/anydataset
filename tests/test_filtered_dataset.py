@@ -29,6 +29,11 @@ from anydataset import (
 )
 from anydataset._compat import StrEnum
 from anydataset.filter import FilterDecision, FilteredDataset
+from anydataset.filter.resume import (
+    iter_filter_fragment_chunks,
+    write_filter_fragment,
+)
+from anydataset.filter.types import _FilterChunk, _FilterMetricsRow
 from anydataset.provider_service import ProviderServer, RemoteFilterFactory
 from anydataset.runtime import Runtime
 from anydataset.types import (
@@ -41,7 +46,9 @@ from anydataset.types import (
     TextView,
 )
 from anydataset.filter.collect import collect_ranges_parallel
+from anydataset.filter.storage import write_index_rows
 from anydataset.store import DatasetWriter
+from anydataset.store.jsonio import read_json as read_store_json
 
 
 class FilteredDatasetTest(unittest.TestCase):
@@ -214,6 +221,191 @@ class FilteredDatasetTest(unittest.TestCase):
             self.assertEqual(calls, [0, 1])
             self.assertEqual(len(results), 2)
             self.assertEqual(results[0].cache_path, results[1].cache_path)
+
+    def test_rule_apply_rechecks_if_cache_snapshot_disappears(self):
+        _register_rows_source("unit_test_filter_snapshot_recheck")
+        dataset = _dataset("unit_test_filter_snapshot_recheck", [0])
+        calls = []
+        rule = FilterRule(
+            "snapshot_recheck",
+            lambda: lambda sample: calls.append(_value(sample)) or True,
+        )
+        first = rule.apply(dataset_factory=lambda: dataset, device="cpu")
+        removed = False
+
+        def disappearing_read_json(path):
+            nonlocal removed
+            path = Path(path)
+            if path.name == "rule.json" and not removed:
+                removed = True
+                path.unlink()
+            return read_store_json(path)
+
+        with mock.patch(
+            "anydataset.filter.apply.read_json",
+            side_effect=disappearing_read_json,
+        ):
+            restored = rule.apply(dataset_factory=lambda: dataset, device="cpu")
+
+        self.assertEqual(restored.cache_path, first.cache_path)
+        self.assertEqual(_values(restored), [0])
+        self.assertEqual(calls, [0, 0])
+
+    def test_live_lazy_index_rejects_replaced_cache_snapshot(self):
+        _register_rows_source("unit_test_filter_live_snapshot")
+        dataset = _dataset("unit_test_filter_live_snapshot", [0, 1, 2, 3])
+        rule = FilterRule(
+            "all_with_metrics",
+            lambda: lambda sample: FilterDecision(
+                label=True,
+                metrics={"score": _value(sample)},
+            ),
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with mock.patch.dict(os.environ, {"ANYDATASET_HOME": tmpdir}):
+                live = rule.apply(
+                    dataset_factory=lambda: dataset,
+                    device="cpu",
+                    max_shard_samples=2,
+                )
+                self.assertEqual(live.global_index(0), 0)
+
+                rule.apply(
+                    dataset_factory=lambda: dataset,
+                    metrics=True,
+                    device="cpu",
+                    max_shard_samples=3,
+                )
+
+                with self.assertRaisesRegex(RuntimeError, "snapshot changed"):
+                    live.global_index(2)
+
+    def test_lazy_index_validates_actual_shard_count(self):
+        _register_rows_source("unit_test_filter_shard_count")
+        dataset = _dataset("unit_test_filter_shard_count", [0])
+        rule = FilterRule("all", _true_factory)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with mock.patch.dict(os.environ, {"ANYDATASET_HOME": tmpdir}):
+                first = rule.apply(dataset_factory=lambda: dataset, device="cpu")
+                manifest = json.loads(
+                    (first.cache_path / "partitions.json").read_text(encoding="utf-8")
+                )
+                relpath = manifest["partitions"][0]["files"][0]["file"]
+                write_index_rows(first.cache_path / relpath, [0, 0])
+
+                restored = rule.apply(dataset_factory=lambda: dataset, device="cpu")
+                with self.assertRaisesRegex(ValueError, "row count"):
+                    _ = restored.indices
+
+    def test_rule_apply_rebuilds_partition_count_mismatch(self):
+        _register_rows_source("unit_test_filter_partition_count")
+        dataset = _dataset("unit_test_filter_partition_count", [0, 1])
+        calls = []
+        rule = FilterRule(
+            "partition_count",
+            lambda: lambda sample: calls.append(_value(sample)) or True,
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with mock.patch.dict(os.environ, {"ANYDATASET_HOME": tmpdir}):
+                first = rule.apply(dataset_factory=lambda: dataset, device="cpu")
+                path = first.cache_path / "partitions.json"
+                manifest = json.loads(path.read_text(encoding="utf-8"))
+                manifest["partitions"][0]["count"] = 0
+                path.write_text(json.dumps(manifest), encoding="utf-8")
+
+                restored = rule.apply(dataset_factory=lambda: dataset, device="cpu")
+
+        self.assertEqual(restored.counts, {"accept": 2})
+        self.assertEqual(calls, [0, 1, 0, 1])
+
+    def test_rule_apply_rebuilds_metrics_count_mismatch(self):
+        _register_rows_source("unit_test_filter_metrics_count")
+        dataset = _dataset("unit_test_filter_metrics_count", [0, 1])
+        calls = []
+        rule = FilterRule(
+            "metrics_count",
+            lambda: lambda sample: FilterDecision(
+                label=True,
+                metrics={"score": calls.append(_value(sample)) or _value(sample)},
+            ),
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with mock.patch.dict(os.environ, {"ANYDATASET_HOME": tmpdir}):
+                first = rule.apply(
+                    dataset_factory=lambda: dataset,
+                    metrics=True,
+                    device="cpu",
+                )
+                path = first.metrics_path / "metrics.json"
+                manifest = json.loads(path.read_text(encoding="utf-8"))
+                manifest["count"] = 0
+                manifest["files"] = []
+                path.write_text(json.dumps(manifest), encoding="utf-8")
+
+                restored = rule.apply(
+                    dataset_factory=lambda: dataset,
+                    metrics=True,
+                    device="cpu",
+                )
+                rows = list(restored.iter_metrics())
+
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(calls, [0, 1, 0, 1])
+
+    def test_filter_resume_rejects_duplicate_partition_labels(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir)
+            write_filter_fragment(
+                path,
+                (0,),
+                _FilterChunk(partitions={"accept": [0]}, metrics=()),
+            )
+            fragment = next(child for child in path.iterdir() if child.is_dir())
+            manifest_path = fragment / "fragment.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["partitions"].append(dict(manifest["partitions"][0]))
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "Duplicate.*partition label"):
+                tuple(iter_filter_fragment_chunks(path, metrics=False))
+
+    def test_filter_resume_validates_rows_against_scan_count(self):
+        cases = (
+            (
+                _FilterChunk(partitions={"accept": [0, 1]}, metrics=()),
+                False,
+                "partition rows",
+            ),
+            (
+                _FilterChunk(partitions={"accept": [0]}, metrics=()),
+                True,
+                "metrics rows",
+            ),
+            (
+                _FilterChunk(partitions={"accept": [0, 0]}, metrics=()),
+                False,
+                "duplicate partition index",
+            ),
+            (
+                _FilterChunk(
+                    partitions={"accept": [0]},
+                    metrics=(
+                        _FilterMetricsRow(index=0, label="reject", metrics={}),
+                    ),
+                ),
+                True,
+                "metrics do not match partitions",
+            ),
+        )
+        for chunk, metrics, message in cases:
+            with self.subTest(message=message):
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    path = Path(tmpdir)
+                    scan_indexes = (0, 1) if "duplicate" in message else (0,)
+                    write_filter_fragment(path, scan_indexes, chunk)
+
+                    with self.assertRaisesRegex(ValueError, message):
+                        tuple(iter_filter_fragment_chunks(path, metrics=metrics))
 
     def test_rule_apply_resumes_from_completed_chunks(self):
         _register_rows_source("unit_test_filter_resume")
@@ -506,6 +698,7 @@ class FilteredDatasetTest(unittest.TestCase):
             )
             .apply(
                 dataset_factory=dataset_factory,
+                input_id="pickle-input-v1",
                 metrics=True,
                 device="cpu",
             )
@@ -518,8 +711,29 @@ class FilteredDatasetTest(unittest.TestCase):
         self.assertEqual(restored_cache.labels, ("accept", "reject"))
         self.assertEqual(restored.cache_path, filtered.cache_path)
         self.assertEqual(restored.metrics_path, filtered.metrics_path)
+        self.assertEqual(restored.input_id, "pickle-input-v1")
         self.assertEqual(_values(restored), [0, 2])
         self.assertEqual(len(list(restored.iter_metrics())), 4)
+
+    def test_filtered_dataset_factory_preserves_metrics(self):
+        dataset_factory = partial(
+            _unpicklable_dataset,
+            "unit_test_filter_factory_metrics",
+            list(range(4)),
+        )
+        filtered = FilterRule(
+            name="even",
+            factory=_metric_factory,
+        ).apply(
+            dataset_factory=dataset_factory,
+            metrics=True,
+            device="cpu",
+        )
+
+        restored = filtered.dataset_factory()
+
+        self.assertEqual(restored.metrics_path, filtered.metrics_path)
+        self.assertEqual(list(restored.iter_metrics()), list(filtered.iter_metrics()))
 
     def test_filtered_dataset_spawn_loader_reads_selected_samples(self):
         dataset_factory = partial(
@@ -627,6 +841,21 @@ class FilteredDatasetTest(unittest.TestCase):
         files = manifest["partitions"][0]["files"]
         self.assertEqual([file["count"] for file in files], [2, 2, 1])
         self.assertEqual(selected.indices, (0, 1, 2, 3, 4))
+
+    def test_rule_apply_rejects_duplicate_partition_labels(self):
+        _register_rows_source("unit_test_filter_duplicate_partition")
+        dataset = _dataset("unit_test_filter_duplicate_partition", [0])
+        rule = FilterRule("all", _true_factory)
+        result = rule.apply(dataset_factory=lambda: dataset, device="cpu")
+        path = result.cache_path / "partitions.json"
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+        duplicate = dict(manifest["partitions"][0])
+        duplicate["count"] = 0
+        manifest["partitions"].append(duplicate)
+        path.write_text(json.dumps(manifest), encoding="utf-8")
+
+        with self.assertRaisesRegex(ValueError, "Duplicate filter partition label"):
+            rule.apply(dataset_factory=lambda: dataset, device="cpu")
 
     def test_rule_apply_filters_with_workers(self):
         with tempfile.TemporaryDirectory():
@@ -1191,6 +1420,10 @@ class FilteredDatasetTest(unittest.TestCase):
                 rule.apply(dataset_factory=lambda: dataset, write_workers=-1)
             with self.assertRaises(ValueError):
                 rule.apply(dataset_factory=lambda: dataset, write_prefetch=0)
+            with self.assertRaises(TypeError):
+                rule.apply(dataset_factory=lambda: dataset, input_id=1)
+            with self.assertRaises(ValueError):
+                rule.apply(dataset_factory=lambda: dataset, input_id="")
 
     def test_filtered_dataset_rejects_empty_selection(self):
         _register_rows_source("unit_test_filter_requires_labels")
@@ -1246,6 +1479,7 @@ class FilteredDatasetTest(unittest.TestCase):
 
             result = rule.apply(
                 dataset_factory=lambda: merged,
+                input_id="store-source-v1",
                 device="cpu",
             )
             filtered = result.select_by("accept")
@@ -1267,10 +1501,74 @@ class FilteredDatasetTest(unittest.TestCase):
 
         left = base.merge(first).merge(second)
         right = base.merge(second).merge(first)
-        left_grouped = rule.apply(dataset_factory=lambda: left, device="cpu")
-        right_grouped = rule.apply(dataset_factory=lambda: right, device="cpu")
+        left_grouped = rule.apply(
+            dataset_factory=lambda: left,
+            input_id="merge-input-v1",
+            device="cpu",
+        )
+        right_grouped = rule.apply(
+            dataset_factory=lambda: right,
+            input_id="merge-input-v1",
+            device="cpu",
+        )
 
         self.assertEqual(left_grouped.cache_path, right_grouped.cache_path)
+
+    def test_external_merge_input_id_is_stable_and_required(self):
+        _register_rows_source("unit_test_filter_external_identity")
+        base = _dataset("unit_test_filter_external_identity", [0])
+        calls = []
+
+        def dataset_factory():
+            return base.merge([{}])
+
+        rule = FilterRule(
+            name="all",
+            factory=lambda: lambda sample: calls.append(_value(sample)) or True,
+        )
+
+        with self.assertRaisesRegex(TypeError, "input_id is required"):
+            rule.apply(dataset_factory=dataset_factory, device="cpu")
+
+        first = rule.apply(
+            dataset_factory=dataset_factory,
+            input_id="external-snapshot-v1",
+            device="cpu",
+        )
+        repeated = rule.apply(
+            dataset_factory=dataset_factory,
+            input_id="external-snapshot-v1",
+            device="cpu",
+        )
+        changed = rule.apply(
+            dataset_factory=dataset_factory,
+            input_id="external-snapshot-v2",
+            device="cpu",
+        )
+        metadata = json.loads(
+            (first.cache_path / "rule.json").read_text(encoding="utf-8")
+        )
+        identity = metadata["base"]["identity"]
+        external = next(
+            child for child in identity["children"] if child["kind"] == "map_style"
+        )
+
+        self.assertEqual(first.cache_path, repeated.cache_path)
+        self.assertNotEqual(first.cache_path, changed.cache_path)
+        self.assertEqual(calls, [0, 0])
+        self.assertEqual(first.input_id, "external-snapshot-v1")
+        self.assertEqual(identity["view_schema_version"], 2)
+        self.assertEqual(identity["input_id"], "external-snapshot-v1")
+        self.assertNotIn("object_id", external)
+
+        restored = first.dataset_factory()
+        chained = FilterRule("chain", _true_factory).apply(
+            dataset_factory=first.dataset_factory,
+            device="cpu",
+        )
+
+        self.assertEqual(restored.input_id, first.input_id)
+        self.assertEqual(_values(chained), [0])
 
     def test_filter_rule_can_apply_to_filtered_dataset(self):
         _register_rows_source("unit_test_filter_chain")
