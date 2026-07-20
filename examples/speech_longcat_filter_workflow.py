@@ -1,8 +1,9 @@
-"""Recipe for materializing LongCat views and filtering a speech dataset.
+"""Materialize LongCat views and filter FLEURS speech samples.
 
-This example is intentionally written as a readable workflow instead of a
-configurable command-line tool. It assumes a GPU environment with local
-LongCat weights and anytrain evaluators available.
+The workflow writes streaming FLEURS rows to a map-style base store, writes a
+LongCat-only delta store, merges the two stores logically, and builds cached
+speech-quality partitions. It requires anytrain's LongCat and speech extras at
+execution time, but importing this module does not load data or models.
 """
 
 from __future__ import annotations
@@ -10,195 +11,186 @@ from __future__ import annotations
 import json
 import os
 import time
-from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, cast
-import unicodedata
+from typing import Any
 
 import torch
-from anydataset.provider.longcat import LongCatProvider
-from anytrain.evaluator.speech import UTMOSEvaluator, WhisperASREvaluator
-from anytrain.evaluator.text import TextComparisonEvaluator
 
-from anydataset import (
-    AnyDataset,
+from anydataset.dataset import AnyDataset, IterableAnyDataset, MergedDataset
+from anydataset.filter import FilterRule
+from anydataset.provider import LongCatProvider
+from anydataset.quality.speech import Predicate, Profile
+from anydataset.store import ViewMaterializer
+from anydataset.types import (
     AudioItem,
     AudioView,
-    FilterDecision,
-    FilterRule,
-    IterableAnyDataset,
     Modality,
     Preset,
     Role,
     Sample,
+    Source,
+    Spec,
     TextItem,
     TextView,
-    ViewMaterializer,
 )
+
+OUTPUT_ROOT_ENV = "ANYDATASET_SPEECH_WORKFLOW_ROOT"
+DEFAULT_OUTPUT_ROOT = Path("storage/speech-longcat-filter")
 
 SPLIT = "train"
 CONFIG = "en_us"
+BASE_DATASET_ID = f"fleurs-{CONFIG}"
 
-ROOT = Path("/mnt/pami202/zhuyin/datasets/anydataset/speech-longcat-filter")
-DELTA = ROOT / "fleurs-longcat-delta"
-BATCH_SIZE = 8
-BATCH_DELTA = ROOT / f"fleurs-longcat-delta-bs{BATCH_SIZE}"
-ANYDATASET_HOME = ROOT / "home"
+LONGCAT_DECODER = "16k_4codebooks"
+LONGCAT_BATCH_SIZE = 8
+LONGCAT_DEVICES_ENV = "ANYDATASET_LONGCAT_DEVICES"
+LONGCAT_CACHE_ENV = "ANYDATASET_LONGCAT_CACHE_DIR"
+LONGCAT_LOCAL_ONLY_ENV = "ANYDATASET_LONGCAT_LOCAL_FILES_ONLY"
 COMPARE_LIMIT: int | None = None
 
-DEVICE = "cuda:0"
-MIN_UTMOS = 2.8
-MIN_CHRF = 50.0
-MAX_SECONDS_PER_TEXT_UNIT = 4.0
-MIN_PEAK_AMPLITUDE = 0.05
-
-os.environ.setdefault("ANYDATASET_HOME", str(ANYDATASET_HOME))
+QUALITY_DEVICES_ENV = "ANYDATASET_SPEECH_QUALITY_DEVICES"
+WHISPER_MODEL = "large-v3"
+RULE_NAME = "speech_quality_v1_whisper_large_v3_utmos28_chrf50_len4_peak005"
 
 
-class Quality:
-    def __init__(self) -> None:
-        device = _filter_device()
-        self.asr = WhisperASREvaluator(
-            model_name="large-v3",
-            device=device,
-            decode_options={"language": "en", "temperature": 0.0},
+def output_root() -> Path:
+    value = os.environ.get(OUTPUT_ROOT_ENV, str(DEFAULT_OUTPUT_ROOT))
+    return Path(value).expanduser()
+
+
+def base_store_path() -> Path:
+    return output_root() / "fleurs-base"
+
+
+def delta_store_path(batch_size: int) -> Path:
+    return output_root() / f"fleurs-longcat-bs{batch_size}"
+
+
+def fleurs_dataset() -> IterableAnyDataset:
+    return IterableAnyDataset.preset(
+        Preset.FLEURS,
+        split=SPLIT,
+        config_name=CONFIG,
+        streaming=True,
+    )
+
+
+def base_dataset() -> AnyDataset:
+    return store_dataset(base_store_path())
+
+
+def batched_delta_dataset() -> AnyDataset:
+    return store_dataset(delta_store_path(LONGCAT_BATCH_SIZE))
+
+
+def merged_dataset() -> MergedDataset:
+    return base_dataset().merge(batched_delta_dataset())
+
+
+def store_dataset(path: Path) -> AnyDataset:
+    return AnyDataset(
+        Spec(
+            source=Source.STORE,
+            path=str(path),
+            split=SPLIT,
         )
-        self.text = TextComparisonEvaluator()
-        self.utmos = UTMOSEvaluator(
+    )
+
+
+def longcat_provider(device: str) -> LongCatProvider:
+    return LongCatProvider(
+        cache_dir=os.environ.get(LONGCAT_CACHE_ENV),
+        decoder=LONGCAT_DECODER,
+        device=device,
+        local_files_only=env_flag(LONGCAT_LOCAL_ONLY_ENV, default=True),
+    )
+
+
+def quality_factory() -> Predicate:
+    from anytrain.evaluator.speech import (
+        SpeechEvaluator,
+        UTMOSEvaluator,
+        WhisperASREvaluator,
+    )
+
+    device = os.environ.get("ANYDATASET_FILTER_DEVICE")
+    if device is None:
+        raise RuntimeError("ANYDATASET_FILTER_DEVICE is not set by the filter runtime.")
+    evaluator = SpeechEvaluator(
+        asr=WhisperASREvaluator(
+            model_name=WHISPER_MODEL,
+            device=device,
+        ),
+        utmos=UTMOSEvaluator(
             device=device,
             backend_load_options={"trust_repo": True},
-        )
-
-    def __call__(self, sample: Sample) -> FilterDecision:
-        audio = cast(AudioItem, sample[Role.DEFAULT, Modality.AUDIO])
-        transcript = cast(TextItem, sample[Role.DEFAULT, Modality.TEXT])
-        waveform, sample_rate = audio.views[AudioView.WAVEFORM]
-        reference = transcript.views[TextView.TEXT]
-        prediction = self.asr.transcribe(waveform, sample_rate)
-        metrics = self.text.evaluate(prediction, reference)
-        score = float(self.utmos.evaluate(waveform, sample_rate)["utmos"])
-        wave = torch.as_tensor(waveform)
-        duration_seconds = float(wave.shape[-1]) / float(sample_rate)
-        peak_amplitude = (
-            float(wave.detach().abs().max().cpu().item()) if wave.numel() else 0.0
-        )
-        text_units = _text_units(str(reference))
-        seconds_per_text_unit = duration_seconds / float(text_units)
-        reject = (
-            score < MIN_UTMOS
-            or metrics["chrf"] < MIN_CHRF
-            or seconds_per_text_unit > MAX_SECONDS_PER_TEXT_UNIT
-            or peak_amplitude < MIN_PEAK_AMPLITUDE
-        )
-        return FilterDecision(
-            label="reject" if reject else "accept",
-            metrics={
-                "utmos": score,
-                "asr_text": str(prediction),
-                "reference_text": reference,
-                "wer": float(metrics["wer"]),
-                "chrf": float(metrics["chrf"]),
-                "bleu": float(metrics["bleu"]),
-                "duration_seconds": duration_seconds,
-                "peak_amplitude": peak_amplitude,
-                "text_units": text_units,
-                "seconds_per_text_unit": seconds_per_text_unit,
-            },
-        )
-
-
-def quality_factory():
-    return Quality()
-
-
-def _filter_device() -> str:
-    import os
-
-    return os.environ.get("ANYDATASET_FILTER_DEVICE", DEVICE)
-
-
-def _text_units(text: str) -> int:
-    count = 0
-    in_word = False
-    for char in text:
-        if _is_cjk(char):
-            count += 1
-            in_word = False
-        elif char.isalnum():
-            if not in_word:
-                count += 1
-                in_word = True
-        elif unicodedata.category(char).startswith("M"):
-            continue
-        else:
-            in_word = False
-    return max(count, 1)
-
-
-def _is_cjk(char: str) -> bool:
-    codepoint = ord(char)
-    return (
-        0x3400 <= codepoint <= 0x4DBF
-        or 0x4E00 <= codepoint <= 0x9FFF
-        or 0xF900 <= codepoint <= 0xFAFF
-        or 0x20000 <= codepoint <= 0x2A6DF
-        or 0x2A700 <= codepoint <= 0x2B73F
-        or 0x2B740 <= codepoint <= 0x2B81F
-        or 0x2B820 <= codepoint <= 0x2CEAF
-        or 0x2CEB0 <= codepoint <= 0x2EBEF
-        or 0x30000 <= codepoint <= 0x3134F
-        or 0x31350 <= codepoint <= 0x323AF
+        ),
+    )
+    return Predicate(
+        profile=Profile(
+            min_utmos=2.8,
+            min_chrf=50.0,
+            max_seconds_per_text_unit=4.0,
+            min_peak_amplitude=0.05,
+        ),
+        evaluator=evaluator,
+        decode_options={"language": "en", "temperature": 0.0},
     )
 
 
-rule = FilterRule("speech_quality_v2_utmos28_chrf50_len4_peak005", quality_factory)
-
-
-def fleurs_dataset():
-    return IterableAnyDataset.preset(
-        "fleurs", split=SPLIT, config_name=CONFIG, streaming=True
-    )
-
-
-def longcat_provider(device: str):
-    return LongCatProvider(
-        decoders=("16k_4codebooks",),
-        device=device,
-        local_files_only=True,
-    )
-
-
-def materialize_longcat_delta(output_dir: Path, *, batch_size: int) -> dict[str, Any]:
-    if output_dir.exists():
-        return {
-            "path": str(output_dir),
-            "batch_size": batch_size,
-            "materialized": False,
-            "seconds": None,
-        }
+def materialize_base_store() -> dict[str, Any]:
+    path = base_store_path()
+    if path.exists():
+        count = len(base_dataset())
+        return store_result(path, count=count, materialized=False, seconds=None)
 
     start = time.perf_counter()
-    ViewMaterializer(output_dir, split=SPLIT, batch_size=batch_size).write(
-        dataset_factory=fleurs_dataset,
-        provider_factory=longcat_provider,
-        devices="auto",
+    fleurs_dataset().write(
+        path,
+        dataset_id=BASE_DATASET_ID,
+        split=SPLIT,
     )
-    return {
-        "path": str(output_dir),
-        "batch_size": batch_size,
-        "materialized": True,
-        "seconds": time.perf_counter() - start,
-    }
+    return store_result(
+        path,
+        count=len(base_dataset()),
+        materialized=True,
+        seconds=time.perf_counter() - start,
+    )
+
+
+def materialize_longcat_delta(path: Path, *, batch_size: int) -> dict[str, Any]:
+    if path.exists():
+        count = len(store_dataset(path))
+        return store_result(path, count=count, materialized=False, seconds=None)
+
+    start = time.perf_counter()
+    ViewMaterializer(
+        path,
+        split=SPLIT,
+        batch_size=batch_size,
+        input_id=f"{BASE_DATASET_ID}-{SPLIT}-v1",
+        provider_id=f"longcat-{LONGCAT_DECODER}-v1",
+    ).write(
+        dataset_factory=base_dataset,
+        provider_factory=longcat_provider,
+        devices=os.environ.get(LONGCAT_DEVICES_ENV, "auto"),
+    )
+    return store_result(
+        path,
+        count=len(store_dataset(path)),
+        materialized=True,
+        seconds=time.perf_counter() - start,
+    )
 
 
 def compare_longcat_deltas(
-    baseline_dir: Path,
-    batch_dir: Path,
+    baseline_path: Path,
+    batched_path: Path,
     *,
     limit: int | None,
 ) -> dict[str, Any]:
-    baseline = AnyDataset(f"store://{baseline_dir}:{SPLIT}")
-    batched = AnyDataset(f"store://{batch_dir}:{SPLIT}")
+    baseline = store_dataset(baseline_path)
+    batched = store_dataset(batched_path)
     if len(baseline) != len(batched):
         raise ValueError(
             f"LongCat delta sample counts differ: {len(baseline)} != {len(batched)}."
@@ -207,94 +199,134 @@ def compare_longcat_deltas(
     checked = len(baseline) if limit is None else min(limit, len(baseline))
     start = time.perf_counter()
     for index in range(checked):
-        _assert_same_codes(
-            _longcat_codes(baseline[index]),
-            _longcat_codes(batched[index]),
-            index,
+        assert_same_codes(
+            longcat_codes(baseline[index]),
+            longcat_codes(batched[index]),
+            index=index,
         )
     return {
-        "baseline": str(baseline_dir),
-        "batch": str(batch_dir),
+        "baseline": str(baseline_path),
+        "batched": str(batched_path),
         "checked": checked,
         "matches": True,
         "seconds": time.perf_counter() - start,
     }
 
 
-def _longcat_codes(sample: Sample) -> Mapping[str, Any]:
-    audio = cast(AudioItem, sample[Role.DEFAULT, Modality.AUDIO])
-    codes = audio.views[AudioView.LONGCAT]
-    if not isinstance(codes, Mapping):
-        raise TypeError("LongCat view must be a mapping of code tensors.")
+def longcat_codes(sample: Sample) -> torch.Tensor:
+    item = sample.get((Role.DEFAULT, Modality.AUDIO))
+    if not isinstance(item, AudioItem):
+        raise TypeError("LongCat delta sample must contain the default audio item.")
+    codes = item.views.get(AudioView.LONGCAT)
+    if not isinstance(codes, torch.Tensor):
+        raise TypeError("LongCat view must be a Tensor.")
+    if codes.ndim != 2:
+        raise ValueError("LongCat view must have shape [frame, codebook].")
+    if codes.shape[1] == 0:
+        raise ValueError("LongCat view must have a non-empty codebook axis.")
+    if codes.dtype == torch.bool or codes.is_floating_point() or codes.is_complex():
+        raise TypeError("LongCat view must contain integer code ids.")
     return codes
 
 
-def _assert_same_codes(
-    baseline: Mapping[str, Any],
-    batched: Mapping[str, Any],
+def assert_same_codes(
+    baseline: torch.Tensor,
+    batched: torch.Tensor,
+    *,
     index: int,
 ) -> None:
-    if set(baseline) != set(batched):
+    if baseline.dtype != batched.dtype or baseline.shape != batched.shape:
         raise ValueError(
-            f"LongCat code keys differ at sample {index}: "
-            f"{sorted(baseline)} != {sorted(batched)}."
+            f"LongCat code metadata differs at sample {index}: "
+            f"{baseline.dtype}/{tuple(baseline.shape)} != "
+            f"{batched.dtype}/{tuple(batched.shape)}."
         )
-    for name in sorted(baseline):
-        left = baseline[name]
-        right = batched[name]
-        if isinstance(left, torch.Tensor) and isinstance(right, torch.Tensor):
-            if left.dtype != right.dtype or left.shape != right.shape:
-                raise ValueError(
-                    f"LongCat code {name!r} metadata differs at sample {index}: "
-                    f"{left.dtype}/{tuple(left.shape)} != "
-                    f"{right.dtype}/{tuple(right.shape)}."
-                )
-            if not torch.equal(left, right):
-                raise ValueError(f"LongCat code {name!r} differs at sample {index}.")
-            continue
-        if left != right:
-            raise ValueError(f"LongCat code {name!r} differs at sample {index}.")
+    if not torch.equal(baseline, batched):
+        raise ValueError(f"LongCat codes differ at sample {index}.")
 
 
-# Materialize both the original single-sample path and the batched path, then
-# compare their LongCat outputs before reusing the batched delta downstream.
-baseline_timing = materialize_longcat_delta(DELTA, batch_size=1)
-batch_timing = materialize_longcat_delta(BATCH_DELTA, batch_size=BATCH_SIZE)
-longcat_comparison = compare_longcat_deltas(
-    DELTA,
-    BATCH_DELTA,
-    limit=COMPARE_LIMIT,
-)
+def merged_views(dataset: MergedDataset) -> list[str]:
+    if len(dataset) == 0:
+        raise ValueError("FLEURS base store is empty.")
+    sample = dataset[0]
+    audio = sample.get((Role.DEFAULT, Modality.AUDIO))
+    text = sample.get((Role.DEFAULT, Modality.TEXT))
+    if not isinstance(audio, AudioItem):
+        raise TypeError("Merged sample must contain the default audio item.")
+    if not isinstance(text, TextItem) or TextView.TEXT not in text.views:
+        raise TypeError("Merged sample must contain the default text view.")
+    if AudioView.WAVEFORM not in audio.views or AudioView.LONGCAT not in audio.views:
+        raise ValueError("Merged audio must contain waveform and LongCat views.")
+    longcat_codes(sample)
+    return sorted(view.value for view in audio.views)
 
-# Merge the original FLEURS waveform/text views with the generated LongCat view.
-merged = AnyDataset(f"store://{BATCH_DELTA}:{SPLIT}")
-sample = merged[0]
-audio = cast(AudioItem, sample[Role.DEFAULT, Modality.AUDIO])
-transcript = cast(TextItem | None, sample.get((Role.DEFAULT, Modality.TEXT)))
-if AudioView.WAVEFORM not in audio.views or (
-    transcript is None or TextView.TEXT not in transcript.views
-):
-    merged = merged.merge(
-        IterableAnyDataset.preset(
-            "fleurs", split=SPLIT, config_name=CONFIG, streaming=True
-        ),
+
+def store_result(
+    path: Path,
+    *,
+    count: int,
+    materialized: bool,
+    seconds: float | None,
+) -> dict[str, Any]:
+    return {
+        "path": str(path),
+        "samples": count,
+        "materialized": materialized,
+        "seconds": seconds,
+    }
+
+
+def env_flag(name: str, *, default: bool) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"{name} must be a boolean environment value.")
+
+
+def main() -> None:
+    root = output_root().resolve()
+    os.environ[OUTPUT_ROOT_ENV] = str(root)
+    os.environ.setdefault("ANYDATASET_HOME", str(root / "home"))
+
+    base = materialize_base_store()
+    baseline = materialize_longcat_delta(delta_store_path(1), batch_size=1)
+    batched = materialize_longcat_delta(
+        delta_store_path(LONGCAT_BATCH_SIZE),
+        batch_size=LONGCAT_BATCH_SIZE,
+    )
+    comparison = compare_longcat_deltas(
+        delta_store_path(1),
+        delta_store_path(LONGCAT_BATCH_SIZE),
+        limit=COMPARE_LIMIT,
     )
 
-# Apply the named quality rule and select the accepted partition.
-result = rule.apply(merged, metrics=True, device="cpu")
-filtered = result.select("accept")
-sample = filtered[0]
-audio = cast(AudioItem, sample[Role.DEFAULT, Modality.AUDIO])
+    views = merged_views(merged_dataset())
+    result = FilterRule(RULE_NAME, quality_factory).apply(
+        dataset_factory=merged_dataset,
+        metrics=True,
+        device=os.environ.get(QUALITY_DEVICES_ENV, "auto"),
+    )
+    accepted = result.select_by("accept")
 
-summary = {
-    "delta": str(BATCH_DELTA),
-    "filter_cache": str(result.cache_path),
-    "longcat_batch": batch_timing,
-    "longcat_baseline": baseline_timing,
-    "longcat_comparison": longcat_comparison,
-    "metrics": None if result.metrics_path is None else str(result.metrics_path),
-    "accepted": len(filtered),
-    "labels": result.labels,
-    "first_views": sorted(view.value for view in audio.views),
-}
-print(json.dumps(summary, indent=2, sort_keys=True))
+    summary = {
+        "root": str(root),
+        "base": base,
+        "longcat_baseline": baseline,
+        "longcat_batched": batched,
+        "longcat_comparison": comparison,
+        "merged_audio_views": views,
+        "filter_cache": str(result.cache_path),
+        "metrics": None if result.metrics_path is None else str(result.metrics_path),
+        "counts": dict(result.counts),
+        "accepted": len(accepted),
+    }
+    print(json.dumps(summary, indent=2, sort_keys=True))
+
+
+if __name__ == "__main__":
+    main()

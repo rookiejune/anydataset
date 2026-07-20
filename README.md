@@ -1,5 +1,7 @@
 # anydataset
 
+[简体中文](README.zh-CN.md)
+
 `anydataset` is a small PyTorch dataset layer for mapping different physical
 sources into one canonical `Sample` shape:
 
@@ -28,12 +30,20 @@ For local development:
 pip install -e '.[huggingface,audio,dev]'
 ```
 
+Model-backed providers are optional and come from `anytrain`. Install the
+matching extra before using them: `anytrain[longcat]` for `LongCatProvider`,
+`anytrain[speech]` for `WhisperASRProvider` and the default speech-quality
+evaluator, or `anytrain[moss-tts]` plus `anydataset[audio]` for
+`MossTTSProvider`.
+
 ## Presets
 
 Use `AnyDataset.preset()` or `IterableAnyDataset.preset()` when a built-in
 dataset already knows both its source and parser.
-Built-in presets currently include `MNIST`, `CIFAR10`, `FLEURS`,
-`LIBRISPEECH_ASR`, `COMMON_VOICE`, `ESC50`, `NSYNTH`, `FSD50K`, and `WMT19`.
+Map-style presets are `MNIST`, `CIFAR10`, and `FSD50K`. Iterable presets are
+`FLEURS`, `LIBRISPEECH_ASR`, `COMMON_VOICE`, `ESC50`, `NSYNTH`, and `WMT19`.
+Using a preset through the wrong dataset type raises an error. Both constructors
+accept `transforms=...` for item-level transforms after parsing.
 
 ```python
 from anydataset import IterableAnyDataset
@@ -163,6 +173,11 @@ environment variable is unset. Source prepare caches live under
 Runtime warnings and worker logs live under
 `$ANYDATASET_HOME/logs/<timestamp>-<pid>/`.
 
+Every physical `Spec` field participates in `Spec.id`: `source`, `path`,
+`split`, `version`, and `load_options`. Change `version` or a load option when
+the same path denotes a different physical snapshot; source prepare caches are
+reused only for the resulting identity.
+
 The built-in `sharded_csv` source keeps CSV files as the readable source of
 truth and prepares one Parquet cache part per CSV file under
 `$ANYDATASET_HOME/cache/sources`. Preparation converts changed files in a
@@ -189,6 +204,12 @@ dataset = MultipleAnyDataset(
 Every dataset exposes `iter_shard(num_shards, shard_id)` for distributed reads.
 `MultipleAnyDataset` itself is not a filter cache identity; filter or cache the
 child datasets before combining them.
+
+The default `SequentialStrategy` exhausts each child in order.
+`RoundRobinStrategy` interleaves active children evenly, while
+`WeightedRandomStrategy(weights=..., seed=...)` uses weights to choose the next
+active child. It changes interleaving order rather than resampling: every child
+with a positive weight is still exhausted.
 
 ## DataLoader Schemas
 
@@ -245,9 +266,13 @@ loader = DataLoader(
 ```
 
 `Batch.sample` has the same logical structure as one `Sample`, with each field
-batched. Tensor fields with matching shapes are stacked. If only the last
-dimension varies, the collator pads it and records valid positions in
-`Batch.masks`; non-tensor values are returned as lists.
+batched. Generic tensors with matching shapes are stacked; when only their last
+dimension varies, that dimension is padded and recorded in `Batch.masks`.
+Waveforms are first converted with `torch.as_tensor` and use the same rule.
+Codec views have the stricter per-sample shape `[frame, codebook]`; the frame
+axis is padded, producing `[batch, frame, codebook]` and a `[batch, frame]`
+mask. Mapping views are collated recursively and must have consistent keys and
+sequence lengths. Other values are returned as lists.
 
 ```python
 from anydataset.dataset import FieldGroup, FieldRef
@@ -317,11 +342,13 @@ semantics. The ID is preserved by the filtered `dataset_factory`, pickle, and
 chained filters.
 
 `FilterRule` stores a zero-argument factory, and the factory builds the
-predicate inside the process that will execute it. `device="auto"` uses one
-spawned process per visible CUDA device and falls back to CPU single-process
-execution. Pass `device="cpu"` for explicit single-process CPU filtering, or an
-iterable such as `("cpu", "cpu")` or `("cuda:0", "cuda:1")` for explicit
-parallel workers. Multi-device filtering launches one fixed worker per device,
+predicate inside the process that will execute it. `device="auto"` resolves to
+all visible CUDA devices, or to CPU when CUDA is unavailable. One resolved
+device runs in the calling process; more than one launches a fixed worker per
+device with `Runtime.process_start_method` (`"spawn"` by default). Pass
+`device="cpu"` for explicit CPU execution, or an iterable such as
+`("cpu", "cpu")` or `("cuda:0", "cuda:1")` for explicit parallel workers.
+Multi-device filtering
 sets DDP-style `RANK`, `LOCAL_RANK`, `WORLD_SIZE`, `MASTER_ADDR`, and
 `MASTER_PORT` before calling factories, and scans an exhaustive runtime-style
 index shard so every base sample is covered. Multi-device filtering manages
@@ -330,7 +357,7 @@ rather than from inside an existing DDP training process. It uses Python
 `spawn`, so the dataset entry point is always `dataset_factory=...`. Both the
 dataset factory and predicate factory should be module-level picklable
 callables.
-Pass `num_workers` to let each device process read samples through a PyTorch
+Pass `num_workers` to let each execution process read samples through a PyTorch
 `DataLoader`; `batch_size` controls the loader batch size.
 
 Partition index files are sharded by `max_shard_samples` (default: 1,000,000),
@@ -361,19 +388,34 @@ rows = list(filtered.iter_metrics())
 Metrics are written under the filter cache and include the original sample
 index, normalized label, and metrics payload. Set `metrics=True` explicitly;
 when an older partition cache has no metrics side output, the rule is rebuilt.
+Completed caches are immutable generations with reader leases. See
+[`docs/filter_cache.md`](docs/filter_cache.md) for their cleanup contract and
+the `cleanup_filter_generations(...)` API.
 
 ## Quality Predicates
 
 Quality modules provide reusable predicates for `FilterRule`; they do not own
 dataset loading or cache naming.
 
+`FilterRule` accepts map-style inputs. Because WMT19 is an iterable preset,
+materialize it once to a store before filtering it:
+
 ```python
-from anydataset import FilterRule, IterableAnyDataset, Preset
+from anydataset import AnyDataset, FilterRule, IterableAnyDataset, Preset, Source, Spec
 from anydataset.quality.translation import Predicate as TranslationQuality
 
-dataset = IterableAnyDataset.preset(
+source = IterableAnyDataset.preset(
     "wmt19", source_lang="zh", target_lang="en"
 )
+source.write("/data/wmt19-zh-en", dataset_id="wmt19-zh-en", split="train")
+
+
+def dataset_factory():
+    return AnyDataset(
+        Spec(source=Source.STORE, path="/data/wmt19-zh-en", split="train")
+    )
+
+
 def translation_factory():
     return TranslationQuality.from_preset(
         Preset.WMT19,
@@ -397,22 +439,29 @@ labels samples as `accept` or `reject` based on UTMOS, chrF, duration-per-text
 unit, peak amplitude, and optional WER/BLEU thresholds:
 
 ```python
-from anydataset import FilterRule
+from anydataset import AnyDataset, FilterRule, Source, Spec
 from anydataset.quality.speech import Predicate as SpeechQuality
+
+def speech_dataset_factory():
+    return AnyDataset(
+        Spec(source=Source.STORE, path="/data/speech-quality-input", split="train")
+    )
+
 
 def speech_factory():
     return SpeechQuality()
 
 filtered = FilterRule("speech_quality_v1", speech_factory).apply(
-    dataset_factory=dataset_factory,
+    dataset_factory=speech_dataset_factory,
     metrics=True,
 )
 accepted = filtered.select_by("accept")
 ```
 
 Speech quality warnings such as missing waveform or missing same-role text are
-audit signals in the metrics payload; the current predicate rejects only when a
-checked audio item fails a configured threshold.
+audit signals in the metrics payload. A non-finite waveform is a hard rejection
+before evaluator execution; otherwise a checked audio item is rejected when it
+fails a configured threshold.
 
 ## Store
 
@@ -456,6 +505,10 @@ the v2 checks:
 anydataset-store migrate /data/my_anydataset_v1 /data/my_anydataset_v2
 ```
 
+The equivalent Python API is
+`migrate_store("/data/my_anydataset_v1", "/data/my_anydataset_v2")` from
+`anydataset.store`.
+
 Older layouts or v1 manifests that do not exactly match that canonical schema
 must be re-materialized with `DatasetWriter`; migration does not guess missing
 fields or alignment.
@@ -486,10 +539,11 @@ payload again.
 
 Views are stored under `{role}/{modality}/{view}/`; payloads live in that
 view directory's `shards/` files. `ViewMaterializer` writes derived views to a
-delta store. Open both stores through `Source.STORE`, combine them with logical
-`merge()`, and call `write()` only when you need a self-contained store. Base
-and delta stores are aligned by `sample_index`; callers are responsible for
-materializing views from the same ordered dataset.
+delta store. By default it writes only the provider output view; it does not
+copy input views or metadata. Open both stores through `Source.STORE`, combine
+them with logical `merge()`, and call `write()` only when you need a
+self-contained store. Base and delta stores are aligned by `sample_index`;
+callers are responsible for materializing views from the same ordered dataset.
 
 ```python
 from anydataset import AnyDataset, Source, Spec
@@ -528,6 +582,27 @@ merged = AnyDataset(Spec(source=Source.STORE, path="/data/my_anydataset")).merge
 merged.write("/data/my_anydataset_with_longcat")
 ```
 
+When a delta must carry selected input fields, declare them with the existing
+schema contract instead of copying the whole sample:
+
+```python
+from anydataset.types import Modality, Role, TextMeta, TextReq, TextView
+
+keep_schema = {
+    (Role.DEFAULT, Modality.TEXT): TextReq(
+        views=frozenset({TextView.TEXT}),
+        meta=frozenset({TextMeta.LANG}),
+    )
+}
+materializer = ViewMaterializer(
+    "/data/my_anydataset_longcat",
+    keep_schema=keep_schema,
+)
+```
+
+`keep_schema` fields must exist in the input. A selected view that conflicts
+with the provider output raises instead of overwriting it.
+
 `merge()` returns a map-style logical dataset and never mutates either physical
 store. It indexes both sides with the same integer index, like `zip(strict=True)`:
 both sides must be map-style datasets with the same length. The right-hand side
@@ -541,10 +616,13 @@ processes, while `num_workers` controls the PyTorch `DataLoader` workers inside
 each writer process. For parallel writes, pass a picklable module-level
 `dataset_factory` so spawned workers construct their own dataset.
 
-For GPU-backed providers, let `devices` control parallelism. `devices="auto"`
-uses one spawned worker per visible CUDA device, writes worker logs under
-`$ANYDATASET_HOME/logs/<timestamp>-<pid>/materializer`, and commits completed
-fragments when all workers finish. Materializers always use resumable fragments:
+For GPU-backed providers, let `devices` control execution. `devices="auto"`
+resolves every visible CUDA device, or CPU when CUDA is unavailable. One
+resolved device runs in the calling process; multiple devices use one worker
+per device with `Runtime.process_start_method` (`"spawn"` by default), write
+worker logs under `$ANYDATASET_HOME/logs/<timestamp>-<pid>/materializer`, and
+commit completed fragments when all workers finish. Materializers always use
+resumable fragments:
 completed provider batches are grouped into checkpoint chunks under a hidden
 sibling resume directory, and reruns skip completed global sample indexes
 before atomically committing the final store. `commit_samples` controls that
@@ -556,8 +634,9 @@ the input snapshot or provider behavior depends on state that the callables do
 not capture, such as mutable files or checkpoint contents. These IDs augment,
 rather than replace, the factory identities; changing either one quarantines
 the old resume directory instead of reusing incompatible fragments.
-Multi-device materialization uses Python `spawn`, so `dataset_factory` and
-`provider_factory` must be picklable, module-level callables. Like filtering,
+Multi-device materialization uses the configured process start method, so
+`dataset_factory` and `provider_factory` must be picklable, module-level
+callables when that method is `"spawn"`. Like filtering,
 multi-device materialization owns its offline worker processes and should not
 be launched from inside an existing DDP training process.
 Call `write()` from the application main process, not from a PyTorch
@@ -593,10 +672,11 @@ delta = ViewMaterializer(
 )
 ```
 
-Providers can opt into model-side batching by implementing `call_batch(batch)`
-and by passing `batch_size` to the materializer. The `batch` argument is the
-same `Batch(sample, masks)` object returned by `collate_fn`; `batch_size=1` or
-providers without `call_batch` keep using the per-sample `__call__` path.
+Providers opt into model-side batching by implementing `call_batch(batch)` and
+by passing `batch_size` to the materializer. The `batch` argument is the same
+`Batch(sample, masks)` object returned by `collate_fn`. `batch_size=1` uses the
+per-sample `__call__` path; `batch_size>1` requires `call_batch` and raises a
+`TypeError` when it is missing.
 `Batch.masks` remains the canonical validity signal, and sequence lengths can
 be derived with `batch.lengths(field_ref)`. When a view or modality materializer
 batches a single input reference, `call_batch` may return one output sequence.
@@ -637,28 +717,38 @@ class ToyTTS:
         return synthesize(text)
 
 
+def tts_provider_factory(_device: str):
+    return ToyTTS()
+
+
 delta = ModalityMaterializer(
     output_dir="/data/my_anydataset_tts",
 ).write(
     dataset_factory=dataset_factory,
-    provider_factory=lambda device: ToyTTS(),
+    provider_factory=tts_provider_factory,
     devices="cpu",
 )
 ```
 
 Built-in providers follow the model/backend name, for example
 `MossTTSProvider` for text-to-audio and `WhisperASRProvider` for
-audio-to-text.
+audio-to-text. A provider may set `reference_role` when generation also needs an
+already-present output modality from that role, such as reference audio for
+TTS. The reference role is skipped as an output target and its views are added
+to each other role's single input modality.
 
 ## Development
 
 ```bash
-/Users/zhuyin/miniconda3/envs/py312/bin/python -m pytest -q
+python -m compileall -q src tests examples
+python -m pytest -q
 ```
 
 Additional design notes live in `docs/design.md`, filter cache details in
 `docs/filter_cache.md`, and quality-filter notes in
-`docs/translation_quality.md` and `docs/speech_quality.md`.
+`docs/translation_quality.md` and `docs/speech_quality.md`. Advanced process
+ownership and remote model serving are covered in
+`docs/provider_service.md`.
 
 ## Release
 

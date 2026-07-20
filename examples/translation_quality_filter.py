@@ -17,21 +17,22 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from anydataset.quality.translation import Predicate, Profile
-from anydataset.types import SourceKey
-
 from anydataset import (
     AnyDataset,
     FilterRule,
+    has_source,
+    register_source,
+)
+from anydataset.quality.translation import Predicate, Profile
+from anydataset.types import (
     Modality,
     Role,
     Sample,
+    SourceKey,
     Spec,
     TextItem,
     TextMeta,
     TextView,
-    has_source,
-    register_source,
 )
 
 TABLE_SOURCE = "translation_quality_table"
@@ -52,6 +53,24 @@ class BitextParser:
             source_lang=self.source_lang,
             target_lang=self.target_lang,
         )
+
+
+@dataclass(frozen=True)
+class DatasetFactory:
+    spec: Spec
+    parser: BitextParser
+
+    def __call__(self) -> AnyDataset:
+        register_table_source(self.spec.source)
+        return AnyDataset(self.spec, parse_fn=self.parser)
+
+
+@dataclass(frozen=True)
+class PredicateFactory:
+    profile: Profile
+
+    def __call__(self) -> Predicate:
+        return Predicate(self.profile)
 
 
 class BitextTableSource:
@@ -102,9 +121,8 @@ class BitextTableDataset:
 
 def main() -> None:
     args = parse_args()
-    register_table_source(TABLE_SOURCE)
-    dataset = AnyDataset(
-        Spec(
+    dataset_factory = DatasetFactory(
+        spec=Spec(
             source=TABLE_SOURCE,
             path=str(args.input),
             load_options={
@@ -113,7 +131,7 @@ def main() -> None:
                 "limit": args.limit,
             },
         ),
-        parse_fn=BitextParser(
+        parser=BitextParser(
             source_column=args.source_column,
             target_column=args.target_column,
             source_lang=args.source_lang,
@@ -133,12 +151,10 @@ def main() -> None:
         min_script_ratio=args.min_script_ratio,
         reject_script_ratio=args.reject_script_ratio,
     )
-    def factory():
-        return Predicate(profile)
 
-    rule = FilterRule(args.rule_name, factory)
+    rule = FilterRule(args.rule_name, PredicateFactory(profile))
     result = rule.apply(
-        dataset,
+        dataset_factory=dataset_factory,
         metrics=True,
         device=args.device,
     )
