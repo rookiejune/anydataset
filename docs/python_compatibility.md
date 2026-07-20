@@ -15,7 +15,15 @@
 
 ## 验证
 
+最低版本验证必须用同一个明确的 Python 3.9 interpreter 完成编译和测试，避免
+`python3` 与 `python` 指向不同环境。`PYTHON` 按本机环境替换：
+
 ```bash
-PYTHONPYCACHEPREFIX=/private/tmp/anydataset-pycache python3 -m compileall -q src tests
-PYTHONPYCACHEPREFIX=/private/tmp/anydataset-pycache PYTHONPATH=src python -m pytest -q
+PYTHON=/path/to/python3.9
+PYTHONPYCACHEPREFIX=/tmp/anydataset-pycache "$PYTHON" -m compileall -q src tests examples
+PYTHONPYCACHEPREFIX=/tmp/anydataset-pycache PYTHONPATH=src "$PYTHON" -m pytest -q
 ```
+
+`pyproject.toml` 的 `requires-python >= 3.9` 是安装下限；classifiers 当前列出
+Python 3.9-3.12。发布前至少验证 3.9，并在声称某个版本已验证时使用对应 interpreter
+重复以上两条命令。

@@ -4,7 +4,8 @@
 to a map-style sample dataset and caches global row indices in that dataset's
 sample space. A rule does not copy sample payloads and does not change physical
 `Spec` identity. The public filter API lives under `anydataset.filter` and is
-also re-exported from `anydataset`.
+imported from that module. Only `FilterRule` is also re-exported from the
+top-level `anydataset` package.
 
 ```python
 from anydataset.filter import FilterDecision, FilteredDataset, FilterRule
@@ -184,19 +185,20 @@ multi-device runs, each worker also writes lifecycle and failure details under
 `$ANYDATASET_HOME/logs/<timestamp>-<pid>/filter/part-xxxxx.log`; rank 0 mirrors
 its lifecycle log to stderr.
 
-`FilterRule.apply(..., device="auto")` uses one spawned process per visible CUDA
-device, or CPU single-process execution when CUDA is unavailable. Pass
-`device="cpu"` to force single-process CPU execution. Pass an iterable such as
-`("cpu", "cpu")` or `("cuda:0", "cuda:1")` to explicitly parallelize cache
-construction across map-style index ranges.
-Pass `num_workers` to let each device process read samples through a PyTorch
-`DataLoader`; `batch_size` controls that loader's sample batch size. This gives
-one process per device, and optional DataLoader workers inside each process.
+`FilterRule.apply(..., device="auto")` resolves all visible CUDA devices, or CPU
+when CUDA is unavailable. One resolved device runs in the calling process;
+multiple devices start one worker per device using
+`Runtime.process_start_method`, which defaults to `"spawn"`. Pass `device="cpu"`
+to force CPU execution. Pass an iterable such as `("cpu", "cpu")` or
+`("cuda:0", "cuda:1")` to explicitly parallelize cache construction across
+map-style index ranges.
+Pass `num_workers` to let each execution process read samples through a PyTorch
+`DataLoader`; `batch_size` controls that loader's sample batch size.
 `dataset_factory` is the only dataset entry point. This keeps single-device,
 DataLoader-worker, multi-device, and chained filtering on the same contract.
 
-Multi-device filtering uses Python `spawn`, so workers must receive factories
-instead of an already constructed dataset instance:
+With the default `"spawn"` start method, multi-device workers must receive
+picklable factories instead of an already constructed dataset instance:
 
 ```python
 def dataset_factory():

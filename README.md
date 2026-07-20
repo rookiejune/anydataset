@@ -353,9 +353,9 @@ sets DDP-style `RANK`, `LOCAL_RANK`, `WORLD_SIZE`, `MASTER_ADDR`, and
 `MASTER_PORT` before calling factories, and scans an exhaustive runtime-style
 index shard so every base sample is covered. Multi-device filtering manages
 these environment variables itself; run it as an offline preprocessing step
-rather than from inside an existing DDP training process. It uses Python
-`spawn`, so the dataset entry point is always `dataset_factory=...`. Both the
-dataset factory and predicate factory should be module-level picklable
+rather than from inside an existing DDP training process. The dataset entry
+point is always `dataset_factory=...`. With the default `"spawn"` process start
+method, both dataset and predicate factories should be module-level picklable
 callables.
 Pass `num_workers` to let each execution process read samples through a PyTorch
 `DataLoader`; `batch_size` controls the loader batch size.
@@ -401,7 +401,14 @@ dataset loading or cache naming.
 materialize it once to a store before filtering it:
 
 ```python
-from anydataset import AnyDataset, FilterRule, IterableAnyDataset, Preset, Source, Spec
+from anydataset import (
+    AnyDataset,
+    FilterRule,
+    IterableAnyDataset,
+    Preset,
+    Source,
+    Spec,
+)
 from anydataset.quality.translation import Predicate as TranslationQuality
 
 source = IterableAnyDataset.preset(
