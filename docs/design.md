@@ -109,6 +109,12 @@ Preset 不负责加载 codec，也不应该把 LongCat 逻辑塞进 raw row pars
 store 内部以 `sample_index` 作为样本对齐键。`sample_id` 只用于 manifest 和错误信息
 的可读标识，不参与 base store 与 delta store 的对齐；调用方负责保证派生 view 来自
 同一顺序的数据集。
+store 的 map-style `__getitem__` 保持全局下标随机访问语义，不隐式改变采样顺序。
+训练时如果需要避免样本级 shuffle 频繁跨 tar shard，调用方显式使用
+`StoreLocalBatchSampler` 或 `store_local_loader`。该 sampler 读取已选择 view manifest
+里的 payload shard，先按 shard-local block 组 batch，再在需要时 shuffle block 和
+block 内样本；分布式 rank 以完整 batch 为单位切分，不修改通用
+`iter_indexed_shard()` 的 modulo 契约。
 reader 只接受字段和 Parquet manifest 结构均完整匹配 `schema_version: 2` 的 store；
 view manifest 必须显式包含 `sample_index`。旧格式必须先显式迁移或重新物化，
 不在读取时按 `sample_id` 静默补齐。

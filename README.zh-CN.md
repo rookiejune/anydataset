@@ -616,6 +616,31 @@ dataset = AnyDataset(
 )
 ```
 
+store payload 按 view 写入 tar shard。普通 `DataLoader(shuffle=True)` 会在样本级打散，
+一个 batch 可能频繁跨 tar 读取。训练 store 时可以改用 store-local batch sampler：
+
+```python
+from torch.utils.data import DataLoader
+
+from anydataset.dataset import collate_fn
+from anydataset.store import StoreLocalBatchSampler
+
+store = dataset.dataset
+loader = DataLoader(
+    dataset,
+    batch_sampler=StoreLocalBatchSampler(
+        store,
+        batch_size=32,
+        shuffle=True,
+    ),
+    collate_fn=collate_fn(schema),
+)
+```
+
+`StoreLocalBatchSampler` 先按已选择 view 的 payload shard 分组，再 shuffle shard
+顺序和 shard 内样本；它不改变 `StoreDataset.__getitem__` 和全局 index shard 语义。
+使用 `batch_sampler` 时不要再给 `DataLoader` 传 `batch_size`、`shuffle` 或 `sampler`。
+
 reader 只接受 `schema_version: 2`。上一版 canonical store 使用相同的 sample
 manifest 和目录布局，但 dataset manifest 没有版本号，view manifest 使用
 `sample_id` 对齐。该格式必须离线迁移到新目录；源目录保持不变，目标目录只有在

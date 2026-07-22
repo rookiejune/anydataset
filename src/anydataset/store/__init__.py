@@ -18,6 +18,7 @@ from ._files import (
 )
 from .materializer import ModalityMaterializer, ViewMaterializer
 from .migration import migrate_store
+from .sampler import StoreLocalBatchSampler, store_local_loader
 from .writer import DatasetWriter
 
 __all__ = [
@@ -33,10 +34,12 @@ __all__ = [
     "Runtime",
     "StoreFilesInUseError",
     "StoreFilesLease",
+    "StoreLocalBatchSampler",
     "ViewMaterializer",
     "ViewProvider",
     "ViewTransform",
     "cleanup_store_files",
     "lease_store_files",
     "migrate_store",
+    "store_local_loader",
 ]
