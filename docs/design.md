@@ -229,14 +229,21 @@ pickle 重建和链式过滤会继续携带上游 ID。
 reader/provider/writer 进度，便于非交互 job 判断停在哪个阶段。用户级入口不暴露单独的
 log root；嵌套 worker 通过内部配置继承父进程的 run log 目录。
 
-## 质量 Predicate
+## 质量规则
 
-`anydataset.quality` 下的模块只提供可传给 `FilterRule` 的 predicate 和 profile。
+`anydataset.quality` 下的模块只提供可传给 `FilterRule` 的规则类和 profile 类。
 它们不拥有 source、preset、cache root 或训练采样策略。
 
-- `quality.translation` 读取 source/target text，输出 `clean`、`usable`、
-  `review`、`reject`，第一版内置 profile 只覆盖 WMT19 `zh-en`。
-- `quality.speech` 读取 audio item 和同 role text，输出 `accept` 或 `reject`，
+- `quality.text.TextQuality` 只检查单个文本 item。
+- `quality.text.TextAcceptability` 和 `quality.text.ChineseGEC` 是可选模型规则，
+  仍按单个 role/text item 输出自己的 label、flags 和指标。
+- canonical 文本语言用 `TextMeta.LANG -> Lang` 表达；preset 或 parser 入口用
+  `remap_lang(...)` 把数据集原始标签映射成 enum，quality 层不再接收裸字符串。
+- `quality.translation.TranslationQuality` 只检查 source/target pair，输出
+  `accept` 或 `reject`。
+- `quality.rules.QualityChain` 按调用方传入的顺序组合原子规则，并负责
+  `accept`、`review`、`reject` 的链式转移。
+- `quality.speech.SpeechQuality` 读取 audio item 和同 role text，输出 `accept` 或 `reject`，
   并把阈值命中、缺字段等审计信息放进 `FilterDecision.metrics`。
 
 如果接入神经网络评估器，模型路径、阈值和版本仍应体现在 `FilterRule.name` 或调用方

@@ -19,7 +19,7 @@ import torch
 from anydataset.dataset import AnyDataset, IterableAnyDataset, MergedDataset
 from anydataset.filter import FilterRule
 from anydataset.provider import LongCatProvider
-from anydataset.quality.speech import Predicate, Profile
+from anydataset.quality.speech import SpeechQuality, SpeechQualityProfile
 from anydataset.store import ViewMaterializer
 from anydataset.types import (
     AudioItem,
@@ -106,7 +106,7 @@ def longcat_provider(device: str) -> LongCatProvider:
     )
 
 
-def quality_factory() -> Predicate:
+def quality_factory() -> SpeechQuality:
     from anytrain.evaluator.speech import (
         SpeechEvaluator,
         UTMOSEvaluator,
@@ -126,8 +126,8 @@ def quality_factory() -> Predicate:
             backend_load_options={"trust_repo": True},
         ),
     )
-    return Predicate(
-        profile=Profile(
+    return SpeechQuality(
+        profile=SpeechQualityProfile(
             min_utmos=2.8,
             min_chrf=50.0,
             max_seconds_per_text_unit=4.0,

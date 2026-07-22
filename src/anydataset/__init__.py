@@ -3,13 +3,14 @@ from .cache import anydataset_home
 from .dataset import AnyDataset, IterableAnyDataset, MultipleAnyDataset
 from .dataset.source import has_source, register_source
 from .filter import FilterRule
-from .types import Preset, Source, Spec, Task
+from .types import Lang, Preset, Source, Spec, Task, remap_lang
 from .utils import resolve_dataset
 
 __all__ = [
     "AnyDataset",
     "FilterRule",
     "IterableAnyDataset",
+    "Lang",
     "MultipleAnyDataset",
     "Preset",
     "Source",
@@ -19,5 +20,6 @@ __all__ = [
     "anydataset_home",
     "has_source",
     "register_source",
+    "remap_lang",
     "resolve_dataset",
 ]

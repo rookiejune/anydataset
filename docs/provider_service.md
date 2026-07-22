@@ -122,12 +122,12 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from anydataset import AnyDataset, FilterRule, Preset, Source, Spec
+from anydataset import AnyDataset, FilterRule, Lang, Preset, Source, Spec
 from anydataset.provider_service import (
     ProviderServer,
     RemoteFilterFactory,
 )
-from anydataset.quality.translation import Predicate
+from anydataset.quality.translation import TranslationQuality
 from anydataset.runtime import Runtime
 
 
@@ -140,11 +140,11 @@ def dataset_factory() -> AnyDataset:
     return AnyDataset(Spec(source=Source.STORE, path=str(BASE_STORE)))
 
 
-def translation_factory(_device: str) -> Predicate:
-    return Predicate.from_preset(
+def translation_factory(_device: str) -> TranslationQuality:
+    return TranslationQuality.from_preset(
         Preset.WMT19,
-        source_lang="zh",
-        target_lang="en",
+        source_lang=Lang.ZH,
+        target_lang=Lang.EN,
     )
 
 

@@ -43,11 +43,11 @@ wrapper that forwards its `name` and `factory` to `FilteredDataset`.
 chained:
 
 ```python
-clean_text = text_rule.apply(
+accepted_text = text_rule.apply(
     dataset_factory=dataset_factory,
-).select_by("clean", "usable")
-clean_both = speech_rule.apply(
-    dataset_factory=clean_text.dataset_factory,
+).select_by("accept")
+accepted_both = speech_rule.apply(
+    dataset_factory=accepted_text.dataset_factory,
 ).select_by("accept")
 ```
 

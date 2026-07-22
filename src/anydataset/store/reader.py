@@ -14,6 +14,7 @@ from typing import Any
 from ..cache import anydataset_home
 from ..dataset.abc import MapStyleABC
 from ..types import item
+from ..types.language import remap_lang
 from ._files import StoreFilesLease, lease_store_files, payload_path
 from .jsonio import read_json
 from .manifest import (
@@ -725,7 +726,7 @@ def _item_from_entry(
     if modality is item.Modality.TEXT:
         return item.TextItem(
             views=views,
-            meta=_enum_keys(meta, item.TextMeta),
+            meta=_text_meta(meta),
         )
     raise ValueError(f"Unsupported modality: {modality!r}.")
 
@@ -818,6 +819,13 @@ def _enum_keys(values: Mapping[str, Any], enum_type):
     converted = {}
     for key, value in values.items():
         converted[enum_type(key)] = value
+    return converted
+
+
+def _text_meta(values: Mapping[str, Any]) -> Mapping[item.TextMeta, Any]:
+    converted = _enum_keys(values, item.TextMeta)
+    if item.TextMeta.LANG in converted:
+        converted[item.TextMeta.LANG] = remap_lang(converted[item.TextMeta.LANG])
     return converted
 
 

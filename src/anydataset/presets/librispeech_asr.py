@@ -3,7 +3,7 @@ from __future__ import annotations
 from functools import partial
 from typing import Any
 
-from ..dataset import AudioView, TextMeta, TextView
+from ..dataset import AudioView, Lang, TextMeta, TextView
 from ..dataset.abc import IterableAnyDataset
 from ..types import Preset
 from ..types.item import Transforms
@@ -25,7 +25,7 @@ class LibriSpeechASR(IterableAnyDataset):
                 sample_from_row,
                 audio={"audio": AudioView.WAVEFORM},
                 text={"text": TextView.TEXT},
-                text_values={TextMeta.LANG: "en"},
+                text_values={TextMeta.LANG: Lang.EN},
             ),
             transforms=transforms,
         )

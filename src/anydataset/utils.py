@@ -5,7 +5,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Union
 
-from .types import Preset, Source, SourceKey, Spec, source_key
+from .types import Preset, Source, SourceKey, Spec, remap_lang, source_key
 from .types.item import (
     AudioItem,
     AudioMeta,
@@ -172,17 +172,29 @@ def load_text(
     values: Mapping[TextMeta, Any] | None = None,
 ) -> TextItem:
     views: dict[TextView, Any] = {}
-    meta: dict[TextMeta, Any] = dict(values or {})
+    meta: dict[TextMeta, Any] = _text_values(values)
 
     for field, key in fields.items():
         value = _value(row, field)
         if isinstance(key, TextView):
             _assign(views, key, value, target="text view")
         elif isinstance(key, TextMeta):
-            _assign(meta, key, value, target="text metadata")
+            _assign(meta, key, _text_value(key, value), target="text metadata")
         else:
             raise TypeError(f"Unsupported text field key: {key!r}.")
     return TextItem(views=views, meta=meta)
+
+
+def _text_values(values: Mapping[TextMeta, Any] | None) -> dict[TextMeta, Any]:
+    if values is None:
+        return {}
+    return {key: _text_value(key, value) for key, value in values.items()}
+
+
+def _text_value(key: TextMeta, value: Any) -> Any:
+    if key == TextMeta.LANG:
+        return remap_lang(value)
+    return value
 
 
 def _load_item(

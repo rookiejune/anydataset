@@ -20,6 +20,7 @@ from anydataset.types import (
     AudioView,
     ImageItem,
     ImageView,
+    Lang,
     Modality,
     Role,
     TextItem,
@@ -600,7 +601,7 @@ class ViewMaterializerTest(unittest.TestCase):
                         ),
                         (Role.DEFAULT, Modality.TEXT): TextItem(
                             views={TextView.TEXT: "hello"},
-                            meta={TextMeta.LANG: "en_us"},
+                            meta={TextMeta.LANG: Lang.EN},
                         ),
                     }
                 ],
@@ -648,7 +649,7 @@ class ViewMaterializerTest(unittest.TestCase):
                         ),
                         (Role.DEFAULT, Modality.TEXT): TextItem(
                             views={TextView.TEXT: "hello"},
-                            meta={TextMeta.LANG: "en_us"},
+                            meta={TextMeta.LANG: Lang.EN},
                         ),
                     }
                 ],
@@ -689,7 +690,7 @@ class ViewMaterializerTest(unittest.TestCase):
             )
             self.assertEqual(
                 sample[Role.DEFAULT, Modality.TEXT].meta[TextMeta.LANG],
-                "en_us",
+                Lang.EN,
             )
 
     def test_materializer_keep_schema_merges_same_item_fields(self):
@@ -769,7 +770,7 @@ class ViewMaterializerTest(unittest.TestCase):
                     ),
                     (Role.DEFAULT, Modality.TEXT): TextItem(
                         views={TextView.TEXT: f"text-{index}"},
-                        meta={TextMeta.LANG: "en_us"},
+                        meta={TextMeta.LANG: Lang.EN},
                     ),
                 }
                 for index in range(2)
@@ -800,7 +801,7 @@ class ViewMaterializerTest(unittest.TestCase):
                 )
                 self.assertEqual(
                     sample[Role.DEFAULT, Modality.TEXT].meta[TextMeta.LANG],
-                    "en_us",
+                    Lang.EN,
                 )
 
     def test_modality_materializer_adds_missing_modality_with_empty_meta(self):
@@ -813,7 +814,7 @@ class ViewMaterializerTest(unittest.TestCase):
                     {
                         (Role.DEFAULT, Modality.TEXT): TextItem(
                             views={TextView.TEXT: "hello"},
-                            meta={TextMeta.LANG: "en_us"},
+                            meta={TextMeta.LANG: Lang.EN},
                         )
                     }
                 ]
@@ -841,7 +842,7 @@ class ViewMaterializerTest(unittest.TestCase):
             self.assertEqual(delta[Role.DEFAULT, Modality.AUDIO].meta, {})
             self.assertEqual(
                 merged[Role.DEFAULT, Modality.TEXT].meta[TextMeta.LANG],
-                "en_us",
+                Lang.EN,
             )
             self.assertEqual(merged[Role.DEFAULT, Modality.AUDIO].meta, {})
 
@@ -1005,7 +1006,7 @@ class ViewMaterializerTest(unittest.TestCase):
                         ),
                         (Role.DEFAULT, Modality.TEXT): TextItem(
                             views={TextView.TEXT: "hello"},
-                            meta={TextMeta.LANG: "en_us"},
+                            meta={TextMeta.LANG: Lang.EN},
                         ),
                     }
                 ]
@@ -1030,7 +1031,7 @@ class ViewMaterializerTest(unittest.TestCase):
             )
         )
         self.assertEqual(text.views[TextView.TEXT], "hello")
-        self.assertEqual(text.meta[TextMeta.LANG], "en_us")
+        self.assertEqual(text.meta[TextMeta.LANG], Lang.EN)
 
     def test_iter_indexed_shard_uses_map_style_indexes(self):
         dataset = [_audio_sample(torch.tensor([[float(index)]])) for index in range(5)]

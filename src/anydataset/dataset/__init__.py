@@ -38,6 +38,7 @@ from ..types.item import (
     Transforms,
     View,
 )
+from ..types.language import Lang, remap_lang
 from ..types.item import Requirement
 from .multiple import (
     IterationStrategy,
@@ -71,6 +72,7 @@ __all__ = [
     "IterationStrategy",
     "Item",
     "ItemTransform",
+    "Lang",
     "MapStyleABC",
     "MergedDataset",
     "Modality",
@@ -94,4 +96,5 @@ __all__ = [
     "WeightedRandomStrategy",
     "collate_fn",
     "field_lengths",
+    "remap_lang",
 ]

@@ -29,6 +29,7 @@ classifiers = [
 [project.optional-dependencies]
 audio = ["torchaudio>=2.0"]
 huggingface = ["datasets[audio]>=2.0", "huggingface_hub>=0.20"]
+text = ["transformers>=4.30", "sentencepiece>=0.1.99"]
 examples = ["tensorboard>=2.0", "torchvision>=0.15"]
 test = ["pytest>=8.0"]
 dev = [

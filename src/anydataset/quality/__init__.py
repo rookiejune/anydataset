@@ -1,6 +1,6 @@
-"""Quality predicates built on canonical samples.
+"""Quality rules built on canonical samples.
 
-This package provides reusable predicate logic above `anydataset.filter`.
+This package provides reusable rule logic above `anydataset.filter`.
 It does not own physical data loading, cache construction, or dataset presets.
 """
 

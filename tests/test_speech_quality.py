@@ -12,7 +12,8 @@ from anydataset.types import (
     TextItem,
     TextView,
 )
-from anydataset.quality.speech import Label, Predicate, Profile
+from anydataset.quality.rules import QualityLabel
+from anydataset.quality.speech import SpeechQuality, SpeechQualityProfile
 
 
 class FakeSpeechEvaluator:
@@ -36,7 +37,7 @@ class SpeechQualityTest(unittest.TestCase):
                 {"utmos": 4.0, "wer": 0.2, "chrf": 75.0, "bleu": 60.0},
             ]
         )
-        predicate = Predicate(
+        predicate = SpeechQuality(
             evaluator=evaluator,
             decode_options={"language": "en", "temperature": 0.0},
         )
@@ -58,7 +59,7 @@ class SpeechQualityTest(unittest.TestCase):
             }
         )
 
-        self.assertEqual(decision.label, Label.ACCEPT)
+        self.assertEqual(decision.label, QualityLabel.ACCEPT)
         self.assertEqual(decision.metrics["decision"], "accept")
         self.assertEqual(decision.metrics["flags"], [])
         self.assertEqual(decision.metrics["warnings"], [])
@@ -114,7 +115,7 @@ class SpeechQualityTest(unittest.TestCase):
         )
 
     def test_rejects_when_any_checked_audio_fails_thresholds(self):
-        predicate = Predicate(
+        predicate = SpeechQuality(
             evaluator=FakeSpeechEvaluator(
                 [
                     {"utmos": 2.79, "wer": 0.41, "chrf": 49.9, "bleu": 70.0},
@@ -124,7 +125,7 @@ class SpeechQualityTest(unittest.TestCase):
 
         decision = predicate(_sample(torch.zeros(1, 16000), 16000, "hello"))
 
-        self.assertEqual(decision.label, Label.REJECT)
+        self.assertEqual(decision.label, QualityLabel.REJECT)
         self.assertEqual(
             decision.metrics["flags"],
             ["default_utmos_low", "default_chrf_low", "default_peak_amplitude_low"],
@@ -135,8 +136,8 @@ class SpeechQualityTest(unittest.TestCase):
         )
 
     def test_wer_rejection_is_only_enabled_when_threshold_is_set(self):
-        predicate = Predicate(
-            profile=Profile(max_wer=0.4),
+        predicate = SpeechQuality(
+            profile=SpeechQualityProfile(max_wer=0.4),
             evaluator=FakeSpeechEvaluator(
                 [
                     {"utmos": 4.0, "wer": 0.41, "chrf": 80.0, "bleu": 70.0},
@@ -146,13 +147,13 @@ class SpeechQualityTest(unittest.TestCase):
 
         decision = predicate(_sample(torch.ones(1, 16000), 16000, "hello"))
 
-        self.assertEqual(decision.label, Label.REJECT)
+        self.assertEqual(decision.label, QualityLabel.REJECT)
         self.assertEqual(decision.metrics["flags"], ["default_wer_high"])
         self.assertEqual(decision.metrics["items"][0]["flags"], ["wer_high"])
 
     def test_rejects_below_bleu_when_threshold_is_enabled(self):
-        predicate = Predicate(
-            profile=Profile(min_bleu=30.0),
+        predicate = SpeechQuality(
+            profile=SpeechQualityProfile(min_bleu=30.0),
             evaluator=FakeSpeechEvaluator(
                 [
                     {"utmos": 4.0, "wer": 0.1, "chrf": 80.0, "bleu": 29.9},
@@ -162,11 +163,11 @@ class SpeechQualityTest(unittest.TestCase):
 
         decision = predicate(_sample(torch.ones(1, 16000), 16000, "hello"))
 
-        self.assertEqual(decision.label, Label.REJECT)
+        self.assertEqual(decision.label, QualityLabel.REJECT)
         self.assertEqual(decision.metrics["flags"], ["default_bleu_low"])
 
     def test_rejects_long_audio_per_text_unit_and_low_peak(self):
-        predicate = Predicate(
+        predicate = SpeechQuality(
             evaluator=FakeSpeechEvaluator(
                 [
                     {"utmos": 4.0, "wer": 0.1, "chrf": 80.0, "bleu": 70.0},
@@ -176,7 +177,7 @@ class SpeechQualityTest(unittest.TestCase):
 
         decision = predicate(_sample(torch.zeros(1, 80000), 16000, "啊"))
 
-        self.assertEqual(decision.label, Label.REJECT)
+        self.assertEqual(decision.label, QualityLabel.REJECT)
         self.assertEqual(
             decision.metrics["flags"],
             [
@@ -202,7 +203,7 @@ class SpeechQualityTest(unittest.TestCase):
         )
 
     def test_counts_cjk_characters_and_latin_words_as_text_units(self):
-        predicate = Predicate(
+        predicate = SpeechQuality(
             evaluator=FakeSpeechEvaluator(
                 [
                     {"utmos": 4.0, "wer": 0.1, "chrf": 80.0, "bleu": 70.0},
@@ -212,13 +213,13 @@ class SpeechQualityTest(unittest.TestCase):
 
         decision = predicate(_sample(torch.ones(1, 16000), 16000, "你好 ABC 123"))
 
-        self.assertEqual(decision.label, Label.ACCEPT)
+        self.assertEqual(decision.label, QualityLabel.ACCEPT)
         self.assertEqual(decision.metrics["items"][0]["text_units"], 4)
         self.assertEqual(decision.metrics["items"][0]["seconds_per_text_unit"], 0.25)
 
     def test_skips_audio_without_waveform_and_records_warning(self):
         evaluator = FakeSpeechEvaluator([])
-        predicate = Predicate(evaluator=evaluator)
+        predicate = SpeechQuality(evaluator=evaluator)
         decision = predicate(
             {
                 (Role.DEFAULT, Modality.AUDIO): AudioItem(
@@ -230,7 +231,7 @@ class SpeechQualityTest(unittest.TestCase):
             }
         )
 
-        self.assertEqual(decision.label, Label.ACCEPT)
+        self.assertEqual(decision.label, QualityLabel.ACCEPT)
         self.assertEqual(decision.metrics["flags"], [])
         self.assertEqual(decision.metrics["warnings"], ["default_missing_waveform"])
         self.assertEqual(decision.metrics["audio_count"], 1)
@@ -240,7 +241,7 @@ class SpeechQualityTest(unittest.TestCase):
 
     def test_skips_audio_without_same_role_text_and_records_warning(self):
         evaluator = FakeSpeechEvaluator([])
-        predicate = Predicate(evaluator=evaluator)
+        predicate = SpeechQuality(evaluator=evaluator)
         decision = predicate(
             {
                 (Role.SOURCE, Modality.AUDIO): AudioItem(
@@ -252,31 +253,31 @@ class SpeechQualityTest(unittest.TestCase):
             }
         )
 
-        self.assertEqual(decision.label, Label.ACCEPT)
+        self.assertEqual(decision.label, QualityLabel.ACCEPT)
         self.assertEqual(decision.metrics["warnings"], ["source_missing_text"])
         self.assertEqual(decision.metrics["checked_count"], 0)
         self.assertEqual(evaluator.calls, [])
 
     def test_rejects_non_finite_waveform_before_evaluation(self):
         evaluator = FakeSpeechEvaluator([])
-        predicate = Predicate(evaluator=evaluator)
+        predicate = SpeechQuality(evaluator=evaluator)
 
         decision = predicate(
             _sample(torch.tensor([[0.0, float("nan")]]), 16000, "hello")
         )
 
-        self.assertEqual(decision.label, Label.REJECT)
+        self.assertEqual(decision.label, QualityLabel.REJECT)
         self.assertEqual(decision.metrics["flags"], ["default_non_finite_waveform"])
         self.assertEqual(decision.metrics["checked_count"], 0)
         self.assertEqual(evaluator.calls, [])
 
     def test_accepts_sample_without_audio_and_records_warning(self):
         evaluator = FakeSpeechEvaluator([])
-        predicate = Predicate(evaluator=evaluator)
+        predicate = SpeechQuality(evaluator=evaluator)
 
         decision = predicate({})
 
-        self.assertEqual(decision.label, Label.ACCEPT)
+        self.assertEqual(decision.label, QualityLabel.ACCEPT)
         self.assertEqual(decision.metrics["flags"], [])
         self.assertEqual(decision.metrics["warnings"], ["no_audio"])
         self.assertEqual(decision.metrics["audio_count"], 0)
@@ -284,7 +285,7 @@ class SpeechQualityTest(unittest.TestCase):
         self.assertEqual(evaluator.calls, [])
 
     def test_requires_required_speech_metrics(self):
-        predicate = Predicate(
+        predicate = SpeechQuality(
             evaluator=FakeSpeechEvaluator(
                 [
                     {"utmos": 4.0, "wer": 0.1, "chrf": 80.0},
@@ -296,7 +297,7 @@ class SpeechQualityTest(unittest.TestCase):
             predicate(_sample(torch.zeros(1, 16000), 16000, "hello"))
 
     def test_rejects_non_scalar_tensor_metric(self):
-        predicate = Predicate(
+        predicate = SpeechQuality(
             evaluator=FakeSpeechEvaluator(
                 [
                     {

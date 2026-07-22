@@ -2,7 +2,7 @@
 
 The example provides a lightweight local TSV/CSV source and a picklable
 predicate for canonical machine-translation samples. It outputs cached
-`clean`, `usable`, `review`, and `reject` partitions plus JSON audit rows. Heavy semantic
+`accept`, `review`, and `reject` partitions plus JSON audit rows. Heavy semantic
 models are intentionally outside this file; plug them into a later predicate
 once the cheap rule layer is calibrated.
 """
@@ -21,10 +21,17 @@ from anydataset import (
     AnyDataset,
     FilterRule,
     has_source,
+    remap_lang,
     register_source,
 )
-from anydataset.quality.translation import Predicate, Profile
+from anydataset.quality.rules import QualityChain
+from anydataset.quality.rules import Rule
+from anydataset.quality.text import TextQuality
+from anydataset.quality.text import TextQualityProfile
+from anydataset.quality.translation import TranslationQuality
+from anydataset.quality.translation import TranslationQualityProfile
 from anydataset.types import (
+    Lang,
     Modality,
     Role,
     Sample,
@@ -42,8 +49,8 @@ TABLE_SOURCE = "translation_quality_table"
 class BitextParser:
     source_column: str
     target_column: str
-    source_lang: str | None
-    target_lang: str | None
+    source_lang: Lang | None
+    target_lang: Lang | None
 
     def __call__(self, row: Mapping[str, str]) -> Sample:
         return parse_bitext_row(
@@ -66,11 +73,35 @@ class DatasetFactory:
 
 
 @dataclass(frozen=True)
-class PredicateFactory:
-    profile: Profile
+class QualityFactory:
+    text_profile: TextQualityProfile
+    translation_profile: TranslationQualityProfile
 
-    def __call__(self) -> Predicate:
-        return Predicate(self.profile)
+    def __call__(self) -> QualityChain:
+        return QualityChain(
+            (
+                Rule(
+                    "source_text",
+                    TextQuality(
+                        role=Role.SOURCE,
+                        lang=self.translation_profile.source_lang,
+                        profile=self.text_profile,
+                    ),
+                ),
+                Rule(
+                    "target_text",
+                    TextQuality(
+                        role=Role.TARGET,
+                        lang=self.translation_profile.target_lang,
+                        profile=self.text_profile,
+                    ),
+                ),
+                Rule(
+                    "translation",
+                    TranslationQuality(self.translation_profile),
+                ),
+            )
+        )
 
 
 class BitextTableSource:
@@ -121,6 +152,11 @@ class BitextTableDataset:
 
 def main() -> None:
     args = parse_args()
+    if args.source_lang is None or args.target_lang is None:
+        raise ValueError("source_lang and target_lang are required.")
+    source_lang = remap_lang(args.source_lang)
+    target_lang = remap_lang(args.target_lang)
+
     dataset_factory = DatasetFactory(
         spec=Spec(
             source=TABLE_SOURCE,
@@ -134,25 +170,31 @@ def main() -> None:
         parser=BitextParser(
             source_column=args.source_column,
             target_column=args.target_column,
-            source_lang=args.source_lang,
-            target_lang=args.target_lang,
+            source_lang=source_lang,
+            target_lang=target_lang,
         ),
     )
-    if args.source_lang is None or args.target_lang is None:
-        raise ValueError("source_lang and target_lang are required.")
 
-    profile = Profile(
-        source_lang=args.source_lang,
-        target_lang=args.target_lang,
+    text_profile = TextQualityProfile(
+        min_script_ratio=args.min_script_ratio,
+        reject_script_ratio=args.reject_script_ratio,
+    )
+    translation_profile = TranslationQualityProfile(
+        source_lang=source_lang,
+        target_lang=target_lang,
         review_min_ratio=args.review_min_ratio,
         review_max_ratio=args.review_max_ratio,
         reject_min_ratio=args.reject_min_ratio,
         reject_max_ratio=args.reject_max_ratio,
-        min_script_ratio=args.min_script_ratio,
-        reject_script_ratio=args.reject_script_ratio,
     )
 
-    rule = FilterRule(args.rule_name, PredicateFactory(profile))
+    rule = FilterRule(
+        args.rule_name,
+        QualityFactory(
+            text_profile=text_profile,
+            translation_profile=translation_profile,
+        ),
+    )
     result = rule.apply(
         dataset_factory=dataset_factory,
         metrics=True,
@@ -200,8 +242,8 @@ def parse_bitext_row(
     *,
     source_column: str,
     target_column: str,
-    source_lang: str | None,
-    target_lang: str | None,
+    source_lang: Lang | None,
+    target_lang: Lang | None,
 ) -> Sample:
     return {
         (Role.SOURCE, Modality.TEXT): TextItem(

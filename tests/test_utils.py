@@ -5,15 +5,24 @@ from anydataset.types import (
     AudioView,
     ImageMeta,
     ImageView,
+    Lang,
     Modality,
     Role,
     TextMeta,
     TextView,
 )
 from anydataset.utils import labels, sample_from_row, text_map
+from anydataset import remap_lang
 
 
 class PresetCommonTest(unittest.TestCase):
+    def test_remap_lang_normalizes_dataset_language_labels(self):
+        self.assertEqual(remap_lang("en_us"), Lang.EN)
+        self.assertEqual(remap_lang("zh-CN"), Lang.ZH)
+        self.assertEqual(remap_lang("cmn", {"cmn": Lang.ZH}), Lang.ZH)
+        with self.assertRaisesRegex(ValueError, "Unsupported language"):
+            remap_lang("klingon")
+
     def test_sample_from_row_maps_hf_audio_text_and_labels(self):
         row = {
             "audio": {
@@ -42,7 +51,7 @@ class PresetCommonTest(unittest.TestCase):
         self.assertEqual(audio.meta[AudioMeta.LABEL], "speech")
         self.assertEqual(audio.meta[AudioMeta.LABELS], {"target": 3})
         self.assertEqual(text.views[TextView.TEXT], "hello")
-        self.assertEqual(text.meta[TextMeta.LANG], "en")
+        self.assertEqual(text.meta[TextMeta.LANG], Lang.EN)
 
     def test_sample_from_row_maps_image_classification_fields(self):
         sample = sample_from_row(
@@ -130,9 +139,9 @@ class PresetCommonTest(unittest.TestCase):
         source = sample[Role.SOURCE, Modality.TEXT]
         target = sample[Role.TARGET, Modality.TEXT]
         self.assertEqual(source.views[TextView.TEXT], "The tea is hot.")
-        self.assertEqual(source.meta[TextMeta.LANG], "en")
+        self.assertEqual(source.meta[TextMeta.LANG], Lang.EN)
         self.assertEqual(target.views[TextView.TEXT], "Der Tee ist heiss.")
-        self.assertEqual(target.meta[TextMeta.LANG], "de")
+        self.assertEqual(target.meta[TextMeta.LANG], Lang.DE)
 
     def test_sample_from_row_rejects_duplicate_references(self):
         with self.assertRaises(ValueError):

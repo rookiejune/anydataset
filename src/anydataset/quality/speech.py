@@ -12,7 +12,6 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from enum import auto
 from math import isfinite
 import unicodedata
 from typing import Any, Protocol
@@ -20,15 +19,10 @@ from typing import Any, Protocol
 import torch
 from torch import Tensor
 
-from .._compat import StrEnum
 from ..filter import FilterDecision
 from ..filter.types import JsonValue
 from ..types import AudioItem, AudioView, Modality, Role, Sample, TextItem, TextView
-
-
-class Label(StrEnum):
-    ACCEPT = auto()
-    REJECT = auto()
+from .rules import QualityLabel
 
 
 class SpeechEvaluatorProtocol(Protocol):
@@ -43,7 +37,7 @@ class SpeechEvaluatorProtocol(Protocol):
 
 
 @dataclass(frozen=True)
-class Profile:
+class SpeechQualityProfile:
     min_utmos: float = 2.8
     max_wer: float | None = None
     min_chrf: float = 50.0
@@ -68,8 +62,8 @@ class Profile:
 
 
 @dataclass
-class Predicate:
-    profile: Profile = field(default_factory=Profile)
+class SpeechQuality:
+    profile: SpeechQualityProfile = field(default_factory=SpeechQualityProfile)
     evaluator: SpeechEvaluatorProtocol | None = None
     decode_options: Mapping[str, Any] = field(default_factory=dict)
 
@@ -116,7 +110,7 @@ class Predicate:
         if audio_count == 0:
             warnings.append("no_audio")
 
-        label = Label.REJECT if flags else Label.ACCEPT
+        label = QualityLabel.REJECT if flags else QualityLabel.ACCEPT
         return _decision(
             label,
             flags=flags,
@@ -138,7 +132,7 @@ def _default_evaluator() -> SpeechEvaluatorProtocol:
         from anytrain.evaluator.speech import SpeechEvaluator
     except ImportError as exc:
         raise ImportError(
-            "Speech quality Predicate requires `anytrain[speech]` when evaluator is "
+            "SpeechQuality requires `anytrain[speech]` when evaluator is "
             "not provided."
         ) from exc
     return SpeechEvaluator()
@@ -275,7 +269,7 @@ def _metric(metrics: Mapping[str, object], name: str) -> float:
     return output
 
 
-def _flags(metrics: Mapping[str, float], profile: Profile) -> list[str]:
+def _flags(metrics: Mapping[str, float], profile: SpeechQualityProfile) -> list[str]:
     flags: list[str] = []
     if metrics["utmos"] < profile.min_utmos:
         flags.append("utmos_low")
@@ -299,7 +293,7 @@ def _flags(metrics: Mapping[str, float], profile: Profile) -> list[str]:
 
 
 def _decision(
-    label: Label,
+    label: QualityLabel,
     *,
     flags: list[str],
     warnings: list[str],
@@ -350,4 +344,4 @@ def _finite_threshold(value: float, *, name: str) -> None:
         raise ValueError(f"{name} must be finite.")
 
 
-__all__ = ["Label", "Predicate", "Profile"]
+__all__ = ["QualityLabel", "SpeechQuality", "SpeechQualityProfile"]

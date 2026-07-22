@@ -1,14 +1,14 @@
 # Speech Quality Filter
 
-`anydataset.quality.speech` provides a reusable predicate for cached speech
-quality partitions. The predicate works on canonical `Sample` objects and is
+`anydataset.quality.speech` provides `SpeechQuality` for cached speech
+quality partitions. The rule works on canonical `Sample` objects and is
 meant to be used with `FilterRule`.
 
 ## Boundary
 
 - Dataset loading stays in `Spec`, `Preset`, `AnyDataset`, or `Source.STORE`.
 - Cache construction stays in `anydataset.filter`.
-- The predicate reads every `(role, Modality.AUDIO)` item in a sample.
+- `SpeechQuality` reads every `(role, Modality.AUDIO)` item in a sample.
 - Each checked audio item must expose `AudioView.WAVEFORM` and same-role
   `(role, Modality.TEXT)` with `TextView.TEXT`.
 - Missing waveform or same-role text is recorded as an audit warning. It does
@@ -17,7 +17,7 @@ meant to be used with `FilterRule`.
 
 ## Labels
 
-The predicate returns two labels:
+`SpeechQuality` returns two labels:
 
 - `accept`: no checked audio item failed the configured thresholds.
 - `reject`: at least one checked audio item failed a threshold.
@@ -33,21 +33,21 @@ The default thresholds are:
 
 WER is still recorded for audit, but is not a rejection threshold by default
 because ASR output may omit word separators in languages such as Chinese. Enable
-WER rejection by setting `Profile(max_wer=...)`. Enable BLEU rejection by
-setting `Profile(min_bleu=...)`.
+WER rejection by setting `SpeechQualityProfile(max_wer=...)`. Enable BLEU
+rejection by setting `SpeechQualityProfile(min_bleu=...)`.
 
 ## Metrics
 
-The predicate returns `FilterDecision`, so callers should apply the rule with
+`SpeechQuality` returns `FilterDecision`, so callers should apply the rule with
 `metrics=True` when they want audit rows:
 
 ```python
 from anydataset import FilterRule
-from anydataset.quality.speech import Predicate, Profile
+from anydataset.quality.speech import SpeechQuality, SpeechQualityProfile
 
 def factory():
-    return Predicate(
-        profile=Profile(min_utmos=3.2, min_chrf=55.0),
+    return SpeechQuality(
+        profile=SpeechQualityProfile(min_utmos=3.2, min_chrf=55.0),
         decode_options={"language": "en", "temperature": 0.0},
     )
 
@@ -73,7 +73,7 @@ Each metrics payload includes:
 
 ## Evaluator
 
-By default the predicate loads `anytrain.evaluator.speech.SpeechEvaluator`.
+By default `SpeechQuality` loads `anytrain.evaluator.speech.SpeechEvaluator`.
 Pass `evaluator=...` to inject a test double, a preloaded evaluator, or a custom
 backend. The evaluator must be callable as:
 

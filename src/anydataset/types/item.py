@@ -6,6 +6,7 @@ from enum import auto
 from typing import Any, Generic, TypeVar, Union
 
 from .._compat import Self, StrEnum
+from .language import Lang
 
 KeyT = TypeVar("KeyT")
 ValueT = TypeVar("ValueT")
@@ -125,7 +126,7 @@ class TextItem(_Item[TextView, TextMeta]):
         object.__setattr__(
             self,
             "meta",
-            _enum_mapping("TextItem.meta", self.meta, TextMeta),
+            _text_meta_mapping("TextItem.meta", self.meta),
         )
 
 
@@ -195,6 +196,14 @@ def _enum_mapping(name: str, value: object, key_type: type[KeyT]) -> Mapping[Key
     output = dict(value)
     if any(not isinstance(key, key_type) for key in output):
         raise TypeError(f"{name} keys must be {key_type.__name__} values.")
+    return output
+
+
+def _text_meta_mapping(name: str, value: object) -> Mapping[TextMeta, Any]:
+    output = _enum_mapping(name, value, TextMeta)
+    lang = output.get(TextMeta.LANG)
+    if lang is not None and not isinstance(lang, Lang):
+        raise TypeError("TextMeta.LANG must be a Lang value.")
     return output
 
 

@@ -7,6 +7,7 @@ from anydataset import Preset, resolve_dataset
 from anydataset.types import (
     AudioMeta,
     AudioView,
+    Lang,
     Modality,
     Role,
     TextMeta,
@@ -141,11 +142,11 @@ class CommonVoicePresetTest(unittest.TestCase):
         self.assertEqual(audio.meta[AudioMeta.SPEAKER_ID], "speaker-1")
         self.assertNotIn("client_id", audio.meta[AudioMeta.LABELS])
         self.assertEqual(text.views[TextView.TEXT], "Hello there.")
-        self.assertEqual(text.meta[TextMeta.LANG], "en")
+        self.assertEqual(text.meta[TextMeta.LANG], Lang.EN)
 
         zh_text = samples[1][Role.DEFAULT, Modality.TEXT]
         self.assertEqual(zh_text.views[TextView.TEXT], "Ni hao.")
-        self.assertEqual(zh_text.meta[TextMeta.LANG], "zh-CN")
+        self.assertEqual(zh_text.meta[TextMeta.LANG], Lang.ZH)
 
     def test_requires_root_or_environment(self):
         with mock.patch.dict("os.environ", {}, clear=True):

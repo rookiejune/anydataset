@@ -24,6 +24,7 @@ from anydataset.types import (
     AudioView,
     ImageItem,
     ImageView,
+    Lang,
     Modality,
     Role,
     TextView,
@@ -72,6 +73,19 @@ class CanonicalDatasetTest(unittest.TestCase):
             with self.subTest(create=create):
                 with self.assertRaises(TypeError):
                     create()
+
+    def test_text_language_meta_requires_lang_enum(self):
+        item = TextItem(
+            views={TextView.TEXT: "hello"},
+            meta={TextMeta.LANG: Lang.EN},
+        )
+
+        self.assertEqual(item.meta[TextMeta.LANG], Lang.EN)
+        with self.assertRaisesRegex(TypeError, "TextMeta.LANG"):
+            TextItem(
+                views={TextView.TEXT: "hello"},
+                meta={TextMeta.LANG: "en"},
+            )
 
     def test_resolves_preset_to_spec(self):
         spec = resolve_dataset("fleurs:validation")

@@ -30,11 +30,11 @@ For local development:
 pip install -e '.[huggingface,audio,dev]'
 ```
 
-Model-backed providers are optional and come from `anytrain`. Install the
+Model-backed providers are optional. Install the
 matching extra before using them: `anytrain[longcat]` for `LongCatProvider`,
 `anytrain[speech]` for `WhisperASRProvider` and the default speech-quality
-evaluator, or `anytrain[moss-tts]` plus `anydataset[audio]` for
-`MossTTSProvider`.
+evaluator, `anydataset[text]` for `TextAcceptability` and `ChineseGEC`, or
+`anytrain[moss-tts]` plus `anydataset[audio]` for `MossTTSProvider`.
 
 ## Presets
 
@@ -392,9 +392,9 @@ Completed caches are immutable generations with reader leases. See
 [`docs/filter_cache.md`](docs/filter_cache.md) for their cleanup contract and
 the `cleanup_filter_generations(...)` API.
 
-## Quality Predicates
+## Quality Rules
 
-Quality modules provide reusable predicates for `FilterRule`; they do not own
+Quality modules provide reusable rule classes for `FilterRule`; they do not own
 dataset loading or cache naming.
 
 `FilterRule` accepts map-style inputs. Because WMT19 is an iterable preset,
@@ -405,11 +405,15 @@ from anydataset import (
     AnyDataset,
     FilterRule,
     IterableAnyDataset,
+    Lang,
     Preset,
     Source,
     Spec,
 )
-from anydataset.quality.translation import Predicate as TranslationQuality
+from anydataset.quality.rules import QualityChain, Rule
+from anydataset.quality.text import TextQuality
+from anydataset.quality.translation import TranslationQuality
+from anydataset.types import Role
 
 source = IterableAnyDataset.preset(
     "wmt19", source_lang="zh", target_lang="en"
@@ -424,30 +428,48 @@ def dataset_factory():
 
 
 def translation_factory():
-    return TranslationQuality.from_preset(
-        Preset.WMT19,
-        source_lang="zh",
-        target_lang="en",
+    return QualityChain(
+        (
+            Rule(
+                "source_text",
+                TextQuality(role=Role.SOURCE, lang=Lang.ZH),
+            ),
+            Rule(
+                "target_text",
+                TextQuality(role=Role.TARGET, lang=Lang.EN),
+            ),
+            Rule(
+                "pair",
+                TranslationQuality.from_preset(
+                    Preset.WMT19,
+                    source_lang=Lang.ZH,
+                    target_lang=Lang.EN,
+                ),
+            ),
+        )
     )
 
 filtered = FilterRule("mt_quality_rules_v1_zh_en", translation_factory).apply(
     dataset_factory=dataset_factory,
     metrics=True,
 )
-train = filtered.select_by("clean", "usable")
+train = filtered.select_by("accept")
 ```
 
-`anydataset.quality.translation.Predicate` labels text pairs as `clean`,
-`usable`, `review`, or `reject`. The first built-in profile is WMT19 `zh-en`;
-other language pairs should pass an explicit `Profile`.
+`anydataset.quality.text.TextQuality` checks each text item independently.
+`anydataset.quality.translation.TranslationQuality` checks only source/target
+pair consistency. Compose them with `anydataset.quality.rules.QualityChain` to
+control the filtering order and keep per-rule metrics. Canonical language meta
+uses `anydataset.Lang`; map external dataset labels at the boundary with
+`anydataset.remap_lang(...)`.
 
-`anydataset.quality.speech.Predicate` scans audio items with same-role text and
+`anydataset.quality.speech.SpeechQuality` scans audio items with same-role text and
 labels samples as `accept` or `reject` based on UTMOS, chrF, duration-per-text
 unit, peak amplitude, and optional WER/BLEU thresholds:
 
 ```python
 from anydataset import AnyDataset, FilterRule, Source, Spec
-from anydataset.quality.speech import Predicate as SpeechQuality
+from anydataset.quality.speech import SpeechQuality
 
 def speech_dataset_factory():
     return AnyDataset(
