@@ -1,7 +1,7 @@
 """Materialize sample datasets into store directories.
 
 The module coordinates single-process and part-based parallel writes. Store file
-format details stay in `anydataset.store.writer` and `anydataset.store.parts`.
+format details stay in `anydataset.store.writer` and store internals.
 """
 
 from __future__ import annotations
@@ -25,8 +25,11 @@ from .._parallel import (
     set_worker_environment,
     validate_spawn_value,
 )
-from ..store.parts import DatasetPartWriter, commit_store_parts
-from ..store.writer import DEFAULT_MAX_SHARD_SAMPLES, DatasetWriter, _explicit_views
+from ..store._config import DEFAULT_MAX_SHARD_SAMPLES
+from ..store._part_commit import commit_store_parts
+from ..store._part_writer import DatasetPartWriter
+from ..store._sample_write import explicit_views
+from ..store.writer import DatasetWriter
 from ..types.item import Modality, Role, Sample, View
 
 DatasetFactory = Callable[[], Any]
@@ -47,7 +50,7 @@ class DatasetStoreWriter:
         self.output_dir = Path(self.output_dir)
         if self.dataset_id is None:
             self.dataset_id = _dataset_id(self.output_dir)
-        self.views = _explicit_views(self.views)
+        self.views = explicit_views(self.views)
         self.max_shard_samples = positive_int(
             "max_shard_samples",
             self.max_shard_samples,

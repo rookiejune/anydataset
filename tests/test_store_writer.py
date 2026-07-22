@@ -20,15 +20,15 @@ from anydataset.types import (
     TextView,
 )
 from anydataset.store import DatasetWriter
-from anydataset.store.parts import (
-    DatasetFragmentWriter,
-    DatasetPartWriter,
+from anydataset.store import _part_commit as store_parts
+from anydataset.store._part_commit import (
     commit_fragment_part,
-    commit_store_parts,
     commit_store_fragments,
+    commit_store_parts,
     completed_fragment_indexes,
 )
-from anydataset.store.writer import DEFAULT_MAX_SHARD_SAMPLES
+from anydataset.store._part_writer import DatasetFragmentWriter, DatasetPartWriter
+from anydataset.store._config import DEFAULT_MAX_SHARD_SAMPLES
 from anydataset.store.jsonio import read_json, write_json
 from anydataset.store.manifest import (
     DatasetManifest,
@@ -49,7 +49,6 @@ from anydataset.store.paths import (
     view_ready_path,
     view_shard_path,
 )
-from anydataset.store import parts as store_parts
 
 
 class DatasetWriterTest(unittest.TestCase):

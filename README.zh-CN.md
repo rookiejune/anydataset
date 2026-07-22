@@ -115,8 +115,8 @@ fsd50k = AnyDataset.preset(
 from functools import partial
 
 from anydataset import AnyDataset, Source, Spec
+from anydataset.rowmap import sample_from_row
 from anydataset.types import ImageMeta, ImageView
-from anydataset.utils import sample_from_row
 
 dataset = AnyDataset(
     spec=Spec(
@@ -140,8 +140,8 @@ dataset = AnyDataset(
 from functools import partial
 
 from anydataset import IterableAnyDataset, Source, Spec
+from anydataset.rowmap import sample_from_row
 from anydataset.types import AudioView
-from anydataset.utils import sample_from_row
 
 dataset = IterableAnyDataset(
     spec=Spec(

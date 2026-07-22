@@ -6,11 +6,11 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any, Union
 
-from ..dataset import AudioMeta, AudioView, TextMeta, TextView
+from ..types import AudioMeta, AudioView, TextMeta, TextView
 from ..dataset.abc import IterableAnyDataset
 from ..types import Spec
 from ..types.item import Transforms
-from ..utils import labels, sample_from_row
+from ..rowmap import labels, sample_from_row
 
 
 _LANGUAGE_ROOT_FIELD = "__anydataset_root__"

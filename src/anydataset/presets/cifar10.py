@@ -5,7 +5,7 @@ from typing import Any
 
 import torch
 
-from ..dataset import ImageItem, ImageMeta, ImageView, Modality, Role
+from ..types import ImageItem, ImageMeta, ImageView, Modality, Role
 from ..dataset.abc import AnyDataset
 from ..types import Preset
 from ..types.item import Sample, Transforms

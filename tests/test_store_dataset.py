@@ -11,7 +11,7 @@ from unittest import mock
 import torch
 
 from anydataset import AnyDataset, Source, Spec
-from anydataset.dataset import DatasetStoreWriter
+from anydataset.dataset.write import DatasetStoreWriter
 from anydataset.types import (
     AudioItem,
     AudioMeta,

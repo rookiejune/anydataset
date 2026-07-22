@@ -14,11 +14,11 @@ import torch
 
 from .._sharding import validate_shard
 from ..cache import FileLock
-from ..dataset import AudioView
+from ..types import AudioView
 from ..dataset.abc import AnyDataset
 from ..types import Preset
 from ..types.item import Sample, Transforms
-from ..utils import sample_from_row
+from ..rowmap import sample_from_row
 from .registry import preset_spec
 
 

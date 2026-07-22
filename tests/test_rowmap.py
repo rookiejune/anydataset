@@ -11,11 +11,11 @@ from anydataset.types import (
     TextMeta,
     TextView,
 )
-from anydataset.utils import labels, sample_from_row, text_map
+from anydataset.rowmap import labels, sample_from_row, text_map
 from anydataset import remap_lang
 
 
-class PresetCommonTest(unittest.TestCase):
+class RowMapTest(unittest.TestCase):
     def test_remap_lang_normalizes_dataset_language_labels(self):
         self.assertEqual(remap_lang("en_us"), Lang.EN)
         self.assertEqual(remap_lang("zh-CN"), Lang.ZH)

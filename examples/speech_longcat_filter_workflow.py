@@ -16,7 +16,8 @@ from typing import Any
 
 import torch
 
-from anydataset.dataset import AnyDataset, IterableAnyDataset, MergedDataset
+from anydataset import AnyDataset, IterableAnyDataset
+from anydataset.dataset.abc import MergedDataset
 from anydataset.filter import FilterRule
 from anydataset.provider import LongCatProvider
 from anydataset.quality.speech import SpeechQuality, SpeechQualityProfile

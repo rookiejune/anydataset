@@ -16,7 +16,8 @@ from anydataset import (
     Task,
     resolve_dataset,
 )
-from anydataset.dataset import FieldGroup, FieldRef, MergedDataset, collate_fn
+from anydataset.dataset.abc import MergedDataset
+from anydataset.dataset.collate import FieldGroup, FieldRef, collate_fn
 from anydataset.types import (
     AudioItem,
     AudioMeta,

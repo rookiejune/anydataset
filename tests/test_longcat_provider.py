@@ -13,7 +13,7 @@ import torch
 from torch import Tensor
 
 from anydataset import AnyDataset, Source, Spec
-from anydataset.dataset import collate_fn
+from anydataset.dataset.collate import collate_fn
 from anydataset.types import (
     AudioItem,
     AudioReq,

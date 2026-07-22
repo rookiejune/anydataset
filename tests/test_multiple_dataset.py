@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from anydataset.dataset import WeightedRandomStrategy
+from anydataset.dataset.multiple import WeightedRandomStrategy
 from anydataset.dataset.multiple import _cumulative_weights
 
 

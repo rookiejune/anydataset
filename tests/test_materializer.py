@@ -10,7 +10,7 @@ from unittest import mock
 import torch
 
 from anydataset import AnyDataset, Source, Spec
-from anydataset.dataset import FieldGroup, FieldRef
+from anydataset.dataset.collate import FieldGroup, FieldRef
 from anydataset.provider_service import ProviderServer, RemoteProviderFactory
 from anydataset.runtime import Runtime
 from anydataset.store import ModalityMaterializer
@@ -31,7 +31,7 @@ from anydataset.types import (
 from anydataset.store import DatasetWriter, ViewMaterializer
 from anydataset.store.jsonio import read_json
 from anydataset.store.manifestio import read_samples_manifest, read_view_manifest
-from anydataset.store.materializer import _callable_id
+from anydataset.store._materializer_identity import callable_id
 from anydataset.store.paths import view_dir
 from anydataset.store.reader import read_store_dataset
 from anydataset._parallel import iter_indexed_shard
@@ -42,8 +42,8 @@ class ViewMaterializerTest(unittest.TestCase):
         first = partial(_factory_identity_target, 1, option="value")
         second = partial(_factory_identity_target, 1, option="value")
 
-        self.assertEqual(_callable_id(first), _callable_id(second))
-        self.assertNotIn("0x", repr(_callable_id(first)))
+        self.assertEqual(callable_id(first), callable_id(second))
+        self.assertNotIn("0x", repr(callable_id(first)))
 
     def test_resume_metadata_ignores_execution_config(self):
         target = Path("target")

@@ -14,7 +14,7 @@ from ..types import Preset, Spec
 from ..types._sample import merge as merge_samples
 from ..types._sample import select as select_sample
 from ..types.item import Modality, Role, View
-from ..utils import resolve_dataset
+from ..resolver import resolve_dataset
 
 if TYPE_CHECKING:
     from ..cache import CacheManager

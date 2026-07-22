@@ -276,7 +276,7 @@ class FilteredDatasetTest(unittest.TestCase):
             return read_store_json(path)
 
         with mock.patch(
-            "anydataset.filter.apply.read_json",
+            "anydataset.filter._cache.read_json",
             side_effect=disappearing_read_json,
         ):
             restored = rule.apply(dataset_factory=lambda: dataset, device="cpu")

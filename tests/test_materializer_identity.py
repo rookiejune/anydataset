@@ -6,11 +6,8 @@ from pathlib import Path
 
 import torch
 
-from anydataset.store.materializer import (
-    ViewMaterializer,
-    _callable_id,
-    _metadata_value,
-)
+from anydataset.store import ViewMaterializer
+from anydataset.store._materializer_identity import callable_id, metadata_value
 
 
 def _factory(prefix: str):
@@ -60,51 +57,51 @@ def _provider_factory(_device: str):
 
 class MaterializerIdentityTest(unittest.TestCase):
     def test_callable_identity_includes_closure_values(self):
-        first = _callable_id(_factory("old"))
-        second = _callable_id(_factory("new"))
-        repeated = _callable_id(_factory("old"))
+        first = callable_id(_factory("old"))
+        second = callable_id(_factory("new"))
+        repeated = callable_id(_factory("old"))
 
         self.assertNotEqual(first, second)
         self.assertEqual(first, repeated)
 
     def test_callable_identity_includes_plain_instance_state(self):
-        first = _callable_id(_StatefulFactory("old"))
-        second = _callable_id(_StatefulFactory("new"))
-        repeated = _callable_id(_StatefulFactory("old"))
+        first = callable_id(_StatefulFactory("old"))
+        second = callable_id(_StatefulFactory("new"))
+        repeated = callable_id(_StatefulFactory("old"))
 
         self.assertNotEqual(first, second)
         self.assertEqual(first, repeated)
 
     def test_callable_identity_stabilizes_callable_closure_values(self):
-        first = _callable_id(_callback_factory(_callback()))
-        second = _callable_id(_callback_factory(_callback()))
+        first = callable_id(_callback_factory(_callback()))
+        second = callable_id(_callback_factory(_callback()))
 
         self.assertEqual(first, second)
 
     def test_metadata_identity_preserves_mapping_key_types(self):
-        metadata = _metadata_value({1: "integer", "1": "string"})
+        metadata = metadata_value({1: "integer", "1": "string"})
 
         self.assertEqual(len(metadata["items"]), 2)
 
     def test_metadata_identity_distinguishes_tuple_and_list(self):
-        self.assertNotEqual(_metadata_value((1, 2)), _metadata_value([1, 2]))
+        self.assertNotEqual(metadata_value((1, 2)), metadata_value([1, 2]))
 
     def test_callable_identity_hashes_large_tensor_contents_compactly(self):
         first_tensor = torch.zeros(300_000)
         changed_tensor = first_tensor.clone()
         changed_tensor[150_000] = 1
 
-        first = _callable_id(_TensorFactory(first_tensor))
-        repeated = _callable_id(_TensorFactory(first_tensor.clone()))
-        changed = _callable_id(_TensorFactory(changed_tensor))
+        first = callable_id(_TensorFactory(first_tensor))
+        repeated = callable_id(_TensorFactory(first_tensor.clone()))
+        changed = callable_id(_TensorFactory(changed_tensor))
 
         self.assertEqual(first, repeated)
         self.assertNotEqual(first, changed)
         self.assertLess(len(json.dumps(first)), 1000)
 
     def test_callable_identity_handles_contentless_meta_tensor(self):
-        first = _callable_id(_TensorFactory(torch.empty(2, device="meta")))
-        repeated = _callable_id(_TensorFactory(torch.empty(2, device="meta")))
+        first = callable_id(_TensorFactory(torch.empty(2, device="meta")))
+        repeated = callable_id(_TensorFactory(torch.empty(2, device="meta")))
 
         self.assertEqual(first, repeated)
 

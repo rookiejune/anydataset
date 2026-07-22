@@ -3,11 +3,11 @@ from __future__ import annotations
 from functools import partial
 from typing import Any
 
-from ..dataset import AudioView, TextMeta, TextView
+from ..types import AudioView, TextMeta, TextView
 from ..dataset.abc import IterableAnyDataset
 from ..types import Preset
 from ..types.item import Transforms
-from ..utils import sample_from_row
+from ..rowmap import sample_from_row
 from .registry import preset_spec
 
 

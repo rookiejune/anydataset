@@ -16,13 +16,13 @@ from ..store.reader import StoreDataset
 from ..types import Spec
 from ..types.item import Sample
 from ._options import options as apply_options
-from .apply import (
-    apply_filter,
+from ._factory import make_filtered_dataset_factory
+from ._identity import (
     filter_base,
     filter_spec,
     filter_universe,
-    make_filtered_dataset_factory,
 )
+from .apply import apply_filter
 from .generations import GenerationLease, lease_filter_generation
 from .rules import label, unique_labels, validate_string
 from .storage import merged_index, read_metrics, read_partitions

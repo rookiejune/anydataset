@@ -1,28 +1,18 @@
 from __future__ import annotations
 
-import hashlib
-import json
-import marshal
 import multiprocessing
 import os
-import time
-import traceback
-from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass, field
-from enum import Enum
-from functools import partial
 from pathlib import Path
-from types import BuiltinFunctionType, CellType, FunctionType, MethodType
-from typing import Any, Literal, Union, cast
+from typing import Any, Literal, cast
 
-import torch
 from torch.utils.data import DataLoader
 
 from .._compat import strict_zip
 from .._devices import Devices, resolve_devices
-from .._logging import run_logs_dir, use_run_logs_dir, worker_logger, write_warning
+from .._logging import run_logs_dir
 from .._parallel import (
-    DeviceWorker,
     can_select_indexes,
     free_port,
     indexed_loader,
@@ -32,27 +22,19 @@ from .._parallel import (
     restore_environment,
     set_single_worker_environment,
     set_torch_device,
-    set_worker_environment,
     validate_process_parent,
     validate_process_value,
 )
-from .._progress import Progress, ProgressDashboard, put_progress, watch_workers
+from .._progress import ProgressDashboard, watch_workers
 from .._resume import (
-    append_completed_index_cache,
     cleanup_resume_dir,
     dataset_sample_count,
-    index_batch_id,
     indexes_complete,
     log_resume_summary,
     missing_indexes,
-    pending_batch,
-    prepare_resume_dir,
-    quarantine_resume_dir,
-    resume_dir,
     validate_completed_indexes,
 )
 from .._validation import non_negative_int, optional_positive_int, positive_int
-from .._write_pipeline import BackgroundWriteSink
 from ..cache import FileLock
 from ..runtime import Runtime
 from ..types._sample import merge as merge_samples
@@ -66,24 +48,27 @@ from ._batch import (
     with_batch_view_provider,
     with_resilient_batch_provider,
 )
+from ._config import DEFAULT_MAX_SHARD_SAMPLES
+from ._materializer_fragments import FragmentBatchWriter, ProgressSink
+from ._materializer_identity import callable_id, metadata_value, optional_semantic_id
+from ._materializer_resume import (
+    materializer_lock_path,
+    prepare_materializer_resume_dir,
+)
+from ._materializer_worker import WorkerConfig, materialize_worker
 from ._modality import with_modality_provider
 from ._types import MaterializerProvider, ModalityProviderLike
 from ._view import with_view_provider
-from .parts import (
-    DatasetFragmentWriter,
-    commit_fragment_part,
+from ._part_commit import (
     commit_store_fragments,
     commit_store_parts,
     completed_fragment_indexes,
-    store_fragments,
 )
-from .jsonio import read_json, write_json
-from .writer import DEFAULT_MAX_SHARD_SAMPLES, DatasetWriter
+from .writer import DatasetWriter
 
 DatasetFactory = Callable[[], Any]
 ProviderFactory = Callable[[str], MaterializerProvider]
 _MaterializerMode = Literal["view", "modality"]
-_ProgressSink = Union[multiprocessing.Queue, ProgressDashboard]
 
 _PROGRESS_STAGES = ("reader", "provider", "writer")
 DEFAULT_COMMIT_SAMPLES = 32
@@ -125,8 +110,8 @@ class ViewMaterializer:
             "write_prefetch",
             self.write_prefetch,
         )
-        self.input_id = _optional_semantic_id("input_id", self.input_id)
-        self.provider_id = _optional_semantic_id("provider_id", self.provider_id)
+        self.input_id = optional_semantic_id("input_id", self.input_id)
+        self.provider_id = optional_semantic_id("provider_id", self.provider_id)
 
     @property
     def _dataset_id(self) -> str:
@@ -147,7 +132,7 @@ class ViewMaterializer:
                     "workers"
                 )
             )
-        with FileLock(_materializer_lock_path(self.output_dir)):
+        with FileLock(materializer_lock_path(self.output_dir)):
             return self._write_resumable(
                 dataset_factory=dataset_factory,
                 provider_factory=provider_factory,
@@ -373,7 +358,7 @@ class ViewMaterializer:
         sample_indexes: Sequence[int] | None = None,
         fragments_dir: Path,
         expected: int,
-        progress: _ProgressSink | None = None,
+        progress: ProgressSink | None = None,
         worker_id: int = 0,
     ) -> None:
         self._write_resumable_indexed_batches(
@@ -447,9 +432,9 @@ class ViewMaterializer:
         master_port = os.environ.get("MASTER_PORT", free_port())
         workers = [
             context.Process(
-                target=_materialize_worker,
+                target=materialize_worker,
                 args=(
-                    _WorkerConfig(
+                    WorkerConfig(
                         output_dir=Path(self.output_dir),
                         split=self.split,
                         max_shard_samples=self.max_shard_samples,
@@ -539,17 +524,17 @@ class ViewMaterializer:
                 "split": self.split,
                 "max_shard_samples": self.max_shard_samples,
                 "batch_size": self.batch_size,
-                "keep_schema": _metadata_value(self.keep_schema),
+                "keep_schema": metadata_value(self.keep_schema),
             },
             "input": {
                 "type": f"{type(dataset).__module__}.{type(dataset).__qualname__}",
-                "factory": _callable_id(dataset_factory),
+                "factory": callable_id(dataset_factory),
                 "semantic_id": self.input_id,
                 "sample_count": expected,
                 "use_map_style_loader": use_map_style_loader,
             },
             "provider": {
-                "factory": _callable_id(provider_factory),
+                "factory": callable_id(provider_factory),
                 "semantic_id": self.provider_id,
             },
         }
@@ -593,7 +578,7 @@ class ViewMaterializer:
         *,
         fragments_dir: Path,
         expected: int,
-        progress: _ProgressSink | None = None,
+        progress: ProgressSink | None = None,
         worker_id: int = 0,
     ) -> None:
         completed = set(
@@ -606,7 +591,7 @@ class ViewMaterializer:
                 expected,
             )
         )
-        writer = _FragmentBatchWriter(
+        writer = FragmentBatchWriter(
             materializer=self,
             fragments_dir=fragments_dir,
             completed=completed,
@@ -682,609 +667,6 @@ class ModalityMaterializer(ViewMaterializer):
                 cast(ModalityProviderLike, provider),
             ),
         )
-
-
-@dataclass
-class _FragmentBatchWriter:
-    materializer: ViewMaterializer
-    fragments_dir: Path
-    completed: set[int]
-    provider: MaterializerProvider
-    progress: _ProgressSink | None = None
-    worker_id: int = 0
-
-    def write(self, batches: Iterable[Sequence[tuple[int, Sample]]]) -> None:
-        with self._sink() as sink:
-            pending_outputs: list[tuple[int, Sample]] = []
-            read_start = time.perf_counter()
-            for batch in batches:
-                self._record_read(batch, read_start)
-                pending = pending_batch(batch, self.completed)
-                if not pending:
-                    read_start = time.perf_counter()
-                    continue
-                outputs = self._materialized_batch(pending)
-                pending_outputs.extend(outputs)
-                self._flush_ready(sink, pending_outputs)
-                read_start = time.perf_counter()
-            self._flush_remaining(sink, pending_outputs)
-
-    def _record_read(
-        self,
-        batch: Sequence[tuple[int, Sample]],
-        read_start: float,
-    ) -> None:
-        _put_stage_progress(
-            self.progress,
-            worker_id=self.worker_id,
-            stage="reader",
-            samples=len(batch),
-            elapsed=time.perf_counter() - read_start,
-        )
-
-    def _materialized_batch(
-        self,
-        batch: Sequence[tuple[int, Sample]],
-    ) -> tuple[tuple[int, Sample], ...]:
-        provider_start = time.perf_counter()
-        outputs = self._materialized_indexed_batch(batch)
-        _put_stage_progress(
-            self.progress,
-            worker_id=self.worker_id,
-            stage="provider",
-            samples=len(outputs),
-            elapsed=time.perf_counter() - provider_start,
-        )
-        return outputs
-
-    def _materialized_indexed_batch(
-        self,
-        batch: Sequence[tuple[int, Sample]],
-    ) -> tuple[tuple[int, Sample], ...]:
-        if self.materializer.batch_size == 1:
-            return tuple(
-                (
-                    index,
-                    self.materializer._sample_with_provider(sample, self.provider),
-                )
-                for index, sample in batch
-            )
-
-        indexes, samples = strict_zip(*batch)
-        outputs = tuple(
-            self.materializer._resilient_samples_with_batch_provider(
-                samples,
-                self.provider,
-            )
-        )
-        validate_batch_outputs(outputs, len(samples))
-        return tuple(strict_zip(indexes, outputs))
-
-    def _flush_ready(
-        self,
-        sink: BackgroundWriteSink[_FragmentWriteJob],
-        pending_outputs: list[tuple[int, Sample]],
-    ) -> None:
-        while len(pending_outputs) >= self.materializer.commit_samples:
-            self._submit(sink, pending_outputs[: self.materializer.commit_samples])
-            del pending_outputs[: self.materializer.commit_samples]
-
-    def _flush_remaining(
-        self,
-        sink: BackgroundWriteSink[_FragmentWriteJob],
-        pending_outputs: list[tuple[int, Sample]],
-    ) -> None:
-        if pending_outputs:
-            self._submit(sink, pending_outputs)
-
-    def _submit(
-        self,
-        sink: BackgroundWriteSink[_FragmentWriteJob],
-        samples: Sequence[tuple[int, Sample]],
-    ) -> None:
-        indexed = tuple(samples)
-        indexes = tuple(sorted(index for index, _ in indexed))
-        sink.submit(
-            _FragmentWriteJob(
-                fragments_dir=self.fragments_dir,
-                dataset_id=self.materializer._dataset_id,
-                split=self.materializer.split,
-                max_shard_samples=self.materializer.max_shard_samples,
-                indexes=indexes,
-                samples=indexed,
-            )
-        )
-        self.completed.update(indexes)
-
-    def _sink(self) -> BackgroundWriteSink[_FragmentWriteJob]:
-        return BackgroundWriteSink(
-            _write_fragment,
-            workers=self.materializer.write_workers,
-            max_pending=self.materializer.write_prefetch,
-            start_method=self.materializer.runtime.writer_worker_start_method,
-            on_submit=lambda job, pending: _put_stage_progress(
-                self.progress,
-                worker_id=self.worker_id,
-                stage="writer",
-                pending=pending,
-            ),
-            on_complete=lambda job, pending, elapsed: _put_stage_progress(
-                self.progress,
-                worker_id=self.worker_id,
-                stage="writer",
-                samples=len(job.samples),
-                elapsed=elapsed,
-                pending=pending,
-            ),
-        )
-
-
-@dataclass(frozen=True)
-class _FragmentWriteJob:
-    fragments_dir: Path
-    dataset_id: str
-    split: str | None
-    max_shard_samples: int
-    indexes: tuple[int, ...]
-    samples: tuple[tuple[int, Sample], ...]
-
-
-def _write_fragment(job: _FragmentWriteJob) -> None:
-    fragment_id = index_batch_id(job.indexes)
-    DatasetFragmentWriter(
-        job.fragments_dir / fragment_id,
-        dataset_id=job.dataset_id,
-        split=job.split,
-        fragment_id=fragment_id,
-        max_shard_samples=job.max_shard_samples,
-    ).write(job.samples)
-    append_completed_index_cache(job.fragments_dir, fragment_id, job.indexes)
-
-
-def prepare_materializer_resume_dir(
-    output_dir: str | Path,
-    metadata: Mapping[str, object],
-) -> Path:
-    path = resume_dir(output_dir, "fragments")
-    expected = dict(metadata)
-    if path.exists() and _stored_resume_metadata(path) != expected:
-        stale = quarantine_resume_dir(output_dir)
-        write_warning(
-            "materializer",
-            "Quarantined incompatible resume directory "
-            f"at {stale}; remove it after confirming it is no longer needed.",
-        )
-    path = prepare_resume_dir(output_dir, "fragments")
-    write_json(path / "resume.json", expected)
-    return path
-
-
-def _stored_resume_metadata(path: Path) -> Mapping[str, object] | None:
-    metadata_path = path / "resume.json"
-    if not metadata_path.is_file():
-        return None
-    data = read_json(metadata_path)
-    if not isinstance(data, Mapping):
-        raise ValueError("Materializer resume metadata must be a mapping.")
-    return data
-
-
-def _optional_semantic_id(name: str, value: str | None) -> str | None:
-    if value is None:
-        return None
-    if not isinstance(value, str):
-        raise TypeError(f"{name} must be a string or None.")
-    if not value:
-        raise ValueError(f"{name} must not be empty.")
-    return value
-
-
-def _metadata_value(
-    value: object,
-    active: set[int] | None = None,
-) -> object:
-    if isinstance(value, Enum):
-        return {
-            "type": _type_id(value),
-            "value": _metadata_value(value.value, active),
-        }
-    if value is None or isinstance(value, (str, int, float, bool)):
-        return value
-    if isinstance(value, Path):
-        return {"type": _type_id(value), "value": str(value)}
-    if isinstance(value, (bytes, bytearray)):
-        payload = bytes(value)
-        return {
-            "type": _type_id(value),
-            "size": len(payload),
-            "sha256": hashlib.sha256(payload).hexdigest(),
-        }
-    if isinstance(value, torch.Tensor):
-        return _tensor_value(value)
-    if isinstance(value, range):
-        return {
-            "type": _type_id(value),
-            "start": value.start,
-            "stop": value.stop,
-            "step": value.step,
-        }
-    if active is None:
-        active = set()
-    if callable(value):
-        return _callable_identity(value, active)
-
-    marker = id(value)
-    if marker in active:
-        return {"type": _type_id(value), "recursive": True}
-    active.add(marker)
-    try:
-        return _metadata_object(value, active)
-    finally:
-        active.remove(marker)
-
-
-def _metadata_object(value: object, active: set[int]) -> object:
-    if isinstance(value, Mapping):
-        items = [
-            [
-                _metadata_value(key, active),
-                _metadata_value(item, active),
-            ]
-            for key, item in value.items()
-        ]
-        items.sort(key=_metadata_sort_key)
-        return {"type": _type_id(value), "items": items}
-    if isinstance(value, (set, frozenset)):
-        items = [_metadata_value(item, active) for item in value]
-        return {
-            "type": _type_id(value),
-            "items": sorted(items, key=_metadata_sort_key),
-        }
-    if isinstance(value, Sequence) and not isinstance(value, (bytes, bytearray)):
-        return {
-            "type": _type_id(value),
-            "items": [_metadata_value(item, active) for item in value],
-        }
-    state = _instance_state(value)
-    if state is not None:
-        return {
-            "type": _type_id(value),
-            "state": _metadata_digest(state, active),
-        }
-    if type(value).__repr__ is object.__repr__:
-        return _type_id(value)
-    return {"type": _type_id(value), "value": repr(value)}
-
-
-def _closure_value(cell: CellType) -> object:
-    try:
-        return cell.cell_contents
-    except ValueError:
-        return "<empty>"
-
-
-def _callable_id(value: object) -> object:
-    return _callable_identity(value, set())
-
-
-def _callable_identity(value: object, active: set[int]) -> object:
-    marker = id(value)
-    if marker in active:
-        return {"type": _type_id(value), "recursive": True}
-    active.add(marker)
-    try:
-        return _callable_value(value, active)
-    finally:
-        active.remove(marker)
-
-
-def _callable_value(value: object, active: set[int]) -> object:
-    if isinstance(value, partial):
-        return {
-            "type": "functools.partial",
-            "function": _callable_identity(value.func, active),
-            "args": _metadata_digest(value.args, active),
-            "keywords": _metadata_digest(value.keywords or {}, active),
-        }
-    if isinstance(value, MethodType):
-        return {
-            "function": _callable_identity(value.__func__, active),
-            "owner": _metadata_digest(value.__self__, active),
-        }
-    if isinstance(value, (FunctionType, BuiltinFunctionType)):
-        identity: dict[str, object] = {
-            "function": f"{value.__module__}.{value.__qualname__}",
-        }
-        if isinstance(value, FunctionType):
-            identity["code"] = hashlib.sha256(
-                marshal.dumps(value.__code__)
-            ).hexdigest()[:16]
-            identity["defaults"] = _metadata_digest(
-                value.__defaults__ or (),
-                active,
-            )
-            identity["kwdefaults"] = _metadata_digest(
-                value.__kwdefaults__ or {},
-                active,
-            )
-            identity["closure"] = [
-                _metadata_digest(_closure_value(cell), active)
-                for cell in (value.__closure__ or ())
-            ]
-        return identity
-
-    if isinstance(value, type):
-        identity = {"class": f"{value.__module__}.{value.__qualname__}"}
-        for name in ("__init__", "__call__"):
-            member = value.__dict__.get(name)
-            if callable(member):
-                identity[name] = _callable_identity(member, active)
-        return identity
-
-    type_id = _type_id(value)
-    identity = {
-        "type": type_id,
-        "call": _callable_identity(type(value).__call__, active),
-    }
-    state = _instance_state(value)
-    if state is not None:
-        identity["state"] = _metadata_digest(state, active)
-        return identity
-    if type(value).__repr__ is object.__repr__:
-        return identity
-    identity["value"] = repr(value)
-    return identity
-
-
-def _instance_state(value: object) -> dict[str, object] | None:
-    try:
-        state = dict(vars(value))
-    except TypeError:
-        state = {}
-    for cls in type(value).__mro__:
-        slots = cls.__dict__.get("__slots__", ())
-        if isinstance(slots, str):
-            slots = (slots,)
-        for name in slots:
-            if name in {"__dict__", "__weakref__"} or name in state:
-                continue
-            try:
-                state[name] = getattr(value, name)
-            except AttributeError:
-                continue
-    return state or None
-
-
-def _type_id(value: object) -> str:
-    return f"{type(value).__module__}.{type(value).__qualname__}"
-
-
-def _metadata_digest(value: object, active: set[int]) -> str:
-    payload = json.dumps(
-        _metadata_value(value, active),
-        ensure_ascii=True,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
-    return hashlib.sha256(payload).hexdigest()
-
-
-def _metadata_sort_key(value: object) -> str:
-    return json.dumps(
-        value,
-        ensure_ascii=True,
-        sort_keys=True,
-        separators=(",", ":"),
-    )
-
-
-def _tensor_value(value: torch.Tensor) -> dict[str, object]:
-    metadata: dict[str, object] = {
-        "type": _type_id(value),
-        "dtype": str(value.dtype),
-        "layout": str(value.layout),
-        "shape": list(value.shape),
-    }
-    if value.device.type == "meta":
-        metadata["content"] = "meta"
-        return metadata
-    if value.is_quantized:
-        metadata["sha256"] = _dense_tensor_digest(value.int_repr())
-        metadata["qscheme"] = str(value.qscheme())
-        if value.qscheme() in {torch.per_tensor_affine, torch.per_tensor_symmetric}:
-            metadata["scale"] = value.q_scale()
-            metadata["zero_point"] = value.q_zero_point()
-        else:
-            metadata["axis"] = value.q_per_channel_axis()
-            metadata["scales"] = _dense_tensor_digest(
-                value.q_per_channel_scales()
-            )
-            metadata["zero_points"] = _dense_tensor_digest(
-                value.q_per_channel_zero_points()
-            )
-        return metadata
-    if value.layout == torch.strided:
-        metadata["sha256"] = _dense_tensor_digest(value)
-        return metadata
-    try:
-        sparse = value.detach().cpu().to_sparse_coo().coalesce()
-    except (NotImplementedError, RuntimeError) as exc:
-        raise TypeError(
-            "Callable identity cannot fingerprint this Tensor layout."
-        ) from exc
-    metadata["indices"] = _dense_tensor_digest(sparse.indices())
-    metadata["values"] = _dense_tensor_digest(sparse.values())
-    return metadata
-
-
-def _dense_tensor_digest(value: torch.Tensor) -> str:
-    try:
-        tensor = value.detach().resolve_conj().resolve_neg().cpu().contiguous()
-        raw = tensor.reshape(-1).view(torch.uint8)
-    except (NotImplementedError, RuntimeError) as exc:
-        raise TypeError(
-            "Callable identity cannot fingerprint this Tensor dtype."
-        ) from exc
-    digest = hashlib.sha256()
-    chunk_size = 1024 * 1024
-    for start in range(0, raw.numel(), chunk_size):
-        digest.update(raw[start : start + chunk_size].numpy().tobytes())
-    return digest.hexdigest()
-
-
-def _materializer_lock_path(output_dir: str | Path) -> Path:
-    output = Path(output_dir).expanduser()
-    return output.parent / f".{output.name}.materialize.lock"
-
-
-@dataclass(frozen=True)
-class _WorkerConfig:
-    output_dir: Path
-    split: str | None
-    max_shard_samples: int
-    batch_size: int
-    commit_samples: int
-    num_workers: int
-    prefetch_factor: int | None
-    write_workers: int
-    write_prefetch: int | None
-    keep_schema: Schema | None
-    mode: _MaterializerMode
-    runtime: Runtime
-    use_map_style_loader: bool
-    missing_indexes: Sequence[int]
-    fragments_dir: Path
-    parts_dir: Path
-    expected: int
-    logs_dir: Path
-    worker_logs_dir: Path
-    device: str
-    num_shards: int
-    shard_id: int
-    master_addr: str
-    master_port: str
-
-
-def _materialize_worker(
-    config: _WorkerConfig,
-    dataset_factory: DatasetFactory,
-    provider_factory: ProviderFactory,
-    progress: multiprocessing.Queue,
-    barrier: Any,
-) -> None:
-    with use_run_logs_dir(config.logs_dir):
-        logger = worker_logger("materializer", config.worker_logs_dir, config.shard_id)
-        logger.info(
-            "starting shard %s/%s on %s missing=%s map_style=%s",
-            config.shard_id,
-            config.num_shards,
-            config.device,
-            _shard_missing_count(config.missing_indexes, config.num_shards, config.shard_id),
-            config.use_map_style_loader,
-        )
-        env = set_worker_environment(
-            DeviceWorker(
-                device=config.device,
-                rank=config.shard_id,
-                world_size=config.num_shards,
-                master_addr=config.master_addr,
-                master_port=config.master_port,
-            ),
-            device_env="ANYDATASET_MATERIALIZE_DEVICE",
-        )
-        try:
-            if config.runtime.uses_local_device:
-                set_torch_device(config.device)
-            logger.info("loading provider on %s", config.device)
-            provider = provider_factory(config.device)
-            logger.info("loaded provider on %s", config.device)
-            materializer = _worker_materializer(config)
-            logger.info("starting materialization on %s", config.device)
-            materializer._write_resumable_loader_batches(
-                provider,
-                dataset_factory=dataset_factory,
-                sample_count=config.expected,
-                use_map_style_loader=config.use_map_style_loader,
-                sample_indexes=config.missing_indexes,
-                fragments_dir=config.fragments_dir,
-                expected=config.expected,
-                progress=progress,
-                worker_id=config.shard_id,
-            )
-            logger.info("waiting to merge shard %s fragments", config.shard_id)
-            barrier.wait()
-            fragments = store_fragments(
-                config.fragments_dir,
-                dataset_id=materializer._dataset_id,
-                split=config.split,
-            )
-            assigned = fragments[config.shard_id :: config.num_shards]
-            commit_fragment_part(
-                config.parts_dir / f"part-{config.shard_id:05d}",
-                assigned,
-                dataset_id=materializer._dataset_id,
-                split=config.split,
-                shard_id=config.shard_id,
-                num_shards=config.num_shards,
-            )
-        except Exception:
-            error = traceback.format_exc()
-            logger.error("worker failed\n%s", error)
-            put_progress(progress, Progress(config.shard_id, 0, True, error))
-            raise
-        finally:
-            restore_environment(env)
-        logger.info("finished shard %s", config.shard_id)
-        put_progress(progress, Progress(config.shard_id, 0, True, None))
-
-
-def _worker_materializer(config: _WorkerConfig) -> ViewMaterializer:
-    cls = ModalityMaterializer if config.mode == "modality" else ViewMaterializer
-    return cls(
-        config.output_dir,
-        split=config.split,
-        max_shard_samples=config.max_shard_samples,
-        batch_size=config.batch_size,
-        commit_samples=config.commit_samples,
-        num_workers=config.num_workers,
-        prefetch_factor=config.prefetch_factor,
-        write_workers=config.write_workers,
-        write_prefetch=config.write_prefetch,
-        keep_schema=config.keep_schema,
-        runtime=config.runtime,
-    )
-
-
-def _put_stage_progress(
-    progress: _ProgressSink | None,
-    *,
-    worker_id: int,
-    stage: str,
-    samples: int = 0,
-    elapsed: float | None = None,
-    pending: int | None = None,
-) -> None:
-    if progress is None:
-        return
-    put_progress(
-        progress,
-        Progress(
-            worker_id,
-            samples,
-            False,
-            None,
-            stage=stage,
-            elapsed=elapsed,
-            pending=pending,
-        ),
-    )
-
-
-def _shard_missing_count(indexes: Sequence[int], num_shards: int, shard_id: int) -> int:
-    if shard_id >= len(indexes):
-        return 0
-    return (len(indexes) - 1 - shard_id) // num_shards + 1
-
 
 def _missing_indexed_samples(
     dataset: Any,

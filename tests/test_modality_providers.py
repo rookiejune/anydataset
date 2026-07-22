@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 import torch
 
-from anydataset.dataset import collate_fn
+from anydataset.dataset.collate import collate_fn
 from anydataset.types import (
     AudioItem,
     AudioReq,
