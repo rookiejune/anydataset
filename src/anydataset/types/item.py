@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import auto
 from typing import Any, Generic, TypeVar, Union
@@ -54,7 +54,7 @@ class _Item(Generic[ViewT, MetaT]):
 
 
 class AudioMeta(StrEnum):
-    # DURATION = auto()  # derived from waveform.size(-1) / sample_rate
+    DURATION = auto()
     LABEL = auto()
     LABELS = auto()
     SPEAKER_ID = auto()
@@ -67,6 +67,8 @@ class AudioView(StrEnum):
     DAC = auto()
     STABLE = auto()
     UNICODEC = auto()
+    SPEAKERS = auto()
+    SPEAKER_LENGTHS = auto()
 
 
 @dataclass(frozen=True)
@@ -109,10 +111,12 @@ class ImageItem(_Item[ImageView, ImageMeta]):
 
 class TextMeta(StrEnum):
     LANG = auto()
+    SOURCE_INDEX = auto()
 
 
 class TextView(StrEnum):
     TEXT = auto()
+    SPEAKERS = auto()
 
 
 @dataclass(frozen=True)
@@ -204,8 +208,20 @@ def _text_meta_mapping(name: str, value: object) -> Mapping[TextMeta, Any]:
     lang = output.get(TextMeta.LANG)
     if lang is not None and not isinstance(lang, Lang):
         raise TypeError("TextMeta.LANG must be a Lang value.")
+    source_index = output.get(TextMeta.SOURCE_INDEX)
+    if source_index is not None and not _source_index_value(source_index):
+        raise TypeError("TextMeta.SOURCE_INDEX must be an integer or sequence of integers.")
     return output
 
+
+def _source_index_value(value: object) -> bool:
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, int):
+        return True
+    if not isinstance(value, Sequence):
+        return False
+    return all(not isinstance(item, bool) and isinstance(item, int) for item in value)
 
 def _enum_keys(name: str, value: object, key_type: type[KeyT]) -> frozenset[KeyT]:
     try:

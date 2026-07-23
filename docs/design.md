@@ -17,7 +17,7 @@
 
 `Modality` 描述数据类型，例如 `AUDIO`、`TEXT`、`IMAGE`。它决定 item 的类型和可用 view/meta 枚举。
 
-`View` 描述同一份数据的表示方式，例如音频的 waveform、file、LongCat codes 或 DAC codes。新的编码或派生结果应优先作为 view，而不是改写原始 item。
+`View` 描述同一份数据的表示方式，例如音频的 waveform、file、LongCat codes、DAC codes 或 speaker-axis metadata。新的编码或派生结果应优先作为 view，而不是改写原始 item。每个 view 必须有稳定且唯一的值类型；例如 `AudioView.WAVEFORM` 始终是 `(waveform_tensor, sample_rate)`，不能在 grouped 数据集中临时变成 `{speaker_id: waveform}` 这类 mapping。需要表达 speaker 轴顺序时使用独立 view，例如 `AudioView.SPEAKERS`。
 
 `Meta` 描述旁信息，例如 label、labels、language。meta 必须在 schema 中显式声明后才会进入 batch。
 

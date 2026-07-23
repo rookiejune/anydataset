@@ -80,7 +80,7 @@ class FragmentBatchWriter:
         self,
         batch: Sequence[tuple[int, Sample]],
     ) -> tuple[tuple[int, Sample], ...]:
-        if self.materializer.batch_size == 1:
+        if not self.materializer._uses_batch_provider(self.provider):
             return tuple(
                 (
                     index,

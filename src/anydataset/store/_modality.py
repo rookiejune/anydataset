@@ -103,6 +103,8 @@ def with_modality_view(
     view: View,
     value: Any,
 ) -> Item:
+    if isinstance(value, (AudioItem, ImageItem, TextItem)):
+        return _validated_output_item(view, value)
     if isinstance(view, AudioView):
         return AudioItem(views=views(view, value))
     if isinstance(view, ImageView):
@@ -112,3 +114,19 @@ def with_modality_view(
     raise TypeError(
         "modality materializer output must be an AudioView, ImageView, or TextView."
     )
+
+
+def _validated_output_item(view: View, item: Item) -> Item:
+    if isinstance(view, AudioView) and isinstance(item, AudioItem):
+        if view not in item.views:
+            raise ValueError(f"Audio provider output item is missing {view.value!r} view.")
+        return item
+    if isinstance(view, ImageView) and isinstance(item, ImageItem):
+        if view not in item.views:
+            raise ValueError(f"Image provider output item is missing {view.value!r} view.")
+        return item
+    if isinstance(view, TextView) and isinstance(item, TextItem):
+        if view not in item.views:
+            raise ValueError(f"Text provider output item is missing {view.value!r} view.")
+        return item
+    raise TypeError("provider output item modality does not match provider output view.")

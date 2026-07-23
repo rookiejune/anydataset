@@ -11,6 +11,14 @@ from .multiple import (
     SequentialStrategy,
     WeightedRandomStrategy,
 )
+from .speaker import (
+    SpeakerCartesianDataset,
+    SpeakerIdDataset,
+    SpeakerMode,
+    TextRef,
+    speaker_cartesian_indexes,
+    speaker_for_index,
+)
 
 __all__ = [
     "AnyDataset",
@@ -21,5 +29,11 @@ __all__ = [
     "MultipleAnyDataset",
     "RoundRobinStrategy",
     "SequentialStrategy",
+    "SpeakerCartesianDataset",
+    "SpeakerIdDataset",
+    "SpeakerMode",
+    "TextRef",
     "WeightedRandomStrategy",
+    "speaker_cartesian_indexes",
+    "speaker_for_index",
 ]

@@ -16,6 +16,7 @@ from anydataset.runtime import Runtime
 from anydataset.store import ModalityMaterializer
 from anydataset.types import (
     AudioItem,
+    AudioMeta,
     AudioReq,
     AudioView,
     ImageItem,
@@ -884,6 +885,29 @@ class ViewMaterializerTest(unittest.TestCase):
             self.assertTrue(torch.equal(source_waveform, torch.tensor([[5.0]])))
             self.assertTrue(torch.equal(target_waveform, torch.tensor([[2.0]])))
 
+    def test_modality_materializer_uses_batch_only_provider_at_batch_size_one(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = root / "qwen-delta"
+            sample = {
+                (Role.DEFAULT, Modality.TEXT): TextItem(
+                    views={TextView.TEXT: "hello", TextView.SPEAKERS: "Vivian"},
+                )
+            }
+
+            ModalityMaterializer(target, split="train", batch_size=1).write(
+                dataset_factory=_DatasetFactory((sample,)),
+                provider_factory=_StaticProviderFactory(_BatchOnlyTTSProvider()),
+                devices="cpu",
+            )
+
+            stored = read_store_dataset(target)
+            output = stored[0][Role.DEFAULT, Modality.AUDIO]
+            waveform, sample_rate = output.views[AudioView.WAVEFORM]
+            self.assertTrue(torch.equal(waveform, torch.tensor([[1.0, 2.0]])))
+            self.assertEqual(sample_rate, 16000)
+            self.assertEqual(output.meta[AudioMeta.SPEAKER_ID], "Vivian")
+
     def test_modality_materializer_passes_reference_role_output(self):
         sample = {
             (Role.SOURCE, Modality.TEXT): TextItem(views={TextView.TEXT: "source"}),
@@ -1649,6 +1673,25 @@ class _TTSProvider:
 
     def __call__(self, views):
         return torch.tensor([[float(len(views[TextView.TEXT]) + self.offset)]]), 16000
+
+
+class _BatchOnlyTTSProvider:
+    output = AudioView.WAVEFORM
+    batch_only = True
+
+    def __call__(self, views):
+        raise AssertionError("batch_only provider should use call_batch")
+
+    def call_batch(self, batch):
+        ref = (Role.DEFAULT, Modality.TEXT)
+        speakers = batch.sample[ref].views[TextView.SPEAKERS]
+        return [
+            AudioItem(
+                views={AudioView.WAVEFORM: (torch.tensor([[1.0, 2.0]]), 16000)},
+                meta={AudioMeta.SPEAKER_ID: speaker},
+            )
+            for speaker in speakers
+        ]
 
 
 class _MultiRoleTTSProvider(_TTSProvider):

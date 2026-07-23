@@ -9,7 +9,7 @@ import torch
 
 from ..dataset.collate import Batch, FieldGroup, FieldRef
 from ..types.item import Modality, Role
-from ..types.item import AudioView, TextView
+from ..types.item import AudioItem, AudioMeta, AudioView, TextView
 
 try:
     import torchaudio
@@ -215,8 +215,15 @@ def _file_batch(value: Any) -> list[Any]:
     return list(value)
 
 
-def _audio_output(output: Any) -> tuple[Any, int]:
-    return output.waveform, output.sample_rate
+def _audio_output(output: Any) -> AudioItem:
+    return AudioItem(
+        views={AudioView.WAVEFORM: (output.waveform, output.sample_rate)},
+        meta={
+            AudioMeta.DURATION: (
+                float(output.waveform.shape[-1]) / float(output.sample_rate)
+            )
+        },
+    )
 
 
 def _positive_int(name: str, value: int) -> int:

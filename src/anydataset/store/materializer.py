@@ -558,7 +558,7 @@ class ViewMaterializer:
         shard_id: int,
     ) -> Iterator[tuple[int, Sample]]:
         indexed = iter_indexed_shard(dataset, num_shards, shard_id)
-        if self.batch_size == 1:
+        if not self._uses_batch_provider(provider):
             for index, sample in indexed:
                 yield index, self._sample_with_provider(sample, provider)
             return
@@ -637,6 +637,9 @@ class ViewMaterializer:
             samples,
             lambda batch: tuple(self._samples_with_batch_provider(batch, provider)),
         )
+
+    def _uses_batch_provider(self, provider: MaterializerProvider) -> bool:
+        return self.batch_size > 1 or bool(getattr(provider, "batch_only", False))
 
 
 @dataclass

@@ -10,6 +10,7 @@ import torch
 from anydataset.dataset.collate import collate_fn
 from anydataset.types import (
     AudioItem,
+    AudioMeta,
     AudioReq,
     AudioView,
     Modality,
@@ -19,6 +20,7 @@ from anydataset.types import (
     TextView,
 )
 from anydataset.provider.moss_tts import MossTTSProvider
+from anydataset.provider.qwen_tts import QwenTTSProvider
 from anydataset.provider.whisper import WhisperASRProvider
 
 
@@ -36,7 +38,7 @@ class ModalityProviderTest(unittest.TestCase):
                 runtime_kwargs={"style": "clear"},
             )
 
-        waveform, sample_rate = provider({TextView.TEXT: "hello"})
+        output = provider({TextView.TEXT: "hello"})
 
         self.assertEqual(
             FakeMossTTS.calls,
@@ -52,8 +54,11 @@ class ModalityProviderTest(unittest.TestCase):
             ],
         )
         self.assertEqual(FakeMossTTS.loaded.synthesize_calls, [("hello", options, None)])
+        self.assertIsInstance(output, AudioItem)
+        waveform, sample_rate = output.views[AudioView.WAVEFORM]
         self.assertTrue(torch.equal(waveform, torch.tensor([[1.0, 2.0]])))
         self.assertEqual(sample_rate, 16000)
+        self.assertEqual(output.meta[AudioMeta.DURATION], 2.0 / 16000.0)
 
     def test_moss_tts_provider_uses_anytrain_default_model(self):
         FakeMossTTS.calls = []
@@ -109,9 +114,20 @@ class ModalityProviderTest(unittest.TestCase):
             [(["hello", "world"], options, None)],
         )
         self.assertEqual(len(outputs), 2)
-        self.assertTrue(torch.equal(outputs[0][0], torch.tensor([[0.0, 1.0]])))
-        self.assertTrue(torch.equal(outputs[1][0], torch.tensor([[2.0, 3.0]])))
-        self.assertEqual([sample_rate for _, sample_rate in outputs], [16000, 16000])
+        self.assertTrue(
+            torch.equal(outputs[0].views[AudioView.WAVEFORM][0], torch.tensor([[0.0, 1.0]]))
+        )
+        self.assertTrue(
+            torch.equal(outputs[1].views[AudioView.WAVEFORM][0], torch.tensor([[2.0, 3.0]]))
+        )
+        self.assertEqual(
+            [output.views[AudioView.WAVEFORM][1] for output in outputs],
+            [16000, 16000],
+        )
+        self.assertEqual(
+            [output.meta[AudioMeta.DURATION] for output in outputs],
+            [2.0 / 16000.0, 2.0 / 16000.0],
+        )
 
     def test_moss_tts_provider_synthesizes_multiple_text_roles(self):
         FakeMossTTS.calls = []
@@ -148,10 +164,20 @@ class ModalityProviderTest(unittest.TestCase):
         self.assertIsInstance(outputs, dict)
         source = outputs[(Role.SOURCE, Modality.TEXT)]
         target = outputs[(Role.TARGET, Modality.TEXT)]
-        self.assertTrue(torch.equal(source[0][0], torch.tensor([[0.0, 1.0]])))
-        self.assertTrue(torch.equal(target[0][0], torch.tensor([[0.0, 1.0]])))
-        self.assertEqual([sample_rate for _, sample_rate in source], [16000, 16000])
-        self.assertEqual([sample_rate for _, sample_rate in target], [16000, 16000])
+        self.assertTrue(
+            torch.equal(source[0].views[AudioView.WAVEFORM][0], torch.tensor([[0.0, 1.0]]))
+        )
+        self.assertTrue(
+            torch.equal(target[0].views[AudioView.WAVEFORM][0], torch.tensor([[0.0, 1.0]]))
+        )
+        self.assertEqual(
+            [output.views[AudioView.WAVEFORM][1] for output in source],
+            [16000, 16000],
+        )
+        self.assertEqual(
+            [output.views[AudioView.WAVEFORM][1] for output in target],
+            [16000, 16000],
+        )
 
     def test_moss_tts_provider_uses_reference_audio_role(self):
         FakeMossTTS.calls = []
@@ -221,6 +247,69 @@ class ModalityProviderTest(unittest.TestCase):
         self.assertEqual([name for name, _, _ in saved], ["ref-00000000.wav", "ref-00000001.wav"])
         self.assertEqual([tuple(wave.shape) for _, wave, _ in saved], [(1, 3), (1, 1)])
         self.assertEqual(len(outputs), 2)
+
+    def test_qwen_tts_provider_synthesizes_text_batch_with_speaker_ids(self):
+        FakeQwenCustomVoiceTTS.calls = []
+        FakeQwenCustomVoiceTTS.loaded = None
+        with _fake_anytrain_qwen_tts():
+            provider = QwenTTSProvider(
+                "fake-qwen",
+                default_language="Auto",
+                device="cpu",
+                runtime_kwargs={"top_k": 5},
+            )
+
+        outputs = provider.call_batch(
+            collate_fn(
+                {
+                    (Role.DEFAULT, Modality.TEXT): TextReq(
+                        views=frozenset({TextView.TEXT, TextView.SPEAKERS}),
+                    )
+                }
+            )(
+                [
+                    {
+                        (Role.DEFAULT, Modality.TEXT): TextItem(
+                            views={TextView.TEXT: "hello", TextView.SPEAKERS: "Vivian"},
+                        )
+                    },
+                    {
+                        (Role.DEFAULT, Modality.TEXT): TextItem(
+                            views={TextView.TEXT: "world", TextView.SPEAKERS: "Ryan"},
+                        )
+                    },
+                ]
+            )
+        )
+
+        self.assertEqual(
+            FakeQwenCustomVoiceTTS.calls,
+            [
+                (
+                    "fake-qwen",
+                    {
+                        "device": "cpu",
+                        "runtime_kwargs": {"top_k": 5},
+                    },
+                )
+            ],
+        )
+        self.assertEqual(
+            FakeQwenCustomVoiceTTS.loaded.calls,
+            [
+                (
+                    ["hello", "world"],
+                    ["Vivian", "Ryan"],
+                    ["Auto", "Auto"],
+                    None,
+                    None,
+                )
+            ],
+        )
+        self.assertEqual(len(outputs), 2)
+        self.assertTrue(torch.equal(outputs[0].views[AudioView.WAVEFORM][0], torch.tensor([[0.0, 1.0]])))
+        self.assertEqual(outputs[0].meta[AudioMeta.SPEAKER_ID], "Vivian")
+        self.assertEqual(outputs[1].meta[AudioMeta.SPEAKER_ID], "Ryan")
 
     def test_whisper_asr_provider_loads_preset_and_transcribes(self):
         FakeWhisperASREvaluator.calls = []
@@ -458,6 +547,38 @@ class FakeMossTTS:
         return _TTSOutput(torch.tensor([[1.0, 2.0]]), 16000)
 
 
+class FakeQwenCustomVoiceTTS:
+    calls = []
+    loaded = None
+
+    def __init__(self) -> None:
+        self.calls = []
+
+    @classmethod
+    def from_pretrained(cls, model="__default__", **kwargs):
+        cls.calls.append((model, kwargs))
+        cls.loaded = cls()
+        return cls.loaded
+
+    def synthesize_custom_voice(
+        self,
+        text,
+        *,
+        speakers,
+        languages,
+        instructs,
+        options,
+    ):
+        self.calls.append((text, speakers, languages, instructs, options))
+        return [
+            _TTSOutput(
+                torch.tensor([[float(index * 2), float(index * 2 + 1)]]),
+                16000,
+            )
+            for index, _ in enumerate(text)
+        ]
+
+
 class FakeWhisperASREvaluator:
     calls = []
     loaded = None
@@ -503,6 +624,29 @@ class _fake_anytrain_tts:
             "anytrain.tts.moss": types.ModuleType("anytrain.tts.moss"),
         }
         modules["anytrain.tts.moss"].MossTTS = FakeMossTTS
+        self.previous = {name: sys.modules.get(name) for name in modules}
+        sys.modules.update(modules)
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        for name, module in self.previous.items():
+            if module is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = module
+
+
+class _fake_anytrain_qwen_tts:
+    def __init__(self) -> None:
+        self.previous = {}
+
+    def __enter__(self):
+        modules = {
+            "anytrain": types.ModuleType("anytrain"),
+            "anytrain.tts": types.ModuleType("anytrain.tts"),
+            "anytrain.tts.qwen": types.ModuleType("anytrain.tts.qwen"),
+        }
+        modules["anytrain.tts.qwen"].QwenCustomVoiceTTS = FakeQwenCustomVoiceTTS
         self.previous = {name: sys.modules.get(name) for name in modules}
         sys.modules.update(modules)
         return self
