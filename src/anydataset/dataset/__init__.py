@@ -13,6 +13,8 @@ from .multiple import (
     WeightedRandomStrategy,
 )
 from .speaker import (
+    GroupedSpeakerAudioDataset,
+    SpeakerAssignment,
     SpeakerCartesianDataset,
     SpeakerIdDataset,
     SpeakerMode,
@@ -33,6 +35,8 @@ __all__ = [
     "MultipleAnyDataset",
     "RoundRobinStrategy",
     "SequentialStrategy",
+    "GroupedSpeakerAudioDataset",
+    "SpeakerAssignment",
     "SpeakerCartesianDataset",
     "SpeakerIdDataset",
     "SpeakerMode",

@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Change `SpeakerIdDataset` to accept explicit multi-reference
+  `SpeakerAssignment` mappings, add generic grouped speaker-audio reads, and
+  keep Qwen-specific synthesis outside the speaker dataset abstraction.
+
 ## 1.0.0 - 2026-07-03
 
 - Stabilize the canonical `Sample = Mapping[tuple[Role, Modality], Item]`

@@ -181,6 +181,30 @@ provider 可以声明 `reference_role` 作为唯一例外。该 role 必须已�
 
 `ModalityMaterializer` 生成的新 item 默认不复制 meta。label、language 等跨模态语义继承必须由调用方显式完成，避免库替用户猜测业务规则。
 
+### Speaker 条件
+
+`TextView.SPEAKERS` 是文本生成语音时使用的 speaker 条件 view。单条未 batch 的
+`TextItem` 中它始终是一个非空 speaker id 字符串；collate 后才成为字符串序列。它不是
+文本事实 metadata，也不绑定具体 TTS provider。
+
+`SpeakerIdDataset` 通过 `(Role, Modality.TEXT) -> SpeakerAssignment` mapping 为任意
+map-style canonical dataset 的一个或多个 text item 增加 speaker view，且不改变样本数量。
+每个 text reference 独立选择 assignment：aligned speaker 序列必须与 dataset 等长，cycle
+则按样本 index 循环使用非空 speaker 序列。`SpeakerCartesianDataset` 只对一个显式 text
+reference 做 text × speakers 展开，避免多 role 笛卡尔积的组合语义被库隐式猜测。
+
+`GroupedSpeakerAudioDataset` 可以把这种 flat speaker grid 按原 text index 聚合回 speaker
+轴，并用 `AudioView.SPEAKERS` 和 `AudioView.SPEAKER_LENGTHS` 描述轴顺序和未 padding
+长度。flat 长度必须能被 speaker 数整除；同一组内的 source index、speaker 顺序、text
+内容、采样率和 waveform channel shape 必须一致，waveform 必须是 `[channel, time]`。
+flat audio 如含 `AudioMeta.SPEAKER_ID`，它也必须与 text speaker view 一致。聚合结果只用
+`AudioView.SPEAKERS` 表达 speaker 轴，不把 speaker tuple 写进单值 speaker meta。这些物理
+store 契约不满足时读取会明确报错。
+
+TTS provider 只消费已经存在的 `TextView.TEXT`、`TextView.SPEAKERS` 和可选语言 meta。
+例如 Qwen provider 不负责 speaker 分配；调用方先组合 speaker dataset，再使用
+`ModalityMaterializer` 为相同 role 增加 audio item。
+
 ## 过滤分区
 
 过滤规则通过零参数 factory 创建 predicate；factory 在实际执行过滤的进程里调用。
