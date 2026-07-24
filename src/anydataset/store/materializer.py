@@ -25,7 +25,7 @@ from .._parallel import (
     validate_process_parent,
     validate_process_value,
 )
-from .._progress import ProgressDashboard, watch_workers
+from .._progress import Progress, ProgressDashboard, watch_workers
 from .._resume import (
     cleanup_resume_dir,
     dataset_sample_count,
@@ -71,7 +71,15 @@ ProviderFactory = Callable[[str], MaterializerProvider]
 _MaterializerMode = Literal["view", "modality"]
 
 _PROGRESS_STAGES = ("reader", "provider", "writer")
-DEFAULT_COMMIT_SAMPLES = 32
+_COMMIT_PROGRESS_STAGES = (
+    "scan",
+    "validate",
+    "merge-runs",
+    "merge-samples",
+    "merge-views",
+    "link-shards",
+)
+DEFAULT_COMMIT_SAMPLES = 1024
 
 
 @dataclass
@@ -327,23 +335,37 @@ class ViewMaterializer:
             ).write(())
             cleanup_resume_dir(self.output_dir)
             return path
-        path = commit_store_fragments(
-            self.output_dir,
-            fragments_dir,
-            dataset_id=self._dataset_id,
-            split=self.split,
-            expected_sample_count=expected,
-        )
+        with ProgressDashboard(
+            desc="commit materialized views",
+            total=expected,
+            count_stage="merge-samples",
+            stages=_COMMIT_PROGRESS_STAGES,
+        ) as progress:
+            path = commit_store_fragments(
+                self.output_dir,
+                fragments_dir,
+                dataset_id=self._dataset_id,
+                split=self.split,
+                expected_sample_count=expected,
+                progress=_commit_progress(progress),
+            )
         cleanup_resume_dir(self.output_dir)
         return path
 
     def _commit_parts(self, parts_dir: str | Path) -> Path:
-        path = commit_store_parts(
-            self.output_dir,
-            parts_dir,
-            dataset_id=self._dataset_id,
-            split=self.split,
-        )
+        with ProgressDashboard(
+            desc="commit materialized views",
+            total=None,
+            count_stage="merge-samples",
+            stages=_COMMIT_PROGRESS_STAGES,
+        ) as progress:
+            path = commit_store_parts(
+                self.output_dir,
+                parts_dir,
+                dataset_id=self._dataset_id,
+                split=self.split,
+                progress=_commit_progress(progress),
+            )
         cleanup_resume_dir(self.output_dir)
         return path
 
@@ -690,6 +712,13 @@ def _select_sample(sample: Sample, schema: Schema) -> Sample:
 
 def _merge_output_samples(left: Sample, right: Sample) -> Sample:
     return merge_samples(left, right, context="Materialized sample")
+
+
+def _commit_progress(dashboard: ProgressDashboard) -> Callable[[str, int], None]:
+    def put(stage: str, count: int) -> None:
+        dashboard.put(Progress(0, count, False, None, stage=stage))
+
+    return put
 
 
 def _dataset_id(output_dir: str | Path) -> str:

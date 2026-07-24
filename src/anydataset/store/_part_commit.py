@@ -4,6 +4,7 @@ import os
 import shutil
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
+from dataclasses import dataclass
 from heapq import heappop, heappush
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -47,7 +48,15 @@ from .paths import (
 from .reader import read_store_manifest, read_store_views
 
 T = TypeVar("T")
+CommitProgress = Callable[[str, int], None]
 _MERGE_FAN_IN = 32
+_PROGRESS_BATCH_SIZE = 1024
+
+
+@dataclass(frozen=True)
+class _FragmentInfo:
+    path: Path
+    indexes: tuple[int, ...]
 
 
 def commit_store_parts(
@@ -56,11 +65,13 @@ def commit_store_parts(
     *,
     dataset_id: str,
     split: str | None = None,
+    progress: CommitProgress | None = None,
 ) -> Path:
     parts = _part_roots(parts_dir)
+    _put_progress(progress, "scan", len(parts))
     if not parts:
         raise ValueError(f"No materialized parts found: {parts_dir}")
-    _validate_parts(parts, dataset_id, split)
+    _validate_parts(parts, dataset_id, split, progress=progress)
     views = _store_views(parts)
     validate_store_payloads(parts)
     with _bounded_store_roots(
@@ -68,6 +79,7 @@ def commit_store_parts(
         parts,
         dataset_id=dataset_id,
         split=split,
+        progress=progress,
     ) as roots:
         return replace_dir(
             output_dir,
@@ -77,6 +89,7 @@ def commit_store_parts(
                 dataset_id=dataset_id,
                 split=split,
                 views=views,
+                progress=progress,
             ),
         )
 
@@ -88,6 +101,7 @@ def commit_store_fragments(
     dataset_id: str,
     split: str | None = None,
     expected_sample_count: int | None = None,
+    progress: CommitProgress | None = None,
 ) -> Path:
     if expected_sample_count is not None and expected_sample_count < 0:
         raise ValueError("expected_sample_count must be non-negative.")
@@ -95,6 +109,7 @@ def commit_store_fragments(
         fragments_dir,
         dataset_id=dataset_id,
         split=split,
+        progress=progress,
     )
     if not fragments:
         raise ValueError(f"No materialized fragments found: {fragments_dir}")
@@ -105,6 +120,7 @@ def commit_store_fragments(
         fragments,
         dataset_id=dataset_id,
         split=split,
+        progress=progress,
     ) as roots:
         return replace_dir(
             output_dir,
@@ -115,6 +131,7 @@ def commit_store_fragments(
                 split=split,
                 expected_sample_count=expected_sample_count,
                 views=views,
+                progress=progress,
             ),
         )
 
@@ -127,12 +144,14 @@ def commit_fragment_part(
     shard_id: int,
     num_shards: int,
     split: str | None = None,
+    progress: CommitProgress | None = None,
 ) -> Path:
     validate_shard(num_shards, shard_id)
-    roots = _validate_fragment_roots(
+    fragment_infos, roots = _validate_fragment_roots_with_info(
         tuple(Path(path) for path in fragments),
         dataset_id=dataset_id,
         split=split,
+        progress=progress,
     )
     if not roots:
         return DatasetPartWriter(
@@ -144,13 +163,14 @@ def commit_fragment_part(
         ).write(())
     views = _store_views(roots)
     validate_store_payloads(roots)
-    sample_count = sum(read_store_manifest(fragment).sample_count for fragment in roots)
+    sample_count = sum(len(fragment.indexes) for fragment in fragment_infos)
 
     with _bounded_store_roots(
         output_dir,
         roots,
         dataset_id=dataset_id,
         split=split,
+        progress=progress,
     ) as merged:
         def write(root: Path) -> Path:
             _commit_roots_to_tmp(
@@ -160,6 +180,7 @@ def commit_fragment_part(
                 split=split,
                 views=views,
                 dense=False,
+                progress=progress,
             )
             write_json(
                 _part_json_path(root),
@@ -185,21 +206,20 @@ def completed_fragment_indexes(
     root = Path(fragments_dir)
     if not root.is_dir():
         return frozenset()
-    fragment_dirs = _fragment_dirs(root)
-    cached = cached_completed_indexes(root, (path.name for path in fragment_dirs))
+    fragment_paths = _fragment_paths(root)
+    cached = cached_completed_indexes(root, (path.name for path in fragment_paths))
     if cached is not None:
         return cached
-    indexes: set[int] = set()
-    cache_entries: list[tuple[str, tuple[int, ...]]] = []
-    for fragment in _validate_fragment_roots(
-        fragment_dirs,
+    fragments = _fragment_infos_from_paths(
+        fragment_paths,
         dataset_id=dataset_id,
         split=split,
-    ):
-        data = read_json(_fragment_json_path(fragment))
-        fragment_indexes = _fragment_sample_indexes(data)
-        cache_entries.append((fragment.name, fragment_indexes))
-        for index in fragment_indexes:
+    )
+    indexes: set[int] = set()
+    cache_entries: list[tuple[str, tuple[int, ...]]] = []
+    for fragment in fragments:
+        cache_entries.append((fragment.path.name, fragment.indexes))
+        for index in fragment.indexes:
             if index in indexes:
                 raise ValueError(f"Duplicate materialized fragment index {index}.")
             indexes.add(index)
@@ -227,6 +247,7 @@ def _bounded_store_roots(
     *,
     dataset_id: str,
     split: str | None,
+    progress: CommitProgress | None,
 ) -> Iterator[tuple[Path, ...]]:
     if len(stores) <= _MERGE_FAN_IN:
         yield stores
@@ -254,9 +275,11 @@ def _bounded_store_roots(
                         split=split,
                         views=_store_views(batch),
                         dense=False,
+                        progress=progress,
                     )
 
                 merged.append(replace_dir(path, write))
+                _put_progress(progress, "merge-runs", len(batch))
             current = tuple(merged)
             level += 1
         yield current
@@ -271,17 +294,20 @@ def _commit_roots_to_tmp(
     expected_sample_count: int | None = None,
     views: tuple[tuple[Role, Modality, View], ...] | None = None,
     dense: bool = True,
+    progress: CommitProgress | None = None,
 ) -> Path:
     sample_count = _write_ordered_samples_manifest(
         root,
         stores,
         expected_sample_count=expected_sample_count,
         dense=dense,
+        progress=progress,
     )
     _write_committed_view_manifests(
         root,
         stores,
         views=views,
+        progress=progress,
     )
     _write_committed_dataset_manifest(
         root,
@@ -298,6 +324,7 @@ def _write_committed_view_manifests(
     stores: tuple[Path, ...],
     *,
     views: tuple[tuple[Role, Modality, View], ...] | None,
+    progress: CommitProgress | None,
 ) -> None:
     for view in (views if views is not None else _store_views(stores)):
         view_count, expected_view_count, shards = _write_ordered_view_manifest(
@@ -305,6 +332,7 @@ def _write_committed_view_manifests(
             stores,
             view,
             _sample_indexes_for_ref(root, view[:2]),
+            progress=progress,
         )
         if view_count != expected_view_count:
             raise ValueError(
@@ -312,7 +340,7 @@ def _write_committed_view_manifests(
                 f"does not match item count {expected_view_count}."
             )
         for store in stores:
-            _copy_view_shards(store, root, view)
+            _copy_view_shards(store, root, view, progress=progress)
         _validate_copied_view_shards(root, view, shards)
         view_ready_path(root, view).touch()
 
@@ -343,10 +371,12 @@ def _write_ordered_samples_manifest(
     *,
     expected_sample_count: int | None,
     dense: bool = True,
+    progress: CommitProgress | None = None,
 ) -> int:
     writer = sample_manifest_writer(root)
     previous_index: int | None = None
     count = 0
+    pending = 0
     try:
         for count, entry in enumerate(_merged_sample_entries(stores), start=1):
             if previous_index is not None:
@@ -380,12 +410,17 @@ def _write_ordered_samples_manifest(
                     items=entry.items,
                 )
             )
+            pending += 1
+            if pending >= _PROGRESS_BATCH_SIZE:
+                _put_progress(progress, "merge-samples", pending)
+                pending = 0
         if expected_sample_count is not None and count != expected_sample_count:
             raise ValueError(
                 "Materialized fragments coverage mismatch: "
                 f"missing sample_index {count}"
             )
         writer.close()
+        _put_progress(progress, "merge-samples", pending)
     except Exception:
         writer.abort()
         raise
@@ -397,12 +432,15 @@ def _write_ordered_view_manifest(
     stores: tuple[Path, ...],
     view: tuple[Role, Modality, View],
     sample_indexes: Iterable[int],
+    *,
+    progress: CommitProgress | None,
 ) -> tuple[int, int, frozenset[str]]:
     writer = view_manifest_writer(root, view)
     entries = iter(_unique_view_entries(_merged_view_entries(stores, view)))
     current = _next_entry(entries)
     count = 0
     expected_count = 0
+    pending = 0
     shards: set[str] = set()
     try:
         for sample_index in sample_indexes:
@@ -425,6 +463,10 @@ def _write_ordered_view_manifest(
             writer.write(current)
             shards.add(current.shard)
             count += 1
+            pending += 1
+            if pending >= _PROGRESS_BATCH_SIZE:
+                _put_progress(progress, "merge-views", pending)
+                pending = 0
             current = _next_entry(entries)
         if current is not None:
             raise ValueError(
@@ -432,6 +474,7 @@ def _write_ordered_view_manifest(
                 f"{current.sample_index}."
             )
         writer.close()
+        _put_progress(progress, "merge-views", pending)
     except Exception:
         writer.abort()
         raise
@@ -559,30 +602,83 @@ def _fragment_roots(
     *,
     dataset_id: str,
     split: str | None,
+    progress: CommitProgress | None = None,
 ) -> tuple[Path, ...]:
     root = Path(fragments_dir).expanduser()
     if not root.is_dir():
         return ()
-    return _validate_fragment_roots(
-        _fragment_dirs(root),
-        dataset_id=dataset_id,
-        split=split,
-    )
-
-
-def _fragment_dirs(root: Path) -> tuple[Path, ...]:
     return tuple(
-        sorted(
-            (
-                path
-                for path in root.iterdir()
-                if path.is_dir()
-                if not path.name.startswith(".")
-                if _fragment_json_path(path).is_file()
-            ),
-            key=_fragment_sort_key,
+        info.path
+        for info in _fragment_infos(
+            root,
+            dataset_id=dataset_id,
+            split=split,
+            progress=progress,
         )
     )
+
+
+def _fragment_infos(
+    root: Path,
+    *,
+    dataset_id: str,
+    split: str | None,
+    progress: CommitProgress | None = None,
+) -> tuple[_FragmentInfo, ...]:
+    fragments = _fragment_paths(root)
+    _put_progress(progress, "scan", len(fragments))
+    return _fragment_infos_from_paths(
+        fragments,
+        dataset_id=dataset_id,
+        split=split,
+        progress=progress,
+    )
+
+
+def _fragment_paths(root: Path) -> tuple[Path, ...]:
+    return tuple(
+        path
+        for path in root.iterdir()
+        if path.is_dir()
+        if not path.name.startswith(".")
+        if _fragment_json_path(path).is_file()
+    )
+
+
+def _fragment_infos_from_paths(
+    fragments: tuple[Path, ...],
+    *,
+    dataset_id: str,
+    split: str | None,
+    progress: CommitProgress | None = None,
+) -> tuple[_FragmentInfo, ...]:
+    infos: list[_FragmentInfo] = []
+    for fragment in fragments:
+        infos.append(
+            _read_fragment_info(
+                fragment,
+                dataset_id=dataset_id,
+                split=split,
+            )
+        )
+        _put_progress(progress, "validate", 1)
+    return tuple(sorted(infos, key=lambda info: (min(info.indexes), info.path.name)))
+
+
+def _fragment_info_roots(
+    fragments: tuple[Path, ...],
+    *,
+    dataset_id: str,
+    split: str | None,
+    progress: CommitProgress | None = None,
+) -> tuple[tuple[_FragmentInfo, ...], tuple[Path, ...]]:
+    infos = _fragment_infos_from_paths(
+        fragments,
+        dataset_id=dataset_id,
+        split=split,
+        progress=progress,
+    )
+    return infos, tuple(info.path for info in infos)
 
 
 def _validate_fragment_roots(
@@ -590,10 +686,30 @@ def _validate_fragment_roots(
     *,
     dataset_id: str,
     split: str | None,
+    progress: CommitProgress | None = None,
 ) -> tuple[Path, ...]:
-    for fragment in fragments:
-        _validate_fragment(fragment, dataset_id, split)
-    return fragments
+    _fragment_infos, roots = _fragment_info_roots(
+        fragments,
+        dataset_id=dataset_id,
+        split=split,
+        progress=progress,
+    )
+    return roots
+
+
+def _validate_fragment_roots_with_info(
+    fragments: tuple[Path, ...],
+    *,
+    dataset_id: str,
+    split: str | None,
+    progress: CommitProgress | None = None,
+) -> tuple[tuple[_FragmentInfo, ...], tuple[Path, ...]]:
+    return _fragment_info_roots(
+        fragments,
+        dataset_id=dataset_id,
+        split=split,
+        progress=progress,
+    )
 
 
 def _part_sort_key(path: Path) -> tuple[int, str]:
@@ -605,6 +721,8 @@ def _validate_parts(
     parts: tuple[Path, ...],
     dataset_id: str,
     split: str | None,
+    *,
+    progress: CommitProgress | None = None,
 ) -> None:
     num_shards: int | None = None
     shard_ids: set[int] = set()
@@ -638,12 +756,18 @@ def _validate_parts(
         if shard_id in shard_ids:
             raise ValueError(f"Duplicate materialized part for shard_id {shard_id}.")
         shard_ids.add(shard_id)
+        _put_progress(progress, "validate", 1)
     if num_shards is not None and shard_ids != set(range(num_shards)):
         missing = sorted(set(range(num_shards)) - shard_ids)
         raise ValueError(f"Missing materialized part for shard_id {missing[0]}.")
 
 
-def _validate_fragment(path: Path, dataset_id: str, split: str | None) -> None:
+def _read_fragment_info(
+    path: Path,
+    *,
+    dataset_id: str,
+    split: str | None,
+) -> _FragmentInfo:
     data = read_json(_fragment_json_path(path))
     if data.get("dataset_id") != dataset_id:
         raise ValueError(f"Fragment {path} dataset_id does not match {dataset_id!r}.")
@@ -665,6 +789,7 @@ def _validate_fragment(path: Path, dataset_id: str, split: str | None) -> None:
         raise ValueError(f"Fragment {path} sample indexes do not match its metadata.")
     _validate_manifest_sample_count(path, manifest.sample_count, kind="Fragment")
     _validate_fragment_sample_manifest(path, indexes)
+    return _FragmentInfo(path=path, indexes=indexes)
 
 
 def _validate_manifest_sample_count(path: Path, expected: int, *, kind: str) -> None:
@@ -710,11 +835,6 @@ def _fragment_sample_indexes(data: Mapping[str, object]) -> tuple[int, ...]:
     return tuple(indexes)
 
 
-def _fragment_sort_key(path: Path) -> tuple[int, str]:
-    data = read_json(_fragment_json_path(path))
-    indexes = _fragment_sample_indexes(data)
-    return min(indexes), path.name
-
 def _validate_copied_view_shards(
     root: Path,
     view: tuple[Role, Modality, View],
@@ -732,6 +852,8 @@ def _copy_view_shards(
     source_root: Path,
     target_root: Path,
     view: tuple[Role, Modality, View],
+    *,
+    progress: CommitProgress | None,
 ) -> None:
     source_dir = view_shards_dir(source_root, view)
     if not source_dir.is_dir():
@@ -748,6 +870,7 @@ def _copy_view_shards(
         _link_or_copy(source, target)
         if not target.is_file():
             raise FileNotFoundError(target)
+        _put_progress(progress, "link-shards", 1)
 
 
 def _link_or_copy(source: Path, target: Path) -> None:
@@ -755,3 +878,13 @@ def _link_or_copy(source: Path, target: Path) -> None:
         os.link(source, target)
     except OSError:
         shutil.copy2(source, target)
+
+
+def _put_progress(
+    progress: CommitProgress | None,
+    stage: str,
+    count: int,
+) -> None:
+    if progress is None or count <= 0:
+        return
+    progress(stage, count)
