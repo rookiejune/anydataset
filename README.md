@@ -120,6 +120,69 @@ dataset = AnyDataset(
 )
 ```
 
+## Cost-aware batches
+
+`AnyDataset` can expose a lightweight cost description without parsing the
+full training sample. `cost_fn` receives the physical source row, may run more
+than once, and must not depend on mutable state. `CostDataLoader` uses these
+descriptions to plan batches before it materializes samples through
+`parse_fn`.
+
+```python
+from anydataset import AnyDataset, BatchCost, CostDataLoader
+
+
+def sample_cost(row):
+    # Read only lightweight fields needed to describe this sample.
+    return {
+        "text_tokens": len(row["text"]),
+        "codec_frames": row["codec_frames"],
+    }
+
+
+def batch_cost(samples):
+    count = len(samples)
+    text = max(sample["text_tokens"] for sample in samples)
+    codec = max(sample["codec_frames"] for sample in samples)
+    memory = count * (text + codec)
+    useful = sum(
+        sample["text_tokens"] + sample["codec_frames"] for sample in samples
+    )
+    return BatchCost(
+        memory=memory,
+        compute=float(count * (text * text + codec)),
+        waste=float(memory - useful),
+    )
+
+
+dataset = AnyDataset(spec, parse_fn=parse, cost_fn=sample_cost)
+loader = CostDataLoader(
+    dataset,
+    batch_cost_fn=batch_cost,
+    max_batch_memory=64_000,
+    planning_window=256,
+    shuffle=True,
+    collate_fn=collate,
+    num_workers=4,
+)
+```
+
+`BatchCost.memory` is the hard batch budget, `waste` selects lower-padding
+combinations inside the planning window, and `compute` balances complete
+batches across distributed ranks. Cost planning is eager for the current
+epoch, so all cost descriptions must be small and pickleable. Every rank must
+be able to read every global dataset index; the sampler controls the initial
+rank-local traversal, while distributed planning may assign a batch to a
+different rank for final materialization. The default distributed sampler drops
+the incomplete sample tail rather than padding it with duplicate indexes; an
+incomplete final planned-batch tail is dropped by default as well. Call
+`loader.set_epoch(epoch)` before each distributed epoch to advance the
+underlying sampler shuffle.
+
+The standalone `lba` package is deprecated. Convert map-style inputs to
+`AnyDataset` and use `CostDataLoader`; new code must not add an `lba`
+dependency.
+
 For local JSON, image, or audio files, use `Source.HF` with Hugging Face
 `load_dataset(...)` options such as `data_files` or `data_dir`. For structured
 local datasets with canonical samples, use `Source.STORE`.

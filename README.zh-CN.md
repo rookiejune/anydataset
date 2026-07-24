@@ -74,6 +74,27 @@ labels = image.meta[ImageMeta.LABEL]
 其他非 Tensor 值返回 list。通用的 dtype 或设备归一化仍应在 dataset transform / preset
 parse 阶段完成。
 
+## Cost-aware 动态 batch
+
+map-style `AnyDataset` 可以用 `cost_fn(raw_row)` 提供轻量、可重复计算的样本 cost
+描述。`CostDataLoader` 在执行完整 `parse_fn` 前读取这些描述，并用
+`batch_cost_fn(costs) -> BatchCost` 规划最终 batch：
+
+- `memory` 是 `max_batch_memory` 的硬约束。
+- `waste` 用于在 planning window 内优先选择 padding 浪费更少的组合。
+- `compute` 用于分布式训练时跨 rank 分配完整 batch，减少同步等待。
+
+cost planning 当前按 epoch eager 执行，因此 cost 描述必须轻量且可序列化。每个 rank
+必须能通过全局 index 读取完整 dataset；sampler 只控制初始的 rank-local 遍历，规划后
+的 batch 可以交给其他 rank 在本地 materialize。
+
+默认 DDP sampler 会丢弃无法均分的样本尾部，而不会补齐重复 index；无法给每个 rank
+分配一个完整 batch 的最终 batch 尾部也默认丢弃。
+分布式训练每个 epoch 前调用 `loader.set_epoch(epoch)`，以推进底层 sampler 的 shuffle。
+
+独立的 `lba` 包已经废弃。需要动态 batch 时，先把 map-style 输入转换为
+`AnyDataset`，再使用 `CostDataLoader`；新代码不应继续增加 `lba` 依赖。
+
 ## 加载任意数据集
 
 如果数据集已经有内置 preset，优先用 preset：

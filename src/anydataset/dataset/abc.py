@@ -30,6 +30,7 @@ class _Base(ABC):
         self,
         spec: str | Preset | Spec,
         parse_fn: Callable[[Any], Sample] | None = None,
+        cost_fn: Callable[[Any], Any] | None = None,
         transforms: Transforms | None = None,
     ) -> None:
         self.spec = resolve_dataset(spec)
@@ -38,7 +39,10 @@ class _Base(ABC):
         self._source: DatasetSource | None = None
         if parse_fn is not None and not callable(parse_fn):
             raise TypeError("parse_fn must be callable or None.")
+        if cost_fn is not None and not callable(cost_fn):
+            raise TypeError("cost_fn must be callable or None.")
         self.parse_fn = _identity_sample if parse_fn is None else parse_fn
+        self.cost_fn = cost_fn
         self.transforms = None if transforms is None else dict(transforms)
 
     def prepare(self) -> Any:
@@ -323,6 +327,12 @@ class AnyDataset(_Base, MapStyleABC):
 
     def __getitem__(self, index: int) -> Sample:
         return self.transform_sample(self.parse_fn(self.dataset[index]))
+
+    def cost(self, index: int) -> Any:
+        """Return the lightweight batching description for one raw row."""
+        if self.cost_fn is None:
+            raise TypeError("AnyDataset requires cost_fn for cost-aware batching.")
+        return self.cost_fn(self.dataset[index])
 
     def iter_indexed_range(self, start: int, stop: int):
         if start < 0 or stop < start or stop > len(self):
