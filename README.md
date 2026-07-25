@@ -122,43 +122,23 @@ dataset = AnyDataset(
 
 ## Cost-aware batches
 
-`AnyDataset` can expose a lightweight cost description without parsing the
-full training sample. `cost_fn` receives the physical source row, may run more
-than once, and must not depend on mutable state. `CostDataLoader` uses these
-descriptions to plan batches before it materializes samples through
-`parse_fn`.
+Map-style `AnyDataset` can plan dynamic batches from lightweight index-level
+costs without parsing the full training sample. `dataset.dataloader(...)`
+calls `cost_fn(index) -> int` before materializing samples through `parse_fn`.
+The function may run more than once and must not depend on mutable state.
 
 ```python
-from anydataset import AnyDataset, BatchCost, CostDataLoader
+from anydataset import AnyDataset
 
 
-def sample_cost(row):
-    # Read only lightweight fields needed to describe this sample.
-    return {
-        "text_tokens": len(row["text"]),
-        "codec_frames": row["codec_frames"],
-    }
+def index_cost(index: int) -> int:
+    # Read only lightweight metadata, such as a precomputed token/frame length.
+    return lengths[index]
 
 
-def batch_cost(samples):
-    count = len(samples)
-    text = max(sample["text_tokens"] for sample in samples)
-    codec = max(sample["codec_frames"] for sample in samples)
-    memory = count * (text + codec)
-    useful = sum(
-        sample["text_tokens"] + sample["codec_frames"] for sample in samples
-    )
-    return BatchCost(
-        memory=memory,
-        compute=float(count * (text * text + codec)),
-        waste=float(memory - useful),
-    )
-
-
-dataset = AnyDataset(spec, parse_fn=parse, cost_fn=sample_cost)
-loader = CostDataLoader(
-    dataset,
-    batch_cost_fn=batch_cost,
+dataset = AnyDataset(spec, parse_fn=parse)
+loader = dataset.dataloader(
+    cost_fn=index_cost,
     max_batch_memory=64_000,
     planning_window=256,
     shuffle=True,
@@ -167,21 +147,19 @@ loader = CostDataLoader(
 )
 ```
 
-`BatchCost.memory` is the hard batch budget, `waste` selects lower-padding
-combinations inside the planning window, and `compute` balances complete
-batches across distributed ranks. Cost planning is eager for the current
-epoch, so all cost descriptions must be small and pickleable. Every rank must
-be able to read every global dataset index; the sampler controls the initial
-rank-local traversal, while distributed planning may assign a batch to a
-different rank for final materialization. The default distributed sampler drops
-the incomplete sample tail rather than padding it with duplicate indexes; an
-incomplete final planned-batch tail is dropped by default as well. Call
-`loader.set_epoch(epoch)` before each distributed epoch to advance the
-underlying sampler shuffle.
-
-The standalone `lba` package is deprecated. Convert map-style inputs to
-`AnyDataset` and use `CostDataLoader`; new code must not add an `lba`
-dependency.
+The planner treats batch memory and distributed compute as the sum of selected
+sample costs. Each sample cost must be a positive integer. Within each planning
+window, it greedily adds the fitting sample that makes the batch as full as
+possible without exceeding `max_batch_memory`; `max_batch_samples` can cap the
+number of samples per planned batch. Cost planning is eager for the current
+epoch, so all cost descriptions must be small and pickleable. With no custom
+sampler, the dataset builds the rank-local read plan behind the single
+`shuffle` flag, and distributed planning never reassigns a planned batch to a
+different rank. `StoreDataset` overrides that private plan to shuffle payload
+shard groups first and then shuffle sample indexes inside each shard group, so
+planned batches stay shard-local. DDP only trims rank-local final batches so all
+ranks take the same number of steps. Call `loader.set_epoch(epoch)` before each
+distributed epoch to advance the shuffle.
 
 For local JSON, image, or audio files, use `Source.HF` with Hugging Face
 `load_dataset(...)` options such as `data_files` or `data_dir`. For structured
@@ -585,6 +563,13 @@ dataset = AnyDataset(
 )
 restored = dataset[0]
 ```
+
+Store payloads are written to tar shards per view. The same
+`dataset.dataloader(..., shuffle=True)` entry point remains the only shuffle
+control for store training: when the prepared dataset is a `StoreDataset`, the
+loader first shuffles payload shard groups, then shuffles indexes within each
+group, and plans batches without crossing shard-group boundaries. Use
+`seed=...` and `loader.set_epoch(epoch)` for reproducible epoch changes.
 
 Readers accept only store `schema_version: 2`. The preceding canonical store
 format used the same sample manifest and directory layout, but had no dataset

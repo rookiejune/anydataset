@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import random
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -20,6 +21,7 @@ if TYPE_CHECKING:
     from ..cache import CacheManager
     from ..types.item import Sample, Schema, Transforms
     from .source import DatasetSource
+    from torch.utils.data import DataLoader, Sampler
 
 
 _DEFAULT_MAX_SHARD_SAMPLES = 100_000
@@ -30,7 +32,6 @@ class _Base(ABC):
         self,
         spec: str | Preset | Spec,
         parse_fn: Callable[[Any], Sample] | None = None,
-        cost_fn: Callable[[Any], Any] | None = None,
         transforms: Transforms | None = None,
     ) -> None:
         self.spec = resolve_dataset(spec)
@@ -39,10 +40,7 @@ class _Base(ABC):
         self._source: DatasetSource | None = None
         if parse_fn is not None and not callable(parse_fn):
             raise TypeError("parse_fn must be callable or None.")
-        if cost_fn is not None and not callable(cost_fn):
-            raise TypeError("cost_fn must be callable or None.")
         self.parse_fn = _identity_sample if parse_fn is None else parse_fn
-        self.cost_fn = cost_fn
         self.transforms = None if transforms is None else dict(transforms)
 
     def prepare(self) -> Any:
@@ -214,6 +212,50 @@ class MapStyleABC(Dataset, ABC):
         _validate_map_style_dataset("merge dataset", dataset)
         return MergedDataset(self, dataset)
 
+    def dataloader(
+        self,
+        *,
+        cost_fn: Callable[[int], int],
+        max_batch_memory: int,
+        shuffle: bool = False,
+        sampler: Sampler[int] | None = None,
+        seed: int = 0,
+        epoch: int = 0,
+        planning_window: int = 256,
+        max_batch_samples: int | None = None,
+        drop_distributed_tail: bool = True,
+        **loader_kwargs: Any,
+    ) -> DataLoader[Any]:
+        from .batching import _DataLoader
+
+        return _DataLoader(
+            self,
+            cost_fn=cost_fn,
+            max_batch_memory=max_batch_memory,
+            shuffle=shuffle,
+            sampler=sampler,
+            seed=seed,
+            epoch=epoch,
+            planning_window=planning_window,
+            max_batch_samples=max_batch_samples,
+            drop_distributed_tail=drop_distributed_tail,
+            **loader_kwargs,
+        )
+
+    def _shuffle(
+        self,
+        *,
+        shuffle: bool,
+        seed: int,
+        epoch: int,
+        num_replicas: int,
+        rank: int,
+    ) -> Iterator[Sequence[int]]:
+        indexes = list(range(len(self)))
+        if shuffle:
+            random.Random(seed + epoch).shuffle(indexes)
+        yield indexes[rank::num_replicas]
+
     def iter_shard(self, num_shards: int, shard_id: int) -> Iterator[Sample]:
         for _index, sample in self.iter_indexed_shard(num_shards, shard_id):
             yield sample
@@ -328,11 +370,32 @@ class AnyDataset(_Base, MapStyleABC):
     def __getitem__(self, index: int) -> Sample:
         return self.transform_sample(self.parse_fn(self.dataset[index]))
 
-    def cost(self, index: int) -> Any:
-        """Return the lightweight batching description for one raw row."""
-        if self.cost_fn is None:
-            raise TypeError("AnyDataset requires cost_fn for cost-aware batching.")
-        return self.cost_fn(self.dataset[index])
+    def _shuffle(
+        self,
+        *,
+        shuffle: bool,
+        seed: int,
+        epoch: int,
+        num_replicas: int,
+        rank: int,
+    ) -> Iterator[Sequence[int]]:
+        dataset = self.dataset
+        if isinstance(dataset, MapStyleABC):
+            yield from dataset._shuffle(
+                shuffle=shuffle,
+                seed=seed,
+                epoch=epoch,
+                num_replicas=num_replicas,
+                rank=rank,
+            )
+            return
+        yield from super()._shuffle(
+            shuffle=shuffle,
+            seed=seed,
+            epoch=epoch,
+            num_replicas=num_replicas,
+            rank=rank,
+        )
 
     def iter_indexed_range(self, start: int, stop: int):
         if start < 0 or stop < start or stop > len(self):

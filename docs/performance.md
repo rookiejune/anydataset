@@ -32,8 +32,9 @@
   `ProviderServer` 保持一请求一连接。
 - server-owned provider 配合 fork reader 的 materializer 和 filter 路径已在目标 Linux
   Python 3.9 环境通过。
-- `length-based-batching-adapter` 已在存在稳定 index 时使用 `index_metadata` final flush，
-  无 index 时才回退 `object_gather`，anydataset 不再新增重复集成层。
+- 分布式动态 batch 验证已确认：存在稳定 index 时可使用 metadata-only final flush，
+  无 index 时才需要回退到 object gather；anydataset 的当前 dataloader 直接沿用全局
+  index 契约，不再新增独立集成层。
 
 环境、命令和完整测量见
 [`001_runtime_followups.md`](experiments/results/001_runtime_followups.md)。真实 provider

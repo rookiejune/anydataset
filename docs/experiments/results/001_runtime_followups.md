@@ -7,7 +7,8 @@ Date: 2026-07-19
 - LongCat: Fudan `145`, NVIDIA GeForce RTX 4090 D, Python 3.12, Torch 2.9,
   `LongCatAudioCodec_encoder.pt`, 2-second 16 kHz speech input.
 - Linux fork validation: Fudan `144`, Python 3.9, Torch 2.8.
-- LBA validation: local Python 3.9, Torch 2.8, two-rank Gloo smoke test.
+- Dynamic batching validation: local Python 3.9, Torch 2.8, two-rank Gloo
+  smoke test.
 
 ## ProviderServer
 
@@ -35,10 +36,9 @@ current one-request isolation contract is retained.
 - Both paths completed with `ProviderServer(start_method="spawn")` and forked
   data readers on Linux.
 
-## Distributed LBA
+## Distributed dynamic batching
 
-The adjacent `length-based-batching-adapter` at commit `06521f7` already uses
-`index_metadata` when all final-flush records have stable indexes and falls back
-to `object_gather` otherwise. Its distributed suite passed 10 tests, including
-the two-rank map-style and iterable smoke cases. No anydataset or LBA change is
-needed for this follow-up.
+The distributed dynamic batching validation confirmed that stable global sample
+indexes are sufficient for metadata-only final flushes, while index-less records
+need an object-gather fallback. The two-rank map-style and iterable smoke cases
+passed, and no anydataset dataloader change was needed for this follow-up.

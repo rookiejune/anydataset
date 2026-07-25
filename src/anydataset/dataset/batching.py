@@ -1,81 +1,62 @@
-"""Cost-aware batching for map-style AnyDataset inputs."""
+"""Cost-aware batching for map-style dataset inputs."""
 
 from __future__ import annotations
 
-import math
 import operator
 import warnings
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
-from itertools import zip_longest
 from typing import Any
 
 import torch.distributed as dist
-from torch.utils.data import (
-    DataLoader,
-    DistributedSampler,
-    RandomSampler,
-    Sampler,
-    SequentialSampler,
-)
+from torch.utils.data import Sampler
+from torch.utils.data import DataLoader as TorchDataLoader
 
-from .abc import AnyDataset
-
-
-@dataclass(frozen=True)
-class BatchCost:
-    """Memory budget, compute estimate, and avoidable work for one batch."""
-
-    memory: int
-    compute: float
-    waste: float
-
-    def __post_init__(self) -> None:
-        memory = operator.index(self.memory)
-        if memory <= 0:
-            raise ValueError("BatchCost.memory must be positive.")
-        if not math.isfinite(self.compute) or self.compute <= 0:
-            raise ValueError("BatchCost.compute must be finite and positive.")
-        if not math.isfinite(self.waste) or self.waste < 0:
-            raise ValueError("BatchCost.waste must be finite and non-negative.")
+from .abc import MapStyleABC
 
 
 @dataclass(frozen=True)
 class _Record:
     index: int
-    cost: Any
+    cost: int
 
 
 @dataclass(frozen=True)
 class _Plan:
     records: tuple[_Record, ...]
-    cost: BatchCost
+    cost: int
 
 
-class CostBatchSampler(Sampler[list[int]]):
+class _BatchSampler(Sampler[list[int]]):
     """Plan memory-bounded batches and balance their compute across ranks."""
 
     def __init__(
         self,
-        dataset: AnyDataset,
+        dataset: MapStyleABC,
         *,
-        batch_cost_fn: Callable[[Sequence[Any]], BatchCost],
+        cost_fn: Callable[[int], int],
         max_batch_memory: int,
-        sampler: Sampler[int],
+        sampler: Sampler[int] | None,
+        shuffle: bool,
+        seed: int,
+        epoch: int,
         planning_window: int = 256,
         max_batch_samples: int | None = None,
         drop_distributed_tail: bool = True,
     ) -> None:
-        if not isinstance(dataset, AnyDataset):
-            raise TypeError("dataset must be an AnyDataset.")
-        if dataset.cost_fn is None:
-            raise TypeError("dataset must define cost_fn.")
-        if not callable(batch_cost_fn):
-            raise TypeError("batch_cost_fn must be callable.")
+        if not isinstance(dataset, MapStyleABC):
+            raise TypeError("dataset must be a MapStyleABC.")
+        if not callable(cost_fn):
+            raise TypeError("cost_fn must be callable.")
         self.dataset = dataset
-        self.batch_cost_fn = batch_cost_fn
+        self.cost_fn = cost_fn
         self.max_batch_memory = _positive_int("max_batch_memory", max_batch_memory)
         self.sampler = sampler
+        if not isinstance(shuffle, bool):
+            raise TypeError("shuffle must be a bool.")
+        self.shuffle = shuffle
+        self.seed = _int("seed", seed)
+        self.epoch = _non_negative_int("epoch", epoch)
         self.planning_window = _positive_int("planning_window", planning_window)
         self.max_batch_samples = (
             None
@@ -87,41 +68,65 @@ class CostBatchSampler(Sampler[list[int]]):
         self.drop_distributed_tail = drop_distributed_tail
 
     def __iter__(self) -> Iterator[list[int]]:
-        local = [
-            _Record(index=operator.index(index), cost=self.dataset.cost(index))
-            for index in self.sampler
-        ]
-        records = _global_records(local)
-        plans = _plans(
-            records,
-            batch_cost_fn=self.batch_cost_fn,
-            max_batch_memory=self.max_batch_memory,
-            planning_window=self.planning_window,
-            max_batch_samples=self.max_batch_samples,
-        )
-        assigned = _assign(plans, drop_tail=self.drop_distributed_tail)
-        yield from ([record.index for record in plan.records] for plan in assigned)
+        plans: list[_Plan] = []
+        for indexes in self._index_groups():
+            records: list[_Record] = []
+            for index in indexes:
+                resolved = operator.index(index)
+                records.append(
+                    _Record(
+                        index=resolved,
+                        cost=_sample_cost(self.cost_fn, resolved),
+                    )
+                )
+            if records:
+                plans.extend(
+                    _plans(
+                        records,
+                        max_batch_memory=self.max_batch_memory,
+                        planning_window=self.planning_window,
+                        max_batch_samples=self.max_batch_samples,
+                    )
+                )
+        plans = _drop_distributed_tail(plans, drop_tail=self.drop_distributed_tail)
+        yield from ([record.index for record in plan.records] for plan in plans)
 
     def __len__(self) -> int:
-        raise TypeError("CostBatchSampler batch count is unavailable before planning.")
+        raise TypeError("dataloader batch count is unavailable before planning.")
 
     def set_epoch(self, epoch: int) -> None:
+        self.epoch = _non_negative_int("epoch", epoch)
         set_epoch = getattr(self.sampler, "set_epoch", None)
         if callable(set_epoch):
             set_epoch(epoch)
 
+    def _index_groups(self) -> Iterator[Sequence[int]]:
+        if self.sampler is not None:
+            yield tuple(operator.index(index) for index in self.sampler)
+            return
+        num_replicas, rank = _rank()
+        yield from self.dataset._shuffle(
+            shuffle=self.shuffle,
+            seed=self.seed,
+            epoch=self.epoch,
+            num_replicas=num_replicas,
+            rank=rank,
+        )
 
-class CostDataLoader(DataLoader[Any]):
-    """Materialize batches planned from lightweight AnyDataset costs."""
+
+class _DataLoader(TorchDataLoader):
+    """Materialize batches planned from index-level sample costs."""
 
     def __init__(
         self,
-        dataset: AnyDataset,
+        dataset: MapStyleABC,
         *,
-        batch_cost_fn: Callable[[Sequence[Any]], BatchCost],
+        cost_fn: Callable[[int], int],
         max_batch_memory: int,
         shuffle: bool = False,
         sampler: Sampler[int] | None = None,
+        seed: int = 0,
+        epoch: int = 0,
         planning_window: int = 256,
         max_batch_samples: int | None = None,
         drop_distributed_tail: bool = True,
@@ -130,15 +135,17 @@ class CostDataLoader(DataLoader[Any]):
         conflicts = {"batch_sampler", "batch_size", "drop_last"} & loader_kwargs.keys()
         if conflicts:
             names = ", ".join(sorted(conflicts))
-            raise ValueError(f"CostDataLoader owns loader kwargs: {names}.")
+            raise ValueError(f"dataloader owns loader kwargs: {names}.")
         if sampler is not None and shuffle:
             raise ValueError("sampler and shuffle define overlapping sample order.")
-        source = _sampler(dataset, shuffle=shuffle) if sampler is None else sampler
-        batch_sampler = CostBatchSampler(
+        batch_sampler = _BatchSampler(
             dataset,
-            batch_cost_fn=batch_cost_fn,
+            cost_fn=cost_fn,
             max_batch_memory=max_batch_memory,
-            sampler=source,
+            sampler=sampler,
+            shuffle=shuffle,
+            seed=seed,
+            epoch=epoch,
             planning_window=planning_window,
             max_batch_samples=max_batch_samples,
             drop_distributed_tail=drop_distributed_tail,
@@ -146,40 +153,16 @@ class CostDataLoader(DataLoader[Any]):
         super().__init__(dataset, batch_sampler=batch_sampler, **loader_kwargs)
 
     def __len__(self) -> int:
-        raise TypeError("CostDataLoader batch count is unavailable before planning.")
+        raise TypeError("dataloader batch count is unavailable before planning.")
 
     def set_epoch(self, epoch: int) -> None:
         """Advance the underlying distributed sampler before the next iteration."""
         self.batch_sampler.set_epoch(epoch)
 
 
-def _sampler(dataset: AnyDataset, *, shuffle: bool) -> Sampler[int]:
-    if dist.is_available() and dist.is_initialized():
-        # Global cost planning must not receive DistributedSampler padding
-        # duplicates; final batch tails are handled explicitly by _assign().
-        return DistributedSampler(dataset, shuffle=shuffle, drop_last=True)
-    if shuffle:
-        return RandomSampler(dataset)
-    return SequentialSampler(dataset)
-
-
-def _global_records(local: list[_Record]) -> list[_Record]:
-    if not dist.is_available() or not dist.is_initialized():
-        return local
-    gathered: list[list[_Record]] = [[] for _ in range(dist.get_world_size())]
-    dist.all_gather_object(gathered, local)
-    return [
-        record
-        for records in zip_longest(*gathered)
-        for record in records
-        if record is not None
-    ]
-
-
 def _plans(
     records: list[_Record],
     *,
-    batch_cost_fn: Callable[[Sequence[Any]], BatchCost],
     max_batch_memory: int,
     planning_window: int,
     max_batch_samples: int | None,
@@ -188,18 +171,17 @@ def _plans(
     plans: list[_Plan] = []
     while pending:
         selected = [pending.pop(0)]
-        cost = _batch_cost(batch_cost_fn, selected)
-        if cost.memory > max_batch_memory:
+        cost = _batch_cost(selected)
+        if cost > max_batch_memory:
             raise ValueError(
                 "A sample exceeds max_batch_memory: "
-                f"index={selected[0].index} memory={cost.memory} "
+                f"index={selected[0].index} memory={cost} "
                 f"budget={max_batch_memory}."
             )
         while max_batch_samples is None or len(selected) < max_batch_samples:
             candidate = _candidate(
                 pending[:planning_window],
                 selected,
-                batch_cost_fn=batch_cost_fn,
                 max_batch_memory=max_batch_memory,
             )
             if candidate is None:
@@ -214,63 +196,75 @@ def _candidate(
     candidates: Sequence[_Record],
     selected: list[_Record],
     *,
-    batch_cost_fn: Callable[[Sequence[Any]], BatchCost],
     max_batch_memory: int,
-) -> tuple[int, BatchCost] | None:
-    best: tuple[tuple[float, int], int, BatchCost] | None = None
+) -> tuple[int, int] | None:
+    best: tuple[int, int] | None = None
     for offset, record in enumerate(candidates):
-        cost = _batch_cost(batch_cost_fn, [*selected, record])
-        if cost.memory > max_batch_memory:
+        cost = _batch_cost([*selected, record])
+        if cost > max_batch_memory:
             continue
-        key = (cost.waste, -cost.memory)
-        if best is None or key < best[0]:
-            best = key, offset, cost
+        if best is None or cost > best[1]:
+            best = offset, cost
     if best is None:
         return None
-    return best[1], best[2]
+    return best
 
 
-def _batch_cost(
-    batch_cost_fn: Callable[[Sequence[Any]], BatchCost],
-    records: Sequence[_Record],
-) -> BatchCost:
-    cost = batch_cost_fn([record.cost for record in records])
-    if not isinstance(cost, BatchCost):
-        raise TypeError("batch_cost_fn must return BatchCost.")
-    return cost
+def _batch_cost(records: Sequence[_Record]) -> int:
+    return sum(record.cost for record in records)
 
 
-def _assign(plans: list[_Plan], *, drop_tail: bool) -> list[_Plan]:
+def _drop_distributed_tail(plans: list[_Plan], *, drop_tail: bool) -> list[_Plan]:
     if not dist.is_available() or not dist.is_initialized():
         return plans
     world_size = dist.get_world_size()
-    rank = dist.get_rank()
-    tail = len(plans) % world_size
-    if tail:
+    counts: list[int] = [0 for _ in range(world_size)]
+    dist.all_gather_object(counts, len(plans))
+    kept = min(counts)
+    if any(count != kept for count in counts):
         if not drop_tail:
             raise RuntimeError(
-                "CostDataLoader cannot assign the final batch tail equally across ranks."
+                "dataloader cannot keep equal rank-local batch counts."
             )
-        warnings.warn(
-            f"CostDataLoader dropped {tail} final batches for equal DDP steps.",
-            RuntimeWarning,
-            stacklevel=2,
-        )
-        plans = plans[:-tail]
-    ordered = sorted(plans, key=lambda plan: plan.cost.compute, reverse=True)
-    assigned: list[_Plan] = []
-    for step in range(0, len(ordered), world_size):
-        group = ordered[step : step + world_size]
-        target = (rank + step // world_size) % world_size
-        assigned.append(group[target])
-    return assigned
+        dropped = len(plans) - kept
+        if dropped:
+            warnings.warn(
+                f"dataloader dropped {dropped} rank-local final batches "
+                "for equal DDP steps.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+    return plans[:kept]
+
+
+def _rank() -> tuple[int, int]:
+    if not dist.is_available() or not dist.is_initialized():
+        return 1, 0
+    return dist.get_world_size(), dist.get_rank()
+
+
+def _int(name: str, value: int) -> int:
+    if isinstance(value, bool):
+        raise TypeError(f"{name} must be an integer.")
+    return operator.index(value)
+
+
+def _non_negative_int(name: str, value: int) -> int:
+    resolved = _int(name, value)
+    if resolved < 0:
+        raise ValueError(f"{name} must be non-negative.")
+    return resolved
 
 
 def _positive_int(name: str, value: int) -> int:
-    resolved = operator.index(value)
+    resolved = _int(name, value)
     if resolved <= 0:
         raise ValueError(f"{name} must be positive.")
     return resolved
 
 
-__all__ = ["BatchCost", "CostBatchSampler", "CostDataLoader"]
+def _sample_cost(cost_fn: Callable[[int], int], index: int) -> int:
+    cost = operator.index(cost_fn(index))
+    if cost <= 0:
+        raise ValueError(f"cost_fn must return a positive integer: index={index}.")
+    return cost

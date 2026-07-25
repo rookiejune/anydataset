@@ -76,24 +76,19 @@ parse 阶段完成。
 
 ## Cost-aware 动态 batch
 
-map-style `AnyDataset` 可以用 `cost_fn(raw_row)` 提供轻量、可重复计算的样本 cost
-描述。`CostDataLoader` 在执行完整 `parse_fn` 前读取这些描述，并用
-`batch_cost_fn(costs) -> BatchCost` 规划最终 batch：
+map-style `AnyDataset` 可以用 `dataset.dataloader(...)` 做动态 batch。
+`cost_fn(index) -> int` 只接收全局样本 index，应读取轻量 metadata（例如预计算长度），
+不要 materialize 完整样本。loader 在执行完整 `parse_fn` 前读取这些 cost；单条样本
+cost 必须是正整数，batch 的 memory 和分布式 compute 都直接使用所选样本 cost 之和。
+每个 planning window 内，planner 会贪心选择仍不超过 `max_batch_memory`、且能让当前
+batch 尽量填满的样本；`max_batch_samples` 可以额外限制单个 batch 的样本数。
 
-- `memory` 是 `max_batch_memory` 的硬约束。
-- `waste` 用于在 planning window 内优先选择 padding 浪费更少的组合。
-- `compute` 用于分布式训练时跨 rank 分配完整 batch，减少同步等待。
-
-cost planning 当前按 epoch eager 执行，因此 cost 描述必须轻量且可序列化。每个 rank
-必须能通过全局 index 读取完整 dataset；sampler 只控制初始的 rank-local 遍历，规划后
-的 batch 可以交给其他 rank 在本地 materialize。
-
-默认 DDP sampler 会丢弃无法均分的样本尾部，而不会补齐重复 index；无法给每个 rank
-分配一个完整 batch 的最终 batch 尾部也默认丢弃。
-分布式训练每个 epoch 前调用 `loader.set_epoch(epoch)`，以推进底层 sampler 的 shuffle。
-
-独立的 `lba` 包已经废弃。需要动态 batch 时，先把 map-style 输入转换为
-`AnyDataset`，再使用 `CostDataLoader`；新代码不应继续增加 `lba` 依赖。
+cost planning 当前按 epoch eager 执行，因此 cost 描述必须轻量且可序列化。没有自定义
+sampler 时，dataset 会在唯一的 `shuffle` 开关背后生成 rank-local 读取计划，规划后的
+batch 不会再被重分配给其他 rank。对 `StoreDataset`，这个私有计划会先 shuffle payload
+shard group，再 shuffle group 内样本 index，因此 planner 只在同一个 shard group 内组
+batch。DDP 只会裁掉 rank-local 的最终 batch 尾部，保证所有 rank step 数一致。
+分布式训练每个 epoch 前调用 `loader.set_epoch(epoch)` 推进 shuffle。
 
 ## 加载任意数据集
 
@@ -662,29 +657,26 @@ dataset = AnyDataset(
 ```
 
 store payload 按 view 写入 tar shard。普通 `DataLoader(shuffle=True)` 会在样本级打散，
-一个 batch 可能频繁跨 tar 读取。训练 store 时可以改用 store-local batch sampler：
+一个 batch 可能频繁跨 tar 读取。训练 store 时使用同一个
+`dataset.dataloader(..., shuffle=True)` 入口即可保持 local-aware：
 
 ```python
-from torch.utils.data import DataLoader
-
 from anydataset.dataset import collate_fn
-from anydataset.store import StoreLocalBatchSampler
 
-store = dataset.dataset
-loader = DataLoader(
-    dataset,
-    batch_sampler=StoreLocalBatchSampler(
-        store,
-        batch_size=32,
-        shuffle=True,
-    ),
+loader = dataset.dataloader(
+    cost_fn=lambda index: lengths[index],
+    max_batch_memory=64_000,
+    max_batch_samples=32,
+    shuffle=True,
+    seed=13,
     collate_fn=collate_fn(schema),
 )
 ```
 
-`StoreLocalBatchSampler` 先按已选择 view 的 payload shard 分组，再 shuffle shard
-顺序和 shard 内样本；它不改变 `StoreDataset.__getitem__` 和全局 index shard 语义。
-使用 `batch_sampler` 时不要再给 `DataLoader` 传 `batch_size`、`shuffle` 或 `sampler`。
+当底层 reader 是 `StoreDataset` 时，loader 会按已选择 view 的 payload shard group
+生成读取计划：先 shuffle shard group 顺序，再 shuffle group 内样本；`StoreDataset.__getitem__`
+和全局 index shard 语义不变。外层只保留 `dataset.dataloader(..., shuffle=...)` 这一处
+shuffle 配置，不再需要单独导入 store 专用 sampler。
 
 reader 只接受 `schema_version: 2`。上一版 canonical store 使用相同的 sample
 manifest 和目录布局，但 dataset manifest 没有版本号，view manifest 使用

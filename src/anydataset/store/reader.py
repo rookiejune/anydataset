@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import random
 import tempfile
 from array import array
 from bisect import bisect_left, bisect_right
@@ -43,6 +44,7 @@ from .paths import (
 from .payload import PayloadCache, payload_value, read_payload_bytes
 
 _StatFingerprint = tuple[int, int, int, int, int]
+_ViewRef = tuple[item.Role, item.Modality, item.View]
 _SAMPLE_INDEX_VALIDATION_VERSION = 2
 _DATASET_MANIFEST_FIELDS = frozenset(
     {"dataset_id", "sample_count", "schema_version", "split"}
@@ -76,6 +78,36 @@ class StoreDataset(MapStyleABC):
             raise IndexError("store dataset index out of range.")
         sample = self.samples[index]
         return _sample_for_entry(self, sample.sample_index, sample)
+
+    def _shuffle(
+        self,
+        *,
+        shuffle: bool,
+        seed: int,
+        epoch: int,
+        num_replicas: int,
+        rank: int,
+    ) -> Iterator[Sequence[int]]:
+        groups = list(_payload_groups(self))
+        if shuffle:
+            rng = random.Random(seed + epoch)
+            rng.shuffle(groups)
+        else:
+            rng = None
+
+        for position, group in enumerate(groups):
+            if position % num_replicas != rank:
+                continue
+            indexes = list(range(group.start, group.stop))
+            if rng is not None:
+                rng.shuffle(indexes)
+            yield indexes
+
+
+@dataclass(frozen=True)
+class _PayloadGroup:
+    start: int
+    stop: int
 
 
 class SampleManifestSequence(Sequence[SampleManifestEntry]):
@@ -630,6 +662,55 @@ def _validate_sample_entry(sample: SampleManifestEntry, index: int) -> None:
         if ref in refs:
             raise ValueError(f"Duplicate sample item ref {ref!r}.")
         refs.add(ref)
+
+
+def _payload_groups(dataset: StoreDataset) -> tuple[_PayloadGroup, ...]:
+    views = tuple(dataset.views)
+    if not views:
+        raise ValueError("StoreDataset shuffle requires at least one store view.")
+
+    groups: list[_PayloadGroup] = []
+    current_key: tuple[tuple[_ViewRef, str], ...] | None = None
+    start = 0
+
+    for index in range(len(dataset)):
+        key = _payload_key(dataset, views, index)
+        if current_key is None:
+            current_key = key
+            start = index
+            continue
+        if key != current_key:
+            groups.append(_PayloadGroup(start=start, stop=index))
+            current_key = key
+            start = index
+
+    if current_key is not None:
+        groups.append(_PayloadGroup(start=start, stop=len(dataset)))
+    return tuple(groups)
+
+
+def _payload_key(
+    dataset: StoreDataset,
+    views: tuple[_ViewRef, ...],
+    index: int,
+) -> tuple[tuple[_ViewRef, str], ...]:
+    sample = dataset.samples[index]
+    sample_refs = frozenset(ref for ref, _meta in sample.items)
+    key: list[tuple[_ViewRef, str]] = []
+    for view in views:
+        if view[:2] not in sample_refs:
+            continue
+        entry = dataset.views[view].entries_by_index[index]
+        if entry is None:
+            raise ValueError(
+                f"Store view {_view_path(view)} is missing sample_index {index}."
+            )
+        key.append((view, entry.shard))
+    if not key:
+        raise ValueError(
+            f"Store sample_index {index} has no payload shard for selected views."
+        )
+    return tuple(key)
 
 
 def _validate_view_ref(view: tuple[item.Role, item.Modality, item.View]) -> None:

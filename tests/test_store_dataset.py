@@ -8,6 +8,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from unittest import mock
 
+import anydataset.store
 import torch
 
 from anydataset import AnyDataset, Source, Spec
@@ -22,7 +23,7 @@ from anydataset.types import (
     TextItem,
     TextView,
 )
-from anydataset.store import DatasetWriter, StoreLocalBatchSampler, store_local_loader
+from anydataset.store import DatasetWriter
 from anydataset.store.jsonio import read_json, write_json
 from anydataset.store.manifest import (
     DatasetManifest,
@@ -385,7 +386,7 @@ class StoreSourceTest(unittest.TestCase):
 
             self.assertEqual(open_tar.call_count, 3)
 
-    def test_store_local_batch_sampler_keeps_batches_inside_payload_shards(self):
+    def test_store_dataloader_keeps_batches_inside_payload_shards(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             output = Path(tmpdir) / "dataset"
             DatasetWriter(
@@ -398,14 +399,18 @@ class StoreSourceTest(unittest.TestCase):
                     for index in range(5)
                 ]
             )
-            dataset = read_store_dataset(output)
+            dataset = AnyDataset(Spec(source=Source.STORE, path=str(output)))
 
-            sampler = StoreLocalBatchSampler(dataset, batch_size=3)
+            loader = dataset.dataloader(
+                cost_fn=lambda _index: 1,
+                max_batch_memory=3,
+                max_batch_samples=3,
+                collate_fn=_sample_indexes,
+            )
 
-            self.assertEqual(list(sampler), [[0, 1], [2, 3], [4]])
-            self.assertEqual(len(sampler), 3)
+            self.assertEqual(list(loader), [[0, 1], [2, 3], [4]])
 
-    def test_store_local_batch_sampler_shuffle_preserves_payload_locality(self):
+    def test_store_dataloader_shuffle_preserves_payload_locality(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             output = Path(tmpdir) / "dataset"
             DatasetWriter(
@@ -418,16 +423,19 @@ class StoreSourceTest(unittest.TestCase):
                     for index in range(6)
                 ]
             )
-            dataset = read_store_dataset(output)
-            sampler = StoreLocalBatchSampler(
-                dataset,
-                batch_size=2,
+            dataset = AnyDataset(Spec(source=Source.STORE, path=str(output)))
+            loader = dataset.dataloader(
+                cost_fn=lambda _index: 1,
+                max_batch_memory=2,
+                max_batch_samples=2,
                 shuffle=True,
                 seed=13,
+                collate_fn=_sample_indexes,
             )
+            store = dataset.dataset
             view = (Role.DEFAULT, Modality.AUDIO, AudioView.WAVEFORM)
 
-            batches = list(sampler)
+            batches = list(loader)
 
             self.assertEqual(
                 sorted(index for batch in batches for index in batch),
@@ -435,12 +443,12 @@ class StoreSourceTest(unittest.TestCase):
             )
             for batch in batches:
                 shards = {
-                    dataset.views[view].entries_by_index[index].shard
+                    store.views[view].entries_by_index[index].shard
                     for index in batch
                 }
                 self.assertEqual(len(shards), 1)
 
-    def test_store_local_batch_sampler_splits_distributed_ranks_by_batch(self):
+    def test_store_shuffle_splits_distributed_ranks_by_payload_group(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             output = Path(tmpdir) / "dataset"
             DatasetWriter(
@@ -455,17 +463,37 @@ class StoreSourceTest(unittest.TestCase):
             )
             dataset = read_store_dataset(output)
 
-            sampler = StoreLocalBatchSampler(
-                dataset,
-                batch_size=3,
-                num_replicas=2,
-                rank=1,
+            rank0 = list(
+                dataset._shuffle(
+                    shuffle=False,
+                    seed=0,
+                    epoch=0,
+                    num_replicas=2,
+                    rank=0,
+                )
+            )
+            rank1 = list(
+                dataset._shuffle(
+                    shuffle=False,
+                    seed=0,
+                    epoch=0,
+                    num_replicas=2,
+                    rank=1,
+                )
             )
 
-            self.assertEqual(list(sampler), [[2, 3]])
-            self.assertEqual(len(sampler), 1)
+            self.assertEqual(rank0, [[0, 1], [4, 5]])
+            self.assertEqual(rank1, [[2, 3]])
 
-    def test_store_local_loader_owns_sampler_kwargs(self):
+    def test_store_exposes_no_public_loader_or_sampler(self):
+        self.assertTrue(
+            all(
+                "loader" not in name.lower() and "sampler" not in name.lower()
+                for name in anydataset.store.__all__
+            )
+        )
+
+    def test_store_dataloader_owns_loader_kwargs(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             output = Path(tmpdir) / "dataset"
             DatasetWriter(output, dataset_id="toy-audio").write(
@@ -474,21 +502,10 @@ class StoreSourceTest(unittest.TestCase):
             dataset = read_store_dataset(output)
 
             with self.assertRaisesRegex(ValueError, "owns loader kwargs"):
-                store_local_loader(dataset, batch_size=1, shuffle=True, sampler=[])
-
-    def test_store_local_batch_sampler_rejects_string_view_refs(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            output = Path(tmpdir) / "dataset"
-            DatasetWriter(output, dataset_id="toy-audio").write(
-                [_audio_sample(waveform=torch.tensor([[1.0]]))]
-            )
-            dataset = read_store_dataset(output)
-
-            with self.assertRaisesRegex(TypeError, "role must be a Role"):
-                StoreLocalBatchSampler(
-                    dataset,
+                dataset.dataloader(
+                    cost_fn=lambda _index: 1,
+                    max_batch_memory=1,
                     batch_size=1,
-                    views=(("default", Modality.AUDIO, AudioView.WAVEFORM),),
                 )
 
     def test_reader_discovers_all_views_without_preloading_indexes(self):
@@ -1108,6 +1125,17 @@ def _audio_sample(
             views={TextView.TEXT: text}
         )
     return sample
+
+
+def _sample_indexes(samples):
+    return [_sample_index(sample) for sample in samples]
+
+
+def _sample_index(sample) -> int:
+    waveform, _sample_rate = sample[Role.DEFAULT, Modality.AUDIO].views[
+        AudioView.WAVEFORM
+    ]
+    return int(waveform.flatten()[0].item())
 
 
 def _write_empty_dataset(path: Path) -> None:
