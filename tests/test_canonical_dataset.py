@@ -82,11 +82,15 @@ class CanonicalDatasetTest(unittest.TestCase):
         )
 
         self.assertEqual(item.meta[TextMeta.LANG], Lang.EN)
+        batched = TextItem(meta={TextMeta.LANG: [Lang.EN, Lang.DE]})
+        self.assertEqual(batched.meta[TextMeta.LANG], [Lang.EN, Lang.DE])
         with self.assertRaisesRegex(TypeError, "TextMeta.LANG"):
             TextItem(
                 views={TextView.TEXT: "hello"},
                 meta={TextMeta.LANG: "en"},
             )
+        with self.assertRaisesRegex(TypeError, "TextMeta.LANG"):
+            TextItem(meta={TextMeta.LANG: [Lang.EN, "de"]})
 
     def test_resolves_preset_to_spec(self):
         spec = resolve_dataset("fleurs:validation")
@@ -837,6 +841,36 @@ class CanonicalDatasetTest(unittest.TestCase):
         audio = batch.sample[ref]
         self.assertEqual(audio.meta[AudioMeta.LABEL], [1, 2])
         self.assertNotIn(FieldRef(ref, FieldGroup.META, AudioMeta.LABEL), batch.masks)
+
+    def test_collate_fn_keeps_text_language_meta_as_values(self):
+        ref = (Role.DEFAULT, Modality.TEXT)
+        schema = {
+            ref: TextReq(
+                views=frozenset({TextView.TEXT}),
+                meta=frozenset({TextMeta.LANG}),
+            )
+        }
+        samples = [
+            {
+                ref: TextItem(
+                    views={TextView.TEXT: "hello"},
+                    meta={TextMeta.LANG: Lang.EN},
+                )
+            },
+            {
+                ref: TextItem(
+                    views={TextView.TEXT: "hallo"},
+                    meta={TextMeta.LANG: Lang.DE},
+                )
+            },
+        ]
+
+        batch = collate_fn(schema)(samples)
+
+        text = batch.sample[ref]
+        self.assertEqual(text.views[TextView.TEXT], ["hello", "hallo"])
+        self.assertEqual(text.meta[TextMeta.LANG], [Lang.EN, Lang.DE])
+        self.assertNotIn(FieldRef(ref, FieldGroup.META, TextMeta.LANG), batch.masks)
 
     def test_collate_fn_keeps_mapping_meta_as_values(self):
         ref = (Role.DEFAULT, Modality.AUDIO)

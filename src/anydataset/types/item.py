@@ -207,12 +207,22 @@ def _enum_mapping(name: str, value: object, key_type: type[KeyT]) -> Mapping[Key
 def _text_meta_mapping(name: str, value: object) -> Mapping[TextMeta, Any]:
     output = _enum_mapping(name, value, TextMeta)
     lang = output.get(TextMeta.LANG)
-    if lang is not None and not isinstance(lang, Lang):
-        raise TypeError("TextMeta.LANG must be a Lang value.")
+    if lang is not None and not _lang_value(lang):
+        raise TypeError("TextMeta.LANG must be a Lang value or sequence of Lang values.")
     source_index = output.get(TextMeta.SOURCE_INDEX)
     if source_index is not None and not _source_index_value(source_index):
         raise TypeError("TextMeta.SOURCE_INDEX must be an integer or sequence of integers.")
     return output
+
+
+def _lang_value(value: object) -> bool:
+    if isinstance(value, Lang):
+        return True
+    if isinstance(value, str):
+        return False
+    if not isinstance(value, Sequence):
+        return False
+    return all(isinstance(item, Lang) for item in value)
 
 
 def _source_index_value(value: object) -> bool:
