@@ -215,6 +215,7 @@ def _is_codec_field(field: FieldRef) -> bool:
         and field.key
         in {
             item.AudioView.LONGCAT,
+            item.AudioView.BICODEC,
             item.AudioView.DAC,
             item.AudioView.STABLE,
             item.AudioView.UNICODEC,
