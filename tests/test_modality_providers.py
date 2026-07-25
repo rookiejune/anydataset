@@ -13,9 +13,11 @@ from anydataset.types import (
     AudioMeta,
     AudioReq,
     AudioView,
+    Lang,
     Modality,
     Role,
     TextItem,
+    TextMeta,
     TextReq,
     TextView,
 )
@@ -311,6 +313,72 @@ class ModalityProviderTest(unittest.TestCase):
         self.assertEqual(outputs[0].meta[AudioMeta.SPEAKER_ID], "Vivian")
         self.assertEqual(outputs[1].meta[AudioMeta.SPEAKER_ID], "Ryan")
 
+    def test_qwen_tts_provider_maps_text_language_meta(self):
+        FakeQwenCustomVoiceTTS.calls = []
+        FakeQwenCustomVoiceTTS.loaded = None
+        with _fake_anytrain_qwen_tts():
+            provider = QwenTTSProvider(default_language="Auto")
+
+        output = provider(
+            {
+                TextView.TEXT: "你好",
+                TextView.SPEAKERS: "Vivian",
+                TextMeta.LANG: Lang.ZH,
+            }
+        )
+
+        self.assertEqual(
+            FakeQwenCustomVoiceTTS.loaded.calls,
+            [("你好", "Vivian", "Chinese", None, None)],
+        )
+        self.assertEqual(output.meta[AudioMeta.SPEAKER_ID], "Vivian")
+
+    def test_qwen_tts_provider_maps_batched_text_language_meta(self):
+        FakeQwenCustomVoiceTTS.calls = []
+        FakeQwenCustomVoiceTTS.loaded = None
+        with _fake_anytrain_qwen_tts():
+            provider = QwenTTSProvider(default_language="Auto")
+
+        outputs = provider.call_batch(
+            collate_fn(
+                {
+                    (Role.DEFAULT, Modality.TEXT): TextReq(
+                        views=frozenset({TextView.TEXT, TextView.SPEAKERS}),
+                        meta=frozenset({TextMeta.LANG}),
+                    )
+                }
+            )(
+                [
+                    {
+                        (Role.DEFAULT, Modality.TEXT): TextItem(
+                            views={TextView.TEXT: "你好", TextView.SPEAKERS: "Vivian"},
+                            meta={TextMeta.LANG: Lang.ZH},
+                        )
+                    },
+                    {
+                        (Role.DEFAULT, Modality.TEXT): TextItem(
+                            views={TextView.TEXT: "hello", TextView.SPEAKERS: "Ryan"},
+                            meta={TextMeta.LANG: Lang.EN},
+                        )
+                    },
+                ]
+            )
+        )
+
+        self.assertEqual(
+            FakeQwenCustomVoiceTTS.loaded.calls,
+            [
+                (
+                    ["你好", "hello"],
+                    ["Vivian", "Ryan"],
+                    ["Chinese", "English"],
+                    None,
+                    None,
+                )
+            ],
+        )
+        self.assertEqual(len(outputs), 2)
+
     def test_whisper_asr_provider_loads_preset_and_transcribes(self):
         FakeWhisperASREvaluator.calls = []
         FakeWhisperASREvaluator.loaded = None
@@ -570,6 +638,8 @@ class FakeQwenCustomVoiceTTS:
         options,
     ):
         self.calls.append((text, speakers, languages, instructs, options))
+        if isinstance(text, str):
+            return _TTSOutput(torch.tensor([[1.0, 2.0]]), 16000)
         return [
             _TTSOutput(
                 torch.tensor([[float(index * 2), float(index * 2 + 1)]]),

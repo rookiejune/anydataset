@@ -14,6 +14,13 @@ from ..types.item import (
     TextMeta,
     TextView,
 )
+from ..types.language import Lang
+
+
+_QWEN_LANG_NAMES = {
+    Lang.ZH: "Chinese",
+    Lang.EN: "English",
+}
 
 
 class QwenTTSProvider:
@@ -54,7 +61,7 @@ class QwenTTSProvider:
         output = self.tts.synthesize_custom_voice(
             text,
             speakers=speaker,
-            languages=str(language),
+            languages=_qwen_language(language),
             instructs=self.default_instruct,
             options=self.options,
         )
@@ -136,13 +143,19 @@ def _string_batch(value: Any, name: str) -> list[str]:
 
 def _language_batch(value: Any, *, count: int, default: str) -> list[str]:
     if value is None:
-        return [default] * count
+        return [_qwen_language(default)] * count
     if isinstance(value, str) or not isinstance(value, Sequence):
-        return [str(value)] * count
-    values = [str(item) for item in value]
+        return [_qwen_language(value)] * count
+    values = [_qwen_language(item) for item in value]
     if len(values) != count:
         raise ValueError("language batch size must match text batch size.")
     return values
+
+
+def _qwen_language(value: Any) -> str:
+    if isinstance(value, Lang):
+        return _QWEN_LANG_NAMES.get(value, value.value)
+    return str(value)
 
 
 def _audio_item(output: Any, speaker: str) -> AudioItem:
