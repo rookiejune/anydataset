@@ -48,13 +48,14 @@ from anydataset.types import (
     AudioView,
     Modality,
     Role,
-    TextItem,
-    TextView,
 )
 from anydataset.filter.collect import collect_ranges_parallel
 from anydataset.filter.storage import read_index_rows, write_index_rows
 from anydataset.store import DatasetWriter
-from anydataset.store.jsonio import read_json as read_store_json
+from anydataset.store.jsonio import (
+    read_json as read_store_json,
+    write_json as write_store_json,
+)
 
 
 class FilteredDatasetTest(unittest.TestCase):
@@ -1017,7 +1018,10 @@ class FilteredDatasetTest(unittest.TestCase):
         self.assertEqual(current["schema_version"], 1)
         self.assertEqual(current["generation"], result.cache_path.name)
         self.assertEqual(metadata["schema_version"], 5)
-        self.assertEqual(metadata["base"]["identity"]["type"], "anydataset.dataset.abc.AnyDataset")
+        self.assertEqual(
+            metadata["base"]["identity"]["type"],
+            "anydataset.dataset.abc.AnyDataset",
+        )
         self.assertEqual(metadata["base"]["spec_id"], dataset.spec.id)
         self.assertEqual(metadata["base"]["identity"]["spec_id"], dataset.spec.id)
         self.assertEqual(metadata["base"]["sample_count"], 2)
@@ -1026,6 +1030,43 @@ class FilteredDatasetTest(unittest.TestCase):
         self.assertEqual(manifest["partitions"][0]["label"], "accept")
         self.assertEqual(manifest["partitions"][0]["count"], 2)
         self.assertEqual(len(manifest["partitions"][0]["files"]), 1)
+
+    def test_store_provenance_versions_filter_cache_identity(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "store"
+            sample = {
+                (Role.DEFAULT, Modality.AUDIO): AudioItem(
+                    views={AudioView.LONGCAT: torch.tensor([[1]])}
+                )
+            }
+            DatasetWriter(
+                path,
+                dataset_id="toy",
+                provenance={"input_id": "input-v1", "provider_id": "provider-v1"},
+            ).write([sample])
+            rule = FilterRule(
+                name="has-longcat",
+                factory=lambda: lambda value: AudioView.LONGCAT
+                in value[Role.DEFAULT, Modality.AUDIO].views,
+            )
+            first = rule.apply(
+                dataset_factory=lambda: AnyDataset(
+                    Spec(source="store", path=str(path))
+                ),
+                device="cpu",
+            )
+
+            manifest = read_store_json(path / "dataset.json")
+            manifest["provenance"]["input_id"] = "input-v2"
+            write_store_json(path / "dataset.json", manifest)
+            second = rule.apply(
+                dataset_factory=lambda: AnyDataset(
+                    Spec(source="store", path=str(path))
+                ),
+                device="cpu",
+            )
+
+        self.assertNotEqual(first.cache_path, second.cache_path)
 
     def test_rule_apply_writes_partition_shards(self):
         _register_rows_source("unit_test_filter_partition_shards")
@@ -1643,138 +1684,6 @@ class FilteredDatasetTest(unittest.TestCase):
 
             with self.assertRaises(ValueError):
                 result.select_by()
-
-    def test_filtered_dataset_reads_store_merge_result(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            root = Path(tmpdir)
-            delta = root / "delta"
-            waveform = torch.tensor([[1.0, 2.0]])
-            DatasetWriter(delta, dataset_id="toy", split="train").write(
-                [
-                    {
-                        (Role.DEFAULT, Modality.AUDIO): AudioItem(
-                            views={
-                                AudioView.LONGCAT: {
-                                    "semantic_codes": torch.tensor([1, 2]),
-                                }
-                            },
-                            meta={AudioMeta.LABEL: "speech"},
-                        )
-                    }
-                ]
-            )
-            source = [
-                {
-                    (Role.DEFAULT, Modality.AUDIO): AudioItem(
-                        views={AudioView.WAVEFORM: (waveform, 4)},
-                        meta={AudioMeta.LABEL: "speech"},
-                    ),
-                    (Role.DEFAULT, Modality.TEXT): TextItem(
-                        views={TextView.TEXT: "hello"},
-                    ),
-                }
-            ]
-            merged = AnyDataset(
-                f"store://{delta}:train",
-            ).merge(source)
-            rule = FilterRule(
-                name="has_longcat",
-                factory=lambda: lambda sample: AudioView.LONGCAT
-                in sample[Role.DEFAULT, Modality.AUDIO].views,
-            )
-
-            result = rule.apply(
-                dataset_factory=lambda: merged,
-                input_id="store-source-v1",
-                device="cpu",
-            )
-            filtered = result.select_by("accept")
-            sample = filtered[0]
-
-        audio = sample[Role.DEFAULT, Modality.AUDIO]
-        self.assertEqual(set(audio.views), {AudioView.WAVEFORM, AudioView.LONGCAT})
-        self.assertEqual(sample[Role.DEFAULT, Modality.TEXT].views[TextView.TEXT], "hello")
-
-    def test_merge_filter_identity_is_order_and_grouping_independent(self):
-        _register_rows_source("unit_test_filter_merge_identity")
-        base = _dataset("unit_test_filter_merge_identity", [0])
-        first = [{"a": 1}]
-        second = [{"b": 2}]
-        rule = FilterRule(
-            name="all",
-            factory=lambda: lambda sample: True,
-        )
-
-        left = base.merge(first).merge(second)
-        right = base.merge(second).merge(first)
-        left_grouped = rule.apply(
-            dataset_factory=lambda: left,
-            input_id="merge-input-v1",
-            device="cpu",
-        )
-        right_grouped = rule.apply(
-            dataset_factory=lambda: right,
-            input_id="merge-input-v1",
-            device="cpu",
-        )
-
-        self.assertEqual(left_grouped.cache_path, right_grouped.cache_path)
-
-    def test_external_merge_input_id_is_stable_and_required(self):
-        _register_rows_source("unit_test_filter_external_identity")
-        base = _dataset("unit_test_filter_external_identity", [0])
-        calls = []
-
-        def dataset_factory():
-            return base.merge([{}])
-
-        rule = FilterRule(
-            name="all",
-            factory=lambda: lambda sample: calls.append(_value(sample)) or True,
-        )
-
-        with self.assertRaisesRegex(TypeError, "input_id is required"):
-            rule.apply(dataset_factory=dataset_factory, device="cpu")
-
-        first = rule.apply(
-            dataset_factory=dataset_factory,
-            input_id="external-snapshot-v1",
-            device="cpu",
-        )
-        repeated = rule.apply(
-            dataset_factory=dataset_factory,
-            input_id="external-snapshot-v1",
-            device="cpu",
-        )
-        changed = rule.apply(
-            dataset_factory=dataset_factory,
-            input_id="external-snapshot-v2",
-            device="cpu",
-        )
-        metadata = json.loads(
-            (first.cache_path / "rule.json").read_text(encoding="utf-8")
-        )
-        identity = metadata["base"]["identity"]
-        external = next(
-            child for child in identity["children"] if child["kind"] == "map_style"
-        )
-
-        self.assertEqual(first.cache_path, repeated.cache_path)
-        self.assertNotEqual(first.cache_path, changed.cache_path)
-        self.assertEqual(calls, [0, 0])
-        self.assertEqual(first.input_id, "external-snapshot-v1")
-        self.assertEqual(identity["view_schema_version"], 2)
-        self.assertEqual(identity["input_id"], "external-snapshot-v1")
-        self.assertNotIn("object_id", external)
-
-        restored = first.dataset_factory()
-        chained = FilterRule("chain", _true_factory).apply(
-            dataset_factory=first.dataset_factory,
-            device="cpu",
-        )
-
-        self.assertEqual(restored.input_id, first.input_id)
-        self.assertEqual(_values(chained), [0])
 
     def test_filter_rule_can_apply_to_filtered_dataset(self):
         _register_rows_source("unit_test_filter_chain")

@@ -65,6 +65,7 @@ def commit_store_parts(
     *,
     dataset_id: str,
     split: str | None = None,
+    provenance: Mapping[str, str] | None = None,
     progress: CommitProgress | None = None,
 ) -> Path:
     parts = _part_roots(parts_dir)
@@ -89,6 +90,7 @@ def commit_store_parts(
                 dataset_id=dataset_id,
                 split=split,
                 views=views,
+                provenance=provenance,
                 progress=progress,
             ),
         )
@@ -101,6 +103,7 @@ def commit_store_fragments(
     dataset_id: str,
     split: str | None = None,
     expected_sample_count: int | None = None,
+    provenance: Mapping[str, str] | None = None,
     progress: CommitProgress | None = None,
 ) -> Path:
     if expected_sample_count is not None and expected_sample_count < 0:
@@ -131,6 +134,7 @@ def commit_store_fragments(
                 split=split,
                 expected_sample_count=expected_sample_count,
                 views=views,
+                provenance=provenance,
                 progress=progress,
             ),
         )
@@ -275,6 +279,7 @@ def _bounded_store_roots(
                         split=split,
                         views=_store_views(batch),
                         dense=False,
+                        provenance=None,
                         progress=progress,
                     )
 
@@ -294,6 +299,7 @@ def _commit_roots_to_tmp(
     expected_sample_count: int | None = None,
     views: tuple[tuple[Role, Modality, View], ...] | None = None,
     dense: bool = True,
+    provenance: Mapping[str, str] | None = None,
     progress: CommitProgress | None = None,
 ) -> Path:
     sample_count = _write_ordered_samples_manifest(
@@ -314,6 +320,7 @@ def _commit_roots_to_tmp(
         dataset_id=dataset_id,
         split=split,
         sample_count=sample_count,
+        provenance=provenance,
     )
     dataset_ready_path(root).touch()
     return root
@@ -351,6 +358,7 @@ def _write_committed_dataset_manifest(
     dataset_id: str,
     split: str | None,
     sample_count: int,
+    provenance: Mapping[str, str] | None,
 ) -> None:
     write_json(
         dataset_json_path(root),
@@ -360,6 +368,7 @@ def _write_committed_dataset_manifest(
                 schema_version=STORE_SCHEMA_VERSION,
                 split=split,
                 sample_count=sample_count,
+                provenance={} if provenance is None else provenance,
             )
         ),
     )

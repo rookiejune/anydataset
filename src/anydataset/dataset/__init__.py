@@ -2,7 +2,6 @@ from .abc import (
     AnyDataset,
     IterableAnyDataset,
     MapStyleABC,
-    MergedDataset,
 )
 from .multiple import (
     IterationStrategy,
@@ -27,7 +26,6 @@ __all__ = [
     "IterableAnyDataset",
     "IterationStrategy",
     "MapStyleABC",
-    "MergedDataset",
     "MultipleAnyDataset",
     "RoundRobinStrategy",
     "SequentialStrategy",

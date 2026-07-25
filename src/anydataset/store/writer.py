@@ -24,6 +24,7 @@ from .manifest import (
     STORE_SCHEMA_VERSION,
     DatasetManifest,
     dataset_manifest_dict,
+    normalize_provenance,
 )
 from .manifestio import sample_manifest_writer
 from .paths import dataset_json_path, dataset_ready_path
@@ -37,6 +38,7 @@ class DatasetWriter:
     split: str | None = None
     views: tuple[tuple[Role, Modality, View], ...] | None = None
     max_shard_samples: int = DEFAULT_MAX_SHARD_SAMPLES
+    provenance: Mapping[str, str] | None = None
 
     def __post_init__(self) -> None:
         self.output_dir = Path(self.output_dir)
@@ -45,6 +47,7 @@ class DatasetWriter:
             "max_shard_samples",
             self.max_shard_samples,
         )
+        self.provenance = normalize_provenance(self.provenance)
 
     def write(self, samples: Iterable[Sample]) -> Path:
         return replace_dir(
@@ -98,6 +101,7 @@ class DatasetWriter:
                 schema_version=STORE_SCHEMA_VERSION,
                 split=self.split,
                 sample_count=sample_count,
+                provenance=self.provenance,
             )
             write_json(dataset_json_path(root), dataset_manifest_dict(manifest))
             sample_manifest.close()

@@ -3,7 +3,6 @@ from __future__ import annotations
 import random
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterator, Sequence
-from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -12,7 +11,6 @@ from torch.utils.data import Dataset, IterableDataset
 from .._parallel import iter_indexed_shard as iter_source_indexed_shard
 from .._sharding import Shard, runtime_shard, validate_shard
 from ..types import Preset, Spec
-from ..types._sample import merge as merge_samples
 from ..types._sample import select as select_sample
 from ..types.item import Modality, Role, View
 from ..resolver import resolve_dataset
@@ -208,10 +206,6 @@ class MapStyleABC(Dataset, ABC):
         shard = runtime_shard()
         yield from self.iter_runtime_shard(shard)
 
-    def merge(self, dataset: Any) -> MergedDataset:
-        _validate_map_style_dataset("merge dataset", dataset)
-        return MergedDataset(self, dataset)
-
     def dataloader(
         self,
         *,
@@ -321,27 +315,6 @@ class MapStyleABC(Dataset, ABC):
             num_workers=num_workers,
             prefetch_factor=prefetch_factor,
             dataset_factory=dataset_factory,
-        )
-
-
-@dataclass(frozen=True)
-class MergedDataset(MapStyleABC):
-    left: Any
-    right: Any
-
-    def __post_init__(self) -> None:
-        _validate_map_style_dataset("left dataset", self.left)
-        _validate_map_style_dataset("right dataset", self.right)
-        _validate_lengths(self.left, self.right)
-
-    def __len__(self) -> int:
-        return _validate_lengths(self.left, self.right)
-
-    def __getitem__(self, index: int) -> Sample:
-        return merge_samples(
-            self.left[index],
-            self.right[index],
-            context=f"Merge sample {index}",
         )
 
 
@@ -462,18 +435,3 @@ def _write_dataset(
     if dataset_factory is not None:
         return writer.write(dataset_factory=dataset_factory)
     return writer.write(dataset)
-
-
-def _validate_map_style_dataset(name: str, dataset: Any) -> None:
-    if not hasattr(dataset, "__len__") or not hasattr(dataset, "__getitem__"):
-        raise TypeError(f"{name} must be a map-style dataset.")
-
-
-def _validate_lengths(left: Any, right: Any) -> int:
-    left_len = len(left)
-    right_len = len(right)
-    if left_len != right_len:
-        raise ValueError(
-            f"merge datasets must have the same length: {left_len} != {right_len}."
-        )
-    return left_len

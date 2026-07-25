@@ -11,7 +11,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="anydataset-store")
     commands = parser.add_subparsers(dest="command", required=True)
 
-    migrate = commands.add_parser("migrate", help="migrate a schema-v1 store to v2")
+    migrate = commands.add_parser("migrate", help="migrate a schema-v1 store to v3")
     migrate.add_argument("source")
     migrate.add_argument("output")
 

@@ -101,26 +101,23 @@ $ANYDATASET_HOME/
 ```
 
 `dataset_hash` is derived from the dataset class and physical `Spec` id for a
-single physical dataset. For a merged map-style dataset it is derived from the
-sorted child identities, so merge input order does not split the cache. A
+single physical dataset. Store manifest provenance is included automatically,
+so a materializer input or provider version change selects a new cache. A
 `MultipleAnyDataset` is not a filter cache identity; filter or cache the child
 datasets independently before combining them.
 
-Library-owned merged children such as `AnyDataset`, `StoreDataset`, and another
-`FilteredDataset` have stable automatic identities. A merge containing an
-external map-style child such as a list or application dataset must also pass a
-non-empty `input_id`:
+For a mutable or application-owned input, pass a non-empty `input_id`:
 
 ```python
 filtered = rule.apply(
-    dataset_factory=merged_dataset_factory,
+    dataset_factory=dataset_factory,
     input_id="base-plus-local-annotations-v3",
 )
 ```
 
 `input_id` is the caller-managed semantic version of the entire filter input
-snapshot. It supplements the automatic child class, physical `Spec`, and sample
-count identity; it does not replace them. Change it when external child content
+snapshot. It supplements the automatic class, physical `Spec`, store provenance,
+and sample-count identity; it does not replace them. Change it when input content
 or ordering changes. The stored ID survives `FilteredDataset.dataset_factory`,
 pickle reconstruction, and chained filters. `FilterRule.name` still versions
 the predicate contract, while `input_id` versions input state.

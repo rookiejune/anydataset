@@ -19,10 +19,12 @@ from ..types.language import remap_lang
 from ._files import StoreFilesLease, lease_store_files, payload_path
 from .jsonio import read_json
 from .manifest import (
+    LEGACY_STORE_SCHEMA_VERSION,
     DatasetManifest,
     SampleManifestEntry,
     STORE_SCHEMA_VERSION,
     ViewManifestEntry,
+    normalize_provenance,
     view_from_dict,
 )
 from .manifestio import (
@@ -46,7 +48,7 @@ from .payload import PayloadCache, payload_value, read_payload_bytes
 _StatFingerprint = tuple[int, int, int, int, int]
 _ViewRef = tuple[item.Role, item.Modality, item.View]
 _SAMPLE_INDEX_VALIDATION_VERSION = 2
-_DATASET_MANIFEST_FIELDS = frozenset(
+_BASE_DATASET_MANIFEST_FIELDS = frozenset(
     {"dataset_id", "sample_count", "schema_version", "split"}
 )
 
@@ -442,7 +444,10 @@ def read_store_manifest(root: str | Path) -> DatasetManifest:
     if not isinstance(data, Mapping):
         raise ValueError("Store dataset manifest must be a JSON object.")
     version = data.get("schema_version")
-    if type(version) is not int or version != STORE_SCHEMA_VERSION:
+    if type(version) is not int or version not in {
+        LEGACY_STORE_SCHEMA_VERSION,
+        STORE_SCHEMA_VERSION,
+    }:
         migration = (
             " Use anydataset.store.migrate_store(source, output) for a schema-v1 "
             "store."
@@ -451,19 +456,28 @@ def read_store_manifest(root: str | Path) -> DatasetManifest:
         )
         raise ValueError(
             "Unsupported store schema_version: "
-            f"{version!r}; expected {STORE_SCHEMA_VERSION}.{migration}"
+            f"{version!r}; expected {LEGACY_STORE_SCHEMA_VERSION} or "
+            f"{STORE_SCHEMA_VERSION}.{migration}"
         )
-    return _dataset_manifest(data)
+    return _dataset_manifest(data, schema_version=version)
 
 
-def _dataset_manifest(data: Mapping[str, Any]) -> DatasetManifest:
+def _dataset_manifest(
+    data: Mapping[str, Any],
+    *,
+    schema_version: int,
+) -> DatasetManifest:
     fields = frozenset(data)
-    missing = _DATASET_MANIFEST_FIELDS - fields
+    required = _BASE_DATASET_MANIFEST_FIELDS
+    if schema_version == STORE_SCHEMA_VERSION:
+        required = required | {"provenance"}
+    missing = required - fields
     if missing:
         raise ValueError(
             f"Store dataset manifest is missing field {sorted(missing)[0]!r}."
         )
-    unsupported = fields - _DATASET_MANIFEST_FIELDS
+    allowed = required
+    unsupported = fields - allowed
     if unsupported:
         raise ValueError(
             "Store dataset manifest has unsupported field "
@@ -479,11 +493,17 @@ def _dataset_manifest(data: Mapping[str, Any]) -> DatasetManifest:
     split = data["split"]
     if split is not None and not isinstance(split, str):
         raise ValueError("Store split must be a string or None.")
+    provenance = (
+        normalize_provenance(data["provenance"])
+        if schema_version == STORE_SCHEMA_VERSION
+        else {}
+    )
     return DatasetManifest(
         dataset_id=dataset_id,
         sample_count=sample_count,
-        schema_version=STORE_SCHEMA_VERSION,
+        schema_version=schema_version,
         split=split,
+        provenance=provenance,
     )
 
 

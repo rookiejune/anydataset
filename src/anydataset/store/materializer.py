@@ -37,7 +37,7 @@ from .._resume import (
 from .._validation import non_negative_int, optional_positive_int, positive_int
 from ..cache import FileLock
 from ..runtime import Runtime
-from ..types._sample import merge as merge_samples
+from ..types._sample import combine as combine_samples
 from ..types._sample import select as select_sample
 from ..types.item import Sample, Schema
 from ..view import Provider
@@ -124,6 +124,17 @@ class ViewMaterializer:
     @property
     def _dataset_id(self) -> str:
         return _dataset_id(self.output_dir)
+
+    @property
+    def _provenance(self) -> dict[str, str]:
+        return {
+            key: value
+            for key, value in (
+                ("input_id", self.input_id),
+                ("provider_id", self.provider_id),
+            )
+            if value is not None
+        }
 
     def write(
         self,
@@ -332,6 +343,7 @@ class ViewMaterializer:
                 dataset_id=self._dataset_id,
                 split=self.split,
                 max_shard_samples=self.max_shard_samples,
+                provenance=self._provenance,
             ).write(())
             cleanup_resume_dir(self.output_dir)
             return path
@@ -347,6 +359,7 @@ class ViewMaterializer:
                 dataset_id=self._dataset_id,
                 split=self.split,
                 expected_sample_count=expected,
+                provenance=self._provenance,
                 progress=_commit_progress(progress),
             )
         cleanup_resume_dir(self.output_dir)
@@ -364,6 +377,7 @@ class ViewMaterializer:
                 parts_dir,
                 dataset_id=self._dataset_id,
                 split=self.split,
+                provenance=self._provenance,
                 progress=_commit_progress(progress),
             )
         cleanup_resume_dir(self.output_dir)
@@ -637,7 +651,7 @@ class ViewMaterializer:
         if self.keep_schema is None:
             return output
         kept = _select_sample(source, self.keep_schema)
-        return _merge_output_samples(kept, output)
+        return _combine_output_sample(kept, output)
 
     def _output_samples(
         self,
@@ -710,8 +724,8 @@ def _select_sample(sample: Sample, schema: Schema) -> Sample:
     return select_sample(sample, schema)
 
 
-def _merge_output_samples(left: Sample, right: Sample) -> Sample:
-    return merge_samples(left, right, context="Materialized sample")
+def _combine_output_sample(left: Sample, right: Sample) -> Sample:
+    return combine_samples(left, right, context="Materialized sample")
 
 
 def _commit_progress(dashboard: ProgressDashboard) -> Callable[[str, int], None]:

@@ -106,6 +106,8 @@ def _v1_manifest(root: Path) -> DatasetManifest:
         raise ValueError("Store dataset manifest must be a JSON object.")
     version = data.get("schema_version")
     if type(version) is int and version == STORE_SCHEMA_VERSION:
+        raise ValueError(f"Store already uses schema_version {STORE_SCHEMA_VERSION}.")
+    if type(version) is int and version == 2:
         raise ValueError("Store already uses schema_version 2.")
     if "schema_version" in data and (type(version) is not int or version != 1):
         raise ValueError(f"Unsupported source store schema_version: {version!r}.")
@@ -134,6 +136,7 @@ def _v1_manifest(root: Path) -> DatasetManifest:
         sample_count=sample_count,
         schema_version=STORE_SCHEMA_VERSION,
         split=split,
+        provenance={},
     )
 
 

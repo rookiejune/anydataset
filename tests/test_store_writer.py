@@ -78,7 +78,13 @@ class DatasetWriterTest(unittest.TestCase):
             self.assertEqual(written, output)
             self.assertEqual(
                 set(dataset_json),
-                {"dataset_id", "sample_count", "schema_version", "split"},
+                {
+                    "dataset_id",
+                    "sample_count",
+                    "schema_version",
+                    "split",
+                    "provenance",
+                },
             )
             self.assertTrue(dataset_ready_path(output).exists())
             self.assertTrue(view_ready_path(output, view).exists())
@@ -676,7 +682,7 @@ class DatasetWriterTest(unittest.TestCase):
 
             with self.assertRaisesRegex(
                 ValueError,
-                "Unsupported store schema_version: None; expected 2",
+                "Unsupported store schema_version: None; expected 2 or 3",
             ):
                 commit_store_parts(
                     root / "output",

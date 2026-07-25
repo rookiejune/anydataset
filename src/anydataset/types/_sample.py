@@ -15,7 +15,7 @@ def select(sample: Sample, schema: Schema) -> Sample:
     }
 
 
-def merge(left: Sample, right: Sample, *, context: str) -> Sample:
+def combine(left: Sample, right: Sample, *, context: str) -> Sample:
     if not isinstance(left, Mapping) or not isinstance(right, Mapping):
         raise TypeError(f"{context} samples must be mappings.")
 
@@ -25,11 +25,11 @@ def merge(left: Sample, right: Sample, *, context: str) -> Sample:
         if current is None:
             result[ref] = item
             continue
-        result[ref] = merge_items(current, item, ref=ref, context=context)
+        result[ref] = combine_items(current, item, ref=ref, context=context)
     return result
 
 
-def merge_items(
+def combine_items(
     left: Item,
     right: Item,
     *,

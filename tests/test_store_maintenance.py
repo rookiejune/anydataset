@@ -35,14 +35,14 @@ from anydataset.types import (
 
 
 class StoreMigrationTest(unittest.TestCase):
-    def test_migrate_store_converts_v1_to_independent_v2_store(self):
+    def test_migrate_store_converts_v1_to_independent_v3_store(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             source = root / "v1"
-            output = root / "v2"
+            output = root / "v3"
             _write_v1_store(source)
 
-            with self.assertRaisesRegex(ValueError, "expected 2"):
+            with self.assertRaisesRegex(ValueError, "expected 2 or 3"):
                 read_store_dataset(source)
 
             migrated = migrate_store(source, output)
@@ -51,7 +51,7 @@ class StoreMigrationTest(unittest.TestCase):
             second = dataset[1]
 
             self.assertEqual(migrated, output.resolve())
-            self.assertEqual(read_json(output / "dataset.json")["schema_version"], 2)
+            self.assertEqual(read_json(output / "dataset.json")["schema_version"], 3)
             self.assertNotIn("schema_version", read_json(source / "dataset.json"))
             self.assertEqual(
                 first[Role.DEFAULT, Modality.TEXT].views[TextView.TEXT],
@@ -81,7 +81,7 @@ class StoreMigrationTest(unittest.TestCase):
     def test_migrate_store_accepts_explicit_v1_version(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             source = Path(tmpdir) / "v1"
-            output = Path(tmpdir) / "v2"
+            output = Path(tmpdir) / "v3"
             _write_v1_store(source)
             manifest = read_json(source / "dataset.json")
             manifest["schema_version"] = 1
@@ -97,7 +97,7 @@ class StoreMigrationTest(unittest.TestCase):
     def test_migrate_store_does_not_publish_invalid_v1_store(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             source = Path(tmpdir) / "v1"
-            output = Path(tmpdir) / "v2"
+            output = Path(tmpdir) / "v3"
             _write_v1_store(source)
             view = (Role.DEFAULT, Modality.TEXT, TextView.TEXT)
             _replace_first_sample_id(source, view, "unknown")
@@ -109,11 +109,11 @@ class StoreMigrationTest(unittest.TestCase):
 
     def test_migrate_store_rejects_current_store(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            source = Path(tmpdir) / "v2"
+            source = Path(tmpdir) / "v3"
             output = Path(tmpdir) / "output"
             _write_store(source)
 
-            with self.assertRaisesRegex(ValueError, "already uses schema_version 2"):
+            with self.assertRaisesRegex(ValueError, "already uses schema_version 3"):
                 migrate_store(source, output)
 
     def test_migrate_store_rejects_boolean_schema_version(self):
@@ -263,6 +263,7 @@ def _write_v1_store(path: Path) -> None:
     _write_store(path)
     manifest = read_json(path / "dataset.json")
     del manifest["schema_version"]
+    del manifest["provenance"]
     write_json(path / "dataset.json", manifest)
     for view in (
         (Role.DEFAULT, Modality.AUDIO, AudioView.WAVEFORM),

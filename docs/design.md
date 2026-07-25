@@ -82,7 +82,7 @@ Preset 应该尽量保留数据集天然提供的信息。例如语音到语音�
 派生表示应通过 provider 和 `ViewMaterializer` 生成。典型流程是：
 
 ```text
-base store -> provider -> delta store -> logical merge -> schema selects derived view
+base store -> provider -> standalone store -> schema selects derived view
 ```
 
 例如 LongCat codes 是 `AudioView.LONGCAT`。Codec view 的单样本值统一为整数 Tensor
@@ -99,16 +99,15 @@ codebook。经 `CodecProvider` 生成时，第 k 列的每个 id 必须满足
 Preset 不负责加载 codec，也不应该把 LongCat 逻辑塞进 raw row parse。Preset 只需要
 产出可被 provider 消费的音频 view，例如 `AudioView.WAVEFORM` 或 `AudioView.FILE`。
 
-`merge()` 是逻辑组合，不修改物理 store。它只接受 map-style dataset，按相同下标取
-左右两侧样本并合并 item/view/meta；重复 view 直接报错，重复 metadata 只有值相等
-时允许。需要发布自包含 store 时，对合并后的 dataset 显式调用 `write(output_dir)`。
+`ViewMaterializer` 和 `ModalityMaterializer` 都直接发布 standalone store。默认只保留
+provider 输出；需要携带输入 view/meta 时，通过 `keep_schema` 显式选择。这样训练和
+filter 都只读取一个 store，不存在运行时 base/delta overlay，也不依赖两个 dataset
+的 sample index 顺序一致。需要多个派生 view 时，按阶段对上一个 standalone store
+继续物化，并显式保留下一阶段所需字段。
+
 `write()` 支持按 part 并行物化，`num_shards` 控制写进程数，`num_workers` 控制每个
 写进程内部的 DataLoader workers；并行写入时调用方应提供可 pickle 的
 `dataset_factory`。
-
-store 内部以 `sample_index` 作为样本对齐键。`sample_id` 只用于 manifest 和错误信息
-的可读标识，不参与 base store 与 delta store 的对齐；调用方负责保证派生 view 来自
-同一顺序的数据集。
 store 的 map-style `__getitem__` 保持全局下标随机访问语义，不隐式改变采样顺序。
 训练时如果需要避免样本级 shuffle 频繁跨 tar shard，仍使用统一的
 `dataset.dataloader(..., shuffle=...)` 入口。底层 `StoreDataset` 通过私有 `_shuffle`
@@ -116,18 +115,19 @@ store 的 map-style `__getitem__` 保持全局下标随机访问语义，不隐�
 shuffle，再在 group 内 shuffle 样本；batch planner 只在同一个 group 内组 batch。
 分布式 rank 在 group 计划层按位置切分，DDP 只裁剪 rank-local 最终 batch 尾部，不修改
 通用 `iter_indexed_shard()` 的 modulo 契约。
-reader 只接受字段和 Parquet manifest 结构均完整匹配 `schema_version: 2` 的 store；
-view manifest 必须显式包含 `sample_index`。旧格式必须先显式迁移或重新物化，
+reader 显式支持字段和 Parquet manifest 结构完整的 `schema_version: 2` 和 `3` store；
+v2 store 没有 provenance，仍可读取。新写入的 v3 store 在 dataset manifest 中保存
+materializer 的 `input_id` 和 `provider_id`。更早格式必须先显式迁移或重新物化，
 不在读取时按 `sample_id` 静默补齐。
 离线 `migrate_store(source, output)` 只处理真实存在过的上一版 canonical 布局：dataset
 manifest 没有 `schema_version`（也接受显式的 `1`），sample manifest 已包含稠密稳定的
 `sample_index`，view manifest 使用 `sample_id`。迁移通过 sample manifest 的唯一 ID
-映射生成 v2 view manifest，把引用的 payload shard 复制到独立新目录，完成 v2 结构、
+映射生成 v3 view manifest，把引用的 payload shard 复制到独立新目录，完成 v3 结构、
 覆盖范围和 tar key 校验后才原子发布。源目录不原地修改。更早的 view revision 目录、
 JSONL manifest 或不同 sample item 结构不属于该 v1 契约，只能从原始 canonical dataset
 重新物化。
 
-`ViewMaterializer` 默认只写 provider 输出 view；如果 delta store 需要额外携带原始
+`ViewMaterializer` 默认只写 provider 输出 view；如果 standalone store 需要额外携带原始
 item 的少量 view 或 meta，调用方通过 `keep_schema` 显式声明。`keep_schema` 使用现有
 `Schema`/`Requirement` 语义，只复制声明的字段；如果声明的 view 和 provider 输出冲突，
 materializer 必须报错，不静默覆盖。
@@ -225,10 +225,11 @@ transforms 的语义版本不由库检查，调用方应把这些约定写进 `n
 
 缓存根目录统一由 `ANYDATASET_HOME` 控制。物理 source prepare cache 写在
 `$ANYDATASET_HOME/cache/sources/<spec_id>`，只由 `Spec` 决定。filter cache 写在
-`$ANYDATASET_HOME/cache/filters/<dataset_id>/<rule_id>`，其中单物理 dataset 的
-`dataset_id` 由 dataset class 和 `Spec.id` 决定，merged map-style dataset 的
-`dataset_id` 由排序后的 child identity 决定。`MultipleAnyDataset` 不作为整体建立
-filter cache identity；调用方应先对各子 dataset 做过滤或缓存，再组合。
+`$ANYDATASET_HOME/cache/filters/<dataset_id>/<rule_id>`，其中物理 dataset 的
+`dataset_id` 由 dataset class、`Spec` 和 store manifest provenance 决定；filtered view
+会把上游 identity、rule 和 label 纳入 identity。对于内容或顺序由业务工程管理的输入，
+调用方用非空 `input_id` 版本化整个输入快照，并在输入变化时更新。`MultipleAnyDataset`
+不作为整体建立 filter cache identity；调用方应先对各子 dataset 做过滤或缓存，再组合。
 store 的 `AudioView.FILE` payload 解包到
 `$ANYDATASET_HOME/cache/store-files/<store_id>`，cache identity 包含 view、shard、
 payload key 和 shard fingerprint，写入使用同目录原子替换。派生文件被外部清理后会按需
@@ -240,11 +241,10 @@ reader 或 `lease_store_files(store_root)` 显式 lease 时直接报错，不静
 返回的字符串路径而释放所有 lease 后，路径不再受保证；需要跨 reader 生命周期使用时必须
 显式持有 lease，或把文件复制到调用方拥有的目录。缓存不做自动容量淘汰，清理必须由调用方
 按物理 store 显式触发，后续访问会重新解包。
-库内 child 使用自动 identity；merged dataset 含 list 或业务自定义 dataset 这类库外
-map-style child 时，调用方必须用非空 `input_id` 标识整个输入快照。该 ID 补充而不
-替代自动 class、`Spec` 和 sample count identity，库外内容或顺序改变时必须更新。
-`FilterRule.name` 版本化 predicate，`input_id` 版本化输入状态；filtered factory、
-pickle 重建和链式过滤会继续携带上游 ID。
+物理 dataset 使用自动 identity；业务输入的内容或顺序改变时，调用方必须更新非空
+`input_id`。该 ID 补充而不替代自动 class、`Spec`、provenance 和 sample count identity。
+`FilterRule.name` 版本化 predicate，`input_id` 版本化输入状态；filtered factory、pickle
+重建和链式过滤会继续携带上游 ID。
 
 运行时 warning 和 worker 日志同样由 `ANYDATASET_HOME` 控制，写入
 `$ANYDATASET_HOME/logs/<timestamp>-<pid>/`。普通 source warning 按来源写成

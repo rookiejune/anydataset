@@ -373,14 +373,15 @@ label by default. Use `select_by(...)` to derive a label view over the same
 cache. `FilterRule.apply(...)` is a convenience wrapper that forwards its
 `name` and `factory` to `FilteredDataset`.
 
-Filter cache identity is automatic for physical datasets and library-owned
-merged children. If a merged dataset contains an external map-style child such
-as a list or application dataset, pass a non-empty `input_id` to `apply()` or
-`FilteredDataset(...)`. The ID versions the entire input snapshot and augments
-the automatic class, `Spec`, and sample-count identity. Change it when external
-content or ordering changes; `FilterRule.name` continues to version predicate
-semantics. The ID is preserved by the filtered `dataset_factory`, pickle, and
-chained filters.
+Filter cache identity is automatic for physical datasets and filtered views.
+For a mutable or application-owned input, pass a non-empty `input_id` to
+`apply()` or `FilteredDataset(...)`. The ID versions the entire input snapshot
+and augments the automatic class, `Spec`, and sample-count identity. Change it
+when input content or ordering changes; `FilterRule.name` continues to version
+predicate semantics. A store's manifest provenance is included automatically,
+so materializer `input_id` and `provider_id` changes also produce a new filter
+cache identity. The explicit ID is preserved by the filtered
+`dataset_factory`, pickle, and chained filters.
 
 `FilterRule` stores a zero-argument factory, and the factory builds the
 predicate inside the process that will execute it. `device="auto"` resolves to
@@ -571,15 +572,17 @@ loader first shuffles payload shard groups, then shuffles indexes within each
 group, and plans batches without crossing shard-group boundaries. Use
 `seed=...` and `loader.set_epoch(epoch)` for reproducible epoch changes.
 
-Readers accept only store `schema_version: 2`. The preceding canonical store
-format used the same sample manifest and directory layout, but had no dataset
-schema version and keyed view manifests by `sample_id`. Migrate that format
-offline into a new directory; the source is never modified, and the destination
-is published only after its manifests, coverage, shards, and payload keys pass
-the v2 checks:
+Readers explicitly support store `schema_version: 2` and the current
+`schema_version: 3`. Version 2 stores have no provenance but remain readable;
+new v3 stores persist materializer `input_id` and `provider_id`. The preceding
+canonical store format used the same sample manifest and directory layout, but
+had no dataset schema version and keyed view manifests by `sample_id`. Migrate
+that format offline into a new directory; the source is never modified, and
+the destination is published only after its manifests, coverage, shards, and
+payload keys pass the v3 checks:
 
 ```bash
-anydataset-store migrate /data/my_anydataset_v1 /data/my_anydataset_v2
+anydataset-store migrate /data/my_anydataset_v1 /data/my_anydataset_v3
 ```
 
 The equivalent Python API is
@@ -615,12 +618,9 @@ is no automatic eviction; after an explicit cleanup, later access extracts the
 payload again.
 
 Views are stored under `{role}/{modality}/{view}/`; payloads live in that
-view directory's `shards/` files. `ViewMaterializer` writes derived views to a
-delta store. By default it writes only the provider output view; it does not
-copy input views or metadata. Open both stores through `Source.STORE`, combine
-them with logical `merge()`, and call `write()` only when you need a
-self-contained store. Base and delta stores are aligned by `sample_index`;
-callers are responsible for materializing views from the same ordered dataset.
+view directory's `shards/` files. `ViewMaterializer` always publishes a
+standalone store. By default it writes only the provider output view; input
+views and metadata are retained only when selected with `keep_schema`.
 
 ```python
 from anydataset import AnyDataset, Source, Spec
@@ -642,7 +642,7 @@ def provider_factory(device: str):
     return ToyLongCat()
 
 
-delta = ViewMaterializer(
+output = ViewMaterializer(
     output_dir="/data/my_anydataset_longcat",
     input_id="my-audio-v1",
     provider_id="toy-longcat-v1",
@@ -652,14 +652,10 @@ delta = ViewMaterializer(
     devices="cpu",
 )
 
-merged = AnyDataset(Spec(source=Source.STORE, path="/data/my_anydataset")).merge(
-    AnyDataset(Spec(source=Source.STORE, path=str(delta)))
-)
-
-merged.write("/data/my_anydataset_with_longcat")
+dataset = AnyDataset(Spec(source=Source.STORE, path=str(output)))
 ```
 
-When a delta must carry selected input fields, declare them with the existing
+When the output must carry selected input fields, declare them with the existing
 schema contract instead of copying the whole sample:
 
 ```python
@@ -678,15 +674,9 @@ materializer = ViewMaterializer(
 ```
 
 `keep_schema` fields must exist in the input. A selected view that conflicts
-with the provider output raises instead of overwriting it.
-
-`merge()` returns a map-style logical dataset and never mutates either physical
-store. It indexes both sides with the same integer index, like `zip(strict=True)`:
-both sides must be map-style datasets with the same length. The right-hand side
-may add new items or new views to an existing item; duplicate views fail, and
-duplicate metadata keys are allowed only when the values are equal. Runtime
-sharding happens on the merged dataset, so both sides share the same global
-index. To publish a complete store, call `write()` on the merged dataset.
+with the provider output raises instead of overwriting it. To publish multiple
+derived views, run another materializer against the previous standalone store
+and explicitly retain the fields needed by the next stage.
 
 `write()` can materialize parts in parallel. `num_shards` controls writer
 processes, while `num_workers` controls the PyTorch `DataLoader` workers inside
@@ -710,7 +700,9 @@ factories. Set `input_id` and `provider_id` to explicit semantic versions when
 the input snapshot or provider behavior depends on state that the callables do
 not capture, such as mutable files or checkpoint contents. These IDs augment,
 rather than replace, the factory identities; changing either one quarantines
-the old resume directory instead of reusing incompatible fragments.
+the old resume directory instead of reusing incompatible fragments. The same
+IDs are written to the final store manifest provenance and participate in
+downstream filter cache identity.
 Multi-device materialization uses the configured process start method, so
 `dataset_factory` and `provider_factory` must be picklable, module-level
 callables when that method is `"spawn"`. Like filtering,
@@ -738,7 +730,7 @@ def provider_factory(device: str):
     return LongCatProvider(device=device)
 
 
-delta = ViewMaterializer(
+output = ViewMaterializer(
     output_dir="/data/my_anydataset_longcat",
     batch_size=8,
     num_workers=4,
@@ -798,7 +790,7 @@ def tts_provider_factory(_device: str):
     return ToyTTS()
 
 
-delta = ModalityMaterializer(
+output = ModalityMaterializer(
     output_dir="/data/my_anydataset_tts",
 ).write(
     dataset_factory=dataset_factory,

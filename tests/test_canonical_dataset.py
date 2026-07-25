@@ -16,7 +16,6 @@ from anydataset import (
     Task,
     resolve_dataset,
 )
-from anydataset.dataset.abc import MergedDataset
 from anydataset.dataset.collate import FieldGroup, FieldRef, collate_fn
 from anydataset.types import (
     AudioItem,
@@ -784,45 +783,6 @@ class CanonicalDatasetTest(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "share one device"):
             collate_fn(schema)(samples)
-
-    def test_merge_accepts_equal_nested_tensor_and_array_metadata(self):
-        ref = (Role.DEFAULT, Modality.AUDIO)
-        left = {
-            ref: AudioItem(
-                meta={
-                    AudioMeta.LABELS: {
-                        "tensor": torch.tensor([1, 2]),
-                        "array": np.array([3, 4]),
-                        "nested": [torch.tensor([5]), np.array([6])],
-                    }
-                }
-            )
-        }
-        right = {
-            ref: AudioItem(
-                meta={
-                    AudioMeta.LABELS: {
-                        "tensor": torch.tensor([1, 2]),
-                        "array": np.array([3, 4]),
-                        "nested": [torch.tensor([5]), np.array([6])],
-                    }
-                }
-            )
-        }
-
-        merged = MergedDataset([left], [right])[0]
-
-        labels = merged[ref].meta[AudioMeta.LABELS]
-        self.assertTrue(torch.equal(labels["tensor"], torch.tensor([1, 2])))
-        self.assertTrue(np.array_equal(labels["array"], np.array([3, 4])))
-
-    def test_merge_rejects_unequal_nested_array_metadata(self):
-        ref = (Role.DEFAULT, Modality.AUDIO)
-        left = {ref: AudioItem(meta={AudioMeta.LABELS: {"array": np.array([1, 2])}})}
-        right = {ref: AudioItem(meta={AudioMeta.LABELS: {"array": np.array([1, 3])}})}
-
-        with self.assertRaisesRegex(ValueError, "metadata conflict"):
-            MergedDataset([left], [right])[0]
 
     def test_collate_fn_keeps_non_tensor_meta_as_values(self):
         ref = (Role.DEFAULT, Modality.AUDIO)

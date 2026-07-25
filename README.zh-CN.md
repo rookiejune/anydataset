@@ -426,12 +426,13 @@ predicate 返回 `True` 会归为 `"accept"`，返回 `False` 会归为 `"reject
 
 `FilteredDataset(...)` 会先检查当前 base dataset 和 rule name 是否已经有可用缓存；没有就先构建。它默认选择缓存里所有 label；需要某些 label 时用 `select_by(...)` 基于同一份缓存派生视图。`FilterRule.apply(...)` 是便利入口，只是把自己的 `name` 和 `factory` 转发给 `FilteredDataset`。
 
-物理 dataset 和库内 merged child 的 filter cache identity 会自动生成。如果 merged
-dataset 含 list 或业务工程自定义 dataset 这类库外 map-style child，调用
-`apply()` 或 `FilteredDataset(...)` 时必须传入非空 `input_id`。它表示整个 filter
-输入快照的语义版本，并补充自动生成的 class、`Spec` 和 sample count identity；库外
-child 的内容或顺序变化时，调用方必须更新它。`FilterRule.name` 仍然负责版本化
-predicate 语义。filtered `dataset_factory`、pickle 和链式过滤都会保留该 ID。
+物理 dataset 和 filtered view 的 filter cache identity 会自动生成。对于内容或顺序
+由业务工程管理、可能变化的输入，调用 `apply()` 或 `FilteredDataset(...)` 时传入非空
+`input_id`。它表示整个 filter 输入快照的语义版本，并补充自动生成的 class、`Spec`
+和 sample count identity；输入变化时调用方必须更新它。store manifest 的 provenance
+会自动参与 identity，因此 materializer 的 `input_id` 或 `provider_id` 变化也会得到新的
+filter cache。显式 `input_id` 会由 filtered `dataset_factory`、pickle 和链式过滤继续
+携带。
 
 `FilterRule` 保存的是零参数 factory，factory 会在实际执行 predicate 的进程里创建
 predicate。`device="auto"` 会解析为全部可见 CUDA device；CUDA 不可用时解析为 CPU。
@@ -678,13 +679,13 @@ loader = dataset.dataloader(
 和全局 index shard 语义不变。外层只保留 `dataset.dataloader(..., shuffle=...)` 这一处
 shuffle 配置，不再需要单独导入 store 专用 sampler。
 
-reader 只接受 `schema_version: 2`。上一版 canonical store 使用相同的 sample
-manifest 和目录布局，但 dataset manifest 没有版本号，view manifest 使用
-`sample_id` 对齐。该格式必须离线迁移到新目录；源目录保持不变，目标目录只有在
-manifest、覆盖范围、shard 和 payload key 全部通过 v2 校验后才会原子发布：
+reader 显式支持 `schema_version: 2` 和当前的 `schema_version: 3`。v2 store 没有
+provenance，仍可直接读取；新写入的 v3 store 会保存 materializer 的 `input_id` 和
+`provider_id`。更早的 canonical store 使用相同的 sample manifest 和目录布局，但
+dataset manifest 没有版本号，view manifest 使用 `sample_id` 对齐，必须离线迁移到新目录：
 
 ```bash
-anydataset-store migrate /data/my_anydataset_v1 /data/my_anydataset_v2
+anydataset-store migrate /data/my_anydataset_v1 /data/my_anydataset_v3
 ```
 
 等价 Python 入口是
@@ -733,10 +734,8 @@ schema = {
 ## 生成新的 View
 
 store 的 view 目录直接使用 `{role}/{modality}/{view}`，真实 payload 放在该 view 目录下的
-`shards/` 里。`ViewMaterializer` 会读取已有 dataset，把每个 item 的全部 views 交给
-provider，由 provider 决定如何生成自己的输出 view。它写出的是 delta store：默认只写
-provider 的输出 view，不复制输入 view 或 meta。base store 和 delta store 按
-`sample_index` 对齐；调用方负责保证派生 view 来自同一顺序的数据集。
+`shards/` 里。`ViewMaterializer` 总是发布可以独立读取的 store。默认只写 provider 的
+输出 view；输入 view 和 meta 只有在 `keep_schema` 中显式声明时才会保留。
 
 ```python
 import torch
@@ -762,7 +761,7 @@ def provider_factory(device: str):
     return ToyLongCat()
 
 
-delta = ViewMaterializer(
+output = ViewMaterializer(
     output_dir="/data/my_anydataset_longcat",
     split="train",
     input_id="my-audio-v1",
@@ -773,16 +772,12 @@ delta = ViewMaterializer(
     devices="cpu",
 )
 
-merged = AnyDataset(
-    Spec(source=Source.STORE, path="/data/my_anydataset", split="train"),
-).merge(
-    AnyDataset(Spec(source=Source.STORE, path=str(delta), split="train"))
+dataset = AnyDataset(
+    Spec(source=Source.STORE, path=str(output), split="train"),
 )
-
-merged.write("/data/my_anydataset_with_longcat", split="train")
 ```
 
-如果 delta 需要携带少量输入字段，用现有 schema 契约显式声明，不复制整个 sample：
+如果输出需要携带少量输入字段，用现有 schema 契约显式声明，不复制整个 sample：
 
 ```python
 from anydataset.types import Modality, Role, TextMeta, TextReq, TextView
@@ -800,7 +795,8 @@ materializer = ViewMaterializer(
 ```
 
 `keep_schema` 声明的字段必须存在；如果其中的 view 与 provider 输出冲突，会显式报错而
-不是覆盖。
+不是覆盖。需要多个派生 view 时，对上一步的 standalone store 再运行 materializer，并
+显式保留下一步需要的字段。
 
 如果 provider 需要 GPU，可以用 `devices` 控制执行设备。`devices="auto"` 会解析为
 全部可见 CUDA device；CUDA 不可用时解析为 CPU。只解析出一个 device 时在调用进程
@@ -815,7 +811,8 @@ provider batch 会聚合成 checkpoint chunk，保留在目标目录旁边的隐
 resume compatibility 会记录两个 factory 的自动标识。当输入快照或 provider 行为依赖
 callable 无法表达的状态（例如可变文件或 checkpoint 内容）时，用 `input_id` 和
 `provider_id` 显式给出语义版本。这两个 ID 会补充而不是替代 factory 标识；任一 ID
-变化都会隔离旧 resume 目录，不会复用不兼容的 fragment。
+变化都会隔离旧 resume 目录，不会复用不兼容的 fragment。它们也会写入最终 store
+manifest 的 provenance，参与下游 filter cache identity。
 和过滤一样，多设备 materialize 拥有自己的离线 worker，不应放进已经存在的 DDP
 训练进程里运行。
 如果 `parse_fn` 里有 file 到 waveform 这类 CPU 重活，可以给 materializer 传
@@ -832,7 +829,7 @@ def provider_factory(device: str):
     return LongCatProvider(device=device)
 
 
-delta = ViewMaterializer(
+output = ViewMaterializer(
     output_dir="/data/my_anydataset_longcat",
     split="train",
     batch_size=8,
@@ -867,35 +864,12 @@ view 没有 mask，有效长度来自加载后的 waveform。当前 LongCat enco
 所以 provider 会根据每个输入 waveform 的有效长度按比例裁剪输出 codes，避免把
 padding 对应的 codes 写入 store。
 
-`merge()` 返回逻辑合并后的 map-style dataset，不修改左右两侧的物理 store。它按
-相同下标取左右两侧样本，相当于 `zip(strict=True)`；左右两侧必须都是 map-style
-dataset，并且长度必须一致。右侧可以提供新 item 或同一 item 下的新 view；重复 view
-会报错，重复 metadata 只有值相等时才允许。调用方负责维护两个 dataset 的顺序、
-过滤和版本一致性。runtime shard 会作用在合并后的 dataset 上，因此两侧会共享同一个
-全局下标。
-
-需要发布自包含 store 时，对逻辑合并结果显式调用 `write()`：
-
-```python
-merged.write(
-    "/data/my_anydataset_with_longcat",
-    split="train",
-)
-```
-
 `write()` 可以并行写 part store 后统一 commit。`num_shards` 控制写进程数，
 `num_workers` 控制每个写进程内部的 `DataLoader` workers；并行写入时建议传入
-模块顶层的 `dataset_factory`，避免 spawn worker pickle 已构造 dataset 实例：
+模块顶层的 `dataset_factory`，避免 spawn worker pickle 已构造 dataset 实例。
 
-```python
-merged.write(
-    "/data/my_anydataset_with_longcat",
-    split="train",
-    num_shards=4,
-    num_workers=4,
-    dataset_factory=merged_dataset_factory,
-)
-```
+`ViewMaterializer` 和 `ModalityMaterializer` 的最终输出都可以直接作为
+`Source.STORE` 输入，不需要再和 base store 组合。
 
 生成的新 view 也通过 schema 选择：
 
@@ -929,7 +903,7 @@ def tts_provider_factory(_device: str):
     return ToyTTS()
 
 
-delta = ModalityMaterializer(
+output = ModalityMaterializer(
     output_dir="/data/my_anydataset_tts",
 ).write(
     dataset_factory=dataset_factory,
@@ -956,17 +930,18 @@ codec 契约处理。waveform 输入的采样率来自
 `AudioView.WAVEFORM` 的 `(waveform, sample_rate)` value，file 输入的采样率来自
 `torchaudio.load()`。
 
-典型流程是先用 preset 或 source 读出 waveform store，再 materialize 成 LongCat delta store，合并后在训练 schema 里选择 `AudioView.LONGCAT`：
+典型流程是先用 preset 或 source 读出 waveform store，再 materialize 成可以独立读取的
+LongCat store，并在训练 schema 里选择 `AudioView.LONGCAT`：
 
 ```text
-base waveform store -> ViewMaterializer + LongCatProvider -> delta store -> logical merge -> schema selects LONGCAT
+base waveform store -> ViewMaterializer + LongCatProvider -> standalone store -> schema selects LONGCAT
 ```
 
 ```python
 from anydataset import AnyDataset, Source, Spec
 from anydataset.provider.longcat import LongCatProvider
 
-delta = ViewMaterializer(
+output = ViewMaterializer(
     output_dir="/data/my_anydataset_longcat",
     split="train",
 ).write(
@@ -975,13 +950,9 @@ delta = ViewMaterializer(
     devices="auto",
 )
 
-merged = AnyDataset(
-    Spec(source=Source.STORE, path="/data/my_anydataset", split="train"),
-).merge(
-    AnyDataset(Spec(source=Source.STORE, path=str(delta), split="train"))
+dataset = AnyDataset(
+    Spec(source=Source.STORE, path=str(output), split="train"),
 )
-
-merged.write("/data/my_anydataset_with_longcat", split="train")
 ```
 
 ## 开发

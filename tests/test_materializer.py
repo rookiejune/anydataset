@@ -694,6 +694,27 @@ class ViewMaterializerTest(unittest.TestCase):
                 Lang.EN,
             )
 
+    def test_materializer_writes_semantic_ids_to_store_provenance(self):
+        sample = _audio_sample(torch.tensor([[1.0, 2.0]]))
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = Path(tmpdir) / "target"
+            ViewMaterializer(
+                target,
+                input_id="input-v2",
+                provider_id="provider-v3",
+            ).write(
+                dataset_factory=_DatasetFactory((sample,)),
+                provider_factory=_ProviderFactory(offset=10),
+                devices="cpu",
+            )
+
+            manifest = read_store_dataset(target).manifest
+
+        self.assertEqual(
+            manifest.provenance,
+            {"input_id": "input-v2", "provider_id": "provider-v3"},
+        )
+
     def test_materializer_keep_schema_merges_same_item_fields(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -821,20 +842,37 @@ class ViewMaterializerTest(unittest.TestCase):
                 ]
             )
 
-            ModalityMaterializer(target, split="train").write(
+            ModalityMaterializer(
+                target,
+                split="train",
+                keep_schema={
+                    (Role.DEFAULT, Modality.TEXT): TextReq(
+                        views=frozenset({TextView.TEXT}),
+                        meta=frozenset({TextMeta.LANG}),
+                    )
+                },
+            ).write(
                 dataset_factory=_StoreDatasetFactory(source, root),
                 provider_factory=_TTSProviderFactory(),
                 devices="cpu",
             )
             stored = read_store_dataset(target)
             delta = _read_sample(target, root)
-            merged = _store_dataset(source, root).merge(_store_dataset(target, root))[0]
 
             self.assertEqual(
                 set(stored.views),
-                {(Role.DEFAULT, Modality.AUDIO, AudioView.WAVEFORM)},
+                {
+                    (Role.DEFAULT, Modality.AUDIO, AudioView.WAVEFORM),
+                    (Role.DEFAULT, Modality.TEXT, TextView.TEXT),
+                },
             )
-            self.assertEqual(set(delta), {(Role.DEFAULT, Modality.AUDIO)})
+            self.assertEqual(
+                set(delta),
+                {
+                    (Role.DEFAULT, Modality.AUDIO),
+                    (Role.DEFAULT, Modality.TEXT),
+                },
+            )
             waveform, sample_rate = delta[Role.DEFAULT, Modality.AUDIO].views[
                 AudioView.WAVEFORM
             ]
@@ -842,10 +880,9 @@ class ViewMaterializerTest(unittest.TestCase):
             self.assertEqual(sample_rate, 16000)
             self.assertEqual(delta[Role.DEFAULT, Modality.AUDIO].meta, {})
             self.assertEqual(
-                merged[Role.DEFAULT, Modality.TEXT].meta[TextMeta.LANG],
+                delta[Role.DEFAULT, Modality.TEXT].meta[TextMeta.LANG],
                 Lang.EN,
             )
-            self.assertEqual(merged[Role.DEFAULT, Modality.AUDIO].meta, {})
 
     def test_modality_materializer_collates_multiple_roles_for_one_batch_provider_call(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1016,7 +1053,7 @@ class ViewMaterializerTest(unittest.TestCase):
                     devices="cpu",
                 )
 
-    def test_materialized_delta_merges_into_base_store(self):
+    def test_materializer_output_is_standalone_store(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             source = root / "source"
@@ -1041,8 +1078,55 @@ class ViewMaterializerTest(unittest.TestCase):
                 provider_factory=_ProviderFactory(offset=10),
                 devices="cpu",
             )
-            merged = _store_dataset(source, root).merge(_store_dataset(target, root))
-            sample = merged[0]
+            sample = _store_dataset(target, root)[0]
+
+        audio = sample[Role.DEFAULT, Modality.AUDIO]
+        self.assertEqual(set(audio.views), {AudioView.LONGCAT})
+        self.assertTrue(
+            torch.equal(
+                audio.views[AudioView.LONGCAT]["semantic_codes"],
+                torch.tensor([[11, 12]]),
+            )
+        )
+
+    def test_materializer_output_keeps_explicit_input_fields(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            source = root / "source"
+            target = root / "target"
+            waveform = torch.tensor([[1.0, 2.0]])
+            DatasetWriter(source, dataset_id="toy-audio", split="train").write(
+                [
+                    {
+                        (Role.DEFAULT, Modality.AUDIO): AudioItem(
+                            views={AudioView.WAVEFORM: (waveform, 4)}
+                        ),
+                        (Role.DEFAULT, Modality.TEXT): TextItem(
+                            views={TextView.TEXT: "hello"},
+                            meta={TextMeta.LANG: Lang.EN},
+                        ),
+                    }
+                ]
+            )
+
+            ViewMaterializer(
+                target,
+                split="train",
+                keep_schema={
+                    (Role.DEFAULT, Modality.AUDIO): AudioReq(
+                        views=frozenset({AudioView.WAVEFORM})
+                    ),
+                    (Role.DEFAULT, Modality.TEXT): TextReq(
+                        views=frozenset({TextView.TEXT}),
+                        meta=frozenset({TextMeta.LANG}),
+                    ),
+                },
+            ).write(
+                dataset_factory=_StoreDatasetFactory(source, root),
+                provider_factory=_ProviderFactory(offset=10),
+                devices="cpu",
+            )
+            sample = _store_dataset(target, root)[0]
 
         audio = sample[Role.DEFAULT, Modality.AUDIO]
         text = sample[Role.DEFAULT, Modality.TEXT]

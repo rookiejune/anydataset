@@ -11,7 +11,7 @@ try:
 except ImportError:
     from typing_extensions import Unpack
 
-from ..dataset.abc import AnyDataset, MapStyleABC, MergedDataset
+from ..dataset.abc import AnyDataset, MapStyleABC
 from ..store.reader import StoreDataset
 from ..types import Spec
 from ..types.item import Sample
@@ -101,7 +101,7 @@ class _FilterCache:
 
     def __init__(
         self,
-        base: AnyDataset | StoreDataset | MergedDataset | FilteredDataset,
+        base: AnyDataset | StoreDataset | FilteredDataset,
         partitions: Mapping[str, _Index],
         rule: FilterRule,
         cache_path: Path,
@@ -156,7 +156,7 @@ class _FilterCache:
         )
 
     @property
-    def base(self) -> AnyDataset | StoreDataset | MergedDataset | FilteredDataset:
+    def base(self) -> AnyDataset | StoreDataset | FilteredDataset:
         return self._base
 
     @property
@@ -269,7 +269,7 @@ class FilteredDataset(MapStyleABC):
     @classmethod
     def _from_generation(
         cls,
-        base: AnyDataset | StoreDataset | MergedDataset | FilteredDataset,
+        base: AnyDataset | StoreDataset | FilteredDataset,
         rule: FilterRule,
         cache_path: Path,
         labels: Sequence[str],
@@ -310,7 +310,7 @@ class FilteredDataset(MapStyleABC):
         return _restore_filtered_dataset, (self._cache, self.labels)
 
     @property
-    def base(self) -> AnyDataset | StoreDataset | MergedDataset | FilteredDataset:
+    def base(self) -> AnyDataset | StoreDataset | FilteredDataset:
         return self._cache.base
 
     @property

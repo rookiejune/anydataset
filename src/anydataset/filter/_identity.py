@@ -7,8 +7,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from ..cache import anydataset_home
-from ..dataset.abc import AnyDataset, MapStyleABC, MergedDataset
-from ..store.reader import StoreDataset
+from ..dataset.abc import AnyDataset, MapStyleABC
+from ..store.reader import StoreDataset, read_store_manifest
 from ..types import Source, Spec
 from .generations import (
     filter_cache_root,
@@ -47,11 +47,9 @@ def filter_spec(dataset: FilterBase) -> Spec:
             path=str(dataset.root),
             split=dataset.manifest.split,
         )
-    if isinstance(dataset, MergedDataset):
-        return filter_spec(dataset.left)
     if _is_filtered_dataset(dataset):
         return filter_spec(dataset.base)
-    raise TypeError("dataset must be an AnyDataset, StoreDataset, or MergedDataset.")
+    raise TypeError("dataset must be an AnyDataset, StoreDataset, or FilteredDataset.")
 
 
 def filter_identity(
@@ -70,21 +68,6 @@ def filter_identity(
             "sample_count": len(dataset),
         }
         return _with_input_id(identity, input_id)
-    if isinstance(dataset, MergedDataset):
-        children = sorted(
-            (
-                dataset_identity(child, allow_external=input_id is not None)
-                for child in merged_children(dataset)
-            ),
-            key=filter_identity_key,
-        )
-        identity = {
-            "view_schema_version": _FILTER_VIEW_SCHEMA_VERSION,
-            "kind": "merged",
-            "children": children,
-            "sample_count": len(dataset),
-        }
-        return _with_input_id(identity, input_id)
     spec = filter_spec(dataset)
     identity = {
         "kind": "physical",
@@ -92,43 +75,21 @@ def filter_identity(
         "spec_id": spec.id,
         "spec": spec.to_dict(),
     }
+    provenance = _store_provenance(dataset, spec)
+    if provenance:
+        identity["provenance"] = dict(provenance)
     return _with_input_id(identity, input_id)
 
 
-def dataset_identity(
-    dataset: Any,
-    *,
-    allow_external: bool,
-) -> dict[str, Any]:
-    if (
-        isinstance(dataset, (AnyDataset, StoreDataset, MergedDataset))
-        or _is_filtered_dataset(dataset)
-    ):
-        return filter_identity(dataset)
-    if not hasattr(dataset, "__len__") or not hasattr(dataset, "__getitem__"):
-        raise TypeError("merged dataset inputs must be map-style datasets.")
-    if not allow_external:
-        dataset_type = f"{type(dataset).__module__}.{type(dataset).__qualname__}"
-        raise TypeError(
-            "input_id is required when a merged dataset contains an external "
-            f"map-style child: {dataset_type}."
-        )
-    return {
-        "view_schema_version": _FILTER_VIEW_SCHEMA_VERSION,
-        "kind": "map_style",
-        "type": f"{type(dataset).__module__}.{type(dataset).__qualname__}",
-        "sample_count": len(dataset),
-    }
-
-
-def merged_children(dataset: MergedDataset) -> tuple[Any, ...]:
-    children: list[Any] = []
-    for child in (dataset.left, dataset.right):
-        if isinstance(child, MergedDataset):
-            children.extend(merged_children(child))
-            continue
-        children.append(child)
-    return tuple(children)
+def _store_provenance(
+    dataset: FilterBase,
+    spec: Spec,
+) -> Mapping[str, str]:
+    if isinstance(dataset, StoreDataset):
+        return dataset.manifest.provenance
+    if isinstance(dataset, AnyDataset) and spec.source == Source.STORE:
+        return read_store_manifest(spec.path).provenance
+    return {}
 
 
 def metadata(

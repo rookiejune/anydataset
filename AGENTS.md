@@ -25,4 +25,4 @@
 
 - source 如果原生支持 sharding，优先使用 source 原生 shard；否则用 index modulo 作为保底。
 - source prepare cache path 只由物理 `Spec` 决定，不能因为 task、schema 或 sample metadata 不同而分裂。
-- filter cache path 由 dataset identity 和 `FilterRule.name` 决定；单 spec dataset 使用 class + spec id，merged dataset 使用排序后的 child identity。
+- filter cache path 由 dataset identity 和 `FilterRule.name` 决定；物理 dataset 使用 class、`Spec` 和 store provenance，业务管理的输入用显式 `input_id` 版本化。

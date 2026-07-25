@@ -6,7 +6,7 @@
 ## 当前边界
 
 - `ViewMaterializer` 和 `FilterRule` 都依赖稳定的全局 `sample_index`，用于分片写入、
-  resume fragment、filter partition 和后续 store/delta 对齐。
+  resume fragment、filter partition 和后续 standalone store 的覆盖校验。
 - 外层 device/provider worker 继续保持 spawn-friendly。provider 可能加载 CUDA 模型，
   不应为了 DataLoader 读取性能把外层进程模型改成 fork。
 - 外层扫描 worker、server 和 reader 的 start method 分开配置。
@@ -14,7 +14,7 @@
   `server_start_method` 非空时使用 fork。后台 writer 默认使用 thread backend；只有显式
   使用 process writer backend 时才读取 `writer_start_method`。
 - 默认用户数据集以 map-style 为主；streaming/iterable 数据集需要保留支持。当前
-  `StoreDataset`、`FilteredDataset` 和 `MergedDataset` 这类默认 map-style shard 语义的
+  `StoreDataset`、`FilteredDataset` 这类默认 map-style shard 语义的
   materializer/filter 热路径会使用 map-style indexed loader；`AnyDataset` 仍优先保留
   source-aware indexed shard 路径，避免把顺序 source 退化成随机访问。`sharded_csv`
   prepare 后使用按源文件生成的 Parquet cache，因此也走 map-style indexed loader。

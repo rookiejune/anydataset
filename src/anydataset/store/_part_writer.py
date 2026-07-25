@@ -21,7 +21,12 @@ from ._sample_write import (
     view_path,
 )
 from .jsonio import write_json
-from .manifest import DatasetManifest, STORE_SCHEMA_VERSION, dataset_manifest_dict
+from .manifest import (
+    DatasetManifest,
+    STORE_SCHEMA_VERSION,
+    dataset_manifest_dict,
+    normalize_provenance,
+)
 from .manifestio import sample_manifest_writer
 from .paths import dataset_json_path, dataset_ready_path
 from .viewwriter import ViewWriter
@@ -39,6 +44,7 @@ class DatasetPartWriter:
     views: tuple[tuple[Role, Modality, View], ...] | None = None
     max_shard_samples: int = DEFAULT_MAX_SHARD_SAMPLES
     shard_prefix: str | None = None
+    provenance: Mapping[str, str] | None = None
 
     def __post_init__(self) -> None:
         self.output_dir = Path(self.output_dir)
@@ -48,6 +54,7 @@ class DatasetPartWriter:
             "max_shard_samples",
             self.max_shard_samples,
         )
+        self.provenance = normalize_provenance(self.provenance)
 
     def write(self, samples: Iterable[IndexedSample]) -> Path:
         return replace_dir(
@@ -106,6 +113,7 @@ class DatasetPartWriter:
                 schema_version=STORE_SCHEMA_VERSION,
                 split=self.split,
                 sample_count=sample_count,
+                provenance=self.provenance,
             )
             write_json(dataset_json_path(root), dataset_manifest_dict(manifest))
             write_json(
@@ -142,6 +150,7 @@ class DatasetFragmentWriter:
     fragment_id: str
     split: str | None = None
     max_shard_samples: int = DEFAULT_MAX_SHARD_SAMPLES
+    provenance: Mapping[str, str] | None = None
 
     def __post_init__(self) -> None:
         self.output_dir = Path(self.output_dir)
@@ -150,6 +159,7 @@ class DatasetFragmentWriter:
             "max_shard_samples",
             self.max_shard_samples,
         )
+        self.provenance = normalize_provenance(self.provenance)
 
     def write(self, samples: Sequence[IndexedSample]) -> Path:
         if not samples:
@@ -177,6 +187,7 @@ class DatasetFragmentWriter:
             num_shards=1,
             max_shard_samples=self.max_shard_samples,
             shard_prefix=f"fragment-{self.fragment_id}-",
+            provenance=self.provenance,
         )._write_to_tmp(root, samples)
         write_json(
             fragment_json_path(root),
