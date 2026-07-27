@@ -315,6 +315,7 @@ class _LogProgressBar:
 
     def set_postfix_str(self, value: str) -> None:
         self.postfix = value
+        self._print()
 
     def _print(self, *, force: bool = False) -> None:
         now = time.monotonic()

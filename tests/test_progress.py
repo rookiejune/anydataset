@@ -20,6 +20,9 @@ def test_non_interactive_progress_reports_start_updates_and_finish() -> None:
         ) as progress,
     ):
         progress.put(Progress(0, 4, False, None, stage="provider"))
+        provider_output = stdout.getvalue()
+        assert "materialize views: 0 sample/10 (0.0%)" in provider_output
+        assert "provider=4" in provider_output
         progress.put(Progress(0, 4, False, None, stage="writer"))
 
     output = stdout.getvalue()
