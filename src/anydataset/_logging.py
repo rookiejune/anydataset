@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 import threading
 from contextlib import contextmanager
 from datetime import datetime
@@ -58,11 +59,22 @@ def worker_logger(source: str, logs_dir: Path, worker_id: int) -> logging.Logger
     logger.handlers.clear()
     logger.addHandler(handler)
     if worker_id == 0:
-        console = logging.StreamHandler()
-        console.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
-        logger.addHandler(console)
+        formatter = logging.Formatter("%(asctime)s %(levelname)s %(message)s")
+        stdout = logging.StreamHandler(sys.stdout)
+        stdout.addFilter(_BelowErrorFilter())
+        stdout.setFormatter(formatter)
+        stderr = logging.StreamHandler(sys.stderr)
+        stderr.setLevel(logging.ERROR)
+        stderr.setFormatter(formatter)
+        logger.addHandler(stdout)
+        logger.addHandler(stderr)
     logger.info("worker log: %s", path)
     return logger
+
+
+class _BelowErrorFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        return record.levelno < logging.ERROR
 
 
 def _write_log(source: str, level: str, message: str) -> None:

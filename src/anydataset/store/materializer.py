@@ -25,7 +25,7 @@ from .._parallel import (
     validate_process_parent,
     validate_process_value,
 )
-from .._progress import Progress, ProgressDashboard, watch_workers
+from .._progress import Progress, ProgressDashboard, ProgressStream, watch_workers
 from .._resume import (
     cleanup_resume_dir,
     dataset_sample_count,
@@ -97,6 +97,7 @@ class ViewMaterializer:
     keep_schema: Schema | None = None
     input_id: str | None = None
     provider_id: str | None = None
+    progress_stream: ProgressStream = "stdout"
 
     def __post_init__(self) -> None:
         self.max_shard_samples = positive_int(
@@ -120,6 +121,8 @@ class ViewMaterializer:
         )
         self.input_id = optional_semantic_id("input_id", self.input_id)
         self.provider_id = optional_semantic_id("provider_id", self.provider_id)
+        if self.progress_stream not in {"stderr", "stdout"}:
+            raise ValueError("progress_stream must be 'stderr' or 'stdout'.")
 
     @property
     def _dataset_id(self) -> str:
@@ -294,6 +297,7 @@ class ViewMaterializer:
             count_stage="writer",
             initial=len(completed),
             stages=_PROGRESS_STAGES,
+            stream=self.progress_stream,
         ) as progress:
             provider = provider_factory(device)
             if self.num_workers > 0:
@@ -352,6 +356,7 @@ class ViewMaterializer:
             total=expected,
             count_stage="merge-samples",
             stages=_COMMIT_PROGRESS_STAGES,
+            stream=self.progress_stream,
         ) as progress:
             path = commit_store_fragments(
                 self.output_dir,
@@ -371,6 +376,7 @@ class ViewMaterializer:
             total=None,
             count_stage="merge-samples",
             stages=_COMMIT_PROGRESS_STAGES,
+            stream=self.progress_stream,
         ) as progress:
             path = commit_store_parts(
                 self.output_dir,
@@ -522,6 +528,7 @@ class ViewMaterializer:
                 count_stage="writer",
                 initial=completed_count,
                 stages=_PROGRESS_STAGES,
+                stream=self.progress_stream,
             )
             completed = True
         finally:

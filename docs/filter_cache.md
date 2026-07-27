@@ -177,10 +177,10 @@ Caches written by the earlier same-directory layout have no `current.json` and
 are treated as cache misses. They are not silently opened as generations;
 generation cleanup only manages children of `generations/`.
 
-Cache construction reports scan and fragment-writer progress on stderr. In
+Cache construction reports scan and fragment-writer progress on stdout. In
 multi-device runs, each worker also writes lifecycle and failure details under
 `$ANYDATASET_HOME/logs/<timestamp>-<pid>/filter/part-xxxxx.log`; rank 0 mirrors
-its lifecycle log to stderr.
+ordinary lifecycle logs to stdout and errors to stderr.
 
 `FilterRule.apply(..., device="auto")` resolves all visible CUDA devices, or CPU
 when CUDA is unavailable. One resolved device runs in the calling process;

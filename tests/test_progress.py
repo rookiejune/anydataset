@@ -1,17 +1,17 @@
 from __future__ import annotations
 
 import io
-from contextlib import redirect_stderr
+from contextlib import redirect_stderr, redirect_stdout
 from unittest.mock import patch
 
 from anydataset._progress import Progress, ProgressDashboard
 
 
 def test_non_interactive_progress_reports_start_updates_and_finish() -> None:
-    stderr = io.StringIO()
+    stdout = io.StringIO()
     with (
         patch("anydataset._progress._NON_INTERACTIVE_PROGRESS_INTERVAL", 0.0),
-        redirect_stderr(stderr),
+        redirect_stdout(stdout),
         ProgressDashboard(
             desc="materialize views",
             total=10,
@@ -22,7 +22,7 @@ def test_non_interactive_progress_reports_start_updates_and_finish() -> None:
         progress.put(Progress(0, 4, False, None, stage="provider"))
         progress.put(Progress(0, 4, False, None, stage="writer"))
 
-    output = stderr.getvalue()
+    output = stdout.getvalue()
     assert "materialize views: 0 sample/10 (0.0%)" in output
     assert "materialize views: 4 sample/10 (40.0%)" in output
     assert "provider=4" in output
@@ -30,14 +30,40 @@ def test_non_interactive_progress_reports_start_updates_and_finish() -> None:
 
 
 def test_non_interactive_progress_prints_only_the_primary_bar() -> None:
-    stderr = io.StringIO()
-    with redirect_stderr(stderr), ProgressDashboard(
+    stdout = io.StringIO()
+    with redirect_stdout(stdout), ProgressDashboard(
         desc="scan",
         total=2,
         stages=("reader",),
     ):
         pass
 
-    lines = stderr.getvalue().splitlines()
+    lines = stdout.getvalue().splitlines()
     assert len(lines) == 2
     assert all(line.startswith("scan:") for line in lines)
+
+
+def test_progress_can_render_non_interactive_logs_to_stdout() -> None:
+    stdout = io.StringIO()
+    with redirect_stdout(stdout), ProgressDashboard(
+        desc="qwen tts",
+        total=2,
+        stream="stdout",
+    ) as progress:
+        progress.put(Progress(0, 1, False, None))
+
+    output = stdout.getvalue()
+    assert "qwen tts: 1 sample/2 (50.0%)" in output
+
+
+def test_progress_can_render_non_interactive_logs_to_stderr() -> None:
+    stderr = io.StringIO()
+    with redirect_stderr(stderr), ProgressDashboard(
+        desc="legacy logs",
+        total=2,
+        stream="stderr",
+    ) as progress:
+        progress.put(Progress(0, 1, False, None))
+
+    output = stderr.getvalue()
+    assert "legacy logs: 1 sample/2 (50.0%)" in output

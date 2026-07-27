@@ -10,6 +10,7 @@ from ..view import (
     ViewTransform,
 )
 from ..runtime import Runtime
+from .._progress import ProgressStream
 from ._files import (
     StoreFilesInUseError,
     StoreFilesLease,
@@ -30,6 +31,7 @@ __all__ = [
     "ModalityProvider",
     "ModalityTransform",
     "Provider",
+    "ProgressStream",
     "Runtime",
     "StoreFilesInUseError",
     "StoreFilesLease",
