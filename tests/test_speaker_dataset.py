@@ -8,6 +8,7 @@ from anydataset.dataset import (
     GroupedSpeakerAudioDataset,
     SpeakerAudioBlock,
     SpeakerAudioGrid,
+    SpeakerAudioRow,
     SpeakerAudioSelection,
     SpeakerAssignment,
     SpeakerCartesianDataset,
@@ -355,6 +356,8 @@ class SpeakerAudioGridTest(unittest.TestCase):
         self.assertEqual(selection.shape, (1, 2))
         self.assertEqual(block.shape, (1, 2))
         self.assertEqual(block.text_indices, (0,))
+        self.assertEqual(block.source_indices, (0,))
+        self.assertEqual(block.roles, (Role.DEFAULT,))
         self.assertEqual(block.texts, ("hello",))
         self.assertEqual(block.speaker_ids, ("Vivian", "Ryan"))
         self.assertEqual(block.sample_rate, 24_000)
@@ -373,6 +376,8 @@ class SpeakerAudioGridTest(unittest.TestCase):
 
         self.assertEqual(block.shape, (2, 1))
         self.assertEqual(block.text_indices, (0, 1))
+        self.assertEqual(block.source_indices, (0, 1))
+        self.assertEqual(block.roles, (Role.DEFAULT, Role.DEFAULT))
         self.assertEqual(block.texts, ("hello", "world"))
         self.assertEqual(block.speaker_ids, ("Vivian",))
         self.assertTrue(torch.equal(block.lengths, torch.tensor([[2], [1]])))
@@ -404,6 +409,126 @@ class SpeakerAudioGridTest(unittest.TestCase):
             )
         )
 
+    def test_codec_view_uses_the_same_grid_selection(self):
+        cells = [
+            _flat_view_sample(
+                "hello",
+                "Vivian",
+                0,
+                AudioView.LONGCAT,
+                torch.tensor([[1, 2], [3, 4]]),
+            ),
+            _flat_view_sample(
+                "hello",
+                "Ryan",
+                0,
+                AudioView.LONGCAT,
+                torch.tensor([[5, 6]]),
+            ),
+            _flat_view_sample(
+                "world",
+                "Vivian",
+                1,
+                AudioView.LONGCAT,
+                torch.tensor([[7, 8]]),
+            ),
+            _flat_view_sample(
+                "world",
+                "Ryan",
+                1,
+                AudioView.LONGCAT,
+                torch.tensor([[9, 10], [11, 12]]),
+            ),
+        ]
+        grid = SpeakerAudioGrid(
+            cells,
+            ("Vivian", "Ryan"),
+        )
+
+        block = grid.select(speaker="Vivian").load(view=AudioView.LONGCAT)
+        first_row = grid.rows.load(0, view=AudioView.LONGCAT)[Role.DEFAULT, Modality.AUDIO]
+
+        assert isinstance(first_row, AudioItem)
+        self.assertEqual(block.text_indices, (0, 1))
+        self.assertEqual(block.speaker_ids, ("Vivian",))
+        self.assertIs(block.audio_view, AudioView.LONGCAT)
+        self.assertTrue(
+            torch.equal(
+                block.audio.views[AudioView.LONGCAT],
+                torch.tensor([[[[1, 2], [3, 4]]], [[[7, 8], [0, 0]]]]),
+            )
+        )
+        self.assertTrue(torch.equal(block.lengths, torch.tensor([[2], [1]])))
+        self.assertEqual(
+            tuple(first_row.views[AudioView.LONGCAT].shape),
+            (2, 2, 2),
+        )
+
+    def test_bicodec_view_preserves_separate_unit_axes(self):
+        cells = [
+            _flat_view_sample(
+                "hello",
+                "Vivian",
+                0,
+                AudioView.BICODEC,
+                {
+                    "semantic": torch.tensor([[1], [2]]),
+                    "acoustic": torch.tensor([[10], [11]]),
+                },
+            ),
+            _flat_view_sample(
+                "hello",
+                "Ryan",
+                0,
+                AudioView.BICODEC,
+                {
+                    "semantic": torch.tensor([[3]]),
+                    "acoustic": torch.tensor([[12], [13]]),
+                },
+            ),
+        ]
+        grid = SpeakerAudioGrid(
+            cells,
+            ("Vivian", "Ryan"),
+        )
+
+        block = grid.select().load(view=AudioView.BICODEC)
+        values = block.audio.views[AudioView.BICODEC]
+
+        self.assertTrue(
+            torch.equal(
+                values["semantic"],
+                torch.tensor([[[[1], [2]], [[3], [0]]]]),
+            )
+        )
+        self.assertTrue(
+            torch.equal(
+                values["acoustic"],
+                torch.tensor([[[[10], [11]], [[12], [13]]]]),
+            )
+        )
+        self.assertTrue(torch.equal(block.lengths, torch.tensor([[2, 1]])))
+
+    def test_multiple_views_require_explicit_selection(self):
+        cells = _speaker_grid_cells()
+        for index, sample in enumerate(cells):
+            audio = sample[Role.DEFAULT, Modality.AUDIO]
+            assert isinstance(audio, AudioItem)
+            sample[Role.DEFAULT, Modality.AUDIO] = AudioItem(
+                views={
+                    **audio.views,
+                    AudioView.LONGCAT: torch.tensor([[index + 1, index + 2]]),
+                },
+                meta=audio.meta,
+            )
+        grid = SpeakerAudioGrid(cells, ("Vivian", "Ryan"))
+
+        with self.assertRaisesRegex(ValueError, "multiple audio views"):
+            grid.select().load()
+
+        block = grid.select().load(view=AudioView.LONGCAT)
+        self.assertIs(block.audio_view, AudioView.LONGCAT)
+
     def test_selects_and_loads_one_cell_without_squeezing_axes(self):
         grid = SpeakerAudioGrid(_speaker_grid_cells(), ("Vivian", "Ryan"))
 
@@ -430,6 +555,34 @@ class SpeakerAudioGridTest(unittest.TestCase):
 
         self.assertEqual(block.shape, (2, 1))
 
+    def test_preserves_repeated_source_indices_and_roles(self):
+        cells = [
+            _flat_sample("hello", "Vivian", 0, torch.tensor([[1.0, 2.0]])),
+            _flat_sample("hello", "Ryan", 0, torch.tensor([[3.0]])),
+            _flat_sample("你好", "Vivian", 0, torch.tensor([[4.0]])),
+            _flat_sample("你好", "Ryan", 0, torch.tensor([[5.0, 6.0]])),
+        ]
+        grid = SpeakerAudioGrid(
+            cells,
+            ("Vivian", "Ryan"),
+            row_specs=(
+                SpeakerAudioRow(source_index=0, role=Role.SOURCE),
+                SpeakerAudioRow(source_index=0, role=Role.TARGET),
+            ),
+        )
+
+        block = grid.select(speaker="Vivian").load()
+        grouped_target = grid[1][Role.DEFAULT, Modality.TEXT]
+
+        self.assertEqual(grid.source_indices, (0, 0))
+        self.assertEqual(grid.roles, (Role.SOURCE, Role.TARGET))
+        self.assertEqual(block.text_indices, (0, 1))
+        self.assertEqual(block.source_indices, (0, 0))
+        self.assertEqual(block.roles, (Role.SOURCE, Role.TARGET))
+        self.assertEqual(block.texts, ("hello", "你好"))
+        assert isinstance(grouped_target, TextItem)
+        self.assertEqual(grouped_target.meta[TextMeta.SOURCE_INDEX], 0)
+
     def test_rejects_invalid_grid_selection(self):
         grid = SpeakerAudioGrid(_speaker_grid_cells(), ("Vivian", "Ryan"))
 
@@ -439,6 +592,12 @@ class SpeakerAudioGridTest(unittest.TestCase):
             grid.select(speaker="Aiden")
         with self.assertRaisesRegex(ValueError, "must not contain duplicates"):
             SpeakerAudioGrid(_speaker_grid_cells(), ("Vivian", "Vivian"))
+        with self.assertRaisesRegex(ValueError, "row_specs contains 1 rows"):
+            SpeakerAudioGrid(
+                _speaker_grid_cells(),
+                ("Vivian", "Ryan"),
+                row_specs=(SpeakerAudioRow(source_index=0, role=Role.DEFAULT),),
+            )
 
 
 def _speaker_grid_cells():
@@ -448,6 +607,19 @@ def _speaker_grid_cells():
         _flat_sample("world", "Vivian", 1, torch.tensor([[4.0]])),
         _flat_sample("world", "Ryan", 1, torch.tensor([[5.0, 6.0]])),
     ]
+
+
+def _flat_view_sample(text, speaker, source_index, view, value):
+    return {
+        (Role.DEFAULT, Modality.TEXT): TextItem(
+            views={TextView.TEXT: text, TextView.SPEAKERS: speaker},
+            meta={TextMeta.SOURCE_INDEX: source_index},
+        ),
+        (Role.DEFAULT, Modality.AUDIO): AudioItem(
+            views={view: value},
+            meta={AudioMeta.SPEAKER_ID: speaker},
+        ),
+    }
 
 
 def _flat_sample(

@@ -744,6 +744,53 @@ class CanonicalDatasetTest(unittest.TestCase):
         with self.assertRaisesRegex(TypeError, "Codec view values must be tensors"):
             collate_fn(schema)(samples)
 
+    def test_collate_fn_batches_bicodec_semantic_and_fixed_acoustic_units(self):
+        ref = (Role.DEFAULT, Modality.AUDIO)
+        schema = {ref: AudioReq(views=frozenset({AudioView.BICODEC}))}
+        samples = [
+            {
+                ref: AudioItem(
+                    views={
+                        AudioView.BICODEC: {
+                            "semantic": torch.tensor([[1], [2]]),
+                            "acoustic": torch.tensor([[10], [11]]),
+                        }
+                    }
+                )
+            },
+            {
+                ref: AudioItem(
+                    views={
+                        AudioView.BICODEC: {
+                            "semantic": torch.tensor([[3]]),
+                            "acoustic": torch.tensor([[12], [13]]),
+                        }
+                    }
+                )
+            },
+        ]
+
+        batch = collate_fn(schema)(samples)
+        values = batch.sample[ref].views[AudioView.BICODEC]
+
+        self.assertTrue(
+            torch.equal(values["semantic"], torch.tensor([[[1], [2]], [[3], [0]]]))
+        )
+        self.assertTrue(
+            torch.equal(
+                values["acoustic"],
+                torch.tensor([[[10], [11]], [[12], [13]]]),
+            )
+        )
+        self.assertTrue(
+            torch.equal(
+                batch.masks[
+                    FieldRef(ref, FieldGroup.VIEWS, AudioView.BICODEC)
+                ],
+                torch.tensor([[True, True], [True, False]]),
+            )
+        )
+
     def test_collate_fn_rejects_mixed_codec_dtypes(self):
         ref = (Role.DEFAULT, Modality.AUDIO)
         schema = {ref: AudioReq(views=frozenset({AudioView.LONGCAT}))}

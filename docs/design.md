@@ -206,10 +206,20 @@ store 契约不满足时读取会明确报错。
 `cells` 暴露原 flat dataset，`rows` 暴露 `GroupedSpeakerAudioDataset`；grid 本身的
 `__len__` 和 `__getitem__` 委托给 rows，保持 map-style 单 sample 读取。`select(text=...)`、
 `select(speaker=...)` 和 `select()` 分别惰性选择一行、一列和整个网格，也可以同时指定两个
-轴选择一个 cell。`SpeakerAudioSelection.load()` 只读取选择范围，返回
-`SpeakerAudioBlock`：waveform 是 `[text, speaker, channel, time]`，lengths 是
-`[text, speaker]`，长度为 1 的轴不压缩。整网格 load 是显式的 eager 操作，调用方负责
-控制内存规模。speaker id 在 grid 中必须非空且唯一，选择不隐式重排物理 speaker 轴。
+轴选择一个 cell。`SpeakerAudioSelection.load(view=...)` 只读取选择范围并按指定的
+`AudioItem.views[view]` 做 padding，返回 `SpeakerAudioBlock`。当选中 cells 只有一个可合并
+的 audio view 时可以省略 `view`；存在多个 view 时必须显式指定。block 用 `[text, speaker]`
+lengths 保存当前 view padding 前的主 unit 长度。waveform 额外保留 `waveforms` 和
+`sample_rate` 便捷属性；`block.audio_view` 只是本次 load 解析出的 view，不是 grid 的配置状态。
+block 同时保留
+grid 内的 `text_indices`，以及每个 text row 的 `source_indices`、`roles` 和 `texts`。
+`SpeakerAudioRow` 定义 row 到原始 source index 和 role 的映射；未显式传入 row specs 时，
+grid 使用 row index 和 text ref role。整网格 load 是显式的 eager 操作，调用方负责控制
+内存规模。speaker id 在 grid 中必须非空且唯一，选择不隐式重排物理 speaker 轴。
+
+frame codec view 的 block 值是 `[text, speaker, unit, codebook]` Tensor。BiCodec 使用
+`AudioView.BICODEC` 的 `semantic` / `acoustic` mapping，两个值分别保留自己的 unit 轴；
+speaker lengths 描述可变 semantic unit，固定 acoustic unit 不广播到 semantic frame。
 
 TTS provider 只消费已经存在的 `TextView.TEXT`、`TextView.SPEAKERS` 和可选语言 meta。
 例如 Qwen provider 不负责 speaker 分配；调用方先组合 speaker dataset，再使用

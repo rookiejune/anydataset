@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import auto
-from typing import Any, Union
+from typing import Any, Union, cast
 
 import torch
 
@@ -178,6 +178,8 @@ def _collate_values(
 ) -> tuple[Any, torch.Tensor | None]:
     if _is_waveform_field(field):
         return _collate_waveforms(values, field)
+    if _is_bicodec_field(field):
+        return _collate_bicodec(values, field)
     if _is_codec_field(field):
         return _collate_codec_codes(values, field)
 
@@ -220,6 +222,51 @@ def _is_codec_field(field: FieldRef) -> bool:
             item.AudioView.UNICODEC,
         }
     )
+
+
+def _is_bicodec_field(field: FieldRef) -> bool:
+    return (
+        field.group is FieldGroup.VIEWS
+        and field.ref[1] is item.Modality.AUDIO
+        and field.key is item.AudioView.BICODEC
+    )
+
+
+def _collate_bicodec(
+    values: Sequence[Any],
+    field: FieldRef,
+) -> tuple[dict[str, torch.Tensor], torch.Tensor]:
+    mappings: list[Mapping[Any, Any]] = []
+    for value in values:
+        if not isinstance(value, Mapping):
+            raise TypeError(f"BiCodec view values must be mappings for {field!r}.")
+        if set(value) != {"semantic", "acoustic"}:
+            raise ValueError(
+                f"BiCodec view values must contain semantic and acoustic for {field!r}."
+            )
+        mappings.append(value)
+
+    semantic, mask = _collate_codec_codes(
+        [value["semantic"] for value in mappings],
+        field,
+    )
+    acoustic_values = [value["acoustic"] for value in mappings]
+    if any(not isinstance(value, torch.Tensor) for value in acoustic_values):
+        raise TypeError(f"BiCodec acoustic values must be tensors for {field!r}.")
+    acoustics = cast(list[torch.Tensor], acoustic_values)
+    first = acoustics[0]
+    if first.ndim != 2 or any(value.shape != first.shape for value in acoustics[1:]):
+        raise ValueError(
+            f"BiCodec acoustic values must share one [unit, codebook] shape for {field!r}."
+        )
+    if any(value.dtype != first.dtype for value in acoustics[1:]):
+        raise TypeError(f"BiCodec acoustic values must share one dtype for {field!r}.")
+    if any(value.device != first.device for value in acoustics[1:]):
+        raise ValueError(f"BiCodec acoustic values must share one device for {field!r}.")
+    return {
+        "semantic": semantic,
+        "acoustic": torch.stack(acoustics),
+    }, mask
 
 
 def _collate_codec_codes(

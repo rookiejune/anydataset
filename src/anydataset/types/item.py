@@ -3,7 +3,9 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import auto
-from typing import Any, Generic, TypeVar, Union
+from typing import TYPE_CHECKING, Any, Generic, TypeVar, Union, cast
+
+from typing_extensions import TypedDict
 
 from .._compat import Self, StrEnum
 from .language import Lang
@@ -12,6 +14,9 @@ KeyT = TypeVar("KeyT")
 ValueT = TypeVar("ValueT")
 ViewT = TypeVar("ViewT")
 MetaT = TypeVar("MetaT")
+
+if TYPE_CHECKING:
+    from torch import Tensor
 
 
 def _select(
@@ -63,12 +68,20 @@ class AudioMeta(StrEnum):
 class AudioView(StrEnum):
     WAVEFORM = auto()
     FILE = auto()
+    BICODEC = auto()
     LONGCAT = auto()
     DAC = auto()
     STABLE = auto()
     UNICODEC = auto()
     SPEAKERS = auto()
     SPEAKER_LENGTHS = auto()
+
+
+class SemanticAcousticView(TypedDict):
+    """Structured semantic and acoustic unit tensors for one audio sample."""
+
+    semantic: Tensor
+    acoustic: Tensor
 
 
 @dataclass(frozen=True)
@@ -234,8 +247,10 @@ def _source_index_value(value: object) -> bool:
     return all(not isinstance(item, bool) and isinstance(item, int) for item in value)
 
 def _enum_keys(name: str, value: object, key_type: type[KeyT]) -> frozenset[KeyT]:
+    if not isinstance(value, Iterable):
+        raise TypeError(f"{name} must be an iterable of {key_type.__name__} values.")
     try:
-        output = frozenset(value)
+        output = frozenset(cast(Iterable[KeyT], value))
     except TypeError as exc:
         raise TypeError(f"{name} must be an iterable of {key_type.__name__} values.") from exc
     if any(not isinstance(key, key_type) for key in output):
