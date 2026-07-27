@@ -6,6 +6,9 @@ import torch
 
 from anydataset.dataset import (
     GroupedSpeakerAudioDataset,
+    SpeakerAudioBlock,
+    SpeakerAudioGrid,
+    SpeakerAudioSelection,
     SpeakerAssignment,
     SpeakerCartesianDataset,
     SpeakerIdDataset,
@@ -324,6 +327,127 @@ class SpeakerIdDatasetTest(unittest.TestCase):
         self.assertEqual(speaker_cartesian_indexes(0, 3), (0, 0))
         self.assertEqual(speaker_cartesian_indexes(2, 3), (0, 2))
         self.assertEqual(speaker_cartesian_indexes(3, 3), (1, 0))
+
+
+class SpeakerAudioGridTest(unittest.TestCase):
+    def test_exposes_cells_rows_and_shape(self):
+        cells = _speaker_grid_cells()
+
+        grid = SpeakerAudioGrid(cells, ("Vivian", "Ryan"))
+
+        self.assertEqual(grid.shape, (2, 2))
+        self.assertEqual(len(grid), 2)
+        self.assertIs(grid.cells, cells)
+        self.assertIs(grid.dataset, cells)
+        self.assertIsInstance(grid.rows, GroupedSpeakerAudioDataset)
+        first_text = grid[0][Role.DEFAULT, Modality.TEXT]
+        assert isinstance(first_text, TextItem)
+        self.assertEqual(first_text.views[TextView.TEXT], "hello")
+
+    def test_selects_and_loads_one_text_row(self):
+        grid = SpeakerAudioGrid(_speaker_grid_cells(), ("Vivian", "Ryan"))
+
+        selection = grid.select(text=0)
+        block = selection.load()
+
+        self.assertIsInstance(selection, SpeakerAudioSelection)
+        self.assertIsInstance(block, SpeakerAudioBlock)
+        self.assertEqual(selection.shape, (1, 2))
+        self.assertEqual(block.shape, (1, 2))
+        self.assertEqual(block.text_indices, (0,))
+        self.assertEqual(block.texts, ("hello",))
+        self.assertEqual(block.speaker_ids, ("Vivian", "Ryan"))
+        self.assertEqual(block.sample_rate, 24_000)
+        self.assertTrue(torch.equal(block.lengths, torch.tensor([[2, 1]])))
+        self.assertTrue(
+            torch.equal(
+                block.waveforms,
+                torch.tensor([[[[1.0, 2.0]], [[3.0, 0.0]]]]),
+            )
+        )
+
+    def test_selects_and_loads_one_speaker_column(self):
+        grid = SpeakerAudioGrid(_speaker_grid_cells(), ("Vivian", "Ryan"))
+
+        block = grid.select(speaker="Vivian").load()
+
+        self.assertEqual(block.shape, (2, 1))
+        self.assertEqual(block.text_indices, (0, 1))
+        self.assertEqual(block.texts, ("hello", "world"))
+        self.assertEqual(block.speaker_ids, ("Vivian",))
+        self.assertTrue(torch.equal(block.lengths, torch.tensor([[2], [1]])))
+        self.assertTrue(
+            torch.equal(
+                block.waveforms,
+                torch.tensor([[[[1.0, 2.0]]], [[[4.0, 0.0]]]]),
+            )
+        )
+
+    def test_selects_and_loads_full_grid(self):
+        grid = SpeakerAudioGrid(_speaker_grid_cells(), ("Vivian", "Ryan"))
+
+        block = grid.select().load()
+
+        self.assertEqual(block.shape, (2, 2))
+        self.assertTrue(
+            torch.equal(block.lengths, torch.tensor([[2, 1], [1, 2]]))
+        )
+        self.assertTrue(
+            torch.equal(
+                block.waveforms,
+                torch.tensor(
+                    [
+                        [[[1.0, 2.0]], [[3.0, 0.0]]],
+                        [[[4.0, 0.0]], [[5.0, 6.0]]],
+                    ]
+                ),
+            )
+        )
+
+    def test_selects_and_loads_one_cell_without_squeezing_axes(self):
+        grid = SpeakerAudioGrid(_speaker_grid_cells(), ("Vivian", "Ryan"))
+
+        block = grid.select(text=1, speaker="Ryan").load()
+
+        self.assertEqual(block.shape, (1, 1))
+        self.assertEqual(block.text_indices, (1,))
+        self.assertEqual(block.texts, ("world",))
+        self.assertEqual(block.speaker_ids, ("Ryan",))
+        self.assertEqual(tuple(block.waveforms.shape), (1, 1, 1, 2))
+        self.assertTrue(torch.equal(block.lengths, torch.tensor([[2]])))
+
+    def test_column_load_reads_only_selected_speaker_cells(self):
+        cells = _speaker_grid_cells()
+        cells[1] = _flat_sample(
+            "hello",
+            "wrong",
+            0,
+            torch.tensor([[3.0]]),
+        )
+        grid = SpeakerAudioGrid(cells, ("Vivian", "Ryan"))
+
+        block = grid.select(speaker="Vivian").load()
+
+        self.assertEqual(block.shape, (2, 1))
+
+    def test_rejects_invalid_grid_selection(self):
+        grid = SpeakerAudioGrid(_speaker_grid_cells(), ("Vivian", "Ryan"))
+
+        with self.assertRaisesRegex(IndexError, "text index out of range"):
+            grid.select(text=2)
+        with self.assertRaisesRegex(ValueError, "not present in the grid"):
+            grid.select(speaker="Aiden")
+        with self.assertRaisesRegex(ValueError, "must not contain duplicates"):
+            SpeakerAudioGrid(_speaker_grid_cells(), ("Vivian", "Vivian"))
+
+
+def _speaker_grid_cells():
+    return [
+        _flat_sample("hello", "Vivian", 0, torch.tensor([[1.0, 2.0]])),
+        _flat_sample("hello", "Ryan", 0, torch.tensor([[3.0]])),
+        _flat_sample("world", "Vivian", 1, torch.tensor([[4.0]])),
+        _flat_sample("world", "Ryan", 1, torch.tensor([[5.0, 6.0]])),
+    ]
 
 
 def _flat_sample(

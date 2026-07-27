@@ -12,6 +12,9 @@ from .multiple import (
 )
 from .speaker import (
     GroupedSpeakerAudioDataset,
+    SpeakerAudioBlock,
+    SpeakerAudioGrid,
+    SpeakerAudioSelection,
     SpeakerAssignment,
     SpeakerCartesianDataset,
     SpeakerIdDataset,
@@ -30,6 +33,9 @@ __all__ = [
     "RoundRobinStrategy",
     "SequentialStrategy",
     "GroupedSpeakerAudioDataset",
+    "SpeakerAudioBlock",
+    "SpeakerAudioGrid",
+    "SpeakerAudioSelection",
     "SpeakerAssignment",
     "SpeakerCartesianDataset",
     "SpeakerIdDataset",

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Literal, Protocol, cast
 
@@ -253,6 +254,266 @@ class GroupedSpeakerAudioDataset:
         return grouped
 
 
+@dataclass(frozen=True)
+class SpeakerAudioBlock:
+    """One materialized rectangular selection from a speaker audio grid."""
+
+    text_indices: tuple[int, ...]
+    texts: tuple[str, ...]
+    speaker_ids: tuple[str, ...]
+    waveforms: torch.Tensor
+    lengths: torch.Tensor
+    sample_rate: int
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.text_indices, tuple) or any(
+            isinstance(index, bool) or not isinstance(index, int) or index < 0
+            for index in self.text_indices
+        ):
+            raise TypeError("text_indices must be a tuple of non-negative integers.")
+        if not isinstance(self.texts, tuple) or any(
+            not isinstance(text, str) for text in self.texts
+        ):
+            raise TypeError("texts must be a tuple of strings.")
+        if len(self.text_indices) != len(self.texts):
+            raise ValueError("text_indices and texts must have the same length.")
+        if not isinstance(self.speaker_ids, tuple):
+            raise TypeError("speaker_ids must be a tuple of strings.")
+        _unique_speaker_ids(self.speaker_ids)
+        if not isinstance(self.waveforms, torch.Tensor):
+            raise TypeError("waveforms must be a Tensor.")
+        if self.waveforms.ndim != 4:
+            raise ValueError(
+                "waveforms must have shape [text, speaker, channel, time]."
+            )
+        shape = (len(self.texts), len(self.speaker_ids))
+        if tuple(self.waveforms.shape[:2]) != shape:
+            raise ValueError(
+                f"waveforms grid shape {tuple(self.waveforms.shape[:2])} does not match {shape}."
+            )
+        if not isinstance(self.lengths, torch.Tensor):
+            raise TypeError("lengths must be a Tensor.")
+        if self.lengths.dtype is not torch.int64:
+            raise TypeError("lengths must have dtype torch.int64.")
+        if tuple(self.lengths.shape) != shape:
+            raise ValueError(f"lengths must have shape {shape}.")
+        if bool(torch.any(self.lengths < 0).item()):
+            raise ValueError("lengths must be non-negative.")
+        if bool(torch.any(self.lengths > self.waveforms.shape[-1]).item()):
+            raise ValueError("lengths must not exceed the waveform time axis.")
+        if isinstance(self.sample_rate, bool) or not isinstance(self.sample_rate, int):
+            raise TypeError("sample_rate must be an integer.")
+        if self.sample_rate <= 0:
+            raise ValueError("sample_rate must be positive.")
+
+    @property
+    def shape(self) -> tuple[int, int]:
+        return len(self.texts), len(self.speaker_ids)
+
+
+class SpeakerAudioGrid:
+    """Expose a flat text-major speaker store as a logical two-axis grid."""
+
+    def __init__(
+        self,
+        dataset: MapDataset,
+        speaker_ids: Sequence[str],
+        text_ref: TextRef = (Role.DEFAULT, Modality.TEXT),
+        audio_ref: tuple[Role, Modality] = (Role.DEFAULT, Modality.AUDIO),
+    ) -> None:
+        self._cells: MapDataset = dataset
+        self._speaker_ids: tuple[str, ...] = _unique_speaker_ids(speaker_ids)
+        self._rows = GroupedSpeakerAudioDataset(
+            dataset,
+            self.speaker_ids,
+            text_ref=text_ref,
+            audio_ref=audio_ref,
+        )
+
+    @property
+    def cells(self) -> MapDataset:
+        return self._cells
+
+    @property
+    def dataset(self) -> MapDataset:
+        """Return the flat cell dataset retained for grouped-dataset compatibility."""
+
+        return self.cells
+
+    @property
+    def rows(self) -> GroupedSpeakerAudioDataset:
+        return self._rows
+
+    @property
+    def speaker_ids(self) -> tuple[str, ...]:
+        return self._speaker_ids
+
+    @property
+    def text_ref(self) -> TextRef:
+        return self.rows.text_ref
+
+    @property
+    def audio_ref(self) -> tuple[Role, Modality]:
+        return self.rows.audio_ref
+
+    @property
+    def shape(self) -> tuple[int, int]:
+        return len(self.rows), len(self.speaker_ids)
+
+    def __len__(self) -> int:
+        return len(self.rows)
+
+    def __getitem__(self, index: int) -> Sample:
+        return self.rows[index]
+
+    def select(
+        self,
+        *,
+        text: int | None = None,
+        speaker: str | None = None,
+    ) -> SpeakerAudioSelection:
+        """Select one text row, one speaker column, one cell, or the full grid."""
+
+        text_indices = (
+            tuple(range(len(self)))
+            if text is None
+            else (_selection_index(text, len(self)),)
+        )
+        if speaker is None:
+            speaker_indices = tuple(range(len(self.speaker_ids)))
+        else:
+            speaker_id = _speaker_id(speaker)
+            try:
+                speaker_indices = (self.speaker_ids.index(speaker_id),)
+            except ValueError as error:
+                raise ValueError(
+                    f"speaker id {speaker_id!r} is not present in the grid."
+                ) from error
+        return SpeakerAudioSelection(self, text_indices, speaker_indices)
+
+    def _load(
+        self,
+        text_indices: tuple[int, ...],
+        speaker_indices: tuple[int, ...],
+    ) -> SpeakerAudioBlock:
+        if not text_indices or not speaker_indices:
+            raise ValueError("speaker audio selection must not be empty.")
+        texts: list[str] = []
+        waveforms: list[torch.Tensor] = []
+        lengths: list[int] = []
+        sample_rate: int | None = None
+        for text_index in text_indices:
+            source_text: TextItem | None = None
+            for speaker_index in speaker_indices:
+                flat_index = text_index * len(self.speaker_ids) + speaker_index
+                sample = self.cells[flat_index]
+                text_item = _text_item(sample.get(self.text_ref), self.text_ref)
+                current_text = _source_text(text_item)
+                if source_text is None:
+                    source_text = current_text
+                elif current_text != source_text:
+                    raise ValueError(
+                        f"flat sample {flat_index} text content differs from source index {text_index}."
+                    )
+                source_index = text_item.meta.get(TextMeta.SOURCE_INDEX)
+                if source_index != text_index:
+                    raise ValueError(
+                        f"flat sample {flat_index} has source index {source_index!r}; expected {text_index!r}."
+                    )
+                speaker_id = self.speaker_ids[speaker_index]
+                actual_speaker = text_item.views.get(TextView.SPEAKERS)
+                if actual_speaker != speaker_id:
+                    raise ValueError(
+                        f"flat sample {flat_index} has speaker {actual_speaker!r}; expected {speaker_id!r}."
+                    )
+                audio_item = _audio_item(sample.get(self.audio_ref), self.audio_ref)
+                audio_speaker = audio_item.meta.get(AudioMeta.SPEAKER_ID)
+                if audio_speaker is not None and audio_speaker != speaker_id:
+                    raise ValueError(
+                        f"flat sample {flat_index} has audio speaker {audio_speaker!r}; expected {speaker_id!r}."
+                    )
+                waveform, current_sample_rate = _waveform(
+                    audio_item.views.get(AudioView.WAVEFORM)
+                )
+                if sample_rate is None:
+                    sample_rate = current_sample_rate
+                elif current_sample_rate != sample_rate:
+                    raise ValueError(
+                        "selected speaker waveforms must share one sample rate."
+                    )
+                waveforms.append(waveform)
+                lengths.append(int(waveform.shape[-1]))
+            if source_text is None:
+                raise ValueError("speaker audio selection must include a speaker.")
+            texts.append(_text(source_text))
+        if sample_rate is None:
+            raise ValueError("speaker audio selection must not be empty.")
+        stacked = _stack_waveforms(waveforms)
+        grid_shape = (len(text_indices), len(speaker_indices))
+        return SpeakerAudioBlock(
+            text_indices=text_indices,
+            texts=tuple(texts),
+            speaker_ids=tuple(
+                self.speaker_ids[speaker_index] for speaker_index in speaker_indices
+            ),
+            waveforms=stacked.reshape(*grid_shape, *stacked.shape[1:]),
+            lengths=_speaker_lengths(lengths).reshape(grid_shape),
+            sample_rate=sample_rate,
+        )
+
+
+class SpeakerAudioSelection:
+    """A lazy rectangular selection from a speaker audio grid."""
+
+    def __init__(
+        self,
+        grid: SpeakerAudioGrid,
+        text_indices: tuple[int, ...],
+        speaker_indices: tuple[int, ...],
+    ) -> None:
+        if not isinstance(grid, SpeakerAudioGrid):
+            raise TypeError("grid must be a SpeakerAudioGrid.")
+        if not isinstance(text_indices, tuple):
+            raise TypeError("text_indices must be a tuple of integers.")
+        if not isinstance(speaker_indices, tuple):
+            raise TypeError("speaker_indices must be a tuple of integers.")
+        for text_index in text_indices:
+            _selection_index(text_index, len(grid))
+        for speaker_index in speaker_indices:
+            if _integer(speaker_index, "speaker index") >= len(grid.speaker_ids):
+                raise IndexError("speaker index out of range.")
+        if len(set(text_indices)) != len(text_indices):
+            raise ValueError("text_indices must not contain duplicates.")
+        if len(set(speaker_indices)) != len(speaker_indices):
+            raise ValueError("speaker_indices must not contain duplicates.")
+        self._grid = grid
+        self._text_indices = text_indices
+        self._speaker_indices = speaker_indices
+
+    @property
+    def grid(self) -> SpeakerAudioGrid:
+        return self._grid
+
+    @property
+    def text_indices(self) -> tuple[int, ...]:
+        return self._text_indices
+
+    @property
+    def speaker_ids(self) -> tuple[str, ...]:
+        return tuple(
+            self.grid.speaker_ids[index] for index in self._speaker_indices
+        )
+
+    @property
+    def shape(self) -> tuple[int, int]:
+        return len(self.text_indices), len(self.speaker_ids)
+
+    def load(self) -> SpeakerAudioBlock:
+        """Read and pad only the selected rectangle."""
+
+        return self.grid._load(self.text_indices, self._speaker_indices)
+
+
 def speaker_for_index(
     index: object,
     speaker_ids: Sequence[str],
@@ -317,6 +578,13 @@ def _speaker_ids(value: object, *, allow_empty: bool = False) -> tuple[str, ...]
     return speakers
 
 
+def _unique_speaker_ids(value: object) -> tuple[str, ...]:
+    speakers = _speaker_ids(value)
+    if len(set(speakers)) != len(speakers):
+        raise ValueError("speaker_ids must not contain duplicates.")
+    return speakers
+
+
 def _speaker_id(value: object) -> str:
     if not isinstance(value, str) or not value:
         raise ValueError("speaker ids must be non-empty strings.")
@@ -354,6 +622,13 @@ def _index(value: object, length: int) -> None:
         raise IndexError("grouped sample index out of range.")
 
 
+def _selection_index(value: object, length: int) -> int:
+    index = _integer(value, "text")
+    if index >= length:
+        raise IndexError("text index out of range.")
+    return index
+
+
 def _integer(value: object, name: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
         raise TypeError(f"{name} must be an integer.")
@@ -380,6 +655,13 @@ def _source_text(item: TextItem) -> TextItem:
         if key is not TextMeta.SOURCE_INDEX
     }
     return TextItem(views=views, meta=meta)
+
+
+def _text(item: TextItem) -> str:
+    value = item.views.get(TextView.TEXT)
+    if not isinstance(value, str):
+        raise TypeError("TextView.TEXT must be a string.")
+    return value
 
 
 def _audio_item(value: object, ref: tuple[Role, Modality]) -> AudioItem:

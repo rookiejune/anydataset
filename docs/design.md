@@ -202,6 +202,15 @@ flat audio 如含 `AudioMeta.SPEAKER_ID`，它也必须与 text speaker view 一
 `AudioView.SPEAKERS` 表达 speaker 轴，不把 speaker tuple 写进单值 speaker meta。这些物理
 store 契约不满足时读取会明确报错。
 
+`SpeakerAudioGrid` 在同一个 text-major flat store 上保留 `text × speaker` 二维语义。
+`cells` 暴露原 flat dataset，`rows` 暴露 `GroupedSpeakerAudioDataset`；grid 本身的
+`__len__` 和 `__getitem__` 委托给 rows，保持 map-style 单 sample 读取。`select(text=...)`、
+`select(speaker=...)` 和 `select()` 分别惰性选择一行、一列和整个网格，也可以同时指定两个
+轴选择一个 cell。`SpeakerAudioSelection.load()` 只读取选择范围，返回
+`SpeakerAudioBlock`：waveform 是 `[text, speaker, channel, time]`，lengths 是
+`[text, speaker]`，长度为 1 的轴不压缩。整网格 load 是显式的 eager 操作，调用方负责
+控制内存规模。speaker id 在 grid 中必须非空且唯一，选择不隐式重排物理 speaker 轴。
+
 TTS provider 只消费已经存在的 `TextView.TEXT`、`TextView.SPEAKERS` 和可选语言 meta。
 例如 Qwen provider 不负责 speaker 分配；调用方先组合 speaker dataset，再使用
 `ModalityMaterializer` 为相同 role 增加 audio item。
