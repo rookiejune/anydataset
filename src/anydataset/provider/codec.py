@@ -18,11 +18,11 @@ from ..types.item import AudioView, Modality, Role
 from .abc import AudioProvider
 
 if TYPE_CHECKING:
-    from anytrain.codec import Codec
+    from anytrain.codec import FrameCodec
 
 
 class CodecProvider(nn.Module, AudioProvider):
-    def __init__(self, codec: Codec, output: AudioView) -> None:
+    def __init__(self, codec: FrameCodec, output: AudioView) -> None:
         super().__init__()
         self.codec = codec
         self.output = output

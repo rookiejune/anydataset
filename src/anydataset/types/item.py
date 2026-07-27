@@ -64,7 +64,6 @@ class AudioView(StrEnum):
     WAVEFORM = auto()
     FILE = auto()
     LONGCAT = auto()
-    BICODEC = auto()
     DAC = auto()
     STABLE = auto()
     UNICODEC = auto()
