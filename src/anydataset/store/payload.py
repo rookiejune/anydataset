@@ -165,7 +165,9 @@ def payload_value(view: tuple[Role, Modality, View], data: bytes) -> Any:
         return data
     if modality is Modality.TEXT and key == TextView.TEXT:
         return data.decode("utf-8")
-    return torch.load(BytesIO(data), map_location="cpu")
+    # Store payloads intentionally support arbitrary Python values, so keep the
+    # legacy unpickling behavior explicit and avoid PyTorch's implicit-mode warning.
+    return torch.load(BytesIO(data), map_location="cpu", weights_only=False)
 
 
 def read_payload_bytes(

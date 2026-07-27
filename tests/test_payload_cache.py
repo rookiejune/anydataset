@@ -10,12 +10,21 @@ from unittest import mock
 import torch
 
 from anydataset.store.reader import read_store_dataset
-from anydataset.store.payload import PayloadCache
+from anydataset.store.payload import PayloadCache, payload_value
 from anydataset.store.writer import DatasetWriter
 from anydataset.types import AudioItem, AudioView, Modality, Role
 
 
 class PayloadCacheTest(unittest.TestCase):
+    def test_payload_value_uses_explicit_weights_only_mode(self):
+        view = (Role.DEFAULT, Modality.AUDIO, AudioView.WAVEFORM)
+        with mock.patch(
+            "anydataset.store.payload.torch.load", return_value="loaded"
+        ) as load:
+            self.assertEqual(payload_value(view, b"payload"), "loaded")
+
+        self.assertFalse(load.call_args.kwargs["weights_only"])
+
     def test_payload_cache_close_replaces_inherited_lock_after_fork(self):
         cache = PayloadCache()
         inherited_lock = cache._lock
