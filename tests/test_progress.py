@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import io
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import redirect_stdout
 from unittest.mock import patch
 
 from anydataset._progress import Progress, ProgressDashboard
@@ -48,22 +48,8 @@ def test_progress_can_render_non_interactive_logs_to_stdout() -> None:
     with redirect_stdout(stdout), ProgressDashboard(
         desc="qwen tts",
         total=2,
-        stream="stdout",
     ) as progress:
         progress.put(Progress(0, 1, False, None))
 
     output = stdout.getvalue()
     assert "qwen tts: 1 sample/2 (50.0%)" in output
-
-
-def test_progress_can_render_non_interactive_logs_to_stderr() -> None:
-    stderr = io.StringIO()
-    with redirect_stderr(stderr), ProgressDashboard(
-        desc="legacy logs",
-        total=2,
-        stream="stderr",
-    ) as progress:
-        progress.put(Progress(0, 1, False, None))
-
-    output = stderr.getvalue()
-    assert "legacy logs: 1 sample/2 (50.0%)" in output

@@ -12,11 +12,10 @@ import time
 from collections.abc import Iterator
 from dataclasses import dataclass
 from queue import Empty
-from typing import Literal, TextIO, TypeVar
+from typing import TypeVar
 
 _PROGRESS_INTERVAL = 1.0
 _NON_INTERACTIVE_PROGRESS_INTERVAL = 10.0
-ProgressStream = Literal["stderr", "stdout"]
 ItemT = TypeVar("ItemT")
 
 
@@ -86,7 +85,6 @@ def watch_workers(
     count_stage: str | None = None,
     initial: int = 0,
     stages: tuple[str, ...] = (),
-    stream: ProgressStream = "stdout",
 ) -> None:
     done = 0
     with ProgressDashboard(
@@ -95,7 +93,6 @@ def watch_workers(
         count_stage=count_stage,
         initial=initial,
         stages=stages,
-        stream=stream,
     ) as dashboard:
         while done < len(workers):
             try:
@@ -129,26 +126,18 @@ class ProgressDashboard:
         count_stage: str | None = None,
         initial: int = 0,
         stages: tuple[str, ...] = (),
-        stream: ProgressStream = "stdout",
     ) -> None:
-        _validate_stream(stream)
         self.desc = desc
         self.total = total
         self.count_stage = count_stage
         self.initial = initial
         self.stages = stages
-        self.stream = stream
         self._stats: dict[str, _StageStats] = {}
         self._bar = None
         self._stage_bars: dict[str, object] = {}
 
     def __enter__(self):
-        self._bar = _progress_bar(
-            desc=self.desc,
-            total=self.total,
-            position=0,
-            stream=self.stream,
-        )
+        self._bar = _progress_bar(desc=self.desc, total=self.total, position=0)
         self._bar.__enter__()
         if self.initial:
             self._bar.update(self.initial)
@@ -158,7 +147,6 @@ class ProgressDashboard:
                 total=self._stage_total(),
                 position=position,
                 leave=False,
-                stream=self.stream,
             )
             bar.__enter__()
             self._stage_bars[stage] = bar
@@ -225,13 +213,11 @@ def _progress_bar(
     total: int | None,
     position: int = 0,
     leave: bool = True,
-    stream: ProgressStream = "stdout",
 ):
-    output = _stream(stream)
-    if not output.isatty():
+    if not sys.stdout.isatty():
         if position > 0:
             return _NullProgressBar()
-        return _LogProgressBar(desc=desc, total=total, stream=output)
+        return _LogProgressBar(desc=desc, total=total)
     try:
         from tqdm.auto import tqdm
     except ImportError:
@@ -242,18 +228,8 @@ def _progress_bar(
         desc=desc,
         position=position,
         leave=leave,
-        file=output,
+        file=sys.stdout,
     )
-
-
-def _stream(value: ProgressStream) -> TextIO:
-    _validate_stream(value)
-    return sys.stdout if value == "stdout" else sys.stderr
-
-
-def _validate_stream(value: str) -> None:
-    if value not in {"stderr", "stdout"}:
-        raise ValueError("stream must be 'stderr' or 'stdout'.")
 
 
 def _format_stage_postfix(
@@ -318,10 +294,9 @@ class _NullProgressBar:
 
 
 class _LogProgressBar:
-    def __init__(self, *, desc: str, total: int | None, stream: TextIO) -> None:
+    def __init__(self, *, desc: str, total: int | None) -> None:
         self.desc = desc
         self.total = total
-        self.stream = stream
         self.count = 0
         self.postfix = ""
         self.started_at = time.monotonic()
@@ -358,5 +333,5 @@ class _LogProgressBar:
         line = f"{self.desc}: {progress} [{elapsed:.0f}s, {rate:.1f} sample/s]"
         if self.postfix:
             line += f" {self.postfix}"
-        print(line, file=self.stream, flush=True)
+        print(line, file=sys.stdout, flush=True)
         self.last_printed_at = now

@@ -251,8 +251,8 @@ reader 或 `lease_store_files(store_root)` 显式 lease 时直接报错，不静
 `<source>.log`，filter 和 materializer 的多进程 worker 日志分别写在
 `filter/part-xxxxx.log` 和 `materializer/part-xxxxx.log`。两者的 rank 0 都把普通 worker
 生命周期写到 stdout，ERROR 及以上写到 stderr；filter 额外报告 scan/writer 进度，materializer 报告
-reader/provider/writer 进度，便于非交互 job 判断停在哪个阶段。进度默认写入 `stdout`，
-materializer 可通过 `progress_stream` 选择 `stderr`；用户级入口不暴露单独的 log root，
+reader/provider/writer 进度，便于非交互 job 判断停在哪个阶段。进度写入 `stdout`；
+用户级入口不暴露单独的 log root，
 嵌套 worker 通过内部配置继承父进程的 run log 目录。
 
 ## 质量规则
