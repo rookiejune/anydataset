@@ -751,6 +751,11 @@ be derived with `batch.lengths(field_ref)`. When a view or modality materializer
 batches a single input reference, `call_batch` may return one output sequence.
 When the same batch contains multiple input references, `call_batch` must return
 a mapping from `(role, modality)` reference to that reference's output sequence.
+If a batch provider raises an out-of-memory error, the materializer clears
+available caches and recursively retries the batch as two smaller batches. Each
+split writes an immediate progress log with the worker, provider type, failed
+batch size, and retry sizes. An out-of-memory error for one sample is not
+recoverable and is raised to the caller.
 
 `LongCatProvider.call_batch` pads waveform or file input before encoding. If a
 batch has multiple audio roles, it encodes each role separately from the same

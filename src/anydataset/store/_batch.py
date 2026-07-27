@@ -28,6 +28,8 @@ from ._modality import modality_inputs, role_items, with_modality_view
 from ._types import ModalityProviderLike, output_modality
 from ._view import with_view
 
+OomCallback = Callable[[int, int, int], None]
+
 
 def sample_batches(
     samples: Iterable[Sample],
@@ -60,6 +62,8 @@ def indexed_sample_batches(
 def with_resilient_batch_provider(
     samples: Sequence[Sample],
     call: Callable[[Sequence[Sample]], Sequence[Sample]],
+    *,
+    on_oom: OomCallback | None = None,
 ) -> Iterator[Sample]:
     try:
         yield from call(samples)
@@ -70,8 +74,18 @@ def with_resilient_batch_provider(
         _release_exception(exc)
         _clear_cuda_cache()
         midpoint = len(samples) // 2
-        yield from with_resilient_batch_provider(samples[:midpoint], call)
-        yield from with_resilient_batch_provider(samples[midpoint:], call)
+        if on_oom is not None:
+            on_oom(len(samples), midpoint, len(samples) - midpoint)
+        yield from with_resilient_batch_provider(
+            samples[:midpoint],
+            call,
+            on_oom=on_oom,
+        )
+        yield from with_resilient_batch_provider(
+            samples[midpoint:],
+            call,
+            on_oom=on_oom,
+        )
 
 
 def with_batch_view_provider(

@@ -25,7 +25,12 @@ from .._parallel import (
     validate_process_parent,
     validate_process_value,
 )
-from .._progress import Progress, ProgressDashboard, watch_workers
+from .._progress import (
+    Progress,
+    ProgressDashboard,
+    watch_workers,
+    write_progress_message,
+)
 from .._resume import (
     cleanup_resume_dir,
     dataset_sample_count,
@@ -602,7 +607,11 @@ class ViewMaterializer:
         for batch in indexed_sample_batches(indexed, self.batch_size):
             indexes, samples = strict_zip(*batch)
             outputs = tuple(
-                self._resilient_samples_with_batch_provider(samples, provider)
+                self._resilient_samples_with_batch_provider(
+                    samples,
+                    provider,
+                    worker_id=shard_id,
+                )
             )
             validate_batch_outputs(outputs, len(samples))
             yield from strict_zip(indexes, outputs)
@@ -668,10 +677,22 @@ class ViewMaterializer:
         self,
         samples: Sequence[Sample],
         provider: MaterializerProvider,
+        *,
+        worker_id: int = 0,
     ) -> Iterator[Sample]:
+        def on_oom(batch_size: int, left_size: int, right_size: int) -> None:
+            write_progress_message(
+                "materialize views",
+                "provider OOM: "
+                f"worker={worker_id} provider={type(provider).__name__} "
+                f"batch_size={batch_size}; retrying as {left_size}+{right_size} "
+                "after cache cleanup",
+            )
+
         yield from with_resilient_batch_provider(
             samples,
             lambda batch: tuple(self._samples_with_batch_provider(batch, provider)),
+            on_oom=on_oom,
         )
 
     def _uses_batch_provider(self, provider: MaterializerProvider) -> bool:

@@ -117,6 +117,19 @@ def put_progress(progress: multiprocessing.Queue, message: Progress) -> None:
     progress.put(message)
 
 
+def write_progress_message(desc: str, message: str) -> None:
+    line = f"{desc}: {message}"
+    if not sys.stdout.isatty():
+        print(line, file=sys.stdout, flush=True)
+        return
+    try:
+        from tqdm.auto import tqdm
+    except ImportError:
+        print(line, file=sys.stdout, flush=True)
+        return
+    tqdm.write(line, file=sys.stdout)
+
+
 class ProgressDashboard:
     def __init__(
         self,

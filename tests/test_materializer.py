@@ -1,7 +1,9 @@
+import io
 import multiprocessing
 import os
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
@@ -461,12 +463,14 @@ class ViewMaterializerTest(unittest.TestCase):
                 ],
             )
             provider = _SplitOnOomBatchProvider()
+            stdout = io.StringIO()
 
-            ViewMaterializer(target, batch_size=4).write(
-                dataset_factory=_DatasetFactory(dataset),
-                provider_factory=_StaticProviderFactory(provider),
-                devices="cpu",
-            )
+            with redirect_stdout(stdout):
+                ViewMaterializer(target, batch_size=4).write(
+                    dataset_factory=_DatasetFactory(dataset),
+                    provider_factory=_StaticProviderFactory(provider),
+                    devices="cpu",
+                )
 
             stored = read_store_dataset(target)
             codes = [
@@ -491,6 +495,12 @@ class ViewMaterializerTest(unittest.TestCase):
         self.assertTrue(torch.equal(codes[1], torch.tensor([[5, 6, 7]])))
         self.assertTrue(torch.equal(codes[2], torch.tensor([[8, 9]])))
         self.assertTrue(torch.equal(codes[3], torch.tensor([[10]])))
+        self.assertIn(
+            "materialize views: provider OOM: worker=0 "
+            "provider=_SplitOnOomBatchProvider batch_size=4; "
+            "retrying as 2+2 after cache cleanup",
+            stdout.getvalue(),
+        )
 
     def test_materializer_clears_cuda_cache_before_splitting_oom_batch(self):
         provider = _SplitOnOomBatchProvider()

@@ -94,6 +94,7 @@ class FragmentBatchWriter:
             self.materializer._resilient_samples_with_batch_provider(
                 samples,
                 self.provider,
+                worker_id=self.worker_id,
             )
         )
         validate_batch_outputs(outputs, len(samples))
