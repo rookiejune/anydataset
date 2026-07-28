@@ -27,6 +27,20 @@ class _Plan:
     cost: int
 
 
+class _DatasetSampler(Sampler[int]):
+    """Expose dataset-owned rank-local ordering through PyTorch's sampler contract."""
+
+    def __init__(self, batch_sampler: _BatchSampler) -> None:
+        self.batch_sampler = batch_sampler
+
+    def __iter__(self) -> Iterator[int]:
+        for indexes in self.batch_sampler._dataset_index_groups():
+            yield from indexes
+
+    def set_epoch(self, epoch: int) -> None:
+        self.batch_sampler.epoch = _non_negative_int("epoch", epoch)
+
+
 class _BatchSampler(Sampler[list[int]]):
     """Plan memory-bounded batches and balance their compute across ranks."""
 
@@ -51,7 +65,7 @@ class _BatchSampler(Sampler[list[int]]):
         self.dataset = dataset
         self.cost_fn = cost_fn
         self.max_batch_memory = _positive_int("max_batch_memory", max_batch_memory)
-        self.sampler = sampler
+        self._source_sampler = sampler
         if not isinstance(shuffle, bool):
             raise TypeError("shuffle must be a bool.")
         self.shuffle = shuffle
@@ -66,6 +80,9 @@ class _BatchSampler(Sampler[list[int]]):
         if not isinstance(drop_distributed_tail, bool):
             raise TypeError("drop_distributed_tail must be a bool.")
         self.drop_distributed_tail = drop_distributed_tail
+        self.sampler: Sampler[int] = (
+            sampler if sampler is not None else _DatasetSampler(self)
+        )
 
     def __iter__(self) -> Iterator[list[int]]:
         plans: list[_Plan] = []
@@ -96,14 +113,17 @@ class _BatchSampler(Sampler[list[int]]):
 
     def set_epoch(self, epoch: int) -> None:
         self.epoch = _non_negative_int("epoch", epoch)
-        set_epoch = getattr(self.sampler, "set_epoch", None)
+        set_epoch = getattr(self._source_sampler, "set_epoch", None)
         if callable(set_epoch):
             set_epoch(epoch)
 
     def _index_groups(self) -> Iterator[Sequence[int]]:
-        if self.sampler is not None:
-            yield tuple(operator.index(index) for index in self.sampler)
+        if self._source_sampler is not None:
+            yield tuple(operator.index(index) for index in self._source_sampler)
             return
+        yield from self._dataset_index_groups()
+
+    def _dataset_index_groups(self) -> Iterator[Sequence[int]]:
         num_replicas, rank = _rank()
         yield from self.dataset._shuffle(
             shuffle=self.shuffle,

@@ -159,7 +159,9 @@ different rank. `StoreDataset` overrides that private plan to shuffle payload
 shard groups first and then shuffle sample indexes inside each shard group, so
 planned batches stay shard-local. DDP only trims rank-local final batches so all
 ranks take the same number of steps. Call `loader.set_epoch(epoch)` before each
-distributed epoch to advance the shuffle.
+distributed epoch to advance the shuffle. The loader also exposes this through
+PyTorch's `batch_sampler.sampler.set_epoch(epoch)` contract so trainer frameworks
+can advance dataset-owned ordering automatically.
 
 For local JSON, image, or audio files, use `Source.HF` with Hugging Face
 `load_dataset(...)` options such as `data_files` or `data_dir`. For structured

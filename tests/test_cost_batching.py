@@ -131,6 +131,24 @@ def test_dataloader_uses_dataset_shuffle_groups() -> None:
     assert dataset.calls[-1] == (True, 7, 5, 1, 0)
 
 
+def test_pytorch_sampler_epoch_contract_advances_dataset_shuffle() -> None:
+    dataset = _GroupedDataset()
+    loader = dataset.dataloader(
+        cost_fn=lambda _index: 1,
+        max_batch_memory=2,
+        max_batch_samples=2,
+        shuffle=True,
+        seed=7,
+        epoch=2,
+        collate_fn=list,
+    )
+
+    loader.batch_sampler.sampler.set_epoch(5)
+
+    assert list(loader) == [[1, 0], [3, 2]]
+    assert dataset.calls == [(True, 7, 5, 1, 0)]
+
+
 def test_map_style_abc_can_use_dataloader() -> None:
     dataset = _IndexDataset([4, 1, 3, 2])
 
