@@ -418,7 +418,7 @@ class StoreSourceTest(unittest.TestCase):
             dataset = AnyDataset(Spec(source=Source.STORE, path=str(output)))
 
             loader = dataset.dataloader(
-                cost_fn=lambda _index: 1,
+                costs=1,
                 max_batch_memory=3,
                 max_batch_samples=3,
                 collate_fn=_sample_indexes,
@@ -441,7 +441,7 @@ class StoreSourceTest(unittest.TestCase):
             )
             dataset = AnyDataset(Spec(source=Source.STORE, path=str(output)))
             loader = dataset.dataloader(
-                cost_fn=lambda _index: 1,
+                costs=1,
                 max_batch_memory=2,
                 max_batch_samples=2,
                 shuffle=True,
@@ -519,7 +519,7 @@ class StoreSourceTest(unittest.TestCase):
 
             with self.assertRaisesRegex(ValueError, "owns loader kwargs"):
                 dataset.dataloader(
-                    cost_fn=lambda _index: 1,
+                    costs=1,
                     max_batch_memory=1,
                     batch_size=1,
                 )

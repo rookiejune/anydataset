@@ -77,17 +77,19 @@ parse 阶段完成。
 ## Cost-aware 动态 batch
 
 map-style `AnyDataset` 可以用 `dataset.dataloader(...)` 做动态 batch。
-`cost_fn(index) -> int` 只接收全局样本 index，应读取轻量 metadata（例如预计算长度），
-不要 materialize 完整样本。loader 在执行完整 `parse_fn` 前读取这些 cost；单条样本
+`costs` 接受表示所有样本 cost 相同的正整数，或与 dataset 等长、按全局样本 index
+对齐的稳定 `Sequence[int]`。loader 在执行完整 `parse_fn` 前按需读取这些 cost；单条样本
 cost 必须是正整数，batch 的 memory 和分布式 compute 都直接使用所选样本 cost 之和。
 每个 planning window 内，planner 会贪心选择仍不超过 `max_batch_memory`、且能让当前
 batch 尽量填满的样本；`max_batch_samples` 可以额外限制单个 batch 的样本数。
 
-cost planning 当前按 epoch eager 执行，因此 cost 描述必须轻量且可序列化。没有自定义
-sampler 时，dataset 会在唯一的 `shuffle` 开关背后生成 rank-local 读取计划，规划后的
-batch 不会再被重分配给其他 rank。对 `StoreDataset`，这个私有计划会先 shuffle payload
-shard group，再 shuffle group 内样本 index，因此 planner 只在同一个 shard group 内组
-batch。DDP 只会裁掉 rank-local 的最终 batch 尾部，保证所有 rank step 数一致。
+planner 只保留有界 lookahead，提前结束 epoch 时不会读取尚未看见的尾部 cost；完整遍历
+epoch 仍必然读取每条所选样本的 cost，因此昂贵长度应在预处理阶段计算并持久化，不能靠
+materialize 完整样本临时推导。没有自定义 sampler 时，dataset 会在唯一的 `shuffle`
+开关背后生成 rank-local 读取计划，规划后的 batch 不会再被重分配给其他 rank。对
+`StoreDataset`，这个私有计划会先 shuffle payload shard group，再 shuffle group 内样本
+index，因此 planner 只在同一个 shard group 内组 batch。DDP 按有界 plan window 同步，
+只裁掉 rank-local 的最终 batch 尾部，保证所有 rank step 数一致。
 分布式训练每个 epoch 前调用 `loader.set_epoch(epoch)` 推进 shuffle。
 
 ## 加载任意数据集
@@ -197,7 +199,9 @@ dataset = IterableAnyDataset(
 内置 `sharded_csv` source 保留 CSV 作为可读的事实来源，并在
 `$ANYDATASET_HOME/cache/sources` 下为每个 CSV prepare 一个 Parquet cache part。
 prepare 使用 spawn process pool 并行转换变化文件，最后原子提交 cache manifest；
-dataset 随后通过 Parquet row group 提供 map-style 随机访问。
+dataset 随后通过 Parquet row group 提供 map-style 随机访问。动态 batch shuffle 会先
+打乱 row group 顺序，并且每次只物化一个 row group 的 index，不再分配全数据集 Python
+index list。
 
 只需要得到 `Spec` 时，也可以使用字符串 shorthand：
 
@@ -665,7 +669,7 @@ store payload 按 view 写入 tar shard。普通 `DataLoader(shuffle=True)` 会�
 from anydataset.dataset import collate_fn
 
 loader = dataset.dataloader(
-    cost_fn=lambda index: lengths[index],
+    costs=lengths,
     max_batch_memory=64_000,
     max_batch_samples=32,
     shuffle=True,

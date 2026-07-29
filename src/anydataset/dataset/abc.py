@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import random
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from torch.utils.data import Dataset, IterableDataset
 
@@ -23,6 +23,12 @@ if TYPE_CHECKING:
 
 
 _DEFAULT_MAX_SHARD_SAMPLES = 100_000
+_DEFAULT_SHUFFLE_GROUP_SAMPLES = 4096
+
+
+@runtime_checkable
+class _IndexGrouped(Protocol):
+    def iter_index_groups(self) -> Iterator[Sequence[int]]: ...
 
 
 class _Base(ABC):
@@ -209,7 +215,7 @@ class MapStyleABC(Dataset, ABC):
     def dataloader(
         self,
         *,
-        cost_fn: Callable[[int], int],
+        costs: int | Sequence[int],
         max_batch_memory: int,
         shuffle: bool = False,
         sampler: Sampler[int] | None = None,
@@ -224,7 +230,7 @@ class MapStyleABC(Dataset, ABC):
 
         return _DataLoader(
             self,
-            cost_fn=cost_fn,
+            costs=costs,
             max_batch_memory=max_batch_memory,
             shuffle=shuffle,
             sampler=sampler,
@@ -245,10 +251,16 @@ class MapStyleABC(Dataset, ABC):
         num_replicas: int,
         rank: int,
     ) -> Iterator[Sequence[int]]:
-        indexes = list(range(len(self)))
-        if shuffle:
-            random.Random(seed + epoch).shuffle(indexes)
-        yield indexes[rank::num_replicas]
+        if not shuffle:
+            yield range(rank, len(self), num_replicas)
+            return
+        yield from _shuffle_index_groups(
+            _index_groups(len(self), _DEFAULT_SHUFFLE_GROUP_SAMPLES),
+            seed=seed,
+            epoch=epoch,
+            num_replicas=num_replicas,
+            rank=rank,
+        )
 
     def iter_shard(self, num_shards: int, shard_id: int) -> Iterator[Sample]:
         for _index, sample in self.iter_indexed_shard(num_shards, shard_id):
@@ -362,6 +374,16 @@ class AnyDataset(_Base, MapStyleABC):
                 rank=rank,
             )
             return
+        if isinstance(dataset, _IndexGrouped):
+            yield from _shuffle_index_groups(
+                dataset.iter_index_groups(),
+                shuffle=shuffle,
+                seed=seed,
+                epoch=epoch,
+                num_replicas=num_replicas,
+                rank=rank,
+            )
+            return
         yield from super()._shuffle(
             shuffle=shuffle,
             seed=seed,
@@ -405,6 +427,47 @@ def _iter_modulo(
     for index, row in enumerate(rows):
         if index % num_shards == shard_id:
             yield row
+
+
+def _index_groups(length: int, size: int) -> Iterator[range]:
+    for start in range(0, length, size):
+        yield range(start, min(start + size, length))
+
+
+def _shuffle_index_groups(
+    groups: Iterable[Sequence[int]],
+    *,
+    shuffle: bool = True,
+    seed: int,
+    epoch: int,
+    num_replicas: int,
+    rank: int,
+) -> Iterator[Sequence[int]]:
+    if shuffle:
+        shuffled = [group for group in groups if len(group) > 0]
+        rng = random.Random(seed + epoch)
+        rng.shuffle(shuffled)
+        ordered: Iterable[Sequence[int]] = shuffled
+    else:
+        ordered = groups
+        rng = None
+
+    position = 0
+    for group in ordered:
+        size = len(group)
+        if size == 0:
+            continue
+        group_seed = None if rng is None else rng.getrandbits(64)
+        offset = (rank - position) % num_replicas
+        position += size
+        if offset >= size:
+            continue
+        if group_seed is None:
+            yield group[offset::num_replicas]
+            continue
+        indexes = list(group)
+        random.Random(group_seed).shuffle(indexes)
+        yield indexes[offset::num_replicas]
 
 
 def _write_dataset(

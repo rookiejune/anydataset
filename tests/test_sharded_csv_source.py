@@ -209,6 +209,52 @@ class ShardedCsvSourceTest(unittest.TestCase):
             self.assertEqual(dataset[-1], "two")
             self.assertEqual(list(dataset.iter_shard(2, 1)), ["one"])
 
+    def test_shuffle_uses_parquet_row_groups(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            shard = Path(tmpdir) / "shard_0"
+            shard.mkdir()
+            (shard / "0.csv").write_text(
+                "value\n0\n1\n2\n3\n4\n",
+                encoding="utf-8",
+            )
+            with mock.patch(
+                "anydataset.dataset.source.sharded_csv._PARQUET_ROW_GROUP_SIZE",
+                2,
+            ):
+                dataset = AnyDataset(Spec(source="sharded_csv", path=tmpdir))
+                groups = list(
+                    dataset._shuffle(
+                        shuffle=True,
+                        seed=7,
+                        epoch=3,
+                        num_replicas=1,
+                        rank=0,
+                    )
+                )
+                rank_indexes = [
+                    [
+                        index
+                        for group in dataset._shuffle(
+                            shuffle=False,
+                            seed=0,
+                            epoch=0,
+                            num_replicas=2,
+                            rank=rank,
+                        )
+                        for index in group
+                    ]
+                    for rank in range(2)
+                ]
+
+            self.assertEqual(
+                sorted(index for group in groups for index in group),
+                list(range(5)),
+            )
+            self.assertEqual(sorted(len(group) for group in groups), [1, 2, 2])
+            for group in groups:
+                self.assertEqual(min(group) // 2, max(group) // 2)
+            self.assertEqual(rank_indexes, [[0, 2, 4], [1, 3]])
+
     def test_reuses_prepared_parquet_cache(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

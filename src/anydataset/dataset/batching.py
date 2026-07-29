@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import operator
 import warnings
-from collections.abc import Callable, Iterator, Sequence
+from bisect import bisect_left, bisect_right, insort
+from collections import OrderedDict
+from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass
+from itertools import islice
 from typing import Any
 
 import torch.distributed as dist
@@ -13,6 +16,9 @@ from torch.utils.data import Sampler
 from torch.utils.data import DataLoader as TorchDataLoader
 
 from .abc import MapStyleABC
+
+
+_DISTRIBUTED_PLAN_WINDOW = 128
 
 
 @dataclass(frozen=True)
@@ -25,6 +31,44 @@ class _Record:
 class _Plan:
     records: tuple[_Record, ...]
     cost: int
+
+
+class _Pending:
+    def __init__(self, records: Iterable[_Record]) -> None:
+        self._source = iter(records)
+        self._order: OrderedDict[int, _Record] = OrderedDict()
+        self._costs: list[tuple[int, int, int]] = []
+        self._arrival = 0
+
+    def __bool__(self) -> bool:
+        return bool(self._order)
+
+    def fill(self, limit: int) -> None:
+        while len(self._order) < limit:
+            try:
+                record = next(self._source)
+            except StopIteration:
+                return
+            arrival = self._arrival
+            self._arrival += 1
+            self._order[arrival] = record
+            insort(self._costs, (record.cost, -arrival, arrival))
+
+    def pop_first(self) -> _Record:
+        arrival, record = self._order.popitem(last=False)
+        key = (record.cost, -arrival, arrival)
+        offset = bisect_left(self._costs, key)
+        if offset >= len(self._costs) or self._costs[offset] != key:
+            raise RuntimeError("batch planner pending cost index is inconsistent.")
+        self._costs.pop(offset)
+        return record
+
+    def pop_fitting(self, budget: int) -> _Record | None:
+        offset = bisect_right(self._costs, (budget, self._arrival, self._arrival)) - 1
+        if offset < 0:
+            return None
+        _cost, _reverse_arrival, arrival = self._costs.pop(offset)
+        return self._order.pop(arrival)
 
 
 class _DatasetSampler(Sampler[int]):
@@ -48,7 +92,7 @@ class _BatchSampler(Sampler[list[int]]):
         self,
         dataset: MapStyleABC,
         *,
-        cost_fn: Callable[[int], int],
+        costs: int | Sequence[int],
         max_batch_memory: int,
         sampler: Sampler[int] | None,
         shuffle: bool,
@@ -60,10 +104,8 @@ class _BatchSampler(Sampler[list[int]]):
     ) -> None:
         if not isinstance(dataset, MapStyleABC):
             raise TypeError("dataset must be a MapStyleABC.")
-        if not callable(cost_fn):
-            raise TypeError("cost_fn must be callable.")
         self.dataset = dataset
-        self.cost_fn = cost_fn
+        self.costs = _costs(costs, sample_count=len(dataset))
         self.max_batch_memory = _positive_int("max_batch_memory", max_batch_memory)
         self._source_sampler = sampler
         if not isinstance(shuffle, bool):
@@ -85,28 +127,22 @@ class _BatchSampler(Sampler[list[int]]):
         )
 
     def __iter__(self) -> Iterator[list[int]]:
-        plans: list[_Plan] = []
+        plans = self._iter_plans()
+        for plan in _synchronized_plans(
+            plans,
+            drop_tail=self.drop_distributed_tail,
+        ):
+            yield [record.index for record in plan.records]
+
+    def _iter_plans(self) -> Iterator[_Plan]:
         for indexes in self._index_groups():
-            records: list[_Record] = []
-            for index in indexes:
-                resolved = operator.index(index)
-                records.append(
-                    _Record(
-                        index=resolved,
-                        cost=_sample_cost(self.cost_fn, resolved),
-                    )
-                )
-            if records:
-                plans.extend(
-                    _plans(
-                        records,
-                        max_batch_memory=self.max_batch_memory,
-                        planning_window=self.planning_window,
-                        max_batch_samples=self.max_batch_samples,
-                    )
-                )
-        plans = _drop_distributed_tail(plans, drop_tail=self.drop_distributed_tail)
-        yield from ([record.index for record in plan.records] for plan in plans)
+            records = (_record(self.costs, index) for index in indexes)
+            yield from _plans(
+                records,
+                max_batch_memory=self.max_batch_memory,
+                planning_window=self.planning_window,
+                max_batch_samples=self.max_batch_samples,
+            )
 
     def __len__(self) -> int:
         raise TypeError("dataloader batch count is unavailable before planning.")
@@ -117,9 +153,9 @@ class _BatchSampler(Sampler[list[int]]):
         if callable(set_epoch):
             set_epoch(epoch)
 
-    def _index_groups(self) -> Iterator[Sequence[int]]:
+    def _index_groups(self) -> Iterator[Iterable[int]]:
         if self._source_sampler is not None:
-            yield tuple(operator.index(index) for index in self._source_sampler)
+            yield self._source_sampler
             return
         yield from self._dataset_index_groups()
 
@@ -141,7 +177,7 @@ class _DataLoader(TorchDataLoader):
         self,
         dataset: MapStyleABC,
         *,
-        cost_fn: Callable[[int], int],
+        costs: int | Sequence[int],
         max_batch_memory: int,
         shuffle: bool = False,
         sampler: Sampler[int] | None = None,
@@ -160,7 +196,7 @@ class _DataLoader(TorchDataLoader):
             raise ValueError("sampler and shuffle define overlapping sample order.")
         batch_sampler = _BatchSampler(
             dataset,
-            cost_fn=cost_fn,
+            costs=costs,
             max_batch_memory=max_batch_memory,
             sampler=sampler,
             shuffle=shuffle,
@@ -181,17 +217,19 @@ class _DataLoader(TorchDataLoader):
 
 
 def _plans(
-    records: list[_Record],
+    records: Iterable[_Record],
     *,
     max_batch_memory: int,
     planning_window: int,
     max_batch_samples: int | None,
-) -> list[_Plan]:
-    pending = list(records)
-    plans: list[_Plan] = []
-    while pending:
-        selected = [pending.pop(0)]
-        cost = _batch_cost(selected)
+) -> Iterator[_Plan]:
+    pending = _Pending(records)
+    while True:
+        pending.fill(1)
+        if not pending:
+            return
+        selected = [pending.pop_first()]
+        cost = selected[0].cost
         if cost > max_batch_memory:
             raise ValueError(
                 "A sample exceeds max_batch_memory: "
@@ -199,62 +237,45 @@ def _plans(
                 f"budget={max_batch_memory}."
             )
         while max_batch_samples is None or len(selected) < max_batch_samples:
-            candidate = _candidate(
-                pending[:planning_window],
-                selected,
-                max_batch_memory=max_batch_memory,
-            )
+            pending.fill(planning_window)
+            candidate = pending.pop_fitting(max_batch_memory - cost)
             if candidate is None:
                 break
-            offset, cost = candidate
-            selected.append(pending.pop(offset))
-        plans.append(_Plan(records=tuple(selected), cost=cost))
-    return plans
+            selected.append(candidate)
+            cost += candidate.cost
+        yield _Plan(records=tuple(selected), cost=cost)
 
 
-def _candidate(
-    candidates: Sequence[_Record],
-    selected: list[_Record],
+def _synchronized_plans(
+    plans: Iterable[_Plan],
     *,
-    max_batch_memory: int,
-) -> tuple[int, int] | None:
-    best: tuple[int, int] | None = None
-    for offset, record in enumerate(candidates):
-        cost = _batch_cost([*selected, record])
-        if cost > max_batch_memory:
-            continue
-        if best is None or cost > best[1]:
-            best = offset, cost
-    if best is None:
-        return None
-    return best
-
-
-def _batch_cost(records: Sequence[_Record]) -> int:
-    return sum(record.cost for record in records)
-
-
-def _drop_distributed_tail(plans: list[_Plan], *, drop_tail: bool) -> list[_Plan]:
+    drop_tail: bool,
+) -> Iterator[_Plan]:
     if not dist.is_available() or not dist.is_initialized():
-        return plans
+        yield from plans
+        return
+
+    source = iter(plans)
     world_size = dist.get_world_size()
-    counts: list[int] = [0 for _ in range(world_size)]
-    dist.all_gather_object(counts, len(plans))
-    kept = min(counts)
-    if any(count != kept for count in counts):
-        if not drop_tail:
-            raise RuntimeError(
-                "dataloader cannot keep equal rank-local batch counts."
-            )
-        dropped = len(plans) - kept
-        if dropped:
-            warnings.warn(
-                f"dataloader dropped {dropped} rank-local final batches "
-                "for equal DDP steps.",
-                RuntimeWarning,
-                stacklevel=2,
-            )
-    return plans[:kept]
+    while True:
+        local = list(islice(source, _DISTRIBUTED_PLAN_WINDOW))
+        counts: list[int] = [0 for _ in range(world_size)]
+        dist.all_gather_object(counts, len(local))
+        kept = min(counts)
+        if any(count != kept for count in counts):
+            if not drop_tail:
+                raise RuntimeError(
+                    "dataloader cannot keep equal rank-local batch counts."
+                )
+            if len(local) > kept:
+                warnings.warn(
+                    "dataloader dropped rank-local final batches for equal DDP steps.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+        yield from local[:kept]
+        if kept < _DISTRIBUTED_PLAN_WINDOW:
+            return
 
 
 def _rank() -> tuple[int, int]:
@@ -283,8 +304,31 @@ def _positive_int(name: str, value: int) -> int:
     return resolved
 
 
-def _sample_cost(cost_fn: Callable[[int], int], index: int) -> int:
-    cost = operator.index(cost_fn(index))
+def _costs(
+    costs: int | Sequence[int],
+    *,
+    sample_count: int,
+) -> int | Sequence[int]:
+    if isinstance(costs, bool):
+        raise TypeError("costs must be a positive integer or integer sequence.")
+    if isinstance(costs, int):
+        if costs <= 0:
+            raise ValueError("constant sample cost must be positive.")
+        return costs
+    if isinstance(costs, (str, bytes, bytearray)) or not isinstance(costs, Sequence):
+        raise TypeError("costs must be a positive integer or integer sequence.")
+    if len(costs) != sample_count:
+        raise ValueError("costs and dataset must have equal length.")
+    return costs
+
+
+def _record(costs: int | Sequence[int], index: int) -> _Record:
+    resolved = operator.index(index)
+    return _Record(index=resolved, cost=_sample_cost(costs, resolved))
+
+
+def _sample_cost(costs: int | Sequence[int], index: int) -> int:
+    cost = costs if isinstance(costs, int) else operator.index(costs[index])
     if cost <= 0:
-        raise ValueError(f"cost_fn must return a positive integer: index={index}.")
+        raise ValueError(f"sample cost must be a positive integer: index={index}.")
     return cost

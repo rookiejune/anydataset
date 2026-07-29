@@ -123,22 +123,19 @@ dataset = AnyDataset(
 ## Cost-aware batches
 
 Map-style `AnyDataset` can plan dynamic batches from lightweight index-level
-costs without parsing the full training sample. `dataset.dataloader(...)`
-calls `cost_fn(index) -> int` before materializing samples through `parse_fn`.
-The function may run more than once and must not depend on mutable state.
+costs without parsing the full training sample. Pass either a positive integer
+for a constant sample cost or a stable `Sequence[int]` aligned with global
+dataset indexes. A sequence must have the same length as the dataset; values
+are read lazily before the corresponding samples are materialized through
+`parse_fn`.
 
 ```python
 from anydataset import AnyDataset
 
 
-def index_cost(index: int) -> int:
-    # Read only lightweight metadata, such as a precomputed token/frame length.
-    return lengths[index]
-
-
 dataset = AnyDataset(spec, parse_fn=parse)
 loader = dataset.dataloader(
-    cost_fn=index_cost,
+    costs=lengths,
     max_batch_memory=64_000,
     planning_window=256,
     shuffle=True,
@@ -151,14 +148,17 @@ The planner treats batch memory and distributed compute as the sum of selected
 sample costs. Each sample cost must be a positive integer. Within each planning
 window, it greedily adds the fitting sample that makes the batch as full as
 possible without exceeding `max_batch_memory`; `max_batch_samples` can cap the
-number of samples per planned batch. Cost planning is eager for the current
-epoch, so all cost descriptions must be small and pickleable. With no custom
-sampler, the dataset builds the rank-local read plan behind the single
-`shuffle` flag, and distributed planning never reassigns a planned batch to a
-different rank. `StoreDataset` overrides that private plan to shuffle payload
-shard groups first and then shuffle sample indexes inside each shard group, so
-planned batches stay shard-local. DDP only trims rank-local final batches so all
-ranks take the same number of steps. Call `loader.set_epoch(epoch)` before each
+number of samples per planned batch. Planning keeps only a bounded lookahead;
+stopping an epoch early does not read costs for the unseen tail. A complete
+epoch necessarily reads every selected sample cost once, so expensive lengths
+should be precomputed and persisted instead of derived by materializing samples.
+With no custom sampler, the dataset builds the rank-local read plan behind the
+single `shuffle` flag, and distributed planning never reassigns a planned batch
+to a different rank. `StoreDataset` overrides that private plan to shuffle
+payload shard groups first and then shuffle sample indexes inside each shard
+group, so planned batches stay shard-local. DDP synchronizes bounded plan
+windows and only trims rank-local final batches so all ranks take the same
+number of steps. Call `loader.set_epoch(epoch)` before each
 distributed epoch to advance the shuffle. The loader also exposes this through
 PyTorch's `batch_sampler.sampler.set_epoch(epoch)` contract so trainer frameworks
 can advance dataset-owned ordering automatically.
@@ -225,7 +225,9 @@ The built-in `sharded_csv` source keeps CSV files as the readable source of
 truth and prepares one Parquet cache part per CSV file under
 `$ANYDATASET_HOME/cache/sources`. Preparation converts changed files in a
 spawned process pool and atomically commits the cache manifest. Dataset reads
-then use Parquet row groups for map-style random access.
+then use Parquet row groups for map-style random access. Dynamic-batch shuffle
+orders those row groups first and only materializes one row group's indexes at a
+time, so it does not allocate a full-dataset Python index list.
 
 ## Multiple Datasets
 

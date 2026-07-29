@@ -113,8 +113,10 @@ store 的 map-style `__getitem__` 保持全局下标随机访问语义，不隐�
 `dataset.dataloader(..., shuffle=...)` 入口。底层 `StoreDataset` 通过私有 `_shuffle`
 生成 payload-shard-local 读取计划：先按已选择 view manifest 的 shard group 排序或
 shuffle，再在 group 内 shuffle 样本；batch planner 只在同一个 group 内组 batch。
-分布式 rank 在 group 计划层按位置切分，DDP 只裁剪 rank-local 最终 batch 尾部，不修改
-通用 `iter_indexed_shard()` 的 modulo 契约。
+`sharded_csv` 使用 Parquet row group 作为同类 index group，避免全量样本 index list
+和跨 row group 随机读取；其他 map-style dataset 使用有界连续 index group。planner
+只维护 `planning_window` 个候选，DDP 按固定 plan window 同步并只裁剪 rank-local 最终
+batch 尾部，不修改通用 `iter_indexed_shard()` 的 modulo 契约。
 reader 显式支持字段和 Parquet manifest 结构完整的 `schema_version: 2` 和 `3` store；
 v2 store 没有 provenance，仍可读取。新写入的 v3 store 在 dataset manifest 中保存
 materializer 的 `input_id` 和 `provider_id`。更早格式必须先显式迁移或重新物化，

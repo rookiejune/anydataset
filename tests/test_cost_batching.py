@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
+from unittest import mock
+
 import anydataset
 import anydataset.dataset
 import pytest
 
 from anydataset import AnyDataset, Source, Spec
 from anydataset.dataset import MapStyleABC
+from anydataset.dataset.batching import _Plan, _Record, _plans, _synchronized_plans
 
 
 def _dataset(rows, *, parse_fn=lambda row: row):
@@ -27,13 +31,10 @@ def test_cost_does_not_parse_sample() -> None:
         return row * 10
 
     dataset = _dataset(rows, parse_fn=parse)
-
-    def cost(index: int) -> int:
-        measured.append(index)
-        return rows[index]
+    costs = _MeasuredCosts(rows, measured)
 
     loader = dataset.dataloader(
-        cost_fn=cost,
+        costs=costs,
         max_batch_memory=8,
         planning_window=4,
         collate_fn=list,
@@ -48,19 +49,37 @@ def test_cost_does_not_parse_sample() -> None:
     assert batches == [[40, 30, 10], [20]]
 
 
-def test_requires_cost_fn() -> None:
+def test_requires_indexable_costs() -> None:
     dataset = _dataset([1])
 
-    with pytest.raises(TypeError, match="cost_fn must be callable"):
+    with pytest.raises(TypeError, match="costs must be a positive integer"):
         dataset.dataloader(
-            cost_fn=None,
+            costs=lambda _index: 1,
             max_batch_memory=1,
         )
 
 
+def test_requires_costs_to_match_dataset_length() -> None:
+    with pytest.raises(ValueError, match="costs and dataset must have equal length"):
+        _dataset([1]).dataloader(
+            costs=[1, 1],
+            max_batch_memory=1,
+        )
+
+
+def test_constant_sample_cost() -> None:
+    loader = _dataset([1, 2, 3]).dataloader(
+        costs=1,
+        max_batch_memory=2,
+        collate_fn=list,
+    )
+
+    assert list(loader) == [[1, 2], [3]]
+
+
 def test_rejects_oversized_sample() -> None:
     loader = _dataset([9]).dataloader(
-        cost_fn=lambda index: [9][index],
+        costs=[9],
         max_batch_memory=8,
     )
 
@@ -70,17 +89,17 @@ def test_rejects_oversized_sample() -> None:
 
 def test_rejects_non_positive_sample_cost() -> None:
     loader = _dataset([0]).dataloader(
-        cost_fn=lambda index: [0][index],
+        costs=[0],
         max_batch_memory=1,
     )
 
-    with pytest.raises(ValueError, match="cost_fn must return a positive integer"):
+    with pytest.raises(ValueError, match="sample cost must be a positive integer"):
         list(loader)
 
 
 def test_batch_count_is_explicitly_unavailable() -> None:
     loader = _dataset([1]).dataloader(
-        cost_fn=lambda index: [1][index],
+        costs=[1],
         max_batch_memory=1,
     )
 
@@ -100,7 +119,7 @@ def test_set_epoch_forwards_to_custom_sampler() -> None:
 
     sampler = EpochSampler()
     loader = _dataset([1]).dataloader(
-        cost_fn=lambda index: [1][index],
+        costs=[1],
         max_batch_memory=1,
         sampler=sampler,
     )
@@ -113,7 +132,7 @@ def test_set_epoch_forwards_to_custom_sampler() -> None:
 def test_dataloader_uses_dataset_shuffle_groups() -> None:
     dataset = _GroupedDataset()
     loader = dataset.dataloader(
-        cost_fn=lambda _index: 1,
+        costs=1,
         max_batch_memory=2,
         max_batch_samples=2,
         shuffle=True,
@@ -134,7 +153,7 @@ def test_dataloader_uses_dataset_shuffle_groups() -> None:
 def test_pytorch_sampler_epoch_contract_advances_dataset_shuffle() -> None:
     dataset = _GroupedDataset()
     loader = dataset.dataloader(
-        cost_fn=lambda _index: 1,
+        costs=1,
         max_batch_memory=2,
         max_batch_samples=2,
         shuffle=True,
@@ -153,13 +172,117 @@ def test_map_style_abc_can_use_dataloader() -> None:
     dataset = _IndexDataset([4, 1, 3, 2])
 
     loader = dataset.dataloader(
-        cost_fn=lambda index: dataset.rows[index],
+        costs=dataset.rows,
         max_batch_memory=8,
         planning_window=4,
         collate_fn=list,
     )
 
     assert list(loader) == [[40, 30, 10], [20]]
+
+
+def test_map_style_shuffle_strides_flattened_groups_across_ranks() -> None:
+    dataset = _IndexDataset(list(range(10)))
+    shuffled = [
+        index
+        for group in dataset._shuffle(
+            shuffle=True,
+            seed=7,
+            epoch=3,
+            num_replicas=1,
+            rank=0,
+        )
+        for index in group
+    ]
+
+    rank_indexes = [
+        [
+            index
+            for group in dataset._shuffle(
+                shuffle=True,
+                seed=7,
+                epoch=3,
+                num_replicas=3,
+                rank=rank,
+            )
+            for index in group
+        ]
+        for rank in range(3)
+    ]
+
+    assert rank_indexes == [shuffled[rank::3] for rank in range(3)]
+
+
+def test_cost_planning_is_lazy() -> None:
+    measured: list[int] = []
+    costs = _MeasuredCosts([1] * 100, measured)
+    loader = _dataset([1] * 100).dataloader(
+        costs=costs,
+        max_batch_memory=1,
+        max_batch_samples=1,
+        planning_window=4,
+        collate_fn=list,
+    )
+
+    first = next(iter(loader))
+
+    assert first == [1]
+    assert measured == [0]
+
+
+def test_distributed_planning_sync_is_bounded() -> None:
+    consumed: list[int] = []
+
+    def plans():
+        for index in range(1_000):
+            consumed.append(index)
+            yield _Plan(records=(_Record(index=index, cost=1),), cost=1)
+
+    def gather(counts: list[int], local: int) -> None:
+        counts[:] = [local, 127]
+
+    with (
+        mock.patch("anydataset.dataset.batching.dist.is_available", return_value=True),
+        mock.patch("anydataset.dataset.batching.dist.is_initialized", return_value=True),
+        mock.patch("anydataset.dataset.batching.dist.get_world_size", return_value=2),
+        mock.patch(
+            "anydataset.dataset.batching.dist.all_gather_object",
+            side_effect=gather,
+        ),
+        pytest.warns(RuntimeWarning, match="dropped rank-local final batches"),
+    ):
+        synchronized = list(_synchronized_plans(plans(), drop_tail=True))
+
+    assert len(synchronized) == 127
+    assert consumed == list(range(128))
+
+
+@pytest.mark.parametrize(
+    ("budget", "window", "max_samples"),
+    [(97, 1, None), (128, 7, 4), (256, 32, 8), (512, 256, None)],
+)
+def test_streaming_planner_matches_reference_greedy_order(
+    budget: int,
+    window: int,
+    max_samples: int | None,
+) -> None:
+    costs = [(index * 37) % 97 + 1 for index in range(300)]
+    actual = [
+        [record.index for record in plan.records]
+        for plan in _plans(
+            (_Record(index, cost) for index, cost in enumerate(costs)),
+            max_batch_memory=budget,
+            planning_window=window,
+            max_batch_samples=max_samples,
+        )
+    ]
+
+    assert actual == _reference_plans(
+        costs,
+        budget=budget,
+        window=window,
+        max_samples=max_samples,
+    )
 
 
 def test_loader_class_is_not_public_api() -> None:
@@ -182,6 +305,49 @@ class _IndexDataset(MapStyleABC):
 
     def __getitem__(self, index: int) -> int:
         return self.rows[index] * 10
+
+
+class _MeasuredCosts(Sequence[int]):
+    def __init__(self, values: Sequence[int], measured: list[int]) -> None:
+        self.values = tuple(values)
+        self.measured = measured
+
+    def __len__(self) -> int:
+        return len(self.values)
+
+    def __getitem__(self, index: int | slice) -> int | tuple[int, ...]:
+        if isinstance(index, slice):
+            return self.values[index]
+        self.measured.append(index)
+        return self.values[index]
+
+
+def _reference_plans(
+    costs: Sequence[int],
+    *,
+    budget: int,
+    window: int,
+    max_samples: int | None,
+) -> list[list[int]]:
+    pending = [_Record(index, cost) for index, cost in enumerate(costs)]
+    plans = []
+    while pending:
+        selected = [pending.pop(0)]
+        selected_cost = selected[0].cost
+        while max_samples is None or len(selected) < max_samples:
+            best: tuple[int, int] | None = None
+            for offset, record in enumerate(pending[:window]):
+                candidate_cost = selected_cost + record.cost
+                if candidate_cost > budget:
+                    continue
+                if best is None or candidate_cost > best[1]:
+                    best = offset, candidate_cost
+            if best is None:
+                break
+            offset, selected_cost = best
+            selected.append(pending.pop(offset))
+        plans.append([record.index for record in selected])
+    return plans
 
 
 class _GroupedDataset(MapStyleABC):

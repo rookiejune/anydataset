@@ -63,7 +63,11 @@
   row group 懒加载；随机读单个样本不需要把整个 view manifest 转成对象。
 - `sharded_csv` 保留 CSV 作为事实来源，prepare 阶段以 spawn process pool 并行生成
   每文件 Parquet part；manifest 原子提交并按源文件 size/mtime 增量复用。读取侧缓存
-  Parquet row group，避免 rank 和 DataLoader worker 重复解析全部 CSV。
+  Parquet row group，动态 batch shuffle 直接按 row group 生成有界 index group，避免
+  rank 和 DataLoader worker 重复解析全部 CSV，也不构造全数据集 Python index list。
+- cost-aware planner 接受稳定 cost sequence 或常量 cost，并以 bounded lookahead 流式
+  生成 batch；候选删除和 batch cost 更新不再随全量 pending list 或当前 batch size
+  重复放大。DDP 每 128 个 plan 同步一次，只在最终不完整窗口裁剪 rank-local 尾部。
 - part/fragment commit 不再常驻保存 `item ref -> sample_index array`；提交时先写
   ordered sample manifest，再按 view 流式扫描 sample manifest 做覆盖校验。
 - 大量 part/fragment 的 manifest 使用固定 fan-in 的分层归并，打开的 parquet 文件数不再

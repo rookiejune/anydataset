@@ -107,6 +107,17 @@ class ShardedCsvDataset:
         files = self._files()
         return files[-1].stop if files else 0
 
+    def iter_index_groups(self) -> Iterator[range]:
+        for file in self._files():
+            start = file.start
+            for count in file.row_groups:
+                stop = start + count
+                if stop > start:
+                    yield range(start, stop)
+                start = stop
+            if start != file.stop:
+                raise RuntimeError("Sharded CSV row group index is inconsistent.")
+
     def __getitem__(self, index: int) -> CsvRow:
         length = len(self)
         if index < 0:
