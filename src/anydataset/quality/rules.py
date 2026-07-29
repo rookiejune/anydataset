@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from enum import auto
+from enum import Enum, auto
 
 from .._compat import StrEnum
 from ..filter import FilterDecision
@@ -100,6 +100,8 @@ def _decision(output: FilterOutput) -> FilterDecision:
 
 
 def _label(value: object) -> QualityLabel:
+    if not isinstance(value, (bool, str, Enum)):
+        raise TypeError("quality label must be bool, str, or Enum.")
     normalized = filter_label(value)
     if normalized == QualityLabel.ACCEPT.value:
         return QualityLabel.ACCEPT

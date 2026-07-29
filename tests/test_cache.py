@@ -3,7 +3,7 @@ import json
 import os
 import tempfile
 import unittest
-from contextlib import redirect_stderr
+from contextlib import redirect_stdout
 from pathlib import Path
 from unittest import mock
 
@@ -146,11 +146,11 @@ class CacheManagerTest(unittest.TestCase):
             self.assertEqual(len(logs), 1)
             self.assertIn("WARNING careful", logs[0].read_text(encoding="utf-8"))
 
-    def test_worker_logger_writes_rank_zero_to_file_and_stderr(self):
+    def test_worker_logger_writes_rank_zero_to_file_and_stdout(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             logs_dir = Path(tmpdir)
-            stderr = io.StringIO()
-            with redirect_stderr(stderr):
+            stdout = io.StringIO()
+            with redirect_stdout(stdout):
                 logger = worker_logger("filter", logs_dir, 0)
                 logger.info("started")
             for handler in logger.handlers:
@@ -161,8 +161,8 @@ class CacheManagerTest(unittest.TestCase):
 
         self.assertIn("worker log:", text)
         self.assertIn("started", text)
-        self.assertIn("worker log:", stderr.getvalue())
-        self.assertIn("started", stderr.getvalue())
+        self.assertIn("worker log:", stdout.getvalue())
+        self.assertIn("started", stdout.getvalue())
 
 
 if __name__ == "__main__":

@@ -2,18 +2,18 @@ from __future__ import annotations
 
 import hashlib
 import os
-import random
 import tempfile
 from array import array
 from bisect import bisect_left, bisect_right
 from collections import OrderedDict
-from collections.abc import Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, overload
 
 from ..cache import anydataset_home
 from ..dataset.abc import MapStyleABC
+from ..dataset._shuffle import shuffle_index_groups
 from ..types import item
 from ..types.language import remap_lang
 from ._files import StoreFilesLease, lease_store_files, payload_path
@@ -47,10 +47,39 @@ from .payload import PayloadCache, payload_value, read_payload_bytes
 
 _StatFingerprint = tuple[int, int, int, int, int]
 _ViewRef = tuple[item.Role, item.Modality, item.View]
+_PayloadLayoutFingerprint = tuple[_StatFingerprint, ...]
 _SAMPLE_INDEX_VALIDATION_VERSION = 2
 _BASE_DATASET_MANIFEST_FIELDS = frozenset(
     {"dataset_id", "sample_count", "schema_version", "split"}
 )
+
+
+@dataclass(frozen=True)
+class _PayloadGroup:
+    start: int
+    stop: int
+
+
+class _PayloadGroupCache:
+    def __init__(self) -> None:
+        self.fingerprint: _PayloadLayoutFingerprint | None = None
+        self.groups: tuple[_PayloadGroup, ...] | None = None
+
+    def get(
+        self,
+        fingerprint: _PayloadLayoutFingerprint,
+        load: Callable[[], tuple[_PayloadGroup, ...]],
+    ) -> tuple[_PayloadGroup, ...]:
+        if self.fingerprint != fingerprint or self.groups is None:
+            self.groups = load()
+            self.fingerprint = fingerprint
+        return self.groups
+
+    def __getstate__(self) -> dict[str, object]:
+        return {}
+
+    def __setstate__(self, state: dict[str, object]) -> None:
+        self.__init__()
 
 
 @dataclass(frozen=True)
@@ -66,6 +95,11 @@ class StoreDataset(MapStyleABC):
     )
     _payloads: PayloadCache = field(
         default_factory=PayloadCache,
+        compare=False,
+        repr=False,
+    )
+    _payload_group_cache: _PayloadGroupCache = field(
+        default_factory=_PayloadGroupCache,
         compare=False,
         repr=False,
     )
@@ -90,26 +124,14 @@ class StoreDataset(MapStyleABC):
         num_replicas: int,
         rank: int,
     ) -> Iterator[Sequence[int]]:
-        groups = list(_payload_groups(self))
-        if shuffle:
-            rng = random.Random(seed + epoch)
-            rng.shuffle(groups)
-        else:
-            rng = None
-
-        for position, group in enumerate(groups):
-            if position % num_replicas != rank:
-                continue
-            indexes = list(range(group.start, group.stop))
-            if rng is not None:
-                rng.shuffle(indexes)
-            yield indexes
-
-
-@dataclass(frozen=True)
-class _PayloadGroup:
-    start: int
-    stop: int
+        yield from shuffle_index_groups(
+            (range(group.start, group.stop) for group in _payload_groups(self)),
+            shuffle=shuffle,
+            seed=seed,
+            epoch=epoch,
+            num_replicas=num_replicas,
+            rank=rank,
+        )
 
 
 class SampleManifestSequence(Sequence[SampleManifestEntry]):
@@ -130,6 +152,12 @@ class SampleManifestSequence(Sequence[SampleManifestEntry]):
 
     def __len__(self) -> int:
         return self._count
+
+    @overload
+    def __getitem__(self, index: int) -> SampleManifestEntry: ...
+
+    @overload
+    def __getitem__(self, index: slice) -> tuple[SampleManifestEntry, ...]: ...
 
     def __getitem__(
         self,
@@ -449,8 +477,7 @@ def read_store_manifest(root: str | Path) -> DatasetManifest:
         STORE_SCHEMA_VERSION,
     }:
         migration = (
-            " Use anydataset.store.migrate_store(source, output) for a schema-v1 "
-            "store."
+            " Use anydataset.store.migrate_store(source, output) for a schema-v1 store."
             if version is None or (type(version) is int and version == 1)
             else ""
         )
@@ -480,8 +507,7 @@ def _dataset_manifest(
     unsupported = fields - allowed
     if unsupported:
         raise ValueError(
-            "Store dataset manifest has unsupported field "
-            f"{sorted(unsupported)[0]!r}."
+            f"Store dataset manifest has unsupported field {sorted(unsupported)[0]!r}."
         )
 
     dataset_id = data["dataset_id"]
@@ -507,7 +533,9 @@ def _dataset_manifest(
     )
 
 
-def read_store_views(root: str | Path) -> tuple[tuple[item.Role, item.Modality, item.View], ...]:
+def read_store_views(
+    root: str | Path,
+) -> tuple[tuple[item.Role, item.Modality, item.View], ...]:
     root = Path(root).expanduser()
     _validate_dataset_root(root)
     return _discover_views(root)
@@ -567,7 +595,9 @@ def _select_views(
     return selected
 
 
-def _discover_views(root: Path) -> tuple[tuple[item.Role, item.Modality, item.View], ...]:
+def _discover_views(
+    root: Path,
+) -> tuple[tuple[item.Role, item.Modality, item.View], ...]:
     views = []
     for path in _view_dirs(root):
         view = _view_from_dir(root, path)
@@ -606,8 +636,7 @@ def _runtime_path(root: Path, path: Path) -> bool:
 
 def _has_view_marker(path: Path) -> bool:
     return any(
-        (path / name).exists()
-        for name in ("manifest.parquet", ".ready", "shards")
+        (path / name).exists() for name in ("manifest.parquet", ".ready", "shards")
     )
 
 
@@ -643,7 +672,9 @@ def _validate_sample_manifest_index(
         sample_ids.add(sample_id)
         count += 1
     if count != sample_count:
-        raise ValueError("sample manifest row count must match dataset.json sample_count.")
+        raise ValueError(
+            "sample manifest row count must match dataset.json sample_count."
+        )
     if _stat_fingerprint(path.stat()) != fingerprint:
         raise ValueError("Sample manifest changed while validating index.")
     _atomic_write_bytes(marker, b"valid\n")
@@ -685,6 +716,24 @@ def _validate_sample_entry(sample: SampleManifestEntry, index: int) -> None:
 
 
 def _payload_groups(dataset: StoreDataset) -> tuple[_PayloadGroup, ...]:
+    fingerprint = _payload_layout_fingerprint(dataset)
+    return dataset._payload_group_cache.get(
+        fingerprint,
+        lambda: _scan_payload_groups(dataset),
+    )
+
+
+def _payload_layout_fingerprint(
+    dataset: StoreDataset,
+) -> _PayloadLayoutFingerprint:
+    paths = [samples_parquet_path(dataset.root)]
+    paths.extend(
+        view_manifest_parquet_path(dataset.root, view) for view in dataset.views
+    )
+    return tuple(_stat_fingerprint(path.stat()) for path in paths)
+
+
+def _scan_payload_groups(dataset: StoreDataset) -> tuple[_PayloadGroup, ...]:
     views = tuple(dataset.views)
     if not views:
         raise ValueError("StoreDataset shuffle requires at least one store view.")
@@ -760,7 +809,9 @@ def _validate_view_indexes(
             if index == previous:
                 raise ValueError(f"Duplicate view entry for sample_index {index}.")
             if index < previous:
-                raise ValueError("View manifest entries must be ordered by sample_index.")
+                raise ValueError(
+                    "View manifest entries must be ordered by sample_index."
+                )
         previous = index
 
 
@@ -934,7 +985,9 @@ def _entry_view(entry: ViewManifestEntry) -> tuple[item.Role, item.Modality, ite
     return entry.role, entry.modality, entry.view
 
 
-def _view_path(view: tuple[item.Role, item.Modality, item.View]) -> tuple[str, str, str]:
+def _view_path(
+    view: tuple[item.Role, item.Modality, item.View],
+) -> tuple[str, str, str]:
     role, modality, key = view
     return role.value, modality.value, key.value
 

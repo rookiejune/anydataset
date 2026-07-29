@@ -155,10 +155,12 @@ should be precomputed and persisted instead of derived by materializing samples.
 With no custom sampler, the dataset builds the rank-local read plan behind the
 single `shuffle` flag, and distributed planning never reassigns a planned batch
 to a different rank. `StoreDataset` overrides that private plan to shuffle
-payload shard groups first and then shuffle sample indexes inside each shard
-group, so planned batches stay shard-local. DDP synchronizes bounded plan
-windows and only trims rank-local final batches so all ranks take the same
-number of steps. Call `loader.set_epoch(epoch)` before each
+payload shard groups first and then shuffle sample indexes inside each group.
+Every group is sliced across ranks, so a store with one payload shard still
+feeds every rank while planned batches remain shard-local. DDP synchronizes
+plan counts with tensor collectives over bounded windows and only trims
+rank-local final batches so all ranks take the same number of steps. Call
+`loader.set_epoch(epoch)` before each
 distributed epoch to advance the shuffle. The loader also exposes this through
 PyTorch's `batch_sampler.sampler.set_epoch(epoch)` contract so trainer frameworks
 can advance dataset-owned ordering automatically.
@@ -546,7 +548,7 @@ store can be read back through `Source.STORE`.
 ```python
 import torch
 
-from anydataset import AnyDataset, Source, Spec
+from anydataset import AnyDataset
 from anydataset.store import DatasetWriter
 from anydataset.types import (
     AudioItem,
@@ -563,17 +565,24 @@ sample = {
 
 DatasetWriter("/data/my_anydataset", dataset_id="toy-audio").write([sample])
 
-dataset = AnyDataset(
-    Spec(source=Source.STORE, path="/data/my_anydataset"),
+dataset = AnyDataset.from_store(
+    "/data/my_anydataset",
+    views=((Role.DEFAULT, Modality.AUDIO, AudioView.WAVEFORM),),
 )
 restored = dataset[0]
 ```
 
+`AnyDataset.from_store(..., views=...)` loads only the selected view manifests
+and payloads. The selection is preserved across pickle/spawn and participates
+in filter cache identity, while the physical `Spec` continues to identify the
+store itself.
+
 Store payloads are written to tar shards per view. The same
 `dataset.dataloader(..., shuffle=True)` entry point remains the only shuffle
 control for store training: when the prepared dataset is a `StoreDataset`, the
-loader first shuffles payload shard groups, then shuffles indexes within each
-group, and plans batches without crossing shard-group boundaries. Use
+loader first shuffles payload shard groups, slices every group across ranks,
+then shuffles rank-local indexes within each group, and plans batches without
+crossing shard-group boundaries. Use
 `seed=...` and `loader.set_epoch(epoch)` for reproducible epoch changes.
 
 Readers explicitly support store `schema_version: 2` and the current
@@ -819,6 +828,8 @@ to each other role's single input modality.
 
 ```bash
 python -m compileall -q src tests examples
+python -m ruff check src tests scripts examples
+python -m basedpyright --pythonpath "$(python -c 'import sys; print(sys.executable)')"
 python -m pytest -q
 ```
 

@@ -11,7 +11,7 @@ import tempfile
 import threading
 import time
 import unittest
-from contextlib import redirect_stderr
+from contextlib import redirect_stdout
 from unittest import mock
 from collections.abc import Iterator, Sequence
 from enum import auto
@@ -1068,6 +1068,42 @@ class FilteredDatasetTest(unittest.TestCase):
 
         self.assertNotEqual(first.cache_path, second.cache_path)
 
+    def test_store_view_selection_versions_filter_cache_identity(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "store"
+            DatasetWriter(path, dataset_id="toy").write(
+                [
+                    {
+                        (Role.DEFAULT, Modality.AUDIO): AudioItem(
+                            views={
+                                AudioView.WAVEFORM: (torch.tensor([[1.0]]), 16000),
+                                AudioView.LONGCAT: torch.tensor([[1]]),
+                            }
+                        )
+                    }
+                ]
+            )
+            waveform = (Role.DEFAULT, Modality.AUDIO, AudioView.WAVEFORM)
+            longcat = (Role.DEFAULT, Modality.AUDIO, AudioView.LONGCAT)
+            rule = FilterRule(name="all", factory=lambda: lambda _sample: True)
+
+            first = rule.apply(
+                dataset_factory=lambda: AnyDataset.from_store(
+                    path,
+                    views=(waveform,),
+                ),
+                device="cpu",
+            )
+            second = rule.apply(
+                dataset_factory=lambda: AnyDataset.from_store(
+                    path,
+                    views=(longcat,),
+                ),
+                device="cpu",
+            )
+
+        self.assertNotEqual(first.cache_path, second.cache_path)
+
     def test_rule_apply_writes_partition_shards(self):
         _register_rows_source("unit_test_filter_partition_shards")
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1318,11 +1354,11 @@ class FilteredDatasetTest(unittest.TestCase):
     def test_rule_apply_reports_scan_and_writer_progress(self):
         _register_rows_source("unit_test_filter_progress")
         dataset = _dataset("unit_test_filter_progress", [0, 1, 2])
-        stderr = io.StringIO()
+        stdout = io.StringIO()
 
         with (
             mock.patch("anydataset._progress._NON_INTERACTIVE_PROGRESS_INTERVAL", 0.0),
-            redirect_stderr(stderr),
+            redirect_stdout(stdout),
         ):
             FilterRule(
                 name="progress",
@@ -1333,7 +1369,7 @@ class FilteredDatasetTest(unittest.TestCase):
                 commit_samples=2,
             )
 
-        output = stderr.getvalue()
+        output = stdout.getvalue()
         self.assertIn("filter samples: 3 sample/3 (100.0%)", output)
         self.assertIn("scan=3", output)
         self.assertIn("writer=3", output)

@@ -13,6 +13,7 @@ from pathlib import Path
 from .._logging import run_logs_dir, use_run_logs_dir, worker_logger
 from .._parallel import (
     DeviceWorker,
+    ProcessHandle,
     can_select_indexes,
     indexed_loader,
     map_style_indexed_loader,
@@ -142,7 +143,9 @@ def collect_ranges_sequential(
             partitions[output.label].append(index)
             sample_count += 1
             if write_metrics and output.metrics is None:
-                raise TypeError("filter predicate must return FilterDecision when metrics=True.")
+                raise TypeError(
+                    "filter predicate must return FilterDecision when metrics=True."
+                )
             if output.metrics is not None:
                 metric_rows.append(
                     _FilterMetricsRow(
@@ -192,7 +195,9 @@ def collect_ranges_parallel(
     )
     context = multiprocessing_context(runtime.process_start_method)
     worker_commit_samples = _worker_commit_samples(commit_samples)
-    outputs = tuple(context.Queue(maxsize=_WORKER_QUEUE_SIZE) for _rank in range(workers))
+    outputs = tuple(
+        context.Queue(maxsize=_WORKER_QUEUE_SIZE) for _rank in range(workers)
+    )
     logs_dir = run_logs_dir()
     worker_logs_dir = logs_dir / "filter"
     processes = [
@@ -222,7 +227,7 @@ def collect_ranges_parallel(
         )
         for rank, worker in enumerate(worker_configs(devices[:workers]))
     ]
-    started: list[multiprocessing.Process] = []
+    started: list[ProcessHandle] = []
     completed = False
     try:
         for process in processes:
@@ -346,7 +351,9 @@ def collect_indexed_shard(
                 continue
             output = decision(predicate(sample), metrics=write_metrics)
             if write_metrics and output.metrics is None:
-                raise TypeError("filter predicate must return FilterDecision when metrics=True.")
+                raise TypeError(
+                    "filter predicate must return FilterDecision when metrics=True."
+                )
             rows.append(
                 _FilterRow(
                     index=index,
@@ -355,7 +362,9 @@ def collect_indexed_shard(
                 )
             )
             if len(rows) == commit_samples:
-                yield _IndexedFilterChunk(rank=int(os.environ["RANK"]), rows=tuple(rows))
+                yield _IndexedFilterChunk(
+                    rank=int(os.environ["RANK"]), rows=tuple(rows)
+                )
                 rows = []
     if rows:
         yield _IndexedFilterChunk(rank=int(os.environ["RANK"]), rows=tuple(rows))
@@ -403,7 +412,7 @@ def _filter_loader(
 
 def _ordered_worker_chunks(
     outputs: Sequence[multiprocessing.Queue],
-    processes: list[multiprocessing.Process],
+    processes: Sequence[ProcessHandle],
     *,
     workers: int,
     sample_count: int,
@@ -491,7 +500,7 @@ def _ordered_worker_targets(
 
 def _read_worker_message(
     output: multiprocessing.Queue,
-    processes: list[multiprocessing.Process],
+    processes: Sequence[ProcessHandle],
     buffer: dict[int, _FilterRow],
     done: set[int],
     *,
@@ -503,17 +512,16 @@ def _read_worker_message(
     try:
         message = output.get(timeout=0.2)
     except queue.Empty:
-        dead = [
-            process
-            for process in processes
-            if process.exitcode not in (None, 0)
-        ]
+        dead = [process for process in processes if process.exitcode not in (None, 0)]
         if dead:
             details = ", ".join(
                 f"{process.name} exited with {process.exitcode}" for process in dead
             )
             raise RuntimeError(f"Filter worker exited early: {details}.")
-        if worker_timeout is not None and time.monotonic() - last_message > worker_timeout:
+        if (
+            worker_timeout is not None
+            and time.monotonic() - last_message > worker_timeout
+        ):
             raise TimeoutError(f"Filter worker {rank} timed out.")
         return last_message
     last_message = time.monotonic()
@@ -559,8 +567,4 @@ def _chunk_from_rows(rows: Sequence[_FilterRow]) -> _FilterChunk:
 
 
 def _done_message(message: object) -> bool:
-    return (
-        isinstance(message, tuple)
-        and len(message) == 3
-        and message[0] == _DONE
-    )
+    return isinstance(message, tuple) and len(message) == 3 and message[0] == _DONE

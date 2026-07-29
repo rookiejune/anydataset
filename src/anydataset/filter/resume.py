@@ -188,7 +188,7 @@ def _read_fragment_chunk(path: Path, *, metrics: bool) -> _FilterChunk:
                 f"Duplicate filter resume fragment partition label: {label!r}."
             )
         indexes = read_index_rows(path / str(item["file"]))
-        if int(item["count"]) != len(indexes):
+        if _count(item["count"], "partition count") != len(indexes):
             raise ValueError(f"Filter resume fragment {path} partition count mismatch.")
         partitions[label] = indexes
         for index in indexes:
@@ -232,7 +232,7 @@ def _fragment_metric_rows(
     if not isinstance(metrics, Mapping):
         raise ValueError("Filter resume fragment metrics must be a mapping.")
     raw_file = metrics.get("file")
-    count = int(metrics.get("count", 0))
+    count = _count(metrics.get("count", 0), "metrics count")
     if raw_file is None:
         if count != 0:
             raise ValueError("Filter resume fragment metrics count mismatch.")
@@ -245,7 +245,7 @@ def _fragment_metric_rows(
 
 def _metric_row(row: Mapping[str, object]) -> _FilterMetricsRow:
     return _FilterMetricsRow(
-        index=int(row["index"]),
+        index=_scan_index(row["index"]),
         label=str(row["label"]),
         metrics=_json_mapping(row["metrics"]),
     )
@@ -305,6 +305,12 @@ def _partition_entry(value: object) -> Mapping[str, object]:
 
 
 def _scan_index(value: object) -> int:
-    if not isinstance(value, int):
+    if isinstance(value, bool) or not isinstance(value, int):
         raise ValueError("Filter resume fragment scan index must be an integer.")
+    return value
+
+
+def _count(value: object, name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError(f"Filter resume fragment {name} must be non-negative.")
     return value

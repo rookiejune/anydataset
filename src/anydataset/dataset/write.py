@@ -18,6 +18,7 @@ from .._progress import Progress, iter_with_progress, put_progress, watch_worker
 from .._validation import non_negative_int, optional_positive_int, positive_int
 from .._parallel import (
     DeviceWorker,
+    ProcessHandle,
     free_port,
     indexed_loader,
     multiprocessing_context,
@@ -79,7 +80,9 @@ class DatasetStoreWriter:
             return self._write_single(dataset)
 
         if dataset is not None:
-            raise TypeError("write accepts either dataset or dataset_factory, not both.")
+            raise TypeError(
+                "write accepts either dataset or dataset_factory, not both."
+            )
         if self.num_shards == 1 and self.num_workers == 0:
             return self._write_single(dataset_factory())
         return self._write_parts(dataset_factory)
@@ -99,7 +102,7 @@ class DatasetStoreWriter:
             dataset_factory,
             context="parallel dataset write",
         )
-        output_dir = _prepare_output_dir(self.output_dir.expanduser())
+        output_dir = _prepare_output_dir(Path(self.output_dir).expanduser())
         if self.num_workers > 0:
             _prepare_loader_dataset(dataset_factory)
         with TemporaryDirectory(
@@ -125,7 +128,7 @@ class DatasetStoreWriter:
                 target=_write_worker,
                 args=(
                     _WorkerConfig(
-                        output_dir=self.output_dir,
+                        output_dir=Path(self.output_dir),
                         dataset_id=self.dataset_id or _dataset_id(self.output_dir),
                         split=self.split,
                         views=self.views,
@@ -145,7 +148,7 @@ class DatasetStoreWriter:
             )
             for shard_id in range(self.num_shards)
         ]
-        started: list[multiprocessing.Process] = []
+        started: list[ProcessHandle] = []
         completed = False
         try:
             for worker in workers:

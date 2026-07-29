@@ -154,6 +154,8 @@ def ensure_filter(
         )
         if generation is not None:
             return generation
+        if reason is None:
+            raise RuntimeError("filter cache miss must include a reason.")
         log_filter_cache_miss(
             cache_path,
             rule,

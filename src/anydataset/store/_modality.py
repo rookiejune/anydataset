@@ -36,7 +36,9 @@ def with_modality_provider(
     return {
         (role, out_modality): with_modality_view(
             output,
-            provider(input_views(roles, role, input_item, out_modality, reference_role)),
+            provider(
+                input_views(roles, role, input_item, out_modality, reference_role)
+            ),
         )
         for role, input_item in modality_inputs(
             roles,
@@ -93,10 +95,14 @@ def input_views(
     output: Modality,
     reference_role: Role | None,
 ) -> Mapping[View, Any]:
-    if reference_role is None:
-        return input_item.views
-    reference_item = roles[reference_role][output]
-    return {**input_item.views, **reference_item.views}
+    result: dict[View, Any] = {}
+    for key, value in input_item.views.items():
+        result[key] = value
+    if reference_role is not None:
+        reference_item = roles[reference_role][output]
+        for key, value in reference_item.views.items():
+            result[key] = value
+    return result
 
 
 def with_modality_view(
@@ -119,14 +125,22 @@ def with_modality_view(
 def _validated_output_item(view: View, item: Item) -> Item:
     if isinstance(view, AudioView) and isinstance(item, AudioItem):
         if view not in item.views:
-            raise ValueError(f"Audio provider output item is missing {view.value!r} view.")
+            raise ValueError(
+                f"Audio provider output item is missing {view.value!r} view."
+            )
         return item
     if isinstance(view, ImageView) and isinstance(item, ImageItem):
         if view not in item.views:
-            raise ValueError(f"Image provider output item is missing {view.value!r} view.")
+            raise ValueError(
+                f"Image provider output item is missing {view.value!r} view."
+            )
         return item
     if isinstance(view, TextView) and isinstance(item, TextItem):
         if view not in item.views:
-            raise ValueError(f"Text provider output item is missing {view.value!r} view.")
+            raise ValueError(
+                f"Text provider output item is missing {view.value!r} view."
+            )
         return item
-    raise TypeError("provider output item modality does not match provider output view.")
+    raise TypeError(
+        "provider output item modality does not match provider output view."
+    )

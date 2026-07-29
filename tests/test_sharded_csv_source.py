@@ -6,6 +6,8 @@ import unittest
 from functools import partial
 from unittest import mock
 
+import pyarrow.parquet as pyarrow_parquet
+
 from anydataset import (
     AnyDataset,
     IterableAnyDataset,
@@ -254,6 +256,37 @@ class ShardedCsvSourceTest(unittest.TestCase):
             for group in groups:
                 self.assertEqual(min(group) // 2, max(group) // 2)
             self.assertEqual(rank_indexes, [[0, 2, 4], [1, 3]])
+
+    def test_random_access_reuses_offsets_and_parquet_file(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            shard = Path(tmpdir) / "shard_0"
+            shard.mkdir()
+            (shard / "0.csv").write_text(
+                "value\n0\n1\n2\n3\n",
+                encoding="utf-8",
+            )
+            with mock.patch(
+                "anydataset.dataset.source.sharded_csv._PARQUET_ROW_GROUP_SIZE",
+                2,
+            ):
+                dataset = AnyDataset(Spec(source="sharded_csv", path=tmpdir))
+                prepared = dataset.dataset
+
+            with (
+                mock.patch(
+                    "anydataset.dataset.source.sharded_csv._stops",
+                    side_effect=AssertionError("row-group stops were recomputed"),
+                ),
+                mock.patch(
+                    "anydataset.dataset.source.sharded_csv.pq.ParquetFile",
+                    wraps=pyarrow_parquet.ParquetFile,
+                ) as parquet,
+            ):
+                self.assertEqual(dataset[0]["value"], "0")
+                self.assertEqual(dataset[3]["value"], "3")
+
+            self.assertEqual(parquet.call_count, 1)
+            prepared.close()
 
     def test_reuses_prepared_parquet_cache(self):
         with tempfile.TemporaryDirectory() as tmpdir:

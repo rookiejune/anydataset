@@ -19,7 +19,7 @@ ViewMap = Union[
 ViewTransform = Callable[[Mapping[ViewT, Any]], Any]
 BatchOutput = Union[Sequence[Any], Mapping[Reference, Sequence[Any]]]
 BatchViewTransform = Callable[[Batch], BatchOutput]
-ModalityTransform = Callable[[ViewMap], Any]
+ModalityTransform = Callable[[Mapping[View, Any]], Any]
 BatchModalityTransform = Callable[[Batch], BatchOutput]
 
 
@@ -41,14 +41,14 @@ class ModalityProvider(Protocol[ViewT]):
     output: ViewT
     reference_role: Role | None
 
-    def __call__(self, views: ViewMap) -> Any: ...
+    def __call__(self, views: Mapping[View, Any]) -> Any: ...
 
 
 class BatchModalityProvider(Protocol[ViewT]):
     output: ViewT
     reference_role: Role | None
 
-    def __call__(self, views: ViewMap) -> Any: ...
+    def __call__(self, views: Mapping[View, Any]) -> Any: ...
 
     def call_batch(self, batch: Batch) -> BatchOutput: ...
 
@@ -69,7 +69,9 @@ class FunctionViewProvider(Generic[ViewT]):
     def __post_init__(self) -> None:
         if not callable(self.transform_fn):
             raise TypeError("transform_fn must be callable.")
-        if self.batch_transform_fn is not None and not callable(self.batch_transform_fn):
+        if self.batch_transform_fn is not None and not callable(
+            self.batch_transform_fn
+        ):
             raise TypeError("batch_transform_fn must be callable.")
 
     def __call__(self, views: Mapping[ViewT, Any]) -> Any:
@@ -90,10 +92,12 @@ class FunctionModalityProvider(Generic[ViewT]):
     def __post_init__(self) -> None:
         if not callable(self.transform_fn):
             raise TypeError("transform_fn must be callable.")
-        if self.batch_transform_fn is not None and not callable(self.batch_transform_fn):
+        if self.batch_transform_fn is not None and not callable(
+            self.batch_transform_fn
+        ):
             raise TypeError("batch_transform_fn must be callable.")
 
-    def __call__(self, views: ViewMap) -> Any:
+    def __call__(self, views: Mapping[View, Any]) -> Any:
         return self.transform_fn(views)
 
     def call_batch(self, batch: Batch) -> BatchOutput:

@@ -6,10 +6,17 @@ from unittest import mock
 import anydataset
 import anydataset.dataset
 import pytest
+import torch
 
 from anydataset import AnyDataset, Source, Spec
 from anydataset.dataset import MapStyleABC
-from anydataset.dataset.batching import _Plan, _Record, _plans, _synchronized_plans
+from anydataset.dataset.batching import (
+    _Plan,
+    _Record,
+    _plan_counts,
+    _plans,
+    _synchronized_plans,
+)
 
 
 def _dataset(rows, *, parse_fn=lambda row: row):
@@ -238,16 +245,13 @@ def test_distributed_planning_sync_is_bounded() -> None:
             consumed.append(index)
             yield _Plan(records=(_Record(index=index, cost=1),), cost=1)
 
-    def gather(counts: list[int], local: int) -> None:
-        counts[:] = [local, 127]
-
     with (
         mock.patch("anydataset.dataset.batching.dist.is_available", return_value=True),
         mock.patch("anydataset.dataset.batching.dist.is_initialized", return_value=True),
         mock.patch("anydataset.dataset.batching.dist.get_world_size", return_value=2),
         mock.patch(
-            "anydataset.dataset.batching.dist.all_gather_object",
-            side_effect=gather,
+            "anydataset.dataset.batching._plan_counts",
+            side_effect=lambda local, _world_size: (local, 127),
         ),
         pytest.warns(RuntimeWarning, match="dropped rank-local final batches"),
     ):
@@ -255,6 +259,23 @@ def test_distributed_planning_sync_is_bounded() -> None:
 
     assert len(synchronized) == 127
     assert consumed == list(range(128))
+
+
+def test_distributed_plan_counts_use_tensor_collective() -> None:
+    def gather(output: torch.Tensor, local: torch.Tensor) -> None:
+        output.copy_(torch.tensor([int(local.item()), 127], dtype=torch.int64))
+
+    with (
+        mock.patch("anydataset.dataset.batching.dist.get_backend", return_value="gloo"),
+        mock.patch(
+            "anydataset.dataset.batching.dist.all_gather_into_tensor",
+            side_effect=gather,
+        ) as collective,
+    ):
+        counts = _plan_counts(128, 2)
+
+    assert counts == (128, 127)
+    collective.assert_called_once()
 
 
 @pytest.mark.parametrize(

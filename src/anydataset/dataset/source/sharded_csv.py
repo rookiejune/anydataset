@@ -16,8 +16,10 @@ from pathlib import Path
 from typing import Any, Protocol
 
 import pyarrow as pa
-import pyarrow.csv as pa_csv
 import pyarrow.parquet as pq
+from pyarrow.csv import ConvertOptions  # pyright: ignore[reportPrivateImportUsage]
+from pyarrow.csv import ReadOptions  # pyright: ignore[reportPrivateImportUsage]
+from pyarrow.csv import read_csv  # pyright: ignore[reportPrivateImportUsage]
 
 from ..._compat import strict_zip
 from ..._parallel import multiprocessing_context
@@ -35,6 +37,7 @@ _CACHE_MANIFEST = "sharded_csv_parquet.json"
 _CACHE_DIR = "sharded_csv_parquet"
 _PARQUET_ROW_GROUP_SIZE = 4096
 _MAX_CACHED_ROW_GROUPS = 2
+_MAX_OPEN_PARQUET_FILES = 8
 _PREPARE_LOCK_TIMEOUT = 3600.0
 _PREPARE_LOCK_POLL = 0.2
 
@@ -55,6 +58,7 @@ class CsvFile:
     start: int
     stop: int
     row_groups: tuple[int, ...]
+    row_group_stops: tuple[int, ...]
 
 
 class ShardedCsvSource:
@@ -95,7 +99,32 @@ class ShardedCsvDataset:
         self._row_group_cache: OrderedDict[
             tuple[Path, int], tuple[dict[str, str], ...]
         ] = OrderedDict()
+        self._parquet_cache: OrderedDict[Path, Any] = OrderedDict()
+        self._pid = os.getpid()
         self._ignored_csv_warning_paths: set[Path] = set()
+
+    def __getstate__(self) -> dict[str, Any]:
+        state = dict(self.__dict__)
+        state["_row_group_cache"] = OrderedDict()
+        state["_parquet_cache"] = OrderedDict()
+        state["_pid"] = os.getpid()
+        return state
+
+    def __setstate__(self, state: dict[str, Any]) -> None:
+        self.__dict__.update(state)
+
+    def close(self) -> None:
+        parquets = tuple(self._parquet_cache.values())
+        self._parquet_cache.clear()
+        self._row_group_cache.clear()
+        for parquet in parquets:
+            parquet.close()
+
+    def __del__(self) -> None:
+        try:
+            self.close()
+        except Exception:
+            pass
 
     def prepare(self) -> None:
         self._files()
@@ -213,12 +242,14 @@ class ShardedCsvDataset:
         for record in records:
             count = int(record["row_count"])
             stop = start + count
+            row_groups = tuple(int(value) for value in record["row_groups"])
             files.append(
                 CsvFile(
                     path=self._cache_dir() / str(record["part"]),
                     start=start,
                     stop=stop,
-                    row_groups=tuple(int(value) for value in record["row_groups"]),
+                    row_groups=row_groups,
+                    row_group_stops=_stops(row_groups),
                 )
             )
             start = stop
@@ -328,7 +359,10 @@ class ShardedCsvDataset:
         if path is None or not path.is_file():
             return {}
         data = _read_json(path)
-        if not isinstance(data, Mapping) or data.get("schema_version") != _CACHE_SCHEMA_VERSION:
+        if (
+            not isinstance(data, Mapping)
+            or data.get("schema_version") != _CACHE_SCHEMA_VERSION
+        ):
             return {}
         records = data.get("files")
         if not isinstance(records, list):
@@ -348,19 +382,43 @@ class ShardedCsvDataset:
         return self.cache_path / _CACHE_DIR
 
     def _read_parquet_row(self, file: CsvFile, index: int) -> dict[str, str]:
-        stops = _stops(file.row_groups)
+        self._reset_after_fork()
+        stops = file.row_group_stops
         row_group = bisect_right(stops, index)
         start = 0 if row_group == 0 else stops[row_group - 1]
         key = (file.path, row_group)
         rows = self._row_group_cache.get(key)
         if rows is None:
-            rows = tuple(pq.ParquetFile(file.path).read_row_group(row_group).to_pylist())
+            rows = tuple(self._parquet(file.path).read_row_group(row_group).to_pylist())
             self._row_group_cache[key] = rows
             while len(self._row_group_cache) > _MAX_CACHED_ROW_GROUPS:
                 self._row_group_cache.popitem(last=False)
         else:
             self._row_group_cache.move_to_end(key)
         return rows[index - start]
+
+    def _parquet(self, path: Path):
+        parquet = self._parquet_cache.get(path)
+        if parquet is not None:
+            self._parquet_cache.move_to_end(path)
+            return parquet
+        parquet = pq.ParquetFile(path)
+        self._parquet_cache[path] = parquet
+        while len(self._parquet_cache) > _MAX_OPEN_PARQUET_FILES:
+            _path, evicted = self._parquet_cache.popitem(last=False)
+            evicted.close()
+        return parquet
+
+    def _reset_after_fork(self) -> None:
+        pid = os.getpid()
+        if pid == self._pid:
+            return
+        parquets = tuple(self._parquet_cache.values())
+        self._parquet_cache = OrderedDict()
+        self._row_group_cache = OrderedDict()
+        self._pid = pid
+        for parquet in parquets:
+            parquet.close()
 
     def _csv_options(self) -> dict[str, Any]:
         return {}
@@ -489,10 +547,10 @@ def _conversion_progress(
 def _convert_file_job(job: tuple[int, Path, Path]) -> tuple[int, JsonMapping]:
     index, source, target = job
     names = _csv_names(source)
-    table = pa_csv.read_csv(
+    table = read_csv(
         source,
-        read_options=pa_csv.ReadOptions(use_threads=False),
-        convert_options=pa_csv.ConvertOptions(
+        read_options=ReadOptions(use_threads=False),
+        convert_options=ConvertOptions(
             column_types={name: pa.string() for name in names},
             strings_can_be_null=False,
         ),
@@ -592,14 +650,10 @@ def _warn_missing_shards(base: Path, shards: Sequence[CsvShard]) -> None:
         return
 
     missing_names = ", ".join(
-        f"shard_{start}"
-        if start == stop
-        else f"shard_{start}..shard_{stop}"
+        f"shard_{start}" if start == stop else f"shard_{start}..shard_{stop}"
         for start, stop in missing
     )
-    _write_warning(
-        f"Missing sharded CSV directories under {base}: {missing_names}."
-    )
+    _write_warning(f"Missing sharded CSV directories under {base}: {missing_names}.")
 
 
 def _missing_shard_ranges(

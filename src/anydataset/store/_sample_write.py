@@ -98,7 +98,19 @@ def sample_view_value(sample: Sample, view: tuple[Role, Modality, View]) -> Any:
     item = sample.get((role, modality))
     if item is None:
         return None
-    return item.views.get(key)
+    if modality is Modality.AUDIO:
+        if not isinstance(item, AudioItem) or not isinstance(key, AudioView):
+            raise TypeError("audio store view must reference an AudioItem.")
+        return item.views.get(key)
+    if modality is Modality.IMAGE:
+        if not isinstance(item, ImageItem) or not isinstance(key, ImageView):
+            raise TypeError("image store view must reference an ImageItem.")
+        return item.views.get(key)
+    if modality is Modality.TEXT:
+        if not isinstance(item, TextItem) or not isinstance(key, TextView):
+            raise TypeError("text store view must reference a TextItem.")
+        return item.views.get(key)
+    raise TypeError(f"Unsupported store modality: {modality!r}.")
 
 
 def validate_item(modality: Modality, item: Item) -> None:

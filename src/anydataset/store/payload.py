@@ -7,7 +7,7 @@ from collections import OrderedDict
 from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, cast
 
 import torch
 
@@ -100,8 +100,11 @@ class PayloadCache:
 
         archive = tarfile.open(path, "r")
         try:
+            fileno = getattr(archive.fileobj, "fileno", None)
+            if not callable(fileno):
+                raise OSError(f"View shard has no file descriptor: {path}")
             opened_fingerprint = _stat_fingerprint(
-                os.fstat(archive.fileobj.fileno())
+                os.fstat(cast(Callable[[], int], fileno)())
             )
             if opened_fingerprint != _stat_fingerprint(path.stat()):
                 raise ValueError(f"View shard changed while opening: {path}")

@@ -1,19 +1,19 @@
 from __future__ import annotations
 
-import random
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Iterable, Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, cast, runtime_checkable
 
 from torch.utils.data import Dataset, IterableDataset
 
 from .._parallel import iter_indexed_shard as iter_source_indexed_shard
 from .._sharding import Shard, runtime_shard, validate_shard
-from ..types import Preset, Spec
+from ..types import Preset, Source, Spec
 from ..types._sample import select as select_sample
 from ..types.item import Modality, Role, View
 from ..resolver import resolve_dataset
+from ._shuffle import index_groups, shuffle_index_groups
 
 if TYPE_CHECKING:
     from ..cache import CacheManager
@@ -29,6 +29,10 @@ _DEFAULT_SHUFFLE_GROUP_SAMPLES = 4096
 @runtime_checkable
 class _IndexGrouped(Protocol):
     def iter_index_groups(self) -> Iterator[Sequence[int]]: ...
+
+
+class _RuntimeSharded(Protocol):
+    def iter_runtime_shard(self, shard: Shard) -> Iterator[Sample]: ...
 
 
 class _Base(ABC):
@@ -83,13 +87,14 @@ class _Base(ABC):
         return state
 
     def __setstate__(self, state: dict[str, Any]) -> None:
-        self.__dict__.update(state)
+        vars(self).update(state)
         self._cache_manager = None
         self._dataset = None
 
     def __iter__(self) -> Iterator[Sample]:
         shard = runtime_shard()
-        yield from self.iter_runtime_shard(shard)
+        dataset = cast(_RuntimeSharded, self)
+        yield from dataset.iter_runtime_shard(shard)
 
     def transform_sample(self, sample: Sample) -> Sample:
         if self.transforms is None:
@@ -165,7 +170,8 @@ class IterableAnyDataset(_Base, IterableDataset):
         dataset = self.dataset
         shard = getattr(dataset, "shard", None)
         if callable(shard):
-            yield from shard(num_shards=num_shards, index=shard_id)
+            method = cast(Callable[..., Iterator[Any]], shard)
+            yield from method(num_shards=num_shards, index=shard_id)
             return
 
         yield from _iter_modulo(self.iter_rows(), num_shards, shard_id)
@@ -254,8 +260,8 @@ class MapStyleABC(Dataset, ABC):
         if not shuffle:
             yield range(rank, len(self), num_replicas)
             return
-        yield from _shuffle_index_groups(
-            _index_groups(len(self), _DEFAULT_SHUFFLE_GROUP_SAMPLES),
+        yield from shuffle_index_groups(
+            index_groups(len(self), _DEFAULT_SHUFFLE_GROUP_SAMPLES),
             seed=seed,
             epoch=epoch,
             num_replicas=num_replicas,
@@ -331,6 +337,41 @@ class MapStyleABC(Dataset, ABC):
 
 
 class AnyDataset(_Base, MapStyleABC):
+    @property
+    def selected_store_views(
+        self,
+    ) -> tuple[tuple[Role, Modality, View], ...] | None:
+        if self.spec.source != Source.STORE:
+            return None
+        from .source.store import StoreSource
+
+        source = self.source
+        if not isinstance(source, StoreSource):
+            raise TypeError("store datasets require StoreSource.")
+        return source.views
+
+    @classmethod
+    def from_store(
+        cls,
+        path: str | Path,
+        split: str | None = None,
+        *,
+        views: tuple[tuple[Role, Modality, View], ...] | None = None,
+        transforms: Transforms | None = None,
+    ) -> AnyDataset:
+        """Open a canonical store while loading only the selected views."""
+
+        if views is not None and not isinstance(views, tuple):
+            raise TypeError("views must be a tuple or None.")
+        from .source.store import StoreSource
+
+        dataset = cls(
+            Spec(source=Source.STORE, path=str(path), split=split),
+            transforms=transforms,
+        )
+        dataset._source = StoreSource(views)
+        return dataset
+
     @classmethod
     def preset(
         cls,
@@ -375,7 +416,7 @@ class AnyDataset(_Base, MapStyleABC):
             )
             return
         if isinstance(dataset, _IndexGrouped):
-            yield from _shuffle_index_groups(
+            yield from shuffle_index_groups(
                 dataset.iter_index_groups(),
                 shuffle=shuffle,
                 seed=seed,
@@ -392,21 +433,33 @@ class AnyDataset(_Base, MapStyleABC):
             rank=rank,
         )
 
-    def iter_indexed_range(self, start: int, stop: int):
+    def iter_indexed_range(
+        self,
+        start: int,
+        stop: int,
+    ) -> Iterator[tuple[int, Sample]]:
         if start < 0 or stop < start or stop > len(self):
             raise ValueError("range must satisfy 0 <= start <= stop <= len(dataset).")
 
         dataset = self.dataset
         iter_indexed = getattr(dataset, "iter_indexed_range", None)
         if callable(iter_indexed):
-            for index, row in iter_indexed(start, stop):
+            method = cast(
+                Callable[[int, int], Iterator[tuple[int, Any]]],
+                iter_indexed,
+            )
+            for index, row in method(start, stop):
                 yield index, self.transform_sample(self.parse_fn(row))
             return
 
         for index in range(start, stop):
             yield index, self[index]
 
-    def iter_indexed_shard(self, num_shards: int, shard_id: int):
+    def iter_indexed_shard(
+        self,
+        num_shards: int,
+        shard_id: int,
+    ) -> Iterator[tuple[int, Sample]]:
         for index, row in iter_source_indexed_shard(
             self.dataset,
             num_shards,
@@ -427,47 +480,6 @@ def _iter_modulo(
     for index, row in enumerate(rows):
         if index % num_shards == shard_id:
             yield row
-
-
-def _index_groups(length: int, size: int) -> Iterator[range]:
-    for start in range(0, length, size):
-        yield range(start, min(start + size, length))
-
-
-def _shuffle_index_groups(
-    groups: Iterable[Sequence[int]],
-    *,
-    shuffle: bool = True,
-    seed: int,
-    epoch: int,
-    num_replicas: int,
-    rank: int,
-) -> Iterator[Sequence[int]]:
-    if shuffle:
-        shuffled = [group for group in groups if len(group) > 0]
-        rng = random.Random(seed + epoch)
-        rng.shuffle(shuffled)
-        ordered: Iterable[Sequence[int]] = shuffled
-    else:
-        ordered = groups
-        rng = None
-
-    position = 0
-    for group in ordered:
-        size = len(group)
-        if size == 0:
-            continue
-        group_seed = None if rng is None else rng.getrandbits(64)
-        offset = (rank - position) % num_replicas
-        position += size
-        if offset >= size:
-            continue
-        if group_seed is None:
-            yield group[offset::num_replicas]
-            continue
-        indexes = list(group)
-        random.Random(group_seed).shuffle(indexes)
-        yield indexes[offset::num_replicas]
 
 
 def _write_dataset(

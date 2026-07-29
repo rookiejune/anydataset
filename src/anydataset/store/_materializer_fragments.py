@@ -89,7 +89,8 @@ class FragmentBatchWriter:
                 for index, sample in batch
             )
 
-        indexes, samples = strict_zip(*batch)
+        indexes = tuple(index for index, _sample in batch)
+        samples = tuple(sample for _index, sample in batch)
         outputs = tuple(
             self.materializer._resilient_samples_with_batch_provider(
                 samples,
@@ -105,9 +106,12 @@ class FragmentBatchWriter:
         sink: BackgroundWriteSink[FragmentWriteJob],
         pending_outputs: list[tuple[int, Sample]],
     ) -> None:
-        while len(pending_outputs) >= self.materializer.commit_samples:
-            self._submit(sink, pending_outputs[: self.materializer.commit_samples])
-            del pending_outputs[: self.materializer.commit_samples]
+        commit_samples = self.materializer.commit_samples
+        if commit_samples is None:
+            raise RuntimeError("materializer commit_samples was not initialized.")
+        while len(pending_outputs) >= commit_samples:
+            self._submit(sink, pending_outputs[:commit_samples])
+            del pending_outputs[:commit_samples]
 
     def _flush_remaining(
         self,

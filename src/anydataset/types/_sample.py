@@ -1,11 +1,16 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
-from typing import Any
+from collections.abc import Callable, Mapping
+from typing import Any, TypeVar
 
 import torch
 
-from .item import Item, Sample, Schema
+from .._compat import StrEnum
+from .item import AudioItem, ImageItem, Item, Sample, Schema, TextItem, _Item
+
+ViewT = TypeVar("ViewT", bound=StrEnum)
+MetaT = TypeVar("MetaT", bound=StrEnum)
+ItemT = TypeVar("ItemT", bound=Item)
 
 
 def select(sample: Sample, schema: Schema) -> Sample:
@@ -39,6 +44,23 @@ def combine_items(
     if type(left) is not type(right):
         raise TypeError(f"{context} item {ref!r} has incompatible types.")
 
+    if isinstance(left, AudioItem) and isinstance(right, AudioItem):
+        return _combine_typed_items(left, right, AudioItem, ref=ref, context=context)
+    if isinstance(left, ImageItem) and isinstance(right, ImageItem):
+        return _combine_typed_items(left, right, ImageItem, ref=ref, context=context)
+    if isinstance(left, TextItem) and isinstance(right, TextItem):
+        return _combine_typed_items(left, right, TextItem, ref=ref, context=context)
+    raise TypeError(f"{context} item {ref!r} has incompatible types.")
+
+
+def _combine_typed_items(
+    left: _Item[ViewT, MetaT],
+    right: _Item[ViewT, MetaT],
+    factory: Callable[..., ItemT],
+    *,
+    ref: object,
+    context: str,
+) -> ItemT:
     conflicts = set(left.views) & set(right.views)
     if conflicts:
         view = min(conflicts, key=lambda value: value.value)
@@ -47,12 +69,10 @@ def combine_items(
     meta = dict(left.meta)
     for key, value in right.meta.items():
         if key in meta and not values_equal(meta[key], value):
-            raise ValueError(
-                f"{context} item {ref!r} metadata conflict for {key!r}."
-            )
+            raise ValueError(f"{context} item {ref!r} metadata conflict for {key!r}.")
         meta[key] = value
 
-    return type(left)(views={**left.views, **right.views}, meta=meta)
+    return factory(views={**left.views, **right.views}, meta=meta)
 
 
 def values_equal(left: Any, right: Any) -> bool:

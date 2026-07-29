@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import pickle
 import shutil
 import tempfile
 import unittest
@@ -464,7 +465,7 @@ class StoreSourceTest(unittest.TestCase):
                 }
                 self.assertEqual(len(shards), 1)
 
-    def test_store_shuffle_splits_distributed_ranks_by_payload_group(self):
+    def test_store_shuffle_splits_each_payload_group_across_ranks(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             output = Path(tmpdir) / "dataset"
             DatasetWriter(
@@ -498,8 +499,99 @@ class StoreSourceTest(unittest.TestCase):
                 )
             )
 
-            self.assertEqual(rank0, [[0, 1], [4, 5]])
-            self.assertEqual(rank1, [[2, 3]])
+            self.assertEqual([list(group) for group in rank0], [[0], [2], [4]])
+            self.assertEqual([list(group) for group in rank1], [[1], [3], [5]])
+
+    def test_store_shuffle_keeps_ranks_nonempty_when_groups_are_fewer(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output = Path(tmpdir) / "dataset"
+            DatasetWriter(
+                output,
+                dataset_id="toy-audio",
+                max_shard_samples=100,
+            ).write(
+                [
+                    _audio_sample(waveform=torch.tensor([[float(index)]]))
+                    for index in range(6)
+                ]
+            )
+            dataset = read_store_dataset(output)
+
+            ranks = [
+                [
+                    index
+                    for group in dataset._shuffle(
+                        shuffle=False,
+                        seed=0,
+                        epoch=0,
+                        num_replicas=4,
+                        rank=rank,
+                    )
+                    for index in group
+                ]
+                for rank in range(4)
+            ]
+
+            self.assertEqual(ranks, [[0, 4], [1, 5], [2], [3]])
+
+    def test_store_shuffle_caches_payload_groups_until_manifest_changes(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output = Path(tmpdir) / "dataset"
+            DatasetWriter(
+                output,
+                dataset_id="toy-audio",
+                max_shard_samples=2,
+            ).write(
+                [
+                    _audio_sample(waveform=torch.tensor([[float(index)]]))
+                    for index in range(4)
+                ]
+            )
+            dataset = read_store_dataset(output)
+            view = (Role.DEFAULT, Modality.AUDIO, AudioView.WAVEFORM)
+
+            with mock.patch(
+                "anydataset.store.reader._scan_payload_groups",
+                wraps=__import__(
+                    "anydataset.store.reader",
+                    fromlist=["_scan_payload_groups"],
+                )._scan_payload_groups,
+            ) as scan:
+                list(
+                    dataset._shuffle(
+                        shuffle=False,
+                        seed=0,
+                        epoch=0,
+                        num_replicas=1,
+                        rank=0,
+                    )
+                )
+                list(
+                    dataset._shuffle(
+                        shuffle=True,
+                        seed=0,
+                        epoch=1,
+                        num_replicas=1,
+                        rank=0,
+                    )
+                )
+                manifest_path = view_manifest_parquet_path(output, view)
+                manifest_stat = manifest_path.stat()
+                os.utime(
+                    manifest_path,
+                    ns=(manifest_stat.st_atime_ns, manifest_stat.st_mtime_ns + 1),
+                )
+                list(
+                    dataset._shuffle(
+                        shuffle=False,
+                        seed=0,
+                        epoch=2,
+                        num_replicas=1,
+                        rank=0,
+                    )
+                )
+
+            self.assertEqual(scan.call_count, 2)
 
     def test_store_exposes_no_public_loader_or_sampler(self):
         self.assertTrue(
@@ -645,6 +737,32 @@ class StoreSourceTest(unittest.TestCase):
 
             dataset = read_store_dataset(output, views=(waveform_view,))
             sample = dataset[0]
+
+        audio = sample[Role.DEFAULT, Modality.AUDIO]
+        self.assertEqual(set(audio.views), {AudioView.WAVEFORM})
+        self.assertTrue(torch.equal(audio.views[AudioView.WAVEFORM][0], waveform))
+
+    def test_anydataset_from_store_preserves_selected_views_when_pickled(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            source = root / "source.wav"
+            source.write_bytes(b"RIFF-data")
+            output = root / "dataset"
+            waveform = torch.tensor([[1.0, 2.0]])
+            DatasetWriter(output, dataset_id="multi-view").write(
+                [
+                    _audio_sample(
+                        waveform=waveform,
+                        file=str(source),
+                        sample_rate=16000,
+                    )
+                ]
+            )
+            waveform_view = (Role.DEFAULT, Modality.AUDIO, AudioView.WAVEFORM)
+            dataset = AnyDataset.from_store(output, views=(waveform_view,))
+
+            restored = pickle.loads(pickle.dumps(dataset))
+            sample = restored[0]
 
         audio = sample[Role.DEFAULT, Modality.AUDIO]
         self.assertEqual(set(audio.views), {AudioView.WAVEFORM})

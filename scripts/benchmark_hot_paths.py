@@ -67,11 +67,16 @@ def main() -> None:
             ),
             repeats=args.repeats,
         ),
-        "store_reader": bench_store_reader_variants(args),
-        "store_payload_read": run_repeated(
-            lambda root: bench_store_payload_read(root, args),
+        "sharded_csv_lookup": run_repeated(
+            lambda root: bench_sharded_csv_lookup(
+                root,
+                rows_per_file=max(args.csv_rows_per_file, 4097),
+            ),
             repeats=args.repeats,
         ),
+        "store_reader": bench_store_reader_variants(args),
+        "store_shuffle": bench_store_shuffle_variants(args),
+        "store_payload_read": bench_store_payload_read_variants(args),
         "indexed_loader": bench_indexed_loader_variants(args),
         "filter_parallel": run_repeated(
             lambda root: bench_filter_parallel(
@@ -132,9 +137,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--writer-variants",
         default="inline,thread,process_spawn,process_fork",
-        help=(
-            "Comma-separated variants: inline,thread,process_spawn,process_fork."
-        ),
+        help=("Comma-separated variants: inline,thread,process_spawn,process_fork."),
     )
     return parser.parse_args()
 
@@ -286,6 +289,44 @@ def bench_sharded_csv(
     )
 
 
+def bench_sharded_csv_lookup(
+    root: Path,
+    *,
+    rows_per_file: int,
+) -> Measurement:
+    csv_root = root / "csv-lookup"
+    write_csv_dataset(
+        csv_root,
+        csv_shards=1,
+        files_per_shard=1,
+        rows_per_file=rows_per_file,
+    )
+    dataset = ShardedCsvSource().prepare(
+        Spec(source="sharded_csv", path=str(csv_root)),
+        root / "csv-lookup-cache",
+    )
+    file = dataset._files()[0]
+    if len(file.row_groups) < 2:
+        raise RuntimeError("CSV lookup benchmark requires multiple row groups.")
+    second_group = file.row_groups[0]
+    indexes = (0, second_group, 1, second_group, 0, second_group)
+
+    start = time.perf_counter()
+    rows = tuple(dataset[index] for index in indexes)
+    seconds = time.perf_counter() - start
+    return Measurement(
+        seconds=seconds,
+        detail={
+            "rows_per_file": rows_per_file,
+            "row_groups": len(file.row_groups),
+            "lookups": len(indexes),
+            "open_parquet_files": len(dataset._parquet_cache),
+            "cached_row_groups": len(dataset._row_group_cache),
+            "checksum": sum(int(row["id"]) for row in rows),
+        },
+    )
+
+
 def bench_store_reader_variants(args: argparse.Namespace) -> dict[str, Any]:
     return {
         "lazy_all": run_repeated(
@@ -345,9 +386,84 @@ def bench_store_reader(
     )
 
 
+def bench_store_shuffle_variants(args: argparse.Namespace) -> dict[str, Any]:
+    return {
+        mode: run_repeated(
+            lambda root, mode=mode: bench_store_shuffle(root, args, mode),
+            repeats=args.repeats,
+        )
+        for mode in ("first", "cached")
+    }
+
+
+def bench_store_shuffle(
+    root: Path,
+    args: argparse.Namespace,
+    mode: str,
+) -> Measurement:
+    output_dir = root / "shuffle"
+    DatasetWriter(
+        output_dir,
+        dataset_id="bench-shuffle",
+        split="train",
+        max_shard_samples=args.store_max_shard_samples,
+    ).write(
+        synthetic_sample(index, args.store_payload_bytes)
+        for index in range(args.store_samples)
+    )
+    dataset = read_store_dataset(output_dir)
+    if mode == "cached":
+        tuple(
+            dataset._shuffle(
+                shuffle=True,
+                seed=13,
+                epoch=0,
+                num_replicas=4,
+                rank=0,
+            )
+        )
+    elif mode != "first":
+        raise KeyError(mode)
+
+    start = time.perf_counter()
+    groups = tuple(
+        tuple(group)
+        for group in dataset._shuffle(
+            shuffle=True,
+            seed=13,
+            epoch=0,
+            num_replicas=4,
+            rank=0,
+        )
+    )
+    seconds = time.perf_counter() - start
+    return Measurement(
+        seconds=seconds,
+        detail={
+            "mode": mode,
+            "samples": len(dataset),
+            "rank_groups": len(groups),
+            "rank_samples": sum(len(group) for group in groups),
+            "checksum": sum(index for group in groups for index in group),
+            "payload_group_cache": dataset._payload_group_cache.groups is not None,
+        },
+    )
+
+
+def bench_store_payload_read_variants(args: argparse.Namespace) -> dict[str, Any]:
+    return {
+        mode: run_repeated(
+            lambda root, mode=mode: bench_store_payload_read(root, args, mode),
+            repeats=args.repeats,
+        )
+        for mode in ("all_views", "selected_view")
+    }
+
+
 def bench_store_payload_read(
     root: Path,
     args: argparse.Namespace,
+    mode: str,
 ) -> Measurement:
     output_dir = root / "payload-reader"
     DatasetWriter(
@@ -356,24 +472,37 @@ def bench_store_payload_read(
         split="train",
         max_shard_samples=args.store_max_shard_samples,
     ).write(
-        synthetic_sample(index, args.store_payload_bytes)
+        synthetic_multiview_sample(index, args.store_payload_bytes)
         for index in range(args.store_samples)
     )
-    dataset = read_store_dataset(output_dir)
+    written_views = 2
+    if mode == "all_views":
+        selected = None
+    elif mode == "selected_view":
+        selected = ((Role.DEFAULT, Modality.TEXT, TextView.TEXT),)
+    else:
+        raise KeyError(mode)
+    dataset = read_store_dataset(output_dir, views=selected)
 
     start = time.perf_counter()
-    payload_reads = 0
     checksum = 0
     for index in range(len(dataset)):
-        text = dataset[index][Role.DEFAULT, Modality.TEXT].views[TextView.TEXT]
-        payload_reads += 1
+        item = dataset[index][Role.DEFAULT, Modality.TEXT]
+        if not isinstance(item, TextItem):
+            raise TypeError("payload benchmark expected a TextItem.")
+        text = item.views[TextView.TEXT]
         checksum += index + len(text)
     seconds = time.perf_counter() - start
+    payload_reads = len(dataset) * len(dataset.views)
     return Measurement(
         seconds=seconds,
         detail={
+            "mode": mode,
             "samples": len(dataset),
             "payload_reads": payload_reads,
+            "selected_views": len(dataset.views),
+            "skipped_payload_reads": len(dataset)
+            * (written_views - len(dataset.views)),
             "payload_bytes": args.store_payload_bytes,
             "checksum": checksum,
             "max_shard_samples": args.store_max_shard_samples,
@@ -540,7 +669,10 @@ def writer_variants(value: str) -> tuple[str, ...]:
         raise ValueError(f"Unknown writer pipeline variants: {unknown}.")
     if len(output) == 0:
         raise ValueError("writer_variants must contain at least one variant.")
-    if "process_fork" in output and "fork" not in multiprocessing.get_all_start_methods():
+    if (
+        "process_fork" in output
+        and "fork" not in multiprocessing.get_all_start_methods()
+    ):
         return tuple(variant for variant in output if variant != "process_fork")
     return output
 
@@ -803,6 +935,17 @@ def synthetic_sample(index: int, payload_bytes: int) -> Sample:
     return {
         (Role.DEFAULT, Modality.TEXT): TextItem(
             views={TextView.TEXT: synthetic_payload(index, payload_bytes)}
+        )
+    }
+
+
+def synthetic_multiview_sample(index: int, payload_bytes: int) -> Sample:
+    return {
+        (Role.DEFAULT, Modality.TEXT): TextItem(
+            views={
+                TextView.TEXT: synthetic_payload(index, payload_bytes),
+                TextView.SPEAKERS: f"speaker-{index % 8}",
+            }
         )
     }
 

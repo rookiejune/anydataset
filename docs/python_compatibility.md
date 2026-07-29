@@ -21,6 +21,8 @@
 ```bash
 PYTHON=/path/to/python3.9
 PYTHONPYCACHEPREFIX=/tmp/anydataset-pycache "$PYTHON" -m compileall -q src tests examples
+"$PYTHON" -m ruff check src tests scripts examples
+"$PYTHON" -m basedpyright --pythonpath "$PYTHON"
 PYTHONPYCACHEPREFIX=/tmp/anydataset-pycache PYTHONPATH=src "$PYTHON" -m pytest -q
 ```
 

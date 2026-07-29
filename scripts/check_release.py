@@ -27,8 +27,29 @@ def main() -> None:
 
     if not args.skip_tests:
         _run([sys.executable, "-m", "pytest", "-q"], root)
-        _run([sys.executable, "-m", "ruff", "check", "src", "tests", "scripts"], root)
-        _run([sys.executable, "-m", "mypy"], root)
+        _run(
+            [
+                sys.executable,
+                "-m",
+                "ruff",
+                "check",
+                "src",
+                "tests",
+                "scripts",
+                "examples",
+            ],
+            root,
+        )
+        _run(
+            [
+                sys.executable,
+                "-m",
+                "basedpyright",
+                "--pythonpath",
+                sys.executable,
+            ],
+            root,
+        )
 
     if args.skip_build:
         return

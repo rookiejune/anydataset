@@ -44,17 +44,9 @@ if TYPE_CHECKING:
 
 
 class Source(StrEnum):
-    def _generate_next_value_(
-        name: str,
-        start: int,
-        count: int,
-        last_values: list[str],
-    ) -> str:
-        return name.lower().replace("_", "-")
-
-    HF = auto()
-    HF_DISK = auto()
-    STORE = auto()
+    HF = "hf"
+    HF_DISK = "hf-disk"
+    STORE = "store"
 
 
 SourceKey = Union[Source, str]
@@ -85,9 +77,7 @@ class Spec:
         if not isinstance(self.load_options, Mapping):
             raise TypeError("Spec.load_options must be a mapping.")
         frozen_options = _freeze_mapping(self.load_options)
-        object.__setattr__(
-            self, "load_options", frozen_options
-        )
+        object.__setattr__(self, "load_options", frozen_options)
         identity = _identity_payload(self)
         object.__setattr__(self, "_identity", MappingProxyType(identity))
         object.__setattr__(self, "_id", _stable_hash(identity))

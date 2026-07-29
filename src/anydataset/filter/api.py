@@ -6,10 +6,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any
 
-try:
-    from typing import Unpack
-except ImportError:
-    from typing_extensions import Unpack
+from typing_extensions import Unpack
 
 from ..dataset.abc import AnyDataset, MapStyleABC
 from ..store.reader import StoreDataset
@@ -35,6 +32,7 @@ from .types import (
     FilterPredicate,
     _Index,
 )
+
 
 class FilterRule:
     __slots__ = ("_factory", "_name")
@@ -385,7 +383,7 @@ def _restore_filter_cache(
     generation = lease_filter_generation(cache_path)
     try:
         return _FilterCache(
-            dataset_factory(),
+            filter_base(dataset_factory()),
             read_partitions(generation.path),
             FilterRule(rule_name, _unavailable_filter_factory),
             generation.path,

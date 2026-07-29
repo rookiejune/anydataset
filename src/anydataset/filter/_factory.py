@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from ._identity import FilterBase
+from ._identity import FilterBase, filter_base
 from .generations import GenerationLease
 from .types import DatasetFactory
 
@@ -26,7 +26,7 @@ class FilteredDatasetFactory:
         from .api import FilteredDataset, FilterRule
 
         return FilteredDataset._from_generation(
-            self.base(),
+            filter_base(self.base()),
             FilterRule(self.rule_name, _unavailable_filter_factory),
             self.cache_path,
             self.labels,

@@ -5,6 +5,8 @@ from collections.abc import Iterator, Mapping
 from pathlib import Path
 from typing import Any
 
+from typing_extensions import TypeGuard
+
 from .._io.atomic import replace_dir
 from .._io.parquet import parquet_schema, pyarrow
 from ..types.item import Modality, Role, View
@@ -294,7 +296,7 @@ def _view_path(view: tuple[Role, Modality, View]) -> tuple[str, str, str]:
     return role.value, modality.value, key.value
 
 
-def _path_name(value: object) -> bool:
+def _path_name(value: object) -> TypeGuard[str]:
     return (
         isinstance(value, str)
         and value not in {"", ".", ".."}

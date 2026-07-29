@@ -167,7 +167,9 @@ class Finding:
 def metrics(sample: Sample, role: Role, fallback_lang: Lang) -> Metrics:
     item = sample.get((role, Modality.TEXT))
     if not isinstance(item, TextItem):
-        return Metrics(text="", lang=fallback_lang, expected_lang=fallback_lang, valid=False)
+        return Metrics(
+            text="", lang=fallback_lang, expected_lang=fallback_lang, valid=False
+        )
 
     value = item.views.get(TextView.TEXT)
     if not isinstance(value, str):
@@ -377,7 +379,7 @@ def longest_run(text: str) -> int:
     return best
 
 
-def unit_ratio(name: str, value: float) -> float:
+def unit_ratio(name: str, value: object) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise TypeError(f"{name} must be a number.")
     try:

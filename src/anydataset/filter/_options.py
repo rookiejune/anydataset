@@ -4,12 +4,12 @@ from typing import cast
 
 from ..runtime import Runtime
 from .rules import validate_string
-from .types import FilterApplyKwargs
+from .types import FilterApplyKwargs, ResolvedFilterApplyOptions
 
 DEFAULT_MAX_SHARD_SAMPLES = 1_000_000
 DEFAULT_COMMIT_SAMPLES = 100_000
 
-_DEFAULTS: FilterApplyKwargs = {
+_DEFAULTS: ResolvedFilterApplyOptions = {
     "input_id": None,
     "metrics": False,
     "device": "auto",
@@ -25,13 +25,13 @@ _DEFAULTS: FilterApplyKwargs = {
 }
 
 
-def options(values: FilterApplyKwargs) -> FilterApplyKwargs:
+def options(values: FilterApplyKwargs) -> ResolvedFilterApplyOptions:
     extra = set(values) - set(_DEFAULTS)
     if extra:
         name = min(extra)
         raise TypeError(f"Unexpected filter apply option: {name}.")
-    resolved = {key: values.get(key, default) for key, default in _DEFAULTS.items()}
+    resolved = cast(ResolvedFilterApplyOptions, {**_DEFAULTS, **values})
     input_id = resolved["input_id"]
     if input_id is not None:
         validate_string("input_id", input_id)
-    return cast(FilterApplyKwargs, resolved)
+    return resolved

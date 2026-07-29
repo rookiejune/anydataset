@@ -5,14 +5,23 @@ from pathlib import Path
 
 from ...store.reader import StoreDataset, read_store_dataset
 from ...types import Spec
-from ...types.item import Sample
+from ...types.item import Modality, Role, Sample, View
 from .protocol import validate_load_options
 
 
 class StoreSource:
-    def prepare(self, spec: Spec, _cache_path: Path) -> StoreDataset:
+    def __init__(
+        self,
+        views: tuple[tuple[Role, Modality, View], ...] | None = None,
+    ) -> None:
+        if views is not None and not isinstance(views, tuple):
+            raise TypeError("store views must be a tuple or None.")
+        self.views = views
+
+    def prepare(self, spec: Spec, cache_path: Path) -> StoreDataset:
+        _ = cache_path
         validate_load_options(spec, (), source="store")
-        dataset = read_store_dataset(spec.path)
+        dataset = read_store_dataset(spec.path, views=self.views)
         if spec.split is not None and dataset.manifest.split != spec.split:
             raise ValueError(
                 f"Store dataset split {dataset.manifest.split!r} does not match "

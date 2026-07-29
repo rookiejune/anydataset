@@ -4,7 +4,9 @@ import hashlib
 import json
 from collections.abc import Mapping
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Union
+
+from typing_extensions import TypeGuard
 
 from ..cache import anydataset_home
 from ..dataset.abc import AnyDataset, MapStyleABC
@@ -17,18 +19,21 @@ from .generations import (
 from .rules import rule_cache_key
 
 if TYPE_CHECKING:
-    from .api import FilterRule
+    from .api import FilteredDataset, FilterRule
 
-
-FilterBase = MapStyleABC
+    FilterBase = Union[AnyDataset, StoreDataset, FilteredDataset]
+else:
+    FilterBase = MapStyleABC
 
 _FILTER_VIEW_SCHEMA_VERSION = 2
 
 
 def filter_base(dataset: object) -> FilterBase:
-    if isinstance(dataset, MapStyleABC):
+    from .api import FilteredDataset
+
+    if isinstance(dataset, (AnyDataset, StoreDataset, FilteredDataset)):
         return dataset
-    raise TypeError("dataset must be a MapStyleABC.")
+    raise TypeError("dataset must be an AnyDataset, StoreDataset, or FilteredDataset.")
 
 
 def filter_universe(dataset: FilterBase) -> FilterBase:
@@ -78,6 +83,9 @@ def filter_identity(
     provenance = _store_provenance(dataset, spec)
     if provenance:
         identity["provenance"] = dict(provenance)
+    selection = _store_selection(dataset)
+    if selection is not None:
+        identity["views"] = selection
     return _with_input_id(identity, input_id)
 
 
@@ -90,6 +98,18 @@ def _store_provenance(
     if isinstance(dataset, AnyDataset) and spec.source == Source.STORE:
         return read_store_manifest(spec.path).provenance
     return {}
+
+
+def _store_selection(dataset: FilterBase) -> list[list[str]] | None:
+    if isinstance(dataset, StoreDataset):
+        views = tuple(dataset.views)
+    elif isinstance(dataset, AnyDataset) and dataset.spec.source == Source.STORE:
+        if dataset.selected_store_views is None:
+            return None
+        views = dataset.selected_store_views
+    else:
+        return None
+    return [[role.value, modality.value, view.value] for role, modality, view in views]
 
 
 def metadata(
@@ -134,7 +154,9 @@ def filter_lock_path(
 
 
 def filter_identity_key(identity: Mapping[str, Any]) -> str:
-    payload = json.dumps(identity, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    payload = json.dumps(identity, sort_keys=True, separators=(",", ":")).encode(
+        "utf-8"
+    )
     return hashlib.sha256(payload).hexdigest()[:16]
 
 
@@ -147,7 +169,7 @@ def _with_input_id(
     return identity
 
 
-def _is_filtered_dataset(dataset: object) -> bool:
+def _is_filtered_dataset(dataset: object) -> TypeGuard[FilteredDataset]:
     from .api import FilteredDataset
 
     return isinstance(dataset, FilteredDataset)

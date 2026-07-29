@@ -9,7 +9,7 @@ import torch
 
 from ..dataset.collate import Batch, FieldGroup, FieldRef
 from ..types.item import Modality, Role
-from ..types.item import AudioItem, AudioMeta, AudioView, TextView
+from ..types.item import AudioItem, AudioMeta, AudioView, TextItem, TextView
 
 try:
     import torchaudio
@@ -35,9 +35,7 @@ class MossTTSProvider:
         try:
             from anytrain.tts.moss import MossTTS
         except ImportError as exc:
-            raise ImportError(
-                "MossTTSProvider requires `anytrain[moss-tts]`."
-            ) from exc
+            raise ImportError("MossTTSProvider requires `anytrain[moss-tts]`.") from exc
         kwargs = {"runtime_kwargs": runtime_kwargs, **load_options}
         if model is None:
             self.tts = MossTTS.from_pretrained(**kwargs)
@@ -78,7 +76,10 @@ class MossTTSProvider:
         batch: Batch,
         ref: tuple[Role, Modality],
     ) -> Sequence[Any]:
-        texts = _text_batch(batch.sample[ref].views[TextView.TEXT])
+        item = batch.sample[ref]
+        if not isinstance(item, TextItem):
+            raise TypeError(f"{ref!r} requires a collated TextItem.")
+        texts = _text_batch(item.views[TextView.TEXT])
         outputs = self.tts.synthesize(
             texts,
             self.options,
@@ -105,21 +106,32 @@ class MossTTSProvider:
         if self.reference_role is None:
             return None
         ref = (self.reference_role, Modality.AUDIO)
-        views = batch.sample[ref].views
+        item = batch.sample[ref]
+        if not isinstance(item, AudioItem):
+            raise TypeError(f"{ref!r} requires a collated AudioItem.")
+        views = item.views
         if AudioView.FILE in views:
             values = _file_batch(views[AudioView.FILE])
             if len(values) != count:
-                raise ValueError("reference file batch size must match text batch size.")
-            self._prepare_reference_files(sum(isinstance(value, bytes) for value in values))
+                raise ValueError(
+                    "reference file batch size must match text batch size."
+                )
+            self._prepare_reference_files(
+                sum(isinstance(value, bytes) for value in values)
+            )
             paths = [self._file_path(value) for value in values]
             if len(paths) != count:
-                raise ValueError("reference file batch size must match text batch size.")
+                raise ValueError(
+                    "reference file batch size must match text batch size."
+                )
             return paths
         if AudioView.WAVEFORM in views:
             waveform, sample_rates = views[AudioView.WAVEFORM]
             lengths = batch.lengths(FieldRef(ref, FieldGroup.VIEWS, AudioView.WAVEFORM))
             if waveform.shape[0] != count:
-                raise ValueError("reference audio batch size must match text batch size.")
+                raise ValueError(
+                    "reference audio batch size must match text batch size."
+                )
             self._prepare_reference_files(count)
             return [
                 self._waveform_path(
@@ -155,7 +167,10 @@ class MossTTSProvider:
         return str(path)
 
     def _prepare_reference_file(self) -> None:
-        if self._tempdir is None or self._reference_file_count >= self.max_reference_files:
+        if (
+            self._tempdir is None
+            or self._reference_file_count >= self.max_reference_files
+        ):
             self._reset_reference_dir()
 
     def _prepare_reference_files(self, count: int) -> None:
@@ -190,8 +205,7 @@ def _text_refs(batch: Batch) -> tuple[tuple[Role, Modality], ...]:
     refs = tuple(
         ref
         for ref in batch.sample
-        if ref[1] is Modality.TEXT
-        and TextView.TEXT in batch.sample[ref].views
+        if ref[1] is Modality.TEXT and TextView.TEXT in batch.sample[ref].views
     )
     if not refs:
         raise ValueError("MossTTSProvider.call_batch expects at least one text input.")

@@ -56,18 +56,26 @@
   本地 torch/CUDA/provider 状态被 worker 继承。
 - `StoreDataset` 打开时不再把 `samples.parquet` 全量转成 Python tuple；`samples` 保留
   sequence 接口，并按 parquet row group 懒加载完整 sample manifest 行。
+- `AnyDataset.from_store(..., views=...)` 在顶层选择训练所需 view，pickle/spawn 后仍保留
+  该选择。物理 `Spec` 不混入训练 schema；filter identity 单独记录 view 子集，避免不同
+  payload 输入错误复用缓存。
 - sample/view manifest 的 schema、row count 和 row-group layout 由同一个
   `ParquetFile` 读取；sample index 的全量一致性校验按 store path 和文件 fingerprint
   缓存，后续打开不再重复扫描，同时仍会拒绝打开过程中发生变化的 manifest。
 - store view manifest 先加载 `sample_index` 轻量列建立查找索引，具体 shard/key 行按
   row group 懒加载；随机读单个样本不需要把整个 view manifest 转成对象。
+- store shuffle 按已选择 view 的 payload shard 组合分组，并在每个 group 内跨 rank 切分，
+  不再把完整 group 只交给一个 rank。group 扫描结果按 sample/view manifest fingerprint
+  缓存在 reader 内；manifest 变化会失效，pickle 后不携带进程内缓存。
 - `sharded_csv` 保留 CSV 作为事实来源，prepare 阶段以 spawn process pool 并行生成
   每文件 Parquet part；manifest 原子提交并按源文件 size/mtime 增量复用。读取侧缓存
-  Parquet row group，动态 batch shuffle 直接按 row group 生成有界 index group，避免
-  rank 和 DataLoader worker 重复解析全部 CSV，也不构造全数据集 Python index list。
+  Parquet row group，预计算每个文件的 row-group stop，并以 LRU 复用已打开的
+  `ParquetFile`；动态 batch shuffle 直接按 row group 生成有界 index group，避免 rank 和
+  DataLoader worker 重复解析全部 CSV，也不构造全数据集 Python index list。
 - cost-aware planner 接受稳定 cost sequence 或常量 cost，并以 bounded lookahead 流式
   生成 batch；候选删除和 batch cost 更新不再随全量 pending list 或当前 batch size
-  重复放大。DDP 每 128 个 plan 同步一次，只在最终不完整窗口裁剪 rank-local 尾部。
+  重复放大。DDP 每 128 个 plan 通过 tensor collective 同步 plan count，只在最终不完整
+  窗口裁剪 rank-local 尾部。
 - part/fragment commit 不再常驻保存 `item ref -> sample_index array`；提交时先写
   ordered sample manifest，再按 view 流式扫描 sample manifest 做覆盖校验。
 - 大量 part/fragment 的 manifest 使用固定 fan-in 的分层归并，打开的 parquet 文件数不再
@@ -98,12 +106,16 @@
 PYTHONPATH=src python scripts/benchmark_hot_paths.py
 ```
 
-`scripts/benchmark_hot_paths.py` 覆盖七组热路径：
+`scripts/benchmark_hot_paths.py` 覆盖九组热路径：
 
 - `store_commit`: 多 part store 提交成本。
 - `sharded_csv`: 物理 CSV 分片的 indexed shard 读取成本。
+- `sharded_csv_lookup`: 同一 Parquet 文件跨多个 row group 随机读取，并报告打开句柄和
+  row-group cache 数量。
 - `store_reader`: lazy/preload manifest 的 store 打开成本。
-- `store_payload_read`: 打开 store 后逐样本执行 tar 定位、payload 读取和 UTF-8 解码的成本。
+- `store_shuffle`: 首次 payload group 扫描与 fingerprint cache 命中的读取计划成本。
+- `store_payload_read`: `all_views` 和 `selected_view` 两种模式下逐样本执行 tar 定位、
+  payload 读取和 UTF-8 解码的成本，并报告被跳过的未选择 view payload 数量。
 - `indexed_loader`: 当前 runtime iterable loader 和正式 map-style indexed loader 实现。
 - `filter_parallel`: 多 device filter 扫描、partition cache 写入和提交成本。
 - `writer_pipeline`: inline、thread、spawn process 和 fork process 后台写入对比。
@@ -142,8 +154,10 @@ PYTHONPATH=src python scripts/benchmark_hot_paths.py \
 ## 判断标准
 
 - 每个候选必须输出相同的 selected sample count 和 index checksum。
-- `store_payload_read` 必须输出与样本数相同的 `payload_reads`；该项单独衡量真实 payload
+- `store_payload_read` 的 `payload_reads` 必须等于样本数乘已选择 view 数；
+  `selected_view` 还必须报告非零 `skipped_payload_reads`。该项单独衡量真实 payload
   读取，不能用只执行 `read_store_dataset()` 的 `store_reader` 打开时间替代。
+- `sharded_csv_lookup` 必须覆盖至少两个 row group，同时保持一个打开的 Parquet 文件句柄。
 - `map_spawn` 必须能通过 spawn worker 重建 dataset，证明 wrapper serialization 不携带
   已构造 dataset cache。
 - 如果 `map_default` 或 `map_fork` 只在特定平台快，默认实现仍要保留显式可控的 start

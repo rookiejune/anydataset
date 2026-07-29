@@ -37,7 +37,7 @@ dev = [
     "build>=1.0",
     "twine>=5.0",
     "ruff>=0.8.0",
-    "mypy>=1.13",
+    "basedpyright>=1.28",
     "tomli>=2.0; python_version < '3.11'",
 ]
 
@@ -55,9 +55,8 @@ where = ["src"]
 line-length = 88
 target-version = "py39"
 
-[tool.mypy]
-python_version = "3.9"
-packages = ["anydataset"]
-ignore_missing_imports = true
-check_untyped_defs = true
-warn_unused_ignores = true
+[tool.basedpyright]
+include = ["src"]
+pythonVersion = "3.9"
+typeCheckingMode = "standard"
+reportImportCycles = false

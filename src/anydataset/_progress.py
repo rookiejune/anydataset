@@ -9,14 +9,31 @@ from __future__ import annotations
 import multiprocessing
 import sys
 import time
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from queue import Empty
-from typing import TypeVar
+from typing import Any, Protocol, TypeVar, cast
+
+from ._parallel import ProcessHandle
 
 _PROGRESS_INTERVAL = 1.0
 _NON_INTERACTIVE_PROGRESS_INTERVAL = 10.0
 ItemT = TypeVar("ItemT")
+MessageT = TypeVar("MessageT", contravariant=True)
+
+
+class _ProgressBar(Protocol):
+    def __enter__(self) -> Any: ...
+
+    def __exit__(self, exc_type: Any, exc_value: Any, traceback: Any) -> Any: ...
+
+    def update(self, count: int) -> None: ...
+
+    def set_postfix_str(self, value: str) -> None: ...
+
+
+class ProgressWriter(Protocol[MessageT]):
+    def put(self, message: MessageT, /) -> Any: ...
 
 
 @dataclass(frozen=True)
@@ -75,7 +92,7 @@ def iter_with_progress(
 
 
 def watch_workers(
-    workers: list[multiprocessing.Process],
+    workers: Sequence[ProcessHandle],
     progress: multiprocessing.Queue,
     *,
     desc: str,
@@ -108,12 +125,11 @@ def watch_workers(
                 done += 1
                 if message.error is not None:
                     raise RuntimeError(
-                        f"{failure_prefix} {message.worker_id} failed.\n"
-                        f"{message.error}"
+                        f"{failure_prefix} {message.worker_id} failed.\n{message.error}"
                     )
 
 
-def put_progress(progress: multiprocessing.Queue, message: Progress) -> None:
+def put_progress(progress: ProgressWriter[Progress], message: Progress) -> None:
     progress.put(message)
 
 
@@ -146,8 +162,8 @@ class ProgressDashboard:
         self.initial = initial
         self.stages = stages
         self._stats: dict[str, _StageStats] = {}
-        self._bar = None
-        self._stage_bars: dict[str, object] = {}
+        self._bar: _ProgressBar | None = None
+        self._stage_bars: dict[str, _ProgressBar] = {}
 
     def __enter__(self):
         self._bar = _progress_bar(desc=self.desc, total=self.total, position=0)
@@ -178,7 +194,11 @@ class ProgressDashboard:
     def put(self, message: Progress) -> None:
         if not isinstance(message, Progress):
             return
-        if message.samples or message.elapsed is not None or message.pending is not None:
+        if (
+            message.samples
+            or message.elapsed is not None
+            or message.pending is not None
+        ):
             stats = self._stats.setdefault(message.stage, _StageStats())
             stats.update(message)
         if message.samples and self._counts_bar(message):
@@ -216,7 +236,7 @@ class ProgressDashboard:
         return max(0, self.total - self.initial)
 
 
-def _dead_worker(workers: list[multiprocessing.Process]) -> bool:
+def _dead_worker(workers: Sequence[ProcessHandle]) -> bool:
     return any(worker.exitcode not in (None, 0) for worker in workers)
 
 
@@ -226,7 +246,7 @@ def _progress_bar(
     total: int | None,
     position: int = 0,
     leave: bool = True,
-):
+) -> _ProgressBar:
     if not sys.stdout.isatty():
         if position > 0:
             return _NullProgressBar()
@@ -235,13 +255,16 @@ def _progress_bar(
         from tqdm.auto import tqdm
     except ImportError:
         return _NullProgressBar()
-    return tqdm(
-        total=total,
-        unit="sample",
-        desc=desc,
-        position=position,
-        leave=leave,
-        file=sys.stdout,
+    return cast(
+        _ProgressBar,
+        tqdm(
+            total=total,
+            unit="sample",
+            desc=desc,
+            position=position,
+            leave=leave,
+            file=sys.stdout,
+        ),
     )
 
 

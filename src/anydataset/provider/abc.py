@@ -17,7 +17,7 @@ except ImportError as exc:
     ) from exc
 
 
-from ..types import AudioView
+from ..types import AudioItem, AudioView
 from ..dataset.collate import Batch, FieldGroup, FieldRef
 from ..types.item import Modality, Role
 
@@ -42,9 +42,17 @@ class AudioProvider(ABC):
         batch: Batch,
         ref: tuple[Role, Modality],
     ) -> tuple[Tensor, Tensor, Tensor]:
-        views = batch.sample[ref].views
+        item = batch.sample[ref]
+        if not isinstance(item, AudioItem):
+            raise TypeError(f"{ref!r} requires a collated AudioItem.")
+        views = item.views
         if AudioView.WAVEFORM in views:
-            waveform, sample_rates = views[AudioView.WAVEFORM]
+            value = views[AudioView.WAVEFORM]
+            if not isinstance(value, tuple) or len(value) != 2:
+                raise TypeError("collated waveform view must be a pair.")
+            waveform, sample_rates = value
+            if not isinstance(waveform, Tensor) or not isinstance(sample_rates, Tensor):
+                raise TypeError("collated waveform view must contain tensors.")
             lengths = batch.lengths(FieldRef(ref, FieldGroup.VIEWS, AudioView.WAVEFORM))
             return waveform, sample_rates, lengths
         if AudioView.FILE in views:
@@ -100,7 +108,9 @@ def _pad_waveforms(
     rank = len(shapes[0])
     prefix = shapes[0][:-1]
     if rank == 0 or any(len(shape) != rank or shape[:-1] != prefix for shape in shapes):
-        raise ValueError("Only the last waveform dimension may vary in audio file batches.")
+        raise ValueError(
+            "Only the last waveform dimension may vary in audio file batches."
+        )
 
     max_len = max(shape[-1] for shape in shapes)
     padded = []

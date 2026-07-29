@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from itertools import islice
 from typing import Any
 
+import torch
 import torch.distributed as dist
 from torch.utils.data import Sampler
 from torch.utils.data import DataLoader as TorchDataLoader
@@ -206,6 +207,7 @@ class _DataLoader(TorchDataLoader):
             max_batch_samples=max_batch_samples,
             drop_distributed_tail=drop_distributed_tail,
         )
+        self._batch_sampler = batch_sampler
         super().__init__(dataset, batch_sampler=batch_sampler, **loader_kwargs)
 
     def __len__(self) -> int:
@@ -213,7 +215,7 @@ class _DataLoader(TorchDataLoader):
 
     def set_epoch(self, epoch: int) -> None:
         """Advance the underlying distributed sampler before the next iteration."""
-        self.batch_sampler.set_epoch(epoch)
+        self._batch_sampler.set_epoch(epoch)
 
 
 def _plans(
@@ -259,8 +261,7 @@ def _synchronized_plans(
     world_size = dist.get_world_size()
     while True:
         local = list(islice(source, _DISTRIBUTED_PLAN_WINDOW))
-        counts: list[int] = [0 for _ in range(world_size)]
-        dist.all_gather_object(counts, len(local))
+        counts = _plan_counts(len(local), world_size)
         kept = min(counts)
         if any(count != kept for count in counts):
             if not drop_tail:
@@ -276,6 +277,19 @@ def _synchronized_plans(
         yield from local[:kept]
         if kept < _DISTRIBUTED_PLAN_WINDOW:
             return
+
+
+def _plan_counts(local_count: int, world_size: int) -> tuple[int, ...]:
+    backend = str(dist.get_backend()).lower()
+    device = (
+        torch.device("cuda", torch.cuda.current_device())
+        if backend == "nccl"
+        else torch.device("cpu")
+    )
+    local = torch.tensor([local_count], dtype=torch.int64, device=device)
+    gathered = torch.empty(world_size, dtype=torch.int64, device=device)
+    dist.all_gather_into_tensor(gathered, local)
+    return tuple(int(value) for value in gathered.cpu().tolist())
 
 
 def _rank() -> tuple[int, int]:

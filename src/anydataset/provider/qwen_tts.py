@@ -11,6 +11,7 @@ from ..types.item import (
     AudioView,
     Modality,
     Role,
+    TextItem,
     TextMeta,
     TextView,
 )
@@ -83,6 +84,8 @@ class QwenTTSProvider:
         ref: tuple[Role, Modality],
     ) -> Sequence[AudioItem]:
         text_item = batch.sample[ref]
+        if not isinstance(text_item, TextItem):
+            raise TypeError(f"{ref!r} requires a collated TextItem.")
         texts = _text_batch(text_item.views[TextView.TEXT])
         speakers = _string_batch(text_item.views[TextView.SPEAKERS], "speaker ids")
         if len(speakers) != len(texts):
@@ -105,7 +108,9 @@ class QwenTTSProvider:
             raise TypeError("Qwen TTS batch synthesize output must be a sequence.")
         if len(outputs) != len(texts):
             raise ValueError("Qwen TTS batch output size must match text batch size.")
-        return [_audio_item(output, speaker) for output, speaker in zip(outputs, speakers)]
+        return [
+            _audio_item(output, speaker) for output, speaker in zip(outputs, speakers)
+        ]
 
 
 def _text_refs(batch: Batch) -> tuple[tuple[Role, Modality], ...]:

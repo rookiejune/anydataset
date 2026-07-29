@@ -143,12 +143,13 @@ class ProviderServer:
             device=self.device,
             authkey=self.authkey,
         )
-        self._process = context.Process(
+        process = context.Process(
             target=_serve_provider,
             args=(config, self.provider_factory),
             name=f"anydataset-provider-{self.device}",
         )
-        self._process.start()
+        self._process = process
+        process.start()
         try:
             self._wait_ready()
         except Exception:

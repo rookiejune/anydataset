@@ -9,7 +9,7 @@ from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Lock
-from typing import Any
+from typing import Any, overload
 
 from .._io.parquet import read_rows, write_columns
 from .._io.shard import BufferedShardWriter
@@ -216,6 +216,12 @@ class _FileIndex(Sequence[int]):
     def __len__(self) -> int:
         return self._count
 
+    @overload
+    def __getitem__(self, index: int) -> int: ...
+
+    @overload
+    def __getitem__(self, index: slice) -> tuple[int, ...]: ...
+
     def __getitem__(self, index: int | slice) -> int | tuple[int, ...]:
         if isinstance(index, slice):
             start, stop, step = index.indices(len(self))
@@ -290,6 +296,12 @@ class _MergedIndex(Sequence[int]):
 
     def __len__(self) -> int:
         return self._count
+
+    @overload
+    def __getitem__(self, index: int) -> int: ...
+
+    @overload
+    def __getitem__(self, index: slice) -> tuple[int, ...]: ...
 
     def __getitem__(self, index: int | slice) -> int | tuple[int, ...]:
         if isinstance(index, slice):
@@ -441,7 +453,9 @@ def _validate_json_value(value: Any) -> JsonValue:
         return value
     if isinstance(value, float):
         if not math.isfinite(value):
-            raise ValueError("filter decision metrics must not contain NaN or infinity.")
+            raise ValueError(
+                "filter decision metrics must not contain NaN or infinity."
+            )
         return value
     if isinstance(value, list):
         return [_validate_json_value(item) for item in value]

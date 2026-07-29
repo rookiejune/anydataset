@@ -16,7 +16,16 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from itertools import islice
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, Union, cast
+
+from multiprocessing.context import (
+    ForkContext,
+    ForkProcess,
+    ForkServerContext,
+    ForkServerProcess,
+    SpawnContext,
+    SpawnProcess,
+)
 
 import torch
 from torch.utils.data import DataLoader, Dataset, IterableDataset, Sampler
@@ -27,6 +36,12 @@ from ._sharding import runtime_shard, validate_shard
 
 DatasetFactory = Callable[[], Any]
 StartMethod = Literal["fork", "spawn", "forkserver"]
+ProcessContext = Union[
+    ForkContext,
+    SpawnContext,
+    ForkServerContext,
+]
+ProcessHandle = Union[ForkProcess, SpawnProcess, ForkServerProcess]
 _START_METHODS = frozenset({"fork", "spawn", "forkserver"})
 
 _DEFAULT_LOADER_PREFETCH_FACTOR = 2
@@ -147,7 +162,8 @@ class SelectedIndexSampler(Sampler[int]):
 def iter_runtime_indexed(dataset: Any) -> Iterator[tuple[int, Any]]:
     iter_indexed = getattr(dataset, "iter_indexed_runtime_shard", None)
     if callable(iter_indexed):
-        yield from iter_indexed()
+        method = cast(Callable[[], Iterator[tuple[int, Any]]], iter_indexed)
+        yield from method()
         return
 
     shard = runtime_shard()
@@ -162,7 +178,11 @@ def iter_indexed_shard(
     validate_shard(num_shards, shard_id)
     iter_indexed = getattr(dataset, "iter_indexed_shard", None)
     if callable(iter_indexed):
-        yield from iter_indexed(num_shards, shard_id)
+        method = cast(
+            Callable[[int, int], Iterator[tuple[int, Any]]],
+            iter_indexed,
+        )
+        yield from method(num_shards, shard_id)
         return
 
     if hasattr(dataset, "__len__") and hasattr(dataset, "__getitem__"):
@@ -259,9 +279,7 @@ def _indexed_loader_kwargs(
             start_method=start_method,
         )
         kwargs["multiprocessing_context"] = multiprocessing_context(start_method)
-        kwargs["prefetch_factor"] = (
-            prefetch_factor or _DEFAULT_LOADER_PREFETCH_FACTOR
-        )
+        kwargs["prefetch_factor"] = prefetch_factor or _DEFAULT_LOADER_PREFETCH_FACTOR
         kwargs["worker_init_fn"] = _RunLogsWorkerInit(run_logs_dir())
     return kwargs
 
@@ -294,8 +312,8 @@ def worker_configs(
     )
 
 
-def multiprocessing_context(start_method: StartMethod = "spawn"):
-    return multiprocessing.get_context(start_method)
+def multiprocessing_context(start_method: StartMethod = "spawn") -> ProcessContext:
+    return cast(ProcessContext, multiprocessing.get_context(start_method))
 
 
 def validate_start_method(

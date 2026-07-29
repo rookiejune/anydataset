@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import multiprocessing
 import os
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass, field
@@ -13,6 +12,7 @@ from .._compat import strict_zip
 from .._devices import Devices, resolve_devices
 from .._logging import run_logs_dir
 from .._parallel import (
+    ProcessHandle,
     can_select_indexes,
     free_port,
     indexed_loader,
@@ -152,8 +152,7 @@ class ViewMaterializer:
         if len(resolved) > 1 or self.num_workers > 0:
             validate_process_parent(
                 context=(
-                    f"{type(self).__name__} with multiple devices or DataLoader "
-                    "workers"
+                    f"{type(self).__name__} with multiple devices or DataLoader workers"
                 )
             )
         with FileLock(materializer_lock_path(self.output_dir)):
@@ -433,6 +432,8 @@ class ViewMaterializer:
             use_map_style_loader = can_select_indexes(dataset)
         if use_map_style_loader:
             if sample_count is None:
+                if dataset is None:
+                    raise RuntimeError("map-style loader dataset was not initialized.")
                 sample_count = len(dataset)
             return map_style_indexed_loader(
                 dataset_factory,
@@ -466,6 +467,9 @@ class ViewMaterializer:
         completed_count: int,
         missing_indexes: Sequence[int],
     ) -> None:
+        commit_samples = self.commit_samples
+        if commit_samples is None:
+            raise RuntimeError("materializer commit_samples was not initialized.")
         context = multiprocessing_context(self.runtime.process_start_method)
         progress = context.Queue()
         barrier = context.Barrier(len(devices))
@@ -480,7 +484,7 @@ class ViewMaterializer:
                         split=self.split,
                         max_shard_samples=self.max_shard_samples,
                         batch_size=self.batch_size,
-                        commit_samples=self.commit_samples,
+                        commit_samples=commit_samples,
                         num_workers=self.num_workers,
                         prefetch_factor=self.prefetch_factor,
                         write_workers=self.write_workers,
@@ -511,7 +515,7 @@ class ViewMaterializer:
             )
             for shard_id, device in enumerate(devices)
         ]
-        started: list[multiprocessing.Process] = []
+        started: list[ProcessHandle] = []
         completed = False
         try:
             for worker in workers:
@@ -605,7 +609,8 @@ class ViewMaterializer:
             return
 
         for batch in indexed_sample_batches(indexed, self.batch_size):
-            indexes, samples = strict_zip(*batch)
+            indexes = tuple(index for index, _sample in batch)
+            samples = tuple(sample for _index, sample in batch)
             outputs = tuple(
                 self._resilient_samples_with_batch_provider(
                     samples,
@@ -727,6 +732,7 @@ class ModalityMaterializer(ViewMaterializer):
                 cast(ModalityProviderLike, provider),
             ),
         )
+
 
 def _missing_indexed_samples(
     dataset: Any,

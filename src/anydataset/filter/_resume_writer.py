@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable, cast
 
 from .._parallel import can_select_indexes, validate_process_value
 from .._progress import Progress, ProgressDashboard
@@ -256,14 +256,14 @@ def replay_filter_resume_fragments(
 
 def filter_chunk_indexes(chunk: _FilterChunk) -> tuple[int, ...]:
     indexes = {
-        int(index)
-        for positions in chunk.partitions.values()
-        for index in positions
+        int(index) for positions in chunk.partitions.values() for index in positions
     }
     return tuple(sorted(indexes))
 
 
-def parallel_dataset_factory(factory: DatasetFactory, runtime: Runtime) -> DatasetFactory:
+def parallel_dataset_factory(
+    factory: DatasetFactory, runtime: Runtime
+) -> DatasetFactory:
     validate_process_value(
         "dataset_factory",
         factory,
@@ -291,14 +291,15 @@ def global_filter_chunk(dataset: FilterBase, chunk: _FilterChunk) -> _FilterChun
     global_index = getattr(dataset, "global_index", None)
     if not callable(global_index):
         return chunk
+    index = cast(Callable[[int], int], global_index)
     return _FilterChunk(
         partitions={
-            label: tuple(global_index(position) for position in positions)
+            label: tuple(index(position) for position in positions)
             for label, positions in chunk.partitions.items()
         },
         metrics=tuple(
             _FilterMetricsRow(
-                index=global_index(row.index),
+                index=index(row.index),
                 label=row.label,
                 metrics=row.metrics,
             )

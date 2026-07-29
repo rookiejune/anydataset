@@ -11,7 +11,15 @@ from ..dataset.abc import MapStyleABC
 from ..runtime import Runtime
 from ..types.item import Sample
 
-JsonValue = Union[None, bool, int, float, str, list["JsonValue"], dict[str, "JsonValue"]]
+JsonValue = Union[
+    None,
+    bool,
+    int,
+    float,
+    str,
+    Sequence["JsonValue"],
+    Mapping[str, "JsonValue"],
+]
 FilterLabel = Union[bool, str, Enum]
 _Index = Sequence[int]
 
@@ -41,6 +49,21 @@ class FilterApplyKwargs(TypedDict):
     write_prefetch: NotRequired[int | None]
     worker_timeout: NotRequired[float | None]
     runtime: NotRequired[Runtime]
+
+
+class ResolvedFilterApplyOptions(TypedDict):
+    input_id: str | None
+    metrics: bool
+    device: Devices
+    batch_size: int
+    num_workers: int
+    prefetch_factor: int | None
+    commit_samples: int
+    max_shard_samples: int | None
+    write_workers: int
+    write_prefetch: int | None
+    worker_timeout: float | None
+    runtime: Runtime
 
 
 @dataclass(frozen=True)

@@ -87,9 +87,10 @@ planner 只保留有界 lookahead，提前结束 epoch 时不会读取尚未看�
 epoch 仍必然读取每条所选样本的 cost，因此昂贵长度应在预处理阶段计算并持久化，不能靠
 materialize 完整样本临时推导。没有自定义 sampler 时，dataset 会在唯一的 `shuffle`
 开关背后生成 rank-local 读取计划，规划后的 batch 不会再被重分配给其他 rank。对
-`StoreDataset`，这个私有计划会先 shuffle payload shard group，再 shuffle group 内样本
-index，因此 planner 只在同一个 shard group 内组 batch。DDP 按有界 plan window 同步，
-只裁掉 rank-local 的最终 batch 尾部，保证所有 rank step 数一致。
+`StoreDataset`，这个私有计划会先 shuffle payload shard group，再把每个 group 内的样本
+切分到各 rank 后分别 shuffle，因此即使 store 只有一个 payload shard，也不会让其他 rank
+空转；planner 仍只在同一个 shard group 内组 batch。DDP 通过 tensor collective 按有界
+plan window 同步，只裁掉 rank-local 的最终 batch 尾部，保证所有 rank step 数一致。
 分布式训练每个 epoch 前调用 `loader.set_epoch(epoch)` 推进 shuffle。
 
 ## 加载任意数据集
@@ -647,19 +648,21 @@ DatasetWriter(
 ).write(samples)
 ```
 
-用 `Source.STORE` 读回来：
+只选择训练需要的 view 读回来：
 
 ```python
-from anydataset import AnyDataset, Source, Spec
+from anydataset import AnyDataset
+from anydataset.types import AudioView, Modality, Role
 
-dataset = AnyDataset(
-    spec=Spec(
-        source=Source.STORE,
-        path="/data/my_anydataset",
-        split="train",
-    ),
+dataset = AnyDataset.from_store(
+    "/data/my_anydataset",
+    split="train",
+    views=((Role.DEFAULT, Modality.AUDIO, AudioView.WAVEFORM),),
 )
 ```
+
+`AnyDataset.from_store(..., views=...)` 只加载所选 view 的 manifest 和 payload；选择会在
+pickle/spawn 后保留，并参与 filter cache identity，而物理 `Spec` 仍只标识 store 本身。
 
 store payload 按 view 写入 tar shard。普通 `DataLoader(shuffle=True)` 会在样本级打散，
 一个 batch 可能频繁跨 tar 读取。训练 store 时使用同一个
@@ -679,8 +682,9 @@ loader = dataset.dataloader(
 ```
 
 当底层 reader 是 `StoreDataset` 时，loader 会按已选择 view 的 payload shard group
-生成读取计划：先 shuffle shard group 顺序，再 shuffle group 内样本；`StoreDataset.__getitem__`
-和全局 index shard 语义不变。外层只保留 `dataset.dataloader(..., shuffle=...)` 这一处
+生成读取计划：先 shuffle shard group 顺序，再把每个 group 内的样本切分到各 rank 后分别
+shuffle；`StoreDataset.__getitem__` 和全局 index shard 语义不变。外层只保留
+`dataset.dataloader(..., shuffle=...)` 这一处
 shuffle 配置，不再需要单独导入 store 专用 sampler。
 
 reader 显式支持 `schema_version: 2` 和当前的 `schema_version: 3`。v2 store 没有
@@ -861,6 +865,10 @@ provider 上实现 `call_batch(batch)`。`batch` 是 `collate_fn` 返回的
 单个输入引用时，`call_batch` 可以直接返回一组输出；同一个 batch 里有多个输入
 引用时，`call_batch` 必须返回从 `(role, modality)` 引用到该引用输出序列的映射。
 
+如果 batch provider 抛出 out-of-memory，materializer 会清理可用缓存，并递归把当前 batch
+拆成两个更小的 batch 重试。每次拆分都会立即写入包含 worker、provider 类型、失败 batch
+大小和重试大小的进度日志。单条样本本身触发 OOM 时无法恢复，会直接向调用方抛出异常。
+
 LongCat provider 的 batch 路径会把 waveform 或 file 输入 padding 后交给 LongCat
 encoder。同一个 batch 里有多个 audio role 时，它会在同一个 collated batch 里按
 role 分别 encode。file batch 会先在 audio provider 层加载成 waveform；因为 file
@@ -963,6 +971,8 @@ dataset = AnyDataset(
 
 ```bash
 python -m compileall -q src tests examples
+python -m ruff check src tests scripts examples
+python -m basedpyright --pythonpath "$(python -c 'import sys; print(sys.executable)')"
 python -m pytest -q
 ```
 

@@ -35,7 +35,7 @@ class BackgroundWriteSink(Generic[T]):
         self.write = write
         self.workers = non_negative_int("write_workers", workers)
         self.max_pending = optional_positive_int("max_pending", max_pending)
-        self.start_method = start_method
+        self.start_method: StartMethod = start_method
         self.backend = backend
         self.on_submit = on_submit
         self.on_complete = on_complete

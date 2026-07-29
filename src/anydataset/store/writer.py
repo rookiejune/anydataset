@@ -55,6 +55,9 @@ class DatasetWriter:
         )
 
     def _write_to_tmp(self, root: Path, samples: Iterable[Sample]) -> Path:
+        provenance = self.provenance
+        if provenance is None:
+            raise RuntimeError("writer provenance was not initialized.")
         sinks: dict[tuple[Role, Modality, View], ViewWriter] = {}
         sample_views: dict[tuple[Role, Modality], frozenset[View]] = {}
         sample_manifest = sample_manifest_writer(root)
@@ -101,7 +104,7 @@ class DatasetWriter:
                 schema_version=STORE_SCHEMA_VERSION,
                 split=self.split,
                 sample_count=sample_count,
-                provenance=self.provenance,
+                provenance=provenance,
             )
             write_json(dataset_json_path(root), dataset_manifest_dict(manifest))
             sample_manifest.close()

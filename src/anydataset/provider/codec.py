@@ -26,7 +26,8 @@ class CodecProvider(nn.Module, AudioProvider):
         super().__init__()
         self.codec = codec
         self.output = output
-        self.codec.eval()
+        if isinstance(codec, nn.Module):
+            codec.eval()
 
     @torch.inference_mode()
     def forward(self, views: Mapping[AudioView, Any]) -> torch.Tensor:
@@ -42,8 +43,7 @@ class CodecProvider(nn.Module, AudioProvider):
         self,
         batch: Batch,
     ) -> (
-        Sequence[torch.Tensor]
-        | Mapping[tuple[Role, Modality], Sequence[torch.Tensor]]
+        Sequence[torch.Tensor] | Mapping[tuple[Role, Modality], Sequence[torch.Tensor]]
     ):
         refs = _audio_refs(batch)
         outputs = {ref: self._encode_ref_batch(batch, ref) for ref in refs}
@@ -75,7 +75,9 @@ class CodecProvider(nn.Module, AudioProvider):
     def _audio_batch(self, views: Mapping[AudioView, Any]) -> tuple[torch.Tensor, int]:
         waveform, sample_rate = self._waveform(views)
         waveform = (
-            waveform if isinstance(waveform, torch.Tensor) else torch.as_tensor(waveform)
+            waveform
+            if isinstance(waveform, torch.Tensor)
+            else torch.as_tensor(waveform)
         )
         if waveform.is_floating_point():
             waveform = waveform.float()
@@ -142,7 +144,9 @@ def _codes(codes: torch.Tensor, codebook_sizes: Sequence[int]) -> torch.Tensor:
         raise ValueError("Codec codes must have shape [batch, frame, codebook].")
     codebooks = len(codebook_sizes)
     if codes.shape[-1] != codebooks:
-        raise ValueError(f"Codec codes must contain all configured {codebooks} codebooks.")
+        raise ValueError(
+            f"Codec codes must contain all configured {codebooks} codebooks."
+        )
     if codes.dtype == torch.bool or codes.is_floating_point() or codes.is_complex():
         raise TypeError("Codec codes must contain integer ids.")
     if codes.numel() == 0:

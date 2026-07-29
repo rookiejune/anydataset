@@ -17,7 +17,7 @@ from bisect import bisect_right
 from collections.abc import Collection, Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterator, TypeVar
+from typing import Any, Iterator, TypeVar, overload
 
 from ._logging import write_info
 
@@ -138,6 +138,12 @@ class ComplementIndexes(Sequence[int]):
                 continue
             yield index
 
+    @overload
+    def __getitem__(self, index: int) -> int: ...
+
+    @overload
+    def __getitem__(self, index: slice) -> tuple[int, ...]: ...
+
     def __getitem__(self, index: int | slice) -> int | tuple[int, ...]:
         if isinstance(index, slice):
             positions = range(len(self))[index]
@@ -151,9 +157,13 @@ class ComplementIndexes(Sequence[int]):
         high = index + len(self.completed)
         while low < high:
             candidate = (low + high) // 2
-            missing_through_candidate = candidate + 1 - bisect_right(
-                self.completed,
-                candidate,
+            missing_through_candidate = (
+                candidate
+                + 1
+                - bisect_right(
+                    self.completed,
+                    candidate,
+                )
             )
             if missing_through_candidate > index:
                 high = candidate
