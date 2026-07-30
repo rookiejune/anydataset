@@ -164,7 +164,18 @@ def _identity_payload(spec: Spec) -> dict[str, Any]:
         "path": spec.path,
         "split": spec.split,
         "version": spec.version,
-        "load_options": _payload_value(spec.load_options),
+        "load_options": _payload_value(_physical_load_options(spec.load_options)),
+    }
+
+
+_OPERATIONAL_LOAD_OPTIONS = frozenset({"prepare_workers"})
+
+
+def _physical_load_options(load_options: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        key: value
+        for key, value in load_options.items()
+        if key not in _OPERATIONAL_LOAD_OPTIONS
     }
 
 

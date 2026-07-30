@@ -49,9 +49,13 @@ class WhisperASRProvider(AudioProvider):
         batch: Batch,
         ref: tuple[Role, Modality],
     ) -> Sequence[str]:
-        waveform, sample_rates, _ = self._waveform_batch(batch, ref)
+        waveform, sample_rates, lengths = self._waveform_batch(batch, ref)
         sample_rate = _single_sample_rate(sample_rates)
-        return _text_outputs(self.asr.transcribe(waveform, sample_rate))
+        texts: list[str] = []
+        for index, length in enumerate(lengths.tolist()):
+            clipped = waveform[index, ..., : int(length)].contiguous()
+            texts.extend(_text_outputs(self.asr.transcribe(clipped, sample_rate)))
+        return texts
 
 
 def _audio_refs(batch: Batch) -> tuple[tuple[Role, Modality], ...]:

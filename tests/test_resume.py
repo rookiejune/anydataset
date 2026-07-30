@@ -23,6 +23,19 @@ from anydataset._resume import (
 )
 
 
+def _append_completed_index_cache_worker(
+    root: str,
+    fragment_id: str,
+    start: int,
+    stop: int,
+) -> None:
+    append_completed_index_cache(
+        Path(root),
+        fragment_id,
+        tuple(range(start, stop)),
+    )
+
+
 class ResumeHelpersTest(unittest.TestCase):
     def test_prepare_resume_dir_uses_hidden_sibling(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -168,8 +181,7 @@ class ResumeHelpersTest(unittest.TestCase):
                     row["schema_version"] = version
                     path.write_text(json.dumps(row) + "\n", encoding="utf-8")
 
-                    with self.assertRaisesRegex(ValueError, "schema_version mismatch"):
-                        cached_completed_indexes(root, ("batch-a",))
+                    self.assertIsNone(cached_completed_indexes(root, ("batch-a",)))
 
     def test_completed_index_cache_rejects_non_integer_write_indexes(self):
         for index in (True, 1.0, "1"):
@@ -183,25 +195,18 @@ class ResumeHelpersTest(unittest.TestCase):
 
     def test_completed_index_cache_rejects_invalid_serialized_rows(self):
         cases = (
-            ([], "row must be an object"),
-            (
-                {"schema_version": 1, "fragment_id": 1, "indexes": [0]},
-                "fragment_id must be a path segment",
-            ),
-            (
-                {"schema_version": 1, "fragment_id": "../batch-a", "indexes": [0]},
-                "fragment_id must be a path segment",
-            ),
+            [],
+            {"schema_version": 1, "fragment_id": 1, "indexes": [0]},
+            {"schema_version": 1, "fragment_id": "../batch-a", "indexes": [0]},
         )
-        for row, message in cases:
+        for row in cases:
             with self.subTest(row=row):
                 with tempfile.TemporaryDirectory() as tmpdir:
                     root = Path(tmpdir)
                     path = root / ".completed-indexes.jsonl"
                     path.write_text(json.dumps(row) + "\n", encoding="utf-8")
 
-                    with self.assertRaisesRegex(ValueError, message):
-                        cached_completed_indexes(root, ("batch-a",))
+                    self.assertIsNone(cached_completed_indexes(root, ("batch-a",)))
 
     def test_completed_index_cache_ignores_fragment_mismatch(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -210,6 +215,18 @@ class ResumeHelpersTest(unittest.TestCase):
             write_completed_index_cache(root, (("batch-a", (0,)),))
 
             self.assertIsNone(cached_completed_indexes(root, ("batch-a", "batch-b")))
+
+    def test_completed_index_cache_returns_none_for_torn_jsonl(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            path = root / ".completed-indexes.jsonl"
+            path.write_text(
+                '{"schema_version":1,"fragment_id":"batch-a","indexes":[0]}\n'
+                '{"schema_version":1,"fragment_id":"bat',
+                encoding="utf-8",
+            )
+
+            self.assertIsNone(cached_completed_indexes(root, ("batch-a",)))
 
     def test_append_completed_index_cache_records_new_fragment(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -221,6 +238,35 @@ class ResumeHelpersTest(unittest.TestCase):
             self.assertEqual(
                 cached_completed_indexes(root, ("batch-a", "batch-b")),
                 frozenset({0, 1, 2}),
+            )
+
+    def test_append_completed_index_cache_is_safe_for_large_concurrent_lines(self):
+        import multiprocessing as mp
+
+        indexes_a = tuple(range(0, 2048))
+        indexes_b = tuple(range(2048, 4096))
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ctx = mp.get_context("spawn")
+            workers = [
+                ctx.Process(
+                    target=_append_completed_index_cache_worker,
+                    args=(tmpdir, "batch-a", 0, 2048),
+                ),
+                ctx.Process(
+                    target=_append_completed_index_cache_worker,
+                    args=(tmpdir, "batch-b", 2048, 4096),
+                ),
+            ]
+            for worker in workers:
+                worker.start()
+            for worker in workers:
+                worker.join(timeout=30)
+                self.assertEqual(worker.exitcode, 0)
+
+            self.assertEqual(
+                cached_completed_indexes(tmpdir, ("batch-a", "batch-b")),
+                frozenset(indexes_a + indexes_b),
             )
 
 

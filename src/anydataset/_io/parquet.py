@@ -85,7 +85,13 @@ def write_columns(
         for name, type_name in schema
     ]
     table = pa.Table.from_arrays(arrays, schema=fields)
-    pq.write_table(table, path)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        pq.write_table(table, tmp)
+        os.replace(tmp, path)
+    finally:
+        if tmp.exists():
+            tmp.unlink(missing_ok=True)
 
 
 def parquet_schema(pa, fields: ParquetSchema):

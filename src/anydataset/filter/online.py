@@ -50,6 +50,7 @@ class RejectReplaceDataset(MapStyleABC):
         "_name",
         "_predicate",
         "_rng",
+        "_served",
         "_stats",
         "_stats_window",
         "_update_prob",
@@ -128,7 +129,8 @@ class RejectReplaceDataset(MapStyleABC):
         self._max_reject_ratio = max_ratio
         self._stats_window = stats_window
         self._warn_cooldown_s = float(warn_cooldown_s)
-        self._buffer: list[Sample] = []
+        self._buffer: list[tuple[int, Sample]] = []
+        self._served: dict[int, int] = {}
         self._stats: deque[bool] = deque(maxlen=stats_window)
         self._warned_at = float("-inf")
         self._rng = random.Random(seed)
@@ -177,7 +179,8 @@ class RejectReplaceDataset(MapStyleABC):
         sample = self._dataset[index]
         if self._accepted(sample):
             self._record(accepted=True)
-            self._store(sample)
+            self._store(index, sample)
+            self._served[index] = index
             return sample
 
         self._record(accepted=False)
@@ -189,11 +192,14 @@ class RejectReplaceDataset(MapStyleABC):
                 continue
             candidate = self._dataset[candidate_index]
             if self._accepted(candidate):
-                self._store(candidate)
+                self._store(candidate_index, candidate)
+                self._served[index] = candidate_index
                 return candidate
 
         if len(self._buffer) >= self._min_buffer:
-            return self._buffer[self._rng.randrange(len(self._buffer))]
+            served_index, sample = self._buffer[self._rng.randrange(len(self._buffer))]
+            self._served[index] = served_index
+            return sample
 
         raise RuntimeError(
             f"online filter {self._name!r} could not find an accept sample "
@@ -203,10 +209,16 @@ class RejectReplaceDataset(MapStyleABC):
         )
 
     def global_index(self, index: int) -> int:
+        if type(index) is not int:
+            raise TypeError("index must be an integer.")
+        length = len(self._dataset)
+        if index < 0 or index >= length:
+            raise IndexError(f"index {index} out of range for length {length}.")
+        served = self._served.get(index, index)
         method = getattr(self._dataset, "global_index", None)
         if not callable(method):
-            return index
-        return cast(Callable[[int], int], method)(index)
+            return served
+        return cast(Callable[[int], int], method)(served)
 
     def _shuffle(
         self,
@@ -228,12 +240,13 @@ class RejectReplaceDataset(MapStyleABC):
     def _accepted(self, sample: Sample) -> bool:
         return _decision_label(self._predicate(sample)) == _ACCEPT
 
-    def _store(self, sample: Sample) -> None:
+    def _store(self, index: int, sample: Sample) -> None:
+        entry = (index, sample)
         if len(self._buffer) < self._buffer_size:
-            self._buffer.append(sample)
+            self._buffer.append(entry)
             return
         if self._rng.random() < self._update_prob:
-            self._buffer[self._rng.randrange(self._buffer_size)] = sample
+            self._buffer[self._rng.randrange(self._buffer_size)] = entry
 
     def _record(self, *, accepted: bool) -> None:
         self._stats.append(accepted)

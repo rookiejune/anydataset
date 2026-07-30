@@ -34,13 +34,16 @@ class FragmentBatchWriter:
     progress: ProgressSink | None = None
     worker_id: int = 0
 
+    def __post_init__(self) -> None:
+        self._inflight: set[int] = set()
+
     def write(self, batches: Iterable[Sequence[tuple[int, Sample]]]) -> None:
         with self._sink() as sink:
             pending_outputs: Deque[tuple[int, Sample]] = deque()
             read_start = time.perf_counter()
             for batch in batches:
                 self._record_read(batch, read_start)
-                pending = pending_batch(batch, self.completed)
+                pending = pending_batch(batch, self.completed | self._inflight)
                 if not pending:
                     read_start = time.perf_counter()
                     continue
@@ -142,7 +145,7 @@ class FragmentBatchWriter:
                 samples=indexed,
             )
         )
-        self.completed.update(indexes)
+        self._inflight.update(indexes)
 
     def _sink(self) -> BackgroundWriteSink[FragmentWriteJob]:
         return BackgroundWriteSink(
@@ -156,14 +159,24 @@ class FragmentBatchWriter:
                 stage="writer",
                 pending=pending,
             ),
-            on_complete=lambda job, pending, elapsed: put_stage_progress(
-                self.progress,
-                worker_id=self.worker_id,
-                stage="writer",
-                samples=len(job.samples),
-                elapsed=elapsed,
-                pending=pending,
-            ),
+            on_complete=self._on_write_complete,
+        )
+
+    def _on_write_complete(
+        self,
+        job: FragmentWriteJob,
+        pending: int,
+        elapsed: float,
+    ) -> None:
+        self.completed.update(job.indexes)
+        self._inflight.difference_update(job.indexes)
+        put_stage_progress(
+            self.progress,
+            worker_id=self.worker_id,
+            stage="writer",
+            samples=len(job.samples),
+            elapsed=elapsed,
+            pending=pending,
         )
 
 

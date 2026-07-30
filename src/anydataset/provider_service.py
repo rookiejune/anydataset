@@ -370,10 +370,29 @@ def _address(address: ProviderAddress) -> str | tuple[str, int]:
 def _unlink_address(address: str | tuple[str, int]) -> None:
     if not isinstance(address, str):
         return
+    path = Path(address)
+    if not path.exists():
+        return
+    if _socket_in_use(path):
+        raise RuntimeError(f"Provider socket is already in use: {path}")
     try:
         os.unlink(address)
     except FileNotFoundError:
         pass
+
+
+def _socket_in_use(path: Path) -> bool:
+    try:
+        conn = Client(str(path), authkey=b"anydataset-probe")
+    except AuthenticationError:
+        return True
+    except (ConnectionRefusedError, FileNotFoundError, PermissionError, OSError):
+        return False
+    try:
+        conn.close()
+    except Exception:
+        pass
+    return True
 
 
 def _clear_cuda_cache() -> None:

@@ -49,9 +49,10 @@
 - `ViewMaterializer` 和多设备 `FilterRule` 对默认 map-style shard 语义的数据集使用该
   loader；source 显式提供全局 indexed shard 的 iterable dataset 继续走 runtime indexed
   loader。
-- `IterableAnyDataset` 的原生 indexed 路径由 source opt-in，不直接信任 raw dataset 的
-  `shard()` 或局部 indexed 方法。内建 `hf-disk`、`store` 和 `sharded_csv` 通过随机访问
-  实现该路径，避免每个逻辑 shard 重扫全部输入。
+- `IterableAnyDataset` 的 `iter_shard` / `iter_indexed_shard` 共用同一 dense global
+  modulo 分区；原生加速只通过 source 的 `IndexedShardingSource` opt-in，不调用 raw
+  dataset 的 `shard()` 或局部 indexed 方法。内建 `hf-disk`、`store` 和 `sharded_csv`
+  通过随机访问实现该路径，避免每个逻辑 shard 重扫全部输入。
 - server 模式下 reader/writer worker 默认用 fork；无 server 的本地路径保持 spawn，避免
   本地 torch/CUDA/provider 状态被 worker 继承。
 - `StoreDataset` 打开时不再把 `samples.parquet` 全量转成 Python tuple；`samples` 保留

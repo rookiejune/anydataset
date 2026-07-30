@@ -76,14 +76,19 @@ class FakeBatchedLongCatCodec:
         sample_rate: int,
     ) -> Tensor:
         self.calls.append((tuple(audio.shape), sample_rate))
-        batch_size = audio.shape[0]
-        return torch.tensor(
-            [
+        templates = (
+            (
                 [[10, 30, 40], [11, 31, 41], [12, 32, 42], [13, 33, 43]],
                 [[20, 50, 60], [21, 51, 61], [22, 52, 62], [23, 53, 63]],
-            ],
-            device=audio.device,
-        )[:batch_size]
+            )
+        )
+        rows = []
+        for index in range(audio.shape[0]):
+            frames = int(audio.shape[-1])
+            first = float(audio[index].reshape(-1)[0].item())
+            template = templates[0] if first < 5.0 else templates[1]
+            rows.append(template[:frames])
+        return torch.tensor(rows, device=audio.device)
 
 
 class FakeBatchedLongCatCodecLoader:
@@ -251,7 +256,7 @@ class LongCatProviderTest(unittest.TestCase):
 
             self.assertEqual(
                 FakeBatchedLongCatCodecLoader.codec.calls,
-                [((2, 1, 4), 16000)],
+                [((1, 1, 4), 16000), ((1, 1, 2), 16000)],
             )
 
             dataset = _store_dataset(target, root)
@@ -320,7 +325,7 @@ class LongCatProviderTest(unittest.TestCase):
 
         self.assertEqual(
             FakeBatchedLongCatCodecLoader.codec.calls,
-            [((2, 1, 4), 16000)],
+            [((1, 1, 4), 16000), ((1, 1, 2), 16000)],
         )
         self.assertTrue(
             torch.equal(
@@ -371,7 +376,7 @@ class LongCatProviderTest(unittest.TestCase):
 
         self.assertEqual(
             FakeBatchedLongCatCodecLoader.codec.calls,
-            [((2, 1, 4), 16000)],
+            [((1, 1, 4), 16000), ((1, 1, 2), 16000)],
         )
 
     def test_call_batch_encodes_multiple_audio_roles(self):
@@ -396,8 +401,10 @@ class LongCatProviderTest(unittest.TestCase):
         self.assertEqual(
             FakeBatchedLongCatCodecLoader.codec.calls,
             [
-                ((2, 1, 4), 16000),
-                ((2, 1, 4), 16000),
+                ((1, 1, 4), 16000),
+                ((1, 1, 2), 16000),
+                ((1, 1, 2), 16000),
+                ((1, 1, 4), 16000),
             ],
         )
         self.assertIsInstance(outputs, dict)
@@ -410,7 +417,7 @@ class LongCatProviderTest(unittest.TestCase):
             torch.equal(source[1][:, 0], torch.tensor([20, 21]))
         )
         self.assertTrue(
-            torch.equal(target[0][:, 0], torch.tensor([10, 11]))
+            torch.equal(target[0][:, 0], torch.tensor([20, 21]))
         )
         self.assertTrue(
             torch.equal(target[1][:, 0], torch.tensor([20, 21, 22, 23]))
@@ -443,7 +450,7 @@ class LongCatProviderTest(unittest.TestCase):
 
             self.assertEqual(
                 FakeBatchedLongCatCodecLoader.codec.calls,
-                [((2, 1, 4), 16000)],
+                [((1, 1, 4), 16000), ((1, 1, 2), 16000)],
             )
 
             dataset = _store_dataset(target, root)
@@ -491,8 +498,10 @@ class LongCatProviderTest(unittest.TestCase):
             self.assertEqual(
                 FakeBatchedLongCatCodecLoader.codec.calls,
                 [
-                    ((2, 1, 4), 16000),
-                    ((2, 1, 4), 16000),
+                    ((1, 1, 4), 16000),
+                    ((1, 1, 2), 16000),
+                    ((1, 1, 2), 16000),
+                    ((1, 1, 4), 16000),
                 ],
             )
 
@@ -519,7 +528,7 @@ class LongCatProviderTest(unittest.TestCase):
             self.assertTrue(
                 torch.equal(
                     first_target[:, 0],
-                    torch.tensor([10, 11]),
+                    torch.tensor([20, 21]),
                 )
             )
             self.assertTrue(

@@ -65,7 +65,8 @@ Preset 应该尽量保留数据集天然提供的信息。例如语音到语音�
   构建进程退出时由下一个进程接管，超时则显式报错。读取侧通过 Parquet row group
   提供 map-style 随机访问，多设备和 DataLoader worker 由全局 sample index sampler
   分片，不重复扫描全部 CSV。`load_options.prepare_workers=0/1` 可显式禁用 process
-  pool，默认值保留自动并行策略。
+pool，默认值保留自动并行策略。`prepare_workers` 只影响转换并行度，不进入 `Spec.id`
+或 prepare cache 身份。
 
 这些字符串 source 可以直接写在 `Spec(source=...)` 里，也可以通过
 `resolve_dataset("tsv://...")` 或 `resolve_dataset("sharded_csv://...")`
@@ -84,8 +85,13 @@ Preset 应该尽量保留数据集天然提供的信息。例如语音到语音�
 `hf-disk`、`store` 和 `sharded_csv` 的 prepared dataset 支持按全局下标随机读取，因此
 实现该契约且不扫描其他 shard。TSV 只能顺序解析文件；Hugging Face streaming 的公开
 `shard()` 按底层 data source 分片，但不返回每行分片前的全局下标。两者都不声明 indexed
-能力，`IterableAnyDataset.iter_indexed_shard()` 对它们使用完整流上的 modulo fallback；
-该 fallback 成本较高，但索引语义稳定。
+能力，`IterableAnyDataset.iter_shard()` / `iter_indexed_shard()` 对它们都使用完整流上的
+modulo fallback；该 fallback 成本较高，但训练、写入与过滤共用同一分区函数。
+`IterableAnyDataset` 不会机会主义地调用 raw dataset 的 `shard()`。
+
+Map-style `iter_runtime_shard` 在多卡时会丢弃不能被 `rank_count` 整除的尾部样本；
+iterable 路径不做该截断。混合 `MultipleAnyDataset([map, iterable])` 时，各子数据集
+相对长度可能因该差异而不一致，调用方需自行对齐或显式配置。
 
 ## 派生 View
 

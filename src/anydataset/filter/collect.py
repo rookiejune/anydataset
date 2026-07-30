@@ -574,7 +574,10 @@ def _read_worker_message(
             buffer[row.index] = row
         return last_message
     if not _done_message(message):
-        return last_message
+        raise RuntimeError(
+            f"Filter worker {rank} queue received unexpected message: "
+            f"{type(message).__name__}."
+        )
     _, rank, error = message
     done.add(rank)
     if error is not None:

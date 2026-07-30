@@ -168,6 +168,12 @@ class ShardedCsvDataset:
         return self._read_parquet_row(file, index - file.start)
 
     def shard(self, *, num_shards: int, index: int) -> Iterator[CsvRow]:
+        """Iterate rows from physical CSV shard directories selected by directory index.
+
+        This is a low-level helper for directory-oriented scans. Anydataset
+        training, write, and filter paths use ``iter_indexed_shard`` (dense
+        global sample-index modulo) instead of this method.
+        """
         if num_shards <= 0:
             raise ValueError("num_shards must be positive.")
         if index < 0 or index >= num_shards:

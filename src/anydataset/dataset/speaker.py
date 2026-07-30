@@ -815,6 +815,8 @@ def _text(item: TextItem) -> str:
     value = item.views.get(TextView.TEXT)
     if not isinstance(value, str):
         raise TypeError("TextView.TEXT must be a string.")
+    if value == "":
+        raise ValueError("TextView.TEXT must be a non-empty string.")
     return value
 
 

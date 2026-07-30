@@ -54,6 +54,7 @@ from anydataset.types import (
     Role,
 )
 from anydataset.filter.collect import collect_ranges_parallel
+from anydataset.filter.collect import _read_worker_message as read_worker_message
 from anydataset.filter.storage import metrics_ready, read_index_rows, write_index_rows
 from anydataset.store import DatasetWriter
 from anydataset.store.jsonio import (
@@ -1873,6 +1874,21 @@ class FilteredDatasetTest(unittest.TestCase):
 
         self.assertEqual(result.counts, {"zero": 2, "one": 1, "two": 1})
 
+    def test_read_worker_message_rejects_unexpected_payload(self):
+        output = mock.Mock()
+        output.get.return_value = {"unexpected": True}
+        with self.assertRaisesRegex(RuntimeError, "unexpected message"):
+            read_worker_message(
+                output,
+                (),
+                {},
+                set(),
+                rank=0,
+                validate_modulo=False,
+                worker_timeout=None,
+                last_message=0.0,
+            )
+
     def test_collect_ranges_parallel_orders_selected_indexes_by_position(self):
         with tempfile.TemporaryDirectory():
             dataset_factory = partial(
@@ -2231,6 +2247,64 @@ class FilteredDatasetTest(unittest.TestCase):
         self.assertEqual(metadata["base"]["view"]["kind"], "filtered")
         self.assertEqual(metadata["base"]["view"]["rule"], {"name": "gte_two"})
         self.assertEqual(metadata["base"]["view"]["labels"], ["accept"])
+        self.assertEqual(
+            metadata["base"]["view"]["generation"],
+            first.cache_path.name,
+        )
+        self.assertEqual(metadata["base"]["view"]["view_schema_version"], 3)
+
+    def test_chained_filter_cache_invalidates_on_upstream_generation_republish(self):
+        _register_rows_source("unit_test_filter_chain_generation")
+        dataset = _dataset("unit_test_filter_chain_generation", [0, 1, 2, 3])
+        upstream_rule = FilterRule(
+            name="gte_two",
+            factory=lambda: lambda sample: _value(sample) >= 2,
+        )
+        downstream_rule = FilterRule(
+            name="even",
+            factory=lambda: lambda sample: _value(sample) % 2 == 0,
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with mock.patch.dict(os.environ, {"ANYDATASET_HOME": tmpdir}):
+                upstream = upstream_rule.apply(
+                    dataset_factory=lambda: dataset,
+                    device="cpu",
+                ).select_by("accept")
+                first = downstream_rule.apply(
+                    dataset_factory=upstream.dataset_factory,
+                    device="cpu",
+                )
+                first_path = first.cache_path
+                first_generation = json.loads(
+                    (first_path / "rule.json").read_text(encoding="utf-8")
+                )["base"]["view"]["generation"]
+                pointer = upstream.cache_path.parents[1] / "current.json"
+                pointer.unlink()
+                republished = upstream_rule.apply(
+                    dataset_factory=lambda: dataset,
+                    device="cpu",
+                ).select_by("accept")
+                self.assertNotEqual(republished.cache_path.name, first_generation)
+                self.assertEqual(len(republished), 2)
+
+                second = downstream_rule.apply(
+                    dataset_factory=republished.dataset_factory,
+                    device="cpu",
+                )
+                second_meta = json.loads(
+                    (second.cache_path / "rule.json").read_text(encoding="utf-8")
+                )
+
+        self.assertNotEqual(first_path, second.cache_path)
+        self.assertEqual(second.counts, {"accept": 1, "reject": 1})
+        self.assertEqual(
+            second_meta["base"]["view"]["generation"],
+            republished.cache_path.name,
+        )
+        self.assertNotEqual(
+            second_meta["base"]["view"]["generation"],
+            first_generation,
+        )
 
     def test_filter_rule_exposes_name_contract_only(self):
         rule = FilterRule(

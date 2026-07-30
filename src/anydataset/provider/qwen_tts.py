@@ -159,7 +159,14 @@ def _language_batch(value: Any, *, count: int, default: str) -> list[str]:
 
 def _qwen_language(value: Any) -> str:
     if isinstance(value, Lang):
-        return _QWEN_LANG_NAMES.get(value, value.value)
+        try:
+            return _QWEN_LANG_NAMES[value]
+        except KeyError as exc:
+            supported = ", ".join(sorted(lang.name for lang in _QWEN_LANG_NAMES))
+            raise ValueError(
+                f"QwenTTSProvider does not support Lang.{value.name}; "
+                f"supported languages: {supported}."
+            ) from exc
     return str(value)
 
 

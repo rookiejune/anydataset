@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import threading
 import unittest
@@ -48,12 +49,54 @@ class FSD50KPresetTest(unittest.TestCase):
             with mock.patch.dict("os.environ", {"ANYDATASET_HOME": tmpdir}):
                 cache = dataset.cache_manager.prepare(dataset.spec)
                 (cache.cache_path / "dev_files.json").write_text(
-                    "[]\n",
+                    '{"schema_version": 1, "listed_complete": true, "files": []}\n',
                     encoding="utf-8",
                 )
 
                 with self.assertRaisesRegex(ValueError, "non-empty list"):
                     dataset.prepare()
+
+    def test_rejects_legacy_list_manifest_and_rebuilds(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dataset = FSD50K()
+            with (
+                mock.patch.dict("os.environ", {"ANYDATASET_HOME": tmpdir}),
+                mock.patch(
+                    "anydataset.presets.fsd50k._list_files",
+                    return_value=["clips/dev/example.wav"],
+                ) as list_files,
+            ):
+                cache = dataset.cache_manager.prepare(dataset.spec)
+                (cache.cache_path / "dev_files.json").write_text(
+                    '["clips/dev/example.wav"]\n',
+                    encoding="utf-8",
+                )
+                state = dataset.prepare()
+
+            self.assertEqual(state["files"], ["clips/dev/example.wav"])
+            list_files.assert_called_once()
+
+    def test_rejects_full_hub_page_without_next_link(self):
+        from anydataset.presets import fsd50k as module
+
+        rows = [
+            {"type": "file", "path": f"clips/dev/{index:04d}.wav"}
+            for index in range(module._HUB_PAGE_LIMIT)
+        ]
+        response = mock.MagicMock()
+        response.__enter__.return_value = response
+        response.read.return_value = json.dumps(rows).encode("utf-8")
+        response.headers = {}
+
+        with mock.patch("anydataset.presets.fsd50k.urlopen", return_value=response):
+            with self.assertRaisesRegex(RuntimeError, "full page without next Link"):
+                module._list_files("Fhrozen/FSD50k", "dev", "main")
+
+    def test_rejects_malformed_hub_next_link(self):
+        from anydataset.presets import fsd50k as module
+
+        with self.assertRaisesRegex(ValueError, "Link header next URL is malformed"):
+            module._next_link_url('rel="next"', "https://huggingface.co")
 
     def test_rejects_hub_file_entry_without_string_path(self):
         response = mock.MagicMock()

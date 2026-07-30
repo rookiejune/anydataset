@@ -735,6 +735,47 @@ class ShardedCsvSourceTest(unittest.TestCase):
                 list(dataset.iter_indexed_shard(2, 1)),
                 [(1, "one")],
             )
+            self.assertEqual(list(dataset.iter_shard(2, 1)), ["one"])
+            self.assertEqual(
+                [sample for _index, sample in dataset.iter_indexed_shard(2, 1)],
+                list(dataset.iter_shard(2, 1)),
+            )
+
+    def test_iterable_and_map_iter_shard_agree_on_dense_modulo(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            shard_0 = root / "shard_0"
+            shard_1 = root / "shard_1"
+            shard_0.mkdir()
+            shard_1.mkdir()
+            (shard_0 / "0.csv").write_text(
+                "src_text\n"
+                "zero\n"
+                "one\n",
+                encoding="utf-8",
+            )
+            (shard_1 / "0.csv").write_text(
+                "src_text\n"
+                "two\n",
+                encoding="utf-8",
+            )
+
+            parse_fn = lambda row: row["src_text"]
+            map_dataset = AnyDataset(
+                Spec(source="sharded_csv", path=tmpdir),
+                parse_fn=parse_fn,
+            )
+            iterable_dataset = IterableAnyDataset(
+                Spec(source="sharded_csv", path=tmpdir),
+                parse_fn=parse_fn,
+            )
+
+            self.assertEqual(list(map_dataset.iter_shard(2, 1)), ["one"])
+            self.assertEqual(list(iterable_dataset.iter_shard(2, 1)), ["one"])
+            self.assertEqual(
+                list(iterable_dataset.iter_indexed_shard(2, 0)),
+                [(0, "zero"), (2, "two")],
+            )
 
     def test_reads_split_physical_shard_csv(self):
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -62,15 +62,15 @@ class CodecProvider(nn.Module, AudioProvider):
         if waveform.ndim == 2:
             waveform = waveform.unsqueeze(1)
         sample_rate = _single_sample_rate(sample_rates)
-        codes = _codes(
-            self.codec.encode(waveform, sample_rate),
-            self.codec.codebook_sizes,
-        )
-        return _split_codes(
-            self._tensor(codes),
-            lengths,
-            waveform.shape[-1],
-        )
+        outputs: list[torch.Tensor] = []
+        for index, length in enumerate(lengths.tolist()):
+            clipped = waveform[index : index + 1, ..., : int(length)].contiguous()
+            codes = _codes(
+                self.codec.encode(clipped, sample_rate),
+                self.codec.codebook_sizes,
+            )
+            outputs.append(self._tensor(codes)[0])
+        return outputs
 
     def _audio_batch(self, views: Mapping[AudioView, Any]) -> tuple[torch.Tensor, int]:
         waveform, sample_rate = self._waveform(views)
@@ -112,29 +112,6 @@ def _single_sample_rate(sample_rates: torch.Tensor) -> int:
     if not torch.equal(sample_rates, sample_rates.new_full(sample_rates.shape, first)):
         raise ValueError("CodecProvider.call_batch requires one sample rate per batch.")
     return int(first)
-
-
-def _split_codes(
-    codes: torch.Tensor,
-    waveform_lengths: torch.Tensor,
-    padded_waveform_length: int,
-) -> list[torch.Tensor]:
-    if padded_waveform_length <= 0:
-        raise ValueError("Batched waveform must have a positive time dimension.")
-    batch_size = int(waveform_lengths.numel())
-    if codes.shape[0] != batch_size:
-        raise ValueError("Codec codes batch size does not match waveform batch.")
-
-    code_length = codes.shape[1]
-    code_lengths = torch.div(
-        waveform_lengths.cpu() * code_length + padded_waveform_length - 1,
-        padded_waveform_length,
-        rounding_mode="floor",
-    )
-    return [
-        codes[index, : int(code_lengths[index].item())].contiguous()
-        for index in range(batch_size)
-    ]
 
 
 def _codes(codes: torch.Tensor, codebook_sizes: Sequence[int]) -> torch.Tensor:

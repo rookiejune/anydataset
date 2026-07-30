@@ -450,11 +450,13 @@ class ModalityProviderTest(unittest.TestCase):
             )
         )
 
-        self.assertEqual(outputs, ["hello-0", "hello-1"])
-        self.assertEqual(len(FakeWhisperASREvaluator.loaded.transcribe_calls), 1)
-        waveform, sample_rate = FakeWhisperASREvaluator.loaded.transcribe_calls[0]
-        self.assertEqual(tuple(waveform.shape), (2, 1, 3))
-        self.assertTrue(torch.equal(waveform[1], torch.tensor([[4.0, 0.0, 0.0]])))
+        self.assertEqual(outputs, ["hello", "hello"])
+        self.assertEqual(len(FakeWhisperASREvaluator.loaded.transcribe_calls), 2)
+        first, sample_rate = FakeWhisperASREvaluator.loaded.transcribe_calls[0]
+        second, _ = FakeWhisperASREvaluator.loaded.transcribe_calls[1]
+        self.assertEqual(tuple(first.shape), (1, 3))
+        self.assertTrue(torch.equal(first, torch.tensor([[1.0, 2.0, 3.0]])))
+        self.assertTrue(torch.equal(second, torch.tensor([[4.0]])))
         self.assertEqual(sample_rate, 16000)
 
     def test_whisper_asr_provider_transcribes_file_batch(self):
@@ -497,11 +499,13 @@ class ModalityProviderTest(unittest.TestCase):
         with patch("anydataset.provider.abc.torchaudio", FakeTorchAudio()):
             outputs = provider.call_batch(batch)
 
-        self.assertEqual(outputs, ["hello-0", "hello-1"])
-        self.assertEqual(len(FakeWhisperASREvaluator.loaded.transcribe_calls), 1)
-        waveform, sample_rate = FakeWhisperASREvaluator.loaded.transcribe_calls[0]
-        self.assertEqual(tuple(waveform.shape), (2, 1, 3))
-        self.assertTrue(torch.equal(waveform[1], torch.tensor([[4.0, 0.0, 0.0]])))
+        self.assertEqual(outputs, ["hello", "hello"])
+        self.assertEqual(len(FakeWhisperASREvaluator.loaded.transcribe_calls), 2)
+        first, sample_rate = FakeWhisperASREvaluator.loaded.transcribe_calls[0]
+        second, _ = FakeWhisperASREvaluator.loaded.transcribe_calls[1]
+        self.assertEqual(tuple(first.shape), (1, 3))
+        self.assertTrue(torch.equal(first, torch.tensor([[1.0, 2.0, 3.0]])))
+        self.assertTrue(torch.equal(second, torch.tensor([[4.0]])))
         self.assertEqual(sample_rate, 16000)
 
     def test_whisper_asr_provider_transcribes_multiple_audio_roles(self):
@@ -537,15 +541,19 @@ class ModalityProviderTest(unittest.TestCase):
         self.assertEqual(
             outputs,
             {
-                (Role.SOURCE, Modality.AUDIO): ["hello-0", "hello-1"],
-                (Role.TARGET, Modality.AUDIO): ["hello-0", "hello-1"],
+                (Role.SOURCE, Modality.AUDIO): ["hello", "hello"],
+                (Role.TARGET, Modality.AUDIO): ["hello", "hello"],
             },
         )
-        self.assertEqual(len(FakeWhisperASREvaluator.loaded.transcribe_calls), 2)
-        source_waveform, _ = FakeWhisperASREvaluator.loaded.transcribe_calls[0]
-        target_waveform, _ = FakeWhisperASREvaluator.loaded.transcribe_calls[1]
-        self.assertEqual(tuple(source_waveform.shape), (2, 1, 3))
-        self.assertEqual(tuple(target_waveform.shape), (2, 1, 2))
+        self.assertEqual(len(FakeWhisperASREvaluator.loaded.transcribe_calls), 4)
+        source_first, _ = FakeWhisperASREvaluator.loaded.transcribe_calls[0]
+        source_second, _ = FakeWhisperASREvaluator.loaded.transcribe_calls[1]
+        target_first, _ = FakeWhisperASREvaluator.loaded.transcribe_calls[2]
+        target_second, _ = FakeWhisperASREvaluator.loaded.transcribe_calls[3]
+        self.assertTrue(torch.equal(source_first, torch.tensor([[1.0, 2.0, 3.0]])))
+        self.assertTrue(torch.equal(source_second, torch.tensor([[5.0]])))
+        self.assertTrue(torch.equal(target_first, torch.tensor([[4.0]])))
+        self.assertTrue(torch.equal(target_second, torch.tensor([[6.0, 7.0]])))
 
     def test_whisper_asr_provider_requires_one_sample_rate_per_batch(self):
         with _fake_anytrain_asr():

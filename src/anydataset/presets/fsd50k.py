@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import os
-import wave
 from collections.abc import Mapping
 from functools import partial
 from pathlib import Path
@@ -60,17 +59,15 @@ class FSD50K(AnyDataset):
 
         manifest_path = cache.cache_path / f"{split}_files.json"
         with FileLock(cache.lock_path, wait_timeout=3600.0):
-            if not manifest_path.exists():
+            files: list[str] | None = None
+            if manifest_path.exists():
+                files = _read_manifest(manifest_path, split)
+            if files is None:
                 files = _manifest_files(
                     _list_files(self.spec.path, split, revision),
                     split,
                 )
-                _write_json(manifest_path, files)
-            else:
-                files = _manifest_files(
-                    json.loads(manifest_path.read_text(encoding="utf-8")),
-                    split,
-                )
+                _write_manifest(manifest_path, files)
 
         self._dataset = {
             "repo_id": self.spec.path,
@@ -94,6 +91,8 @@ class FSD50K(AnyDataset):
 
 
 _VALID_SPLITS = frozenset({"dev", "eval"})
+_HUB_PAGE_LIMIT = 1000
+_MANIFEST_SCHEMA_VERSION = 1
 
 
 def _row_for(state: dict[str, Any], index: int) -> dict[str, Any]:
@@ -114,7 +113,7 @@ def _list_files(repo_id: str, split: str, revision: str) -> list[str]:
     endpoint = os.environ.get("HF_ENDPOINT", "https://huggingface.co").rstrip("/")
     url = (
         f"{endpoint}/api/datasets/{repo_id}/tree/{quote(revision, safe='')}/clips/{split}"
-        "?recursive=true&expand=false&limit=1000"
+        f"?recursive=true&expand=false&limit={_HUB_PAGE_LIMIT}"
     )
     files: list[str] = []
     seen_urls: set[str] = set()
@@ -139,6 +138,10 @@ def _list_files(repo_id: str, split: str, revision: str) -> list[str]:
                     files.append(path)
             next_url = response.headers.get("Link")
         url = _next_link_url(next_url, endpoint)
+        if len(rows) >= _HUB_PAGE_LIMIT and url is None:
+            raise RuntimeError(
+                "FSD50K Hub listing truncated: full page without next Link."
+            )
     return sorted(files)
 
 
@@ -162,6 +165,29 @@ def _manifest_files(value: object, split: str) -> list[str]:
     return files
 
 
+def _read_manifest(path: Path, split: str) -> list[str] | None:
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(raw, dict):
+        return None
+    if (
+        raw.get("schema_version") != _MANIFEST_SCHEMA_VERSION
+        or raw.get("listed_complete") is not True
+    ):
+        return None
+    return _manifest_files(raw.get("files"), split)
+
+
+def _write_manifest(path: Path, files: list[str]) -> None:
+    _write_json(
+        path,
+        {
+            "schema_version": _MANIFEST_SCHEMA_VERSION,
+            "listed_complete": True,
+            "files": files,
+        },
+    )
+
+
 def _next_link_url(link_header: str | None, endpoint: str) -> str | None:
     if not link_header:
         return None
@@ -170,8 +196,8 @@ def _next_link_url(link_header: str | None, endpoint: str) -> str | None:
             continue
         start = part.find("<")
         end = part.find(">")
-        if start == -1 or end == -1:
-            return None
+        if start == -1 or end == -1 or end <= start:
+            raise ValueError("FSD50K Hub Link header next URL is malformed.")
         return _rewrite_endpoint(part[start + 1 : end], endpoint)
     return None
 
@@ -210,53 +236,14 @@ def _download_file(state: dict[str, Any], file_name: str) -> str:
 def _load_audio(path: str | Path) -> tuple[torch.Tensor, int]:
     try:
         import torchaudio
-    except (ImportError, OSError):
-        return _load_pcm_wave(path)
+    except (ImportError, OSError) as exc:
+        raise ImportError(
+            "FSD50K audio loading requires a working torchaudio installation "
+            "(`pip install anydataset[audio]`)."
+        ) from exc
 
     waveform, sample_rate = torchaudio.load(str(path))
     return waveform.to(dtype=torch.float32), int(sample_rate)
-
-
-def _load_pcm_wave(path: str | Path) -> tuple[torch.Tensor, int]:
-    with wave.open(str(path), "rb") as handle:
-        channels = handle.getnchannels()
-        sample_rate = handle.getframerate()
-        sample_width = handle.getsampwidth()
-        frames = handle.getnframes()
-        raw = handle.readframes(frames)
-
-    return _pcm_bytes_to_waveform(raw, channels, sample_width), int(sample_rate)
-
-
-def _pcm_bytes_to_waveform(
-    raw: bytes,
-    channels: int,
-    sample_width: int,
-) -> torch.Tensor:
-    if channels <= 0:
-        raise ValueError("WAV files must contain at least one channel.")
-    if sample_width == 1:
-        values = torch.tensor(list(raw), dtype=torch.float32).sub(128).div(128)
-    elif sample_width == 2:
-        values = torch.frombuffer(raw, dtype=torch.int16).clone().float().div(32768)
-    elif sample_width == 3:
-        values = _int24_pcm_to_float(raw)
-    elif sample_width == 4:
-        values = (
-            torch.frombuffer(raw, dtype=torch.int32).clone().float().div(2147483648)
-        )
-    else:
-        raise ValueError(f"Unsupported WAV sample width: {sample_width}.")
-
-    return values.reshape(-1, channels).transpose(0, 1).contiguous()
-
-
-def _int24_pcm_to_float(raw: bytes) -> torch.Tensor:
-    bytes_tensor = torch.tensor(list(raw), dtype=torch.int32).reshape(-1, 3)
-    values = bytes_tensor[:, 0] | (bytes_tensor[:, 1] << 8) | (bytes_tensor[:, 2] << 16)
-    sign_bit = 1 << 23
-    values = (values ^ sign_bit) - sign_bit
-    return values.to(dtype=torch.float32).div(8388608)
 
 
 def _write_json(path: Path, value: Any) -> None:

@@ -166,12 +166,18 @@ class IterableAnyDataset(_Base, IterableDataset):
             yield self.transform_sample(self.parse_fn(row))
 
     def iter_shard_rows(self, num_shards: int, shard_id: int) -> Iterator[Any]:
+        from .source.protocol import native_indexed_shard
+
         validate_shard(num_shards, shard_id)
-        dataset = self.dataset
-        shard = getattr(dataset, "shard", None)
-        if callable(shard):
-            method = cast(Callable[..., Iterator[Any]], shard)
-            yield from method(num_shards=num_shards, index=shard_id)
+        indexed = native_indexed_shard(
+            self.source,
+            self.dataset,
+            num_shards=num_shards,
+            shard_id=shard_id,
+        )
+        if indexed is not None:
+            for _index, row in indexed:
+                yield row
             return
 
         yield from _iter_modulo(self.iter_rows(), num_shards, shard_id)

@@ -218,9 +218,10 @@ tsv_spec = resolve_dataset("tsv:///data/common_voice/en:train")
 csv_spec = resolve_dataset("sharded_csv:///data/bitext:train")
 ```
 
-`Spec.source`、`path`、`split`、`version` 和 `load_options` 都参与
-`Spec.id`。同一路径改指向另一个物理快照时，应更新 `version` 或对应 load option；
-source prepare cache 只会在最终 identity 相同时复用。
+`Spec.source`、`path`、`split`、`version` 和物理 `load_options` 都参与
+`Spec.id`。不改变源内容的 operational 选项（当前为 `prepare_workers`）不进入
+`Spec.id` / prepare cache 身份。同一路径改指向另一个物理快照时，应更新 `version`
+或对应物理 load option；source prepare cache 只会在最终 identity 相同时复用。
 
 新增物理 source 类型时，注册一个工厂即可；`AnyDataset` 会按 `Spec.source` 从注册器取 source：
 
@@ -250,7 +251,8 @@ dataset = IterableAnyDataset(
 
 内建 `hf-disk`、`store` 和 `sharded_csv` source 通过随机访问提供 indexed 路径。TSV
 和 Hugging Face streaming 的公开 shard API 不携带原始全局行索引，因此明确保留全流
-modulo fallback。
+modulo fallback。`IterableAnyDataset.iter_shard` 与 `iter_indexed_shard` 共用同一
+dense global modulo 分区，不会机会主义地调用 raw dataset 的 `shard()`。
 
 ## 组合数据集
 

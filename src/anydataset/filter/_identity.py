@@ -25,7 +25,7 @@ if TYPE_CHECKING:
 else:
     FilterBase = MapStyleABC
 
-_FILTER_VIEW_SCHEMA_VERSION = 2
+_FILTER_VIEW_SCHEMA_VERSION = 3
 
 
 def filter_base(dataset: object) -> FilterBase:
@@ -63,6 +63,7 @@ def filter_identity(
     input_id: str | None = None,
 ) -> dict[str, Any]:
     if _is_filtered_dataset(dataset):
+        cache_path = Path(dataset.cache_path)
         identity = {
             "view_schema_version": _FILTER_VIEW_SCHEMA_VERSION,
             "kind": "filtered",
@@ -73,7 +74,8 @@ def filter_identity(
                 dataset.rule.version,
             ),
             "labels": list(dataset.labels),
-            "cache_key": filter_cache_root(dataset.cache_path).name,
+            "cache_key": filter_cache_root(cache_path).name,
+            "generation": cache_path.name,
             "sample_count": len(dataset),
         }
         return _with_input_id(identity, input_id)

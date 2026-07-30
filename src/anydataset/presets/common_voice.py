@@ -75,7 +75,11 @@ class CommonVoiceParser:
         self.language_root = language_root
 
     def __call__(self, row: Mapping[str, Any]):
-        language_root = Path(str(row.get(_LANGUAGE_ROOT_FIELD, self.language_root)))
+        if _LANGUAGE_ROOT_FIELD not in row:
+            raise KeyError(
+                f"Common Voice rows require {_LANGUAGE_ROOT_FIELD!r} from the TSV source."
+            )
+        language_root = Path(str(row[_LANGUAGE_ROOT_FIELD]))
         enriched = dict(row)
         enriched.pop(_LANGUAGE_ROOT_FIELD, None)
         enriched["audio_path"] = str(language_root / "clips" / str(row["path"]))

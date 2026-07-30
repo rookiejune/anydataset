@@ -53,9 +53,9 @@ accepted_both = speech_rule.apply(
 
 When a rule is applied to a filtered view, the predicate only scans the selected
 rows, but the written partition indices still refer to the original sample
-space. Cache metadata records the upstream rule and selected labels, and the
-downstream cache key is separated from the same rule applied to the physical
-dataset.
+space. Cache metadata records the upstream rule, selected labels, and the
+upstream generation id; the downstream cache key is separated from the same rule
+applied to the physical dataset.
 
 Predicate return values are normalized to string labels:
 
@@ -72,7 +72,15 @@ changing any of the three fields selects a different cache. When omitted,
 `rule_id` defaults to `name` and the original name-only cache path remains
 compatible. The factory, predicate, dataset `parse_fn`, and dataset transforms
 are deliberately not inspected by the library. Update `version` (or the legacy
-`name`) when those semantics change.
+`name`) whenever those semantics change—including after a failed resume or
+partial publish—so rebuilds do not replay stale decisions under the same rule
+identity.
+
+When a downstream rule is applied to an upstream `FilteredDataset` view, the
+downstream cache identity also pins the upstream **generation id**. Republishing
+the upstream rule under the same name/`rule_id`/`version` creates a new
+generation and therefore a new downstream cache path, even if label counts stay
+the same.
 
 Cache layout:
 

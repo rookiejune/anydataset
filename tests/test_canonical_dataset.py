@@ -179,6 +179,25 @@ class CanonicalDatasetTest(unittest.TestCase):
         self.assertNotEqual(spec.id, different_revision.id)
         self.assertEqual(spec.to_dict()["id"], spec.id)
 
+    def test_spec_id_ignores_operational_prepare_workers(self):
+        base = Spec(source="sharded_csv", path="/data/bitext")
+        with_workers = Spec(
+            source="sharded_csv",
+            path="/data/bitext",
+            load_options={"prepare_workers": 4},
+        )
+        zero_workers = Spec(
+            source="sharded_csv",
+            path="/data/bitext",
+            load_options={"prepare_workers": 0},
+        )
+
+        self.assertEqual(base.id, with_workers.id)
+        self.assertEqual(base.id, zero_workers.id)
+        self.assertEqual(base.cache_relpath, with_workers.cache_relpath)
+        self.assertNotIn("prepare_workers", base.to_dict()["load_options"])
+        self.assertNotIn("prepare_workers", with_workers.to_dict()["load_options"])
+
     def test_spec_load_options_are_frozen(self):
         spec = Spec(
             source=Source.HF,

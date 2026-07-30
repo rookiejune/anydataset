@@ -209,7 +209,9 @@ not preserve global indexes.
 The built-in `hf-disk`, `store`, and `sharded_csv` sources provide this indexed
 path through random access. TSV and Hugging Face streaming datasets use the
 full-stream modulo fallback because their public shard APIs do not propagate
-original global row indexes.
+original global row indexes. `IterableAnyDataset.iter_shard` and
+`iter_indexed_shard` share that same dense global modulo partition; raw dataset
+`shard()` methods are never called opportunistically.
 
 Caches are rooted at `ANYDATASET_HOME`, or `~/.cache/anydataset` when the
 environment variable is unset. Source prepare caches live under
@@ -219,9 +221,11 @@ Runtime warnings and worker logs live under
 `$ANYDATASET_HOME/logs/<timestamp>-<pid>/`.
 
 Every physical `Spec` field participates in `Spec.id`: `source`, `path`,
-`split`, `version`, and `load_options`. Change `version` or a load option when
-the same path denotes a different physical snapshot; source prepare caches are
-reused only for the resulting identity.
+`split`, `version`, and physical `load_options`. Operational options that do not
+change source content—currently `prepare_workers`—are excluded from `Spec.id` /
+prepare cache identity. Change `version` or a physical load option when the same
+path denotes a different physical snapshot; source prepare caches are reused only
+for the resulting identity.
 
 The built-in `sharded_csv` source keeps CSV files as the readable source of
 truth and prepares one Parquet cache part per CSV file under

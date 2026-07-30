@@ -71,6 +71,24 @@ def test_look_ahead_replaces_reject_with_neighbor_accept() -> None:
     )
 
     assert _value(wrapped[1]) == 2
+    assert wrapped.global_index(1) == 2
+
+
+def test_global_index_tracks_served_sample_after_replace() -> None:
+    wrapped = RejectReplaceDataset(
+        _Dataset(range(6)),
+        _even,
+        buffer_size=4,
+        min_buffer=2,
+        max_probe=4,
+        seed=0,
+    )
+
+    assert wrapped.global_index(0) == 0
+    _ = wrapped[0]
+    assert wrapped.global_index(0) == 0
+    _ = wrapped[1]
+    assert wrapped.global_index(1) == 2
 
 
 def test_buffer_fallback_after_probes_exhausted() -> None:

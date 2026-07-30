@@ -8,6 +8,7 @@ domain-specific formats at their own layer.
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import os
@@ -26,6 +27,7 @@ T = TypeVar("T")
 
 _COMPLETED_INDEX_CACHE = ".completed-indexes.jsonl"
 _COMPLETED_INDEX_CACHE_SCHEMA_VERSION = 1
+_COMPLETED_INDEX_CACHE_LOCK = ".completed-indexes.jsonl.lock"
 
 
 def resume_root(output_dir: str | Path) -> Path:
@@ -242,7 +244,10 @@ def cached_completed_indexes(
     if not path.is_file():
         return None
     expected = frozenset(fragment_ids)
-    entries = _read_completed_index_entries(path)
+    try:
+        entries = _read_completed_index_entries(path)
+    except (OSError, UnicodeError, json.JSONDecodeError, ValueError, TypeError):
+        return None
     if frozenset(entries) != expected:
         return None
     indexes: set[int] = set()
@@ -284,11 +289,29 @@ def append_completed_index_cache(
         )
         + "\n"
     )
-    fd = os.open(path, os.O_APPEND | os.O_CREAT | os.O_WRONLY, 0o644)
+    payload = line.encode("utf-8")
+    lock_path = Path(root) / _COMPLETED_INDEX_CACHE_LOCK
+    lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o644)
     try:
-        os.write(fd, line.encode("utf-8"))
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        fd = os.open(path, os.O_APPEND | os.O_CREAT | os.O_WRONLY, 0o644)
+        try:
+            _write_all(fd, payload)
+            os.fsync(fd)
+        finally:
+            os.close(fd)
     finally:
-        os.close(fd)
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        os.close(lock_fd)
+
+
+def _write_all(fd: int, payload: bytes) -> None:
+    offset = 0
+    while offset < len(payload):
+        written = os.write(fd, payload[offset:])
+        if written <= 0:
+            raise OSError("Failed to write completed index cache entry.")
+        offset += written
 
 
 def _completed_index_row(fragment_id: str, indexes: Sequence[int]) -> dict[str, object]:
