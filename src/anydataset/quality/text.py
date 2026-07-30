@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from functools import lru_cache
 from typing import Any
 
+from .._immutable import Immutable
 from ..filter import FilterDecision
 from ..types import Lang, Role, Sample
 from . import _text
@@ -20,17 +21,27 @@ _DEFAULT_GEC_MODELS = {
 }
 _ACCEPT_LABELS = frozenset({"1", "LABEL_1", "ACCEPT", "ACCEPTABLE"})
 _REJECT_LABELS = frozenset({"0", "LABEL_0", "REJECT", "UNACCEPTABLE"})
+_DEFAULT_QUALITY_PROFILE = TextQualityProfile()
 
 
-@dataclass(frozen=True)
-class TextQuality:
+@dataclass(init=False, unsafe_hash=True)
+class TextQuality(Immutable):
     role: Role
     lang: Lang
-    profile: TextQualityProfile = field(default_factory=TextQualityProfile)
+    profile: TextQualityProfile
 
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "role", Role(self.role))
-        object.__setattr__(self, "lang", _lang("text quality lang", self.lang))
+    def __init__(
+        self,
+        role: Role,
+        lang: Lang,
+        profile: TextQualityProfile = _DEFAULT_QUALITY_PROFILE,
+    ) -> None:
+        if not isinstance(profile, TextQualityProfile):
+            raise TypeError("text quality profile must be a TextQualityProfile.")
+        self.role = Role(role)
+        self.lang = _lang("text quality lang", lang)
+        self.profile = profile
+        self.seal()
 
     def __call__(self, sample: Sample) -> FilterDecision:
         metrics = _text.metrics(sample, self.role, self.lang)
@@ -57,27 +68,32 @@ class TextQuality:
         )
 
 
-@dataclass(frozen=True)
-class TextAcceptability:
+@dataclass(init=False, unsafe_hash=True)
+class TextAcceptability(Immutable):
     role: Role
     lang: Lang
-    min_score: float = 0.6
-    model: str | None = None
-    device: int | str | None = None
+    min_score: float
+    model: str
+    device: int | str | None
 
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "role", Role(self.role))
-        object.__setattr__(self, "lang", _lang("text acceptability lang", self.lang))
-        object.__setattr__(
-            self,
-            "min_score",
-            _text.unit_ratio("text acceptability min_score", self.min_score),
+    def __init__(
+        self,
+        role: Role,
+        lang: Lang,
+        min_score: float = 0.6,
+        model: str | None = None,
+        device: int | str | None = None,
+    ) -> None:
+        normalized_lang = _lang("text acceptability lang", lang)
+        self.role = Role(role)
+        self.lang = normalized_lang
+        self.min_score = _text.unit_ratio(
+            "text acceptability min_score",
+            min_score,
         )
-        object.__setattr__(
-            self,
-            "model",
-            _model("text acceptability model", self.lang, self.model),
-        )
+        self.model = _model("text acceptability model", normalized_lang, model)
+        self.device = device
+        self.seal()
 
     def __call__(self, sample: Sample) -> FilterDecision:
         metrics = _text.metrics(sample, self.role, self.lang)
@@ -91,7 +107,7 @@ class TextAcceptability:
         if not flags:
             score = _text.unit_ratio(
                 "text acceptability model output",
-                _score(metrics.text, model=str(self.model), device=self.device),
+                _score(metrics.text, model=self.model, device=self.device),
             )
             if score < self.min_score:
                 flags.append(_flag(self.role, "acceptability_low"))
@@ -119,31 +135,36 @@ class TextAcceptability:
         )
 
 
-@dataclass(frozen=True)
-class ChineseGEC:
+@dataclass(init=False, unsafe_hash=True)
+class ChineseGEC(Immutable):
     role: Role
-    max_edit_ratio: float = 0.05
-    max_edits: int | None = None
-    model: str | None = None
-    device: int | str | None = None
+    max_edit_ratio: float
+    max_edits: int | None
+    model: str
+    device: int | str | None
 
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "role", Role(self.role))
-        object.__setattr__(
-            self,
-            "max_edit_ratio",
-            _text.unit_ratio("ChineseGEC max_edit_ratio", self.max_edit_ratio),
+    def __init__(
+        self,
+        role: Role,
+        max_edit_ratio: float = 0.05,
+        max_edits: int | None = None,
+        model: str | None = None,
+        device: int | str | None = None,
+    ) -> None:
+        self.role = Role(role)
+        self.max_edit_ratio = _text.unit_ratio(
+            "ChineseGEC max_edit_ratio",
+            max_edit_ratio,
         )
-        object.__setattr__(
-            self,
-            "max_edits",
-            _optional_non_negative_int("ChineseGEC max_edits", self.max_edits),
+        self.max_edits = _optional_non_negative_int("ChineseGEC max_edits", max_edits)
+        self.model = _default_model(
+            "ChineseGEC model",
+            Lang.ZH,
+            model,
+            _DEFAULT_GEC_MODELS,
         )
-        object.__setattr__(
-            self,
-            "model",
-            _default_model("ChineseGEC model", Lang.ZH, self.model, _DEFAULT_GEC_MODELS),
-        )
+        self.device = device
+        self.seal()
 
     def __call__(self, sample: Sample) -> FilterDecision:
         metrics = _text.metrics(sample, self.role, Lang.ZH)
@@ -159,7 +180,7 @@ class ChineseGEC:
 
         if not flags:
             corrected = _text.normalize_space(
-                _correct(metrics.text, model=str(self.model), device=self.device)
+                _correct(metrics.text, model=self.model, device=self.device)
             )
             source = metrics.normalized
             edit_count = _edit_distance(source, corrected)

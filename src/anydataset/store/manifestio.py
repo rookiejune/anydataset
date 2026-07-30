@@ -1,7 +1,12 @@
 from __future__ import annotations
 
 import json
+import os
+import threading
+from collections import OrderedDict
 from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Any
 
@@ -10,6 +15,8 @@ from .._io.parquet import (
     parquet_schema,
     pyarrow,
 )
+from .._io.files import StatFingerprint as _StatFingerprint
+from .._io.files import stat_fingerprint as _stat_fingerprint
 from ..types.item import Modality, Role, View
 from .manifest import (
     SampleManifestEntry,
@@ -20,38 +27,173 @@ from .manifest import (
 from .paths import samples_parquet_path, view_manifest_parquet_path
 
 
+_DEFAULT_MAX_OPEN_MANIFESTS = 16
+_ACTIVE_CACHE: ContextVar[ManifestParquetCache | None] = ContextVar(
+    "anydataset_manifest_cache",
+    default=None,
+)
+
+
+class ManifestParquetCache:
+    """Reuse validated manifest ParquetFile handles within one process.
+
+    Handles are keyed by the resolved path and its stat fingerprint.  A store
+    can therefore be rebuilt atomically at the same path without reusing an
+    old handle.  The cache is intentionally pickleable: only its capacity is
+    serialized, while file descriptors are reopened in the new process.
+    """
+
+    def __init__(self, max_open_files: int = _DEFAULT_MAX_OPEN_MANIFESTS) -> None:
+        if not isinstance(max_open_files, int) or isinstance(max_open_files, bool):
+            raise TypeError("max_open_files must be an integer.")
+        if max_open_files <= 0:
+            raise ValueError("max_open_files must be positive.")
+        self.max_open_files = max_open_files
+        self._pid = os.getpid()
+        self._files: OrderedDict[
+            tuple[int, Path, _StatFingerprint], Any
+        ] = OrderedDict()
+        self._lock = threading.RLock()
+
+    def get(self, path: str | Path) -> Any:
+        self._reset_after_fork()
+        resolved = Path(path).expanduser().resolve()
+        fingerprint = _stat_fingerprint(resolved.stat())
+        pid = os.getpid()
+        key = (pid, resolved, fingerprint)
+        with self._lock:
+            cached = self._files.get(key)
+            if cached is not None:
+                self._files.move_to_end(key)
+                return cached
+
+            self._drop_path(resolved)
+            _, pq = pyarrow()
+            parquet = pq.ParquetFile(resolved)
+            try:
+                if _stat_fingerprint(resolved.stat()) != fingerprint:
+                    raise ValueError(f"Manifest changed while opening: {resolved}")
+            except Exception:
+                _close_parquet(parquet)
+                raise
+            self._files[key] = parquet
+            self._evict()
+            return parquet
+
+    @contextmanager
+    def activate(self) -> Iterator[None]:
+        token = _ACTIVE_CACHE.set(self)
+        try:
+            yield
+        finally:
+            _ACTIVE_CACHE.reset(token)
+
+    def close(self) -> None:
+        self._reset_after_fork()
+        with self._lock:
+            files = tuple(self._files.values())
+            self._files.clear()
+        for parquet in files:
+            _close_parquet(parquet)
+
+    def __getstate__(self) -> dict[str, int]:
+        return {"max_open_files": self.max_open_files}
+
+    def __setstate__(self, state: dict[str, int]) -> None:
+        self.__init__(state["max_open_files"])
+
+    def __del__(self) -> None:
+        try:
+            self.close()
+        except Exception:
+            pass
+
+    def _drop_path(self, path: Path) -> None:
+        stale = [key for key in self._files if key[1] == path]
+        for key in stale:
+            parquet = self._files.pop(key)
+            _close_parquet(parquet)
+
+    def _evict(self) -> None:
+        while len(self._files) > self.max_open_files:
+            _key, parquet = self._files.popitem(last=False)
+            _close_parquet(parquet)
+
+    def _reset_after_fork(self) -> None:
+        pid = os.getpid()
+        if pid == self._pid:
+            return
+        inherited = tuple(self._files.values())
+        self._files = OrderedDict()
+        self._lock = threading.RLock()
+        self._pid = pid
+        for parquet in inherited:
+            _close_parquet(parquet)
+
+
+_DEFAULT_CACHE = ManifestParquetCache()
+
+
+def close_manifest_parquet_cache() -> None:
+    """Close handles retained by standalone manifest helper calls."""
+
+    _DEFAULT_CACHE.close()
+
+
+def manifest_parquet_cache() -> ManifestParquetCache:
+    """Return the process-global cache used by standalone manifest helpers."""
+
+    return _DEFAULT_CACHE
+
+
+def _active_cache(cache: ManifestParquetCache | None) -> ManifestParquetCache:
+    return cache or _ACTIVE_CACHE.get() or _DEFAULT_CACHE
+
+
 def samples_manifest_exists(root: str | Path) -> bool:
     return samples_parquet_path(root).is_file()
 
 
-def read_samples_manifest(root: str | Path) -> Iterator[SampleManifestEntry]:
+def read_samples_manifest(
+    root: str | Path,
+    *,
+    cache: ManifestParquetCache | None = None,
+) -> Iterator[SampleManifestEntry]:
     for row in _read_manifest_rows(
         samples_parquet_path(root),
         _SAMPLE_SCHEMA,
         kind="sample",
+        cache=cache,
     ):
         yield _sample_entry(row)
 
 
-def sample_manifest_row_count(root: str | Path) -> int:
-    return sample_manifest_layout(root)[0]
+def sample_manifest_row_count(
+    root: str | Path,
+    *,
+    cache: ManifestParquetCache | None = None,
+) -> int:
+    return sample_manifest_layout(root, cache=cache)[0]
 
 
-def sample_manifest_row_groups(root: str | Path) -> tuple[int, ...]:
-    return sample_manifest_layout(root)[1]
-
-
-def sample_manifest_layout(root: str | Path) -> tuple[int, tuple[int, ...]]:
+def sample_manifest_layout(
+    root: str | Path,
+    *,
+    cache: ManifestParquetCache | None = None,
+) -> tuple[int, tuple[int, ...]]:
     return _manifest_layout(
         samples_parquet_path(root),
         _SAMPLE_SCHEMA,
         kind="sample",
+        cache=cache,
     )
 
 
 def read_samples_manifest_row_group(
     root: str | Path,
     row_group: int,
+    *,
+    cache: ManifestParquetCache | None = None,
 ) -> tuple[SampleManifestEntry, ...]:
     return tuple(
         _sample_entry(row)
@@ -60,15 +202,21 @@ def read_samples_manifest_row_group(
             _SAMPLE_SCHEMA,
             kind="sample",
             row_group=row_group,
+            cache=cache,
         )
     )
 
 
-def read_sample_manifest_index(root: str | Path) -> Iterator[tuple[int, str]]:
+def read_sample_manifest_index(
+    root: str | Path,
+    *,
+    cache: ManifestParquetCache | None = None,
+) -> Iterator[tuple[int, str]]:
     parquet = _validated_parquet(
         samples_parquet_path(root),
         _SAMPLE_SCHEMA,
         kind="sample",
+        cache=cache,
     )
     for batch in parquet.iter_batches(
         batch_size=4096,
@@ -101,33 +249,24 @@ def write_samples_manifest(
 def read_view_manifest(
     root: str | Path,
     view: tuple[Role, Modality, View],
+    *,
+    cache: ManifestParquetCache | None = None,
 ) -> Iterator[ViewManifestEntry]:
-    for row in _read_view_manifest_rows(root, view):
+    for row in _read_view_manifest_rows(root, view, cache=cache):
         yield _view_entry(row)
-
-
-def view_manifest_row_count(
-    root: str | Path,
-    view: tuple[Role, Modality, View],
-) -> int:
-    return view_manifest_layout(root, view)[0]
-
-
-def view_manifest_row_groups(
-    root: str | Path,
-    view: tuple[Role, Modality, View],
-) -> tuple[int, ...]:
-    return view_manifest_layout(root, view)[1]
 
 
 def view_manifest_layout(
     root: str | Path,
     view: tuple[Role, Modality, View],
+    *,
+    cache: ManifestParquetCache | None = None,
 ) -> tuple[int, tuple[int, ...]]:
     return _manifest_layout(
         view_manifest_parquet_path(root, view),
         _VIEW_SCHEMA,
         kind="view",
+        cache=cache,
     )
 
 
@@ -135,18 +274,27 @@ def read_view_manifest_row_group(
     root: str | Path,
     view: tuple[Role, Modality, View],
     row_group: int,
+    *,
+    cache: ManifestParquetCache | None = None,
 ) -> tuple[ViewManifestEntry, ...]:
     return tuple(
         _view_entry(row)
-        for row in _read_view_manifest_rows(root, view, row_group=row_group)
+        for row in _read_view_manifest_rows(
+            root,
+            view,
+            row_group=row_group,
+            cache=cache,
+        )
     )
 
 
 def read_view_manifest_indexes(
     root: str | Path,
     view: tuple[Role, Modality, View],
+    *,
+    cache: ManifestParquetCache | None = None,
 ) -> Iterator[int]:
-    yield from _read_view_manifest_indexes(root, view)
+    yield from _read_view_manifest_indexes(root, view, cache=cache)
 
 
 def write_view_manifest(
@@ -250,6 +398,7 @@ def _read_view_manifest_rows(
     view: tuple[Role, Modality, View],
     *,
     row_group: int | None = None,
+    cache: ManifestParquetCache | None = None,
 ) -> Iterator[dict[str, Any]]:
     path = view_manifest_parquet_path(root, view)
     yield from _read_manifest_rows(
@@ -257,15 +406,18 @@ def _read_view_manifest_rows(
         _VIEW_SCHEMA,
         kind="view",
         row_group=row_group,
+        cache=cache,
     )
 
 
 def _read_view_manifest_indexes(
     root: str | Path,
     view: tuple[Role, Modality, View],
+    *,
+    cache: ManifestParquetCache | None = None,
 ) -> Iterator[int]:
     path = view_manifest_parquet_path(root, view)
-    parquet = _validated_parquet(path, _VIEW_SCHEMA, kind="view")
+    parquet = _validated_parquet(path, _VIEW_SCHEMA, kind="view", cache=cache)
     for batch in parquet.iter_batches(batch_size=4096, columns=["sample_index"]):
         indexes = batch.column(0)
         for position in range(len(indexes)):
@@ -280,8 +432,9 @@ def _manifest_layout(
     fields: tuple[tuple[str, str], ...],
     *,
     kind: str,
+    cache: ManifestParquetCache | None = None,
 ) -> tuple[int, tuple[int, ...]]:
-    parquet = _validated_parquet(path, fields, kind=kind)
+    parquet = _validated_parquet(path, fields, kind=kind, cache=cache)
     metadata = parquet.metadata
     return int(metadata.num_rows), tuple(
         int(metadata.row_group(index).num_rows)
@@ -294,9 +447,10 @@ def _validated_parquet(
     fields: tuple[tuple[str, str], ...],
     *,
     kind: str,
+    cache: ManifestParquetCache | None = None,
 ):
-    pa, pq = pyarrow()
-    parquet = pq.ParquetFile(path)
+    pa, _ = pyarrow()
+    parquet = _active_cache(cache).get(path)
     actual = parquet.schema_arrow
     expected = parquet_schema(pa, fields)
     if not actual.equals(expected, check_metadata=False):
@@ -313,8 +467,9 @@ def _read_manifest_rows(
     *,
     kind: str,
     row_group: int | None = None,
+    cache: ManifestParquetCache | None = None,
 ) -> Iterator[dict[str, Any]]:
-    parquet = _validated_parquet(path, fields, kind=kind)
+    parquet = _validated_parquet(path, fields, kind=kind, cache=cache)
     if row_group is None:
         rows = (
             row
@@ -340,3 +495,9 @@ _VIEW_SCHEMA = (
     ("shard", "string"),
     ("key", "string"),
 )
+
+
+def _close_parquet(parquet: Any) -> None:
+    close = getattr(parquet, "close", None)
+    if callable(close):
+        close()

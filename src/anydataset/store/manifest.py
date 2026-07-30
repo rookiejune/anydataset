@@ -6,11 +6,8 @@ from typing import Any
 
 from .._compat import StrEnum
 from ..types.item import (
-    AudioView,
-    ImageView,
     Modality,
     Role,
-    TextView,
     View,
 )
 
@@ -68,13 +65,7 @@ def view_from_dict(data: Mapping[str, Any]) -> tuple[Role, Modality, View]:
 
 
 def _view_from_str(modality: Modality, value: str) -> View:
-    if modality is Modality.AUDIO:
-        return AudioView(value)
-    if modality is Modality.IMAGE:
-        return ImageView(value)
-    if modality is Modality.TEXT:
-        return TextView(value)
-    raise ValueError(f"Unsupported modality: {modality!r}.")
+    return modality.view(value)
 
 
 def string_key_dict(values: Mapping[Any, Any]) -> dict[str, Any]:

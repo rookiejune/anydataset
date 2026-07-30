@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum
-from typing import TypedDict, Union
+from typing import TYPE_CHECKING, TypedDict, Union
 
 from .._compat import NotRequired
 from .._devices import Devices
@@ -33,7 +33,19 @@ class FilterDecision:
 FilterOutput = Union[FilterLabel, FilterDecision]
 FilterPredicate = Callable[[Sample], FilterOutput]
 FilterFactory = Callable[[], FilterPredicate]
-DatasetFactory = Callable[[], MapStyleABC]
+
+if TYPE_CHECKING:
+    from ..dataset.abc import AnyDataset
+    from ..store.reader import StoreDataset
+    from .api import FilteredDataset
+
+    FilterDataset = Union[AnyDataset, StoreDataset, FilteredDataset]
+else:
+    # Keep the runtime alias import-safe: ``FilteredDataset`` imports this
+    # module while its type-only union is still being resolved by the checker.
+    FilterDataset = MapStyleABC
+
+DatasetFactory = Callable[[], FilterDataset]
 
 
 class FilterApplyKwargs(TypedDict):

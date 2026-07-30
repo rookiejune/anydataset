@@ -15,6 +15,7 @@ from .._resume import cached_completed_indexes, write_completed_index_cache
 from .._sharding import validate_shard
 from ..types.item import Modality, Role, View
 from ._integrity import validate_store_payloads
+from ._payload_groups import write_payload_groups
 from ._part_writer import (
     DatasetPartWriter,
     fragment_json_path as _fragment_json_path,
@@ -32,6 +33,7 @@ from .manifest import (
     dataset_manifest_dict,
 )
 from .manifestio import (
+    ManifestParquetCache,
     read_samples_manifest,
     read_view_manifest,
     sample_manifest_row_count,
@@ -45,6 +47,7 @@ from .paths import (
     view_shard_path,
     view_shards_dir,
 )
+from .payload import write_payload_index
 from .reader import read_store_manifest, read_store_views
 
 T = TypeVar("T")
@@ -57,6 +60,29 @@ _PROGRESS_BATCH_SIZE = 1024
 class _FragmentInfo:
     path: Path
     indexes: tuple[int, ...]
+
+
+class _IndexRuns:
+    def __init__(self) -> None:
+        self._runs: list[list[int]] = []
+
+    def add(self, index: int) -> None:
+        if not self._runs:
+            self._runs.append([index, 1, 1])
+            return
+        start, step, count = self._runs[-1]
+        if count == 1:
+            self._runs[-1][1] = index - start
+            self._runs[-1][2] = 2
+            return
+        if index == start + step * count:
+            self._runs[-1][2] += 1
+            return
+        self._runs.append([index, 1, 1])
+
+    def __iter__(self) -> Iterator[int]:
+        for start, step, count in self._runs:
+            yield from range(start, start + step * count, step)
 
 
 def commit_store_parts(
@@ -302,6 +328,7 @@ def _commit_roots_to_tmp(
     provenance: Mapping[str, str] | None = None,
     progress: CommitProgress | None = None,
 ) -> Path:
+    selected_views = views if views is not None else _store_views(stores)
     sample_count = _write_ordered_samples_manifest(
         root,
         stores,
@@ -312,9 +339,11 @@ def _commit_roots_to_tmp(
     _write_committed_view_manifests(
         root,
         stores,
-        views=views,
+        views=selected_views,
         progress=progress,
     )
+    if dense:
+        write_payload_groups(root, selected_views, sample_count)
     _write_committed_dataset_manifest(
         root,
         dataset_id=dataset_id,
@@ -333,12 +362,16 @@ def _write_committed_view_manifests(
     views: tuple[tuple[Role, Modality, View], ...] | None,
     progress: CommitProgress | None,
 ) -> None:
-    for view in (views if views is not None else _store_views(stores)):
+    selected_views = views if views is not None else _store_views(stores)
+    if not selected_views:
+        return
+    sample_indexes_by_ref = _sample_indexes_by_ref(root)
+    for view in selected_views:
         view_count, expected_view_count, shards = _write_ordered_view_manifest(
             root,
             stores,
             view,
-            _sample_indexes_for_ref(root, view[:2]),
+            sample_indexes_by_ref.get(view[:2], ()),
             progress=progress,
         )
         if view_count != expected_view_count:
@@ -347,7 +380,13 @@ def _write_committed_view_manifests(
                 f"does not match item count {expected_view_count}."
             )
         for store in stores:
-            _copy_view_shards(store, root, view, progress=progress)
+            _copy_view_shards(
+                store,
+                root,
+                view,
+                shards=shards,
+                progress=progress,
+            )
         _validate_copied_view_shards(root, view, shards)
         view_ready_path(root, view).touch()
 
@@ -499,23 +538,50 @@ def _sample_indexes_for_ref(
             yield entry.sample_index
 
 
+def _sample_indexes_by_ref(
+    root: Path,
+) -> dict[tuple[Role, Modality], _IndexRuns]:
+    indexes: dict[tuple[Role, Modality], _IndexRuns] = {}
+    for entry in read_samples_manifest(root):
+        for item_ref in {item_ref for item_ref, _meta in entry.items}:
+            runs = indexes.get(item_ref)
+            if runs is None:
+                runs = _IndexRuns()
+                indexes[item_ref] = runs
+            runs.add(entry.sample_index)
+    return indexes
+
+
 def _merged_sample_entries(stores: tuple[Path, ...]) -> Iterator[SampleManifestEntry]:
-    yield from _merged_iterators(
-        (read_samples_manifest(store) for store in stores),
-        _sample_entry_key,
-    )
+    cache = ManifestParquetCache(max_open_files=max(1, len(stores)))
+    try:
+        yield from _merged_iterators(
+            (read_samples_manifest(store, cache=cache) for store in stores),
+            _sample_entry_key,
+        )
+    finally:
+        cache.close()
 
 
 def _merged_view_entries(
     stores: tuple[Path, ...],
     view: tuple[Role, Modality, View],
 ) -> Iterator[ViewManifestEntry]:
-    entries = (
-        _validated_view_entries(read_view_manifest(store, view), view)
-        for store in stores
-        if view_ready_path(store, view).exists()
+    selected = tuple(
+        store for store in stores if view_ready_path(store, view).exists()
     )
-    yield from _merged_iterators(entries, _view_entry_key)
+    cache = ManifestParquetCache(max_open_files=max(1, len(selected)))
+    try:
+        entries = (
+            _validated_view_entries(
+                read_view_manifest(store, view, cache=cache),
+                view,
+            )
+            for store in selected
+        )
+        yield from _merged_iterators(entries, _view_entry_key)
+    finally:
+        cache.close()
 
 
 def _unique_view_entries(
@@ -690,22 +756,6 @@ def _fragment_info_roots(
     return infos, tuple(info.path for info in infos)
 
 
-def _validate_fragment_roots(
-    fragments: tuple[Path, ...],
-    *,
-    dataset_id: str,
-    split: str | None,
-    progress: CommitProgress | None = None,
-) -> tuple[Path, ...]:
-    _fragment_infos, roots = _fragment_info_roots(
-        fragments,
-        dataset_id=dataset_id,
-        split=split,
-        progress=progress,
-    )
-    return roots
-
-
 def _validate_fragment_roots_with_info(
     fragments: tuple[Path, ...],
     *,
@@ -862,23 +912,26 @@ def _copy_view_shards(
     target_root: Path,
     view: tuple[Role, Modality, View],
     *,
+    shards: Iterable[str],
     progress: CommitProgress | None,
 ) -> None:
     source_dir = view_shards_dir(source_root, view)
     if not source_dir.is_dir():
         return
-    for source in sorted(source_dir.iterdir()):
+    for shard in sorted(shards):
+        source = view_shard_path(source_root, view, shard)
         if not source.is_file():
             continue
-        target = view_shard_path(target_root, view, source.name)
+        target = view_shard_path(target_root, view, shard)
         if target.exists():
             raise ValueError(
-                f"Duplicate view shard {source.name!r} for {view_path(view)}."
-        )
+                f"Duplicate view shard {shard!r} for {view_path(view)}."
+            )
         target.parent.mkdir(parents=True, exist_ok=True)
         _link_or_copy(source, target)
         if not target.is_file():
             raise FileNotFoundError(target)
+        write_payload_index(target_root, view, shard)
         _put_progress(progress, "link-shards", 1)
 
 

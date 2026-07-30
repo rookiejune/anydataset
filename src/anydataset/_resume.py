@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, Iterator, TypeVar, overload
 
 from ._logging import write_info
+from ._validation import validate_path_segment
 
 T = TypeVar("T")
 
@@ -287,15 +288,6 @@ def append_completed_index_cache(
         os.write(fd, line.encode("utf-8"))
     finally:
         os.close(fd)
-
-
-def validate_path_segment(name: str, value: str) -> None:
-    if not isinstance(value, str):
-        raise TypeError(f"{name} must be a string.")
-    if value in {"", ".", ".."}:
-        raise ValueError(f"{name} must be a non-empty path segment.")
-    if "/" in value:
-        raise ValueError(f"{name} cannot contain '/'.")
 
 
 def _completed_index_row(fragment_id: str, indexes: Sequence[int]) -> dict[str, object]:

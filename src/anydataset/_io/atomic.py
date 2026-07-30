@@ -7,6 +7,8 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import TypeVar
 
+from .files import fsync_directory
+
 ValueT = TypeVar("ValueT")
 
 
@@ -20,22 +22,7 @@ def replace_dir(target: str | Path, write: Callable[[Path], ValueT]) -> Path:
         if target.exists():
             target.rmdir()
         os.replace(tmp, target)
-        return target
-    except Exception:
-        cleanup_dir(tmp)
-        raise
-
-
-def replace_existing_dir(target: str | Path, write: Callable[[Path], ValueT]) -> Path:
-    target = Path(target)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    tmp = tmp_dir(target)
-    cleanup_dir(tmp)
-    tmp.mkdir(parents=True)
-    try:
-        write(tmp)
-        cleanup_dir(target)
-        os.replace(tmp, target)
+        fsync_directory(target.parent)
         return target
     except Exception:
         cleanup_dir(tmp)

@@ -38,20 +38,34 @@ from anydataset.store.manifest import (
 from anydataset.store.manifestio import (
     read_samples_manifest,
     read_view_manifest,
+    write_samples_manifest,
     write_view_manifest,
 )
 from anydataset.store.paths import (
     dataset_json_path,
     dataset_ready_path,
+    payload_groups_path,
     samples_parquet_path,
     view_dir,
     view_manifest_parquet_path,
     view_ready_path,
     view_shard_path,
+    view_shard_index_path,
 )
+from anydataset.store.reader import read_store_dataset
 
 
 class DatasetWriterTest(unittest.TestCase):
+    def test_fragment_id_rejects_platform_path_separators(self):
+        for fragment_id in ("parent/child", "parent\\child"):
+            with self.subTest(fragment_id=fragment_id):
+                with self.assertRaisesRegex(ValueError, "path separators"):
+                    DatasetFragmentWriter(
+                        "unused",
+                        dataset_id="toy-audio",
+                        fragment_id=fragment_id,
+                    )
+
     def test_writer_writes_waveform_view_dataset(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             output = Path(tmpdir) / "dataset"
@@ -247,6 +261,7 @@ class DatasetWriterTest(unittest.TestCase):
                 audio_sample(
                     waveform=torch.tensor([[float(index)]]),
                     sample_rate=4,
+                    text=f"text-{index}",
                 )
                 for index in range(3)
             ]
@@ -273,13 +288,18 @@ class DatasetWriterTest(unittest.TestCase):
                 frozenset({0, 1, 2}),
             )
 
-            commit_store_fragments(
-                output,
-                fragments,
-                dataset_id="toy-audio",
-                split="train",
-                expected_sample_count=3,
-            )
+            with mock.patch.object(
+                store_parts,
+                "_sample_indexes_for_ref",
+                side_effect=AssertionError("sample manifest was scanned per view"),
+            ):
+                commit_store_fragments(
+                    output,
+                    fragments,
+                    dataset_id="toy-audio",
+                    split="train",
+                    expected_sample_count=3,
+                )
 
             indexes = [entry.sample_index for entry in read_samples_manifest(output)]
             self.assertEqual(indexes, [0, 1, 2])
@@ -305,13 +325,84 @@ class DatasetWriterTest(unittest.TestCase):
         with mock.patch.object(
             store_parts,
             "read_samples_manifest",
-            side_effect=manifests.__getitem__,
+            side_effect=lambda store, **_kwargs: manifests[store],
         ):
             merged = store_parts._merged_sample_entries(stores)
 
             self.assertEqual(next(merged).sample_index, 0)
 
         self.assertEqual(consumed, {stores[0]: 1, stores[1]: 1})
+
+    def test_manifest_merge_keeps_every_active_parquet_handle_open(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            view = (Role.DEFAULT, Modality.AUDIO, AudioView.WAVEFORM)
+            store_count = 17
+            rows_per_store = 4097
+            total = store_count * rows_per_store
+            stores = tuple(root / f"store-{index:02d}" for index in range(store_count))
+
+            for store_index, store in enumerate(stores):
+                write_samples_manifest(
+                    store,
+                    (
+                        SampleManifestEntry(
+                            sample_id=f"sample-{index}",
+                            sample_index=index,
+                            items=(),
+                        )
+                        for index in range(store_index, total, store_count)
+                    ),
+                )
+                write_view_manifest(
+                    store,
+                    view,
+                    (
+                        ViewManifestEntry(
+                            role=Role.DEFAULT,
+                            modality=Modality.AUDIO,
+                            view=AudioView.WAVEFORM,
+                            sample_index=index,
+                            shard=f"{store_index:06d}.tar",
+                            key=f"sample-{index}.pt",
+                        )
+                        for index in range(store_index, total, store_count)
+                    ),
+                )
+                view_ready_path(store, view).touch()
+
+            self.assertEqual(
+                [
+                    entry.sample_index
+                    for entry in store_parts._merged_sample_entries(stores)
+                ],
+                list(range(total)),
+            )
+            self.assertEqual(
+                [
+                    entry.sample_index
+                    for entry in store_parts._merged_view_entries(stores, view)
+                ],
+                list(range(total)),
+            )
+
+    def test_index_runs_preserve_irregular_distributions(self):
+        indexes = (0, 3, 6, 8, 9, 10, 14, 20, 26, 27, 28)
+        runs = store_parts._IndexRuns()
+
+        for index in indexes:
+            runs.add(index)
+
+        self.assertEqual(tuple(runs), indexes)
+        self.assertEqual(
+            runs._runs,
+            [
+                [0, 3, 3],
+                [8, 1, 3],
+                [14, 6, 3],
+                [27, 1, 2],
+            ],
+        )
 
     def test_fragment_commit_bounds_manifest_merge_fan_in(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -765,6 +856,152 @@ class DatasetWriterTest(unittest.TestCase):
                 store_parts._link_or_copy(source, target)
 
             self.assertEqual(target.read_bytes(), b"payload")
+
+    def test_commit_parts_rebuilds_payload_index_after_copy(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            parts, part, view, entry = _single_audio_part(root)
+            view_shard_index_path(part, view, entry.shard).unlink()
+            output = root / "output"
+
+            with mock.patch.object(store_parts.os, "link", side_effect=OSError):
+                commit_store_parts(output, parts, dataset_id="toy-audio")
+
+            self.assertTrue(
+                view_shard_index_path(output, view, entry.shard).is_file()
+            )
+            dataset = read_store_dataset(output)
+            with mock.patch.object(
+                tarfile.TarFile,
+                "getmembers",
+                side_effect=AssertionError("rebuilt payload index was ignored"),
+            ):
+                waveform, sample_rate = dataset[0][
+                    Role.DEFAULT, Modality.AUDIO
+                ].views[AudioView.WAVEFORM]
+
+            self.assertTrue(torch.equal(waveform, torch.tensor([[1.0]])))
+            self.assertEqual(sample_rate, 4)
+
+    def test_commit_parts_compresses_interleaved_payload_groups(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            parts = root / "parts"
+            sample_count = 40
+            for shard_id in range(4):
+                DatasetPartWriter(
+                    parts / f"part-{shard_id:05d}",
+                    dataset_id="toy-audio",
+                    shard_id=shard_id,
+                    num_shards=4,
+                    max_shard_samples=sample_count,
+                ).write(
+                    (
+                        (
+                            index,
+                            audio_sample(
+                                waveform=torch.tensor([[float(index)]]),
+                                sample_rate=4,
+                            ),
+                        )
+                        for index in range(shard_id, sample_count, 4)
+                    )
+                )
+
+            output = root / "output"
+            commit_store_parts(output, parts, dataset_id="toy-audio")
+            sidecar = read_json(payload_groups_path(output))
+
+            self.assertEqual(sidecar["version"], 2)
+            self.assertEqual(len(sidecar["groups"]), 4)
+            self.assertEqual(
+                sum(len(bucket) for bucket in sidecar["groups"]),
+                4,
+            )
+            dataset = read_store_dataset(output)
+            with mock.patch(
+                "anydataset.store._payload_groups.scan_payload_groups",
+                side_effect=AssertionError("compressed sidecar was ignored"),
+            ):
+                shuffled = list(
+                    dataset._shuffle(
+                        shuffle=True,
+                        seed=7,
+                        epoch=0,
+                        num_replicas=1,
+                        rank=0,
+                    )
+                )
+                ordered = list(
+                    dataset._shuffle(
+                        shuffle=False,
+                        seed=7,
+                        epoch=0,
+                        num_replicas=1,
+                        rank=0,
+                    )
+                )
+
+            self.assertEqual(
+                sorted(index for group in shuffled for index in group),
+                list(range(sample_count)),
+            )
+            self.assertEqual(
+                [index for group in ordered for index in group],
+                list(range(sample_count)),
+            )
+
+    def test_commit_parts_groups_interleaved_multi_view_payloads(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            parts = root / "parts"
+            for shard_id in range(2):
+                DatasetPartWriter(
+                    parts / f"part-{shard_id:05d}",
+                    dataset_id="multi-view",
+                    shard_id=shard_id,
+                    num_shards=2,
+                    max_shard_samples=8,
+                ).write(
+                    (
+                        (
+                            index,
+                            audio_sample(
+                                waveform=torch.tensor([[float(index)]]),
+                                sample_rate=4,
+                                text=(
+                                    f"text-{index}"
+                                    if index % 4 == shard_id
+                                    else None
+                                ),
+                            ),
+                        )
+                        for index in range(shard_id, 8, 2)
+                    )
+                )
+
+            output = root / "output"
+            commit_store_parts(output, parts, dataset_id="multi-view")
+            dataset = read_store_dataset(output)
+
+            with mock.patch(
+                "anydataset.store._payload_groups.scan_payload_groups",
+                side_effect=AssertionError("multi-view sidecar was ignored"),
+            ):
+                groups = list(
+                    dataset._shuffle(
+                        shuffle=True,
+                        seed=7,
+                        epoch=0,
+                        num_replicas=1,
+                        rank=0,
+                    )
+                )
+
+            self.assertEqual(
+                sorted(sorted(group) for group in groups),
+                [[0, 4], [1, 5], [2, 6], [3, 7]],
+            )
 
 
 def _single_audio_part(root: Path):

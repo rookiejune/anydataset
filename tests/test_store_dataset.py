@@ -5,15 +5,15 @@ import pickle
 import shutil
 import tempfile
 import unittest
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from unittest import mock
 
 import anydataset.store
+import anydataset.store.reader as store_reader
 import torch
 
 from anydataset import AnyDataset, Source, Spec
-from anydataset.dataset.write import DatasetStoreWriter
 from anydataset.types import (
     AudioItem,
     AudioMeta,
@@ -36,19 +36,29 @@ from anydataset.store.manifestio import (
     read_view_manifest_indexes,
     write_samples_manifest,
 )
+from anydataset.store._payload_groups import PayloadGroupCache
 from anydataset.store.paths import (
     dataset_ready_path,
+    payload_groups_path,
     samples_parquet_path,
     view_dir,
     view_manifest_parquet_path,
 )
-from anydataset.store.reader import read_store_dataset, read_store_manifest
+from anydataset.store.reader import (
+    SampleManifestSequence,
+    StoreDataset,
+    StoreView,
+    StoreViews,
+    ViewEntryIndex,
+    read_store_dataset,
+    read_store_manifest,
+)
 
 
 class StoreSourceTest(unittest.TestCase):
     def test_dataset_store_writer_validates_views_at_construction(self):
         with self.assertRaisesRegex(TypeError, "views must be a tuple"):
-            DatasetStoreWriter("unused", views=[])
+            DatasetWriter("unused", views=[])
 
     def test_anydataset_reads_dataset_written_by_writer(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -213,7 +223,7 @@ class StoreSourceTest(unittest.TestCase):
             dataset.prepare()
 
             with mock.patch(
-                "anydataset.store.reader.os.replace",
+                "anydataset._io.files.os.replace",
                 wraps=os.replace,
             ) as replace:
                 file_view = Path(
@@ -376,6 +386,140 @@ class StoreSourceTest(unittest.TestCase):
 
             self.assertEqual(open_tar.call_count, 1)
 
+    def test_store_dataset_close_releases_reader_resources(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output = Path(tmpdir) / "dataset"
+            DatasetWriter(output, dataset_id="toy-audio").write(
+                [_audio_sample(waveform=torch.tensor([[1.0]]))]
+            )
+            dataset = read_store_dataset(output)
+            dataset[0]
+
+            self.assertFalse(dataset.closed)
+            self.assertTrue(dataset._payloads._archives)
+            self.assertTrue(dataset._manifest_cache._files)
+
+            dataset.close()
+            dataset.close()
+
+            self.assertTrue(dataset.closed)
+            self.assertFalse(dataset._payloads._archives)
+            self.assertFalse(dataset._manifest_cache._files)
+            with self.assertRaisesRegex(RuntimeError, "StoreDataset is closed"):
+                dataset[0]
+
+    def test_store_dataset_context_manager_closes_resources(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output = Path(tmpdir) / "dataset"
+            DatasetWriter(output, dataset_id="toy-audio").write(
+                [_audio_sample(waveform=torch.tensor([[1.0]]))]
+            )
+
+            with read_store_dataset(output) as dataset:
+                dataset[0]
+                self.assertFalse(dataset.closed)
+
+            self.assertTrue(dataset.closed)
+
+    def test_store_dataset_restores_pre_manifest_cache_pickle_state(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output = Path(tmpdir) / "dataset"
+            DatasetWriter(output, dataset_id="toy-audio").write(
+                [_audio_sample(waveform=torch.tensor([[1.0]]))]
+            )
+            dataset = read_store_dataset(output)
+            view_ref = next(iter(dataset.views))
+            store_view = dataset.views[view_ref]
+
+            samples_state = dataset.samples.__getstate__()
+            samples_state.pop("manifest_cache")
+            samples = SampleManifestSequence.__new__(SampleManifestSequence)
+            samples.__setstate__(samples_state)
+
+            index_state = store_view.entries_by_index.__getstate__()
+            index_state.pop("manifest_cache")
+            index = ViewEntryIndex.__new__(ViewEntryIndex)
+            index.__setstate__(index_state)
+
+            views_state = dict(dataset.views.__dict__)
+            views_state.pop("_manifest_cache")
+            views_state["samples"] = samples
+            views_state["_cache"] = {view_ref: StoreView(view_ref, index)}
+            views = StoreViews.__new__(StoreViews)
+            views.__setstate__(views_state)
+
+            dataset_state = dataset.__getstate__()
+            dataset_state.pop("_manifest_cache")
+            dataset_state.pop("_resource_state")
+            dataset_state["samples"] = samples
+            dataset_state["views"] = views
+            restored = StoreDataset.__new__(StoreDataset)
+            restored.__setstate__(dataset_state)
+
+            waveform, sample_rate = restored[0][
+                Role.DEFAULT, Modality.AUDIO
+            ].views[AudioView.WAVEFORM]
+
+            self.assertTrue(torch.equal(waveform, torch.tensor([[1.0]])))
+            self.assertEqual(sample_rate, 4)
+            self.assertIs(restored.samples._manifest_cache, restored._manifest_cache)
+            self.assertIs(restored.views._manifest_cache, restored._manifest_cache)
+            self.assertIs(
+                index._manifest_cache,
+                restored._manifest_cache,
+            )
+            restored.close()
+
+    def test_store_dataset_restores_legacy_payload_group_cache_pickle(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output = Path(tmpdir) / "dataset"
+            DatasetWriter(output, dataset_id="toy-audio").write(
+                [_audio_sample(waveform=torch.tensor([[1.0]]))]
+            )
+            dataset = read_store_dataset(output)
+            legacy_cache_type = type(
+                "_PayloadGroupCache",
+                (),
+                {
+                    "__module__": store_reader.__name__,
+                    "__getstate__": _empty_pickle_state,
+                },
+            )
+            with mock.patch.object(
+                store_reader,
+                "_PayloadGroupCache",
+                legacy_cache_type,
+            ):
+                legacy = replace(
+                    dataset,
+                    _payload_group_cache=legacy_cache_type(),
+                )
+                payload = pickle.dumps(legacy)
+            legacy.close()
+
+            restored = pickle.loads(payload)
+            try:
+                self.assertIsInstance(
+                    restored._payload_group_cache,
+                    PayloadGroupCache,
+                )
+                self.assertIsNone(restored._payload_group_cache.fingerprint)
+                self.assertEqual(
+                    [
+                        list(group)
+                        for group in restored._shuffle(
+                            shuffle=True,
+                            seed=0,
+                            epoch=0,
+                            num_replicas=1,
+                            rank=0,
+                        )
+                    ],
+                    [[0]],
+                )
+            finally:
+                restored.close()
+
     def test_reader_evicts_old_payload_shards(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -482,7 +626,7 @@ class StoreSourceTest(unittest.TestCase):
 
             rank0 = list(
                 dataset._shuffle(
-                    shuffle=False,
+                    shuffle=True,
                     seed=0,
                     epoch=0,
                     num_replicas=2,
@@ -491,7 +635,7 @@ class StoreSourceTest(unittest.TestCase):
             )
             rank1 = list(
                 dataset._shuffle(
-                    shuffle=False,
+                    shuffle=True,
                     seed=0,
                     epoch=0,
                     num_replicas=2,
@@ -499,8 +643,12 @@ class StoreSourceTest(unittest.TestCase):
                 )
             )
 
-            self.assertEqual([list(group) for group in rank0], [[0], [2], [4]])
-            self.assertEqual([list(group) for group in rank1], [[1], [3], [5]])
+            rank0_indexes = [index for group in rank0 for index in group]
+            rank1_indexes = [index for group in rank1 for index in group]
+            self.assertEqual(sorted((*rank0_indexes, *rank1_indexes)), list(range(6)))
+            self.assertEqual(len(rank0_indexes), 3)
+            self.assertEqual(len(rank1_indexes), 3)
+            self.assertTrue(all(len(group) == 1 for group in (*rank0, *rank1)))
 
     def test_store_shuffle_keeps_ranks_nonempty_when_groups_are_fewer(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -534,6 +682,26 @@ class StoreSourceTest(unittest.TestCase):
 
             self.assertEqual(ranks, [[0, 4], [1, 5], [2], [3]])
 
+    def test_empty_store_has_an_empty_read_plan(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output = Path(tmpdir) / "dataset"
+            DatasetWriter(output, dataset_id="empty").write([])
+            dataset = read_store_dataset(output)
+
+            for shuffle in (False, True):
+                self.assertEqual(
+                    list(
+                        dataset._shuffle(
+                            shuffle=shuffle,
+                            seed=0,
+                            epoch=0,
+                            num_replicas=1,
+                            rank=0,
+                        )
+                    ),
+                    [],
+                )
+
     def test_store_shuffle_caches_payload_groups_until_manifest_changes(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             output = Path(tmpdir) / "dataset"
@@ -551,11 +719,11 @@ class StoreSourceTest(unittest.TestCase):
             view = (Role.DEFAULT, Modality.AUDIO, AudioView.WAVEFORM)
 
             with mock.patch(
-                "anydataset.store.reader._scan_payload_groups",
+                "anydataset.store._payload_groups.scan_payload_groups",
                 wraps=__import__(
-                    "anydataset.store.reader",
-                    fromlist=["_scan_payload_groups"],
-                )._scan_payload_groups,
+                    "anydataset.store._payload_groups",
+                    fromlist=["scan_payload_groups"],
+                ).scan_payload_groups,
             ) as scan:
                 list(
                     dataset._shuffle(
@@ -583,7 +751,7 @@ class StoreSourceTest(unittest.TestCase):
                 )
                 list(
                     dataset._shuffle(
-                        shuffle=False,
+                        shuffle=True,
                         seed=0,
                         epoch=2,
                         num_replicas=1,
@@ -591,7 +759,126 @@ class StoreSourceTest(unittest.TestCase):
                     )
                 )
 
-            self.assertEqual(scan.call_count, 2)
+            self.assertEqual(scan.call_count, 1)
+
+    def test_store_shuffle_uses_persisted_payload_groups(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output = Path(tmpdir) / "dataset"
+            DatasetWriter(
+                output,
+                dataset_id="toy-audio",
+                max_shard_samples=2,
+            ).write(
+                [
+                    _audio_sample(waveform=torch.tensor([[float(index)]]))
+                    for index in range(4)
+                ]
+            )
+            dataset = read_store_dataset(output)
+
+            with mock.patch(
+                "anydataset.store._payload_groups.scan_payload_groups",
+                side_effect=AssertionError("payload group sidecar was ignored"),
+            ):
+                groups = list(
+                    dataset._shuffle(
+                        shuffle=True,
+                        seed=0,
+                        epoch=0,
+                        num_replicas=1,
+                        rank=0,
+                    )
+                )
+
+            self.assertEqual(
+                sorted(sorted(group) for group in groups),
+                [[0, 1], [2, 3]],
+            )
+
+    def test_store_shuffle_scans_when_payload_group_checksum_is_invalid(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output = Path(tmpdir) / "dataset"
+            DatasetWriter(
+                output,
+                dataset_id="toy-audio",
+                max_shard_samples=2,
+            ).write(
+                [
+                    _audio_sample(waveform=torch.tensor([[float(index)]]))
+                    for index in range(4)
+                ]
+            )
+            sidecar_path = payload_groups_path(output)
+            sidecar = read_json(sidecar_path)
+            sidecar["groups_sha256"] = "0" * 64
+            write_json(sidecar_path, sidecar)
+            dataset = read_store_dataset(output)
+
+            with mock.patch(
+                "anydataset.store._payload_groups.scan_payload_groups",
+                wraps=__import__(
+                    "anydataset.store._payload_groups",
+                    fromlist=["scan_payload_groups"],
+                ).scan_payload_groups,
+            ) as scan:
+                groups = list(
+                    dataset._shuffle(
+                        shuffle=True,
+                        seed=0,
+                        epoch=0,
+                        num_replicas=1,
+                        rank=0,
+                    )
+                )
+
+            scan.assert_called_once()
+            self.assertEqual(
+                sorted(sorted(group) for group in groups),
+                [[0, 1], [2, 3]],
+            )
+
+    def test_store_shuffle_uses_sidecar_for_selected_view_subset(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            source = root / "source.wav"
+            source.write_bytes(b"RIFF-data")
+            output = root / "dataset"
+            DatasetWriter(
+                output,
+                dataset_id="multi-view",
+                max_shard_samples=2,
+            ).write(
+                [
+                    _audio_sample(
+                        waveform=torch.tensor([[float(index)]]),
+                        file=str(source),
+                    )
+                    for index in range(4)
+                ]
+            )
+            file_view = (Role.DEFAULT, Modality.AUDIO, AudioView.FILE)
+            waveform_view = (Role.DEFAULT, Modality.AUDIO, AudioView.WAVEFORM)
+            view_manifest_parquet_path(output, file_view).write_bytes(b"not parquet")
+            dataset = read_store_dataset(output, views=(waveform_view,))
+
+            with mock.patch(
+                "anydataset.store._payload_groups.scan_payload_groups",
+                side_effect=AssertionError("selected-view sidecar was ignored"),
+            ):
+                groups = list(
+                    dataset._shuffle(
+                        shuffle=True,
+                        seed=0,
+                        epoch=0,
+                        num_replicas=1,
+                        rank=0,
+                    )
+                )
+
+            self.assertEqual(
+                sorted(sorted(group) for group in groups),
+                [[0, 1], [2, 3]],
+            )
 
     def test_store_exposes_no_public_loader_or_sampler(self):
         self.assertTrue(
@@ -633,7 +920,7 @@ class StoreSourceTest(unittest.TestCase):
             )
 
             with mock.patch(
-                "anydataset.store.reader.read_view_manifest_indexes",
+                "anydataset.store._manifest_index.read_view_manifest_indexes",
                 side_effect=AssertionError("view index loaded"),
             ):
                 dataset = read_store_dataset(output)
@@ -656,7 +943,7 @@ class StoreSourceTest(unittest.TestCase):
             )
 
             with mock.patch(
-                "anydataset.store.reader.read_samples_manifest_row_group",
+                "anydataset.store._manifest_index.read_samples_manifest_row_group",
                 side_effect=AssertionError("sample rows loaded"),
             ):
                 dataset = read_store_dataset(output)
@@ -677,9 +964,9 @@ class StoreSourceTest(unittest.TestCase):
             dataset = read_store_dataset(output)
 
             with mock.patch(
-                "anydataset.store.reader.read_samples_manifest_row_group",
+                "anydataset.store._manifest_index.read_samples_manifest_row_group",
                 wraps=__import__(
-                    "anydataset.store.reader",
+                    "anydataset.store._manifest_index",
                     fromlist=["read_samples_manifest_row_group"],
                 ).read_samples_manifest_row_group,
             ) as read_group:
@@ -772,7 +1059,7 @@ class StoreSourceTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             output = root / "parallel"
-            DatasetStoreWriter(
+            DatasetWriter(
                 output,
                 dataset_id="parallel",
                 split="train",
@@ -801,7 +1088,7 @@ class StoreSourceTest(unittest.TestCase):
             (source / "1.csv").write_text("value\n1\n", encoding="utf-8")
             output = root / "parallel-csv"
 
-            DatasetStoreWriter(
+            DatasetWriter(
                 output,
                 dataset_id="parallel-csv",
                 num_workers=1,
@@ -825,7 +1112,7 @@ class StoreSourceTest(unittest.TestCase):
             second = mock.Mock()
             second.start.side_effect = RuntimeError("start failed")
             context.Process.side_effect = (first, second)
-            writer = DatasetStoreWriter(
+            writer = DatasetWriter(
                 Path(tmpdir) / "output",
                 num_shards=2,
             )
@@ -838,7 +1125,7 @@ class StoreSourceTest(unittest.TestCase):
                 mock.patch("anydataset.dataset.write.free_port", return_value="1234"),
             ):
                 with self.assertRaisesRegex(RuntimeError, "start failed"):
-                    writer._run_parts(_RangeAudioFactory(1), Path(tmpdir) / "parts")
+                    writer.write(dataset_factory=_RangeAudioFactory(1))
 
             first.terminate.assert_called_once_with()
             first.join.assert_called_once_with()
@@ -1019,7 +1306,7 @@ class StoreSourceTest(unittest.TestCase):
                 path.write_bytes(path.read_bytes() + b"changed")
 
             with mock.patch(
-                "anydataset.store.reader.read_view_manifest_indexes",
+                "anydataset.store._manifest_index.read_view_manifest_indexes",
                 side_effect=changing_indexes,
             ):
                 with self.assertRaisesRegex(
@@ -1086,6 +1373,10 @@ def _audio_sample(
             views={TextView.TEXT: text}
         )
     return sample
+
+
+def _empty_pickle_state(_instance):
+    return {}
 
 
 def _sample_indexes(samples):

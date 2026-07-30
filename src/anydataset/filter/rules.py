@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from collections.abc import Iterable
 from enum import Enum
 
@@ -35,8 +36,50 @@ def unique_labels(labels: Iterable[str]) -> tuple[str, ...]:
     return tuple(output)
 
 
-def rule_cache_key(name: str) -> str:
-    return hashlib.sha256(name.encode("utf-8")).hexdigest()[:16]
+def rule_cache_key(
+    name: str,
+    rule_id: str | None = None,
+    version: str | None = None,
+) -> str:
+    """Return a stable cache key for a rule's declared identity.
+
+    ``rule_id`` and ``version`` are optional so caches created by the
+    original name-only API keep their existing paths.  Explicit identity
+    fields are included in the digest and therefore cannot reuse an older
+    rule with the same display name.
+    """
+
+    if (rule_id is None or rule_id == name) and version is None:
+        return hashlib.sha256(name.encode("utf-8")).hexdigest()[:16]
+
+    identity = {"name": name}
+    if rule_id is not None and rule_id != name:
+        identity["rule_id"] = rule_id
+    if version is not None:
+        identity["version"] = version
+    payload = json.dumps(
+        identity,
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()[:16]
+
+
+def rule_identity(
+    name: str,
+    rule_id: str | None = None,
+    version: str | None = None,
+) -> dict[str, str]:
+    """Return the serializable identity used by filter metadata."""
+
+    normalized_id = name if rule_id is None else rule_id
+    identity = {"name": name}
+    if normalized_id != name:
+        identity["rule_id"] = normalized_id
+    if version is not None:
+        identity["version"] = version
+    return identity
 
 
 def label_file_id(value: str) -> str:

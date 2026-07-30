@@ -25,6 +25,8 @@ from .manifestio import (
     sample_manifest_writer,
     view_manifest_writer,
 )
+from ._payload_groups import write_payload_groups
+from .payload import write_payload_index
 from .paths import (
     dataset_json_path,
     dataset_ready_path,
@@ -75,6 +77,7 @@ def migrate_store(source: str | Path, output: str | Path) -> Path:
             view_ready_path(root, view).touch()
 
         write_json(dataset_json_path(root), dataset_manifest_dict(manifest))
+        write_payload_groups(root, views, manifest.sample_count)
         dataset_ready_path(root).touch()
         read_store_dataset(root, preload=True)
         validate_store_payloads((root,))
@@ -289,6 +292,7 @@ def _copy_shards(
         output_path = view_shard_path(output, view, shard)
         output_path.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source_path, output_path)
+        write_payload_index(output, view, shard)
 
 
 def _view_path(view: tuple[Role, Modality, View]) -> tuple[str, str, str]:

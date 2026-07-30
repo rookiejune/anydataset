@@ -229,7 +229,10 @@ truth and prepares one Parquet cache part per CSV file under
 spawned process pool and atomically commits the cache manifest. Dataset reads
 then use Parquet row groups for map-style random access. Dynamic-batch shuffle
 orders those row groups first and only materializes one row group's indexes at a
-time, so it does not allocate a full-dataset Python index list.
+time, so it does not allocate a full-dataset Python index list. Set
+`Spec(load_options={"prepare_workers": 0})` or `1` to disable process-pool
+preparation in restricted environments; the default uses bounded automatic
+parallelism.
 
 ## Multiple Datasets
 
@@ -369,11 +372,12 @@ again = rule.apply(dataset_factory=dataset_factory, labels="accept", device="cpu
 ```
 
 `True` maps to `"accept"` and `False` maps to `"reject"`. String and enum
-labels are stored as their own partitions. The rule `name` is the cache
-contract; callers should put predicate, parser, and transform semantics into
-`name` when cache reuse should change.
+labels are stored as their own partitions. `name` is the display name; use the
+optional `rule_id` and `version` fields to explicitly version predicate, parser,
+and transform semantics. When omitted, `rule_id` defaults to `name` and the
+legacy name-only cache path remains compatible.
 
-`FilteredDataset(...)` checks whether the named rule already has a ready cache
+`FilteredDataset(...)` checks whether the rule identity already has a ready cache
 for the base dataset. If not, it builds the cache. It selects every available
 label by default. Use `select_by(...)` to derive a label view over the same
 cache. `FilterRule.apply(...)` is a convenience wrapper that forwards its
@@ -383,7 +387,7 @@ Filter cache identity is automatic for physical datasets and filtered views.
 For a mutable or application-owned input, pass a non-empty `input_id` to
 `apply()` or `FilteredDataset(...)`. The ID versions the entire input snapshot
 and augments the automatic class, `Spec`, and sample-count identity. Change it
-when input content or ordering changes; `FilterRule.name` continues to version
+when input content or ordering changes; `FilterRule.rule_id` and `version` identify
 predicate semantics. A store's manifest provenance is included automatically,
 so materializer `input_id` and `provider_id` changes also produce a new filter
 cache identity. The explicit ID is preserved by the filtered
@@ -572,6 +576,49 @@ dataset = AnyDataset.from_store(
 restored = dataset[0]
 ```
 
+`dataset_id` is optional. When omitted, it defaults to the final component of
+the expanded `output_dir`, or `"dataset"` when that path has no name.
+`provenance` records semantic input state in the dataset manifest. It accepts
+only non-empty string `input_id` and `provider_id` values; use them to version
+input content or provider behavior that the dataset path and configuration do
+not capture. Provenance participates in downstream filter cache identity.
+
+`write(samples)` and `write(dataset_factory=...)` are mutually exclusive. The
+defaults (`num_shards=1`, `num_workers=0`) write in the calling process and
+accept either form. If `num_shards > 1` or `num_workers > 0`, a
+`dataset_factory` is required so every process constructs its own dataset:
+
+```python
+from anydataset import AnyDataset
+from anydataset.store import DatasetWriter
+
+
+def dataset_factory():
+    return AnyDataset.from_store("/data/source_anydataset")
+
+
+if __name__ == "__main__":
+    DatasetWriter(
+        "/data/parallel_copy",
+        provenance={"input_id": "source-2026-07-30"},
+        num_shards=4,
+        num_workers=2,
+        prefetch_factor=4,
+    ).write(dataset_factory=dataset_factory)
+```
+
+`num_shards` is the number of store writer processes. `num_workers` is the
+number of PyTorch `DataLoader` readers inside each writer process, so a fully
+parallel run can create `num_shards * num_workers` loader workers in addition
+to the writers. `prefetch_factor` is the number of one-sample loader batches
+prefetched by each loader worker; it is used only when `num_workers > 0` and
+defaults to `2` when omitted. Parallel factories must be picklable (normally a
+module-level callable under the default `spawn` start method), and the returned
+dataset must be map-style or implement `iter_indexed_shard()`. Run the writer
+from the application main process. When loader workers are enabled and the
+dataset exposes `prepare()`, the writer calls it once in the parent before
+spawning so shared source metadata can be prepared safely.
+
 `AnyDataset.from_store(..., views=...)` loads only the selected view manifests
 and payloads. The selection is preserved across pickle/spawn and participates
 in filter cache identity, while the physical `Spec` continues to identify the
@@ -605,6 +652,21 @@ The equivalent Python API is
 Older layouts or v1 manifests that do not exactly match that canonical schema
 must be re-materialized with `DatasetWriter`; migration does not guess missing
 fields or alignment.
+
+Use the public integrity API before publishing or moving a store. `fast` checks
+manifest references and shard existence, `normal` also parses every referenced
+tar archive, and the default `full` level verifies every referenced payload key:
+
+```python
+from pathlib import Path
+from anydataset.store import validate_store_payloads
+
+validate_store_payloads((Path("/data/my_anydataset"),), level="full")
+```
+
+Store readers retain manifest and tar handles for repeated access. Close them
+deterministically with `dataset.close()` or use `read_store_dataset(...)` as a
+context manager when the reader lifetime is bounded.
 
 `AudioView.FILE` payloads are extracted under
 `$ANYDATASET_HOME/cache/store-files`. A reader that selected the file view holds

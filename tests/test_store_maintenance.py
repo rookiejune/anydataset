@@ -6,6 +6,7 @@ import os
 import pickle
 import subprocess
 import sys
+import tarfile
 import tempfile
 import unittest
 from pathlib import Path
@@ -18,6 +19,8 @@ from anydataset.store import (
     cleanup_store_files,
     lease_store_files,
     migrate_store,
+    validate_store_payloads,
+    validate_store_view_payloads,
 )
 from anydataset.store.jsonio import read_json, write_json
 from anydataset.store.manifest import STORE_SCHEMA_VERSION
@@ -130,6 +133,31 @@ class StoreMigrationTest(unittest.TestCase):
                 "Unsupported source store schema_version: True",
             ):
                 migrate_store(source, output)
+
+
+class StoreIntegrityTest(unittest.TestCase):
+    def test_integrity_levels_validate_increasing_payload_detail(self):
+        view = (Role.DEFAULT, Modality.TEXT, TextView.TEXT)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir) / "store"
+            _write_store(root)
+            shard = view_shard_path(root, view, "000000.tar")
+
+            validate_store_payloads((root,), level="full")
+            shard.write_bytes(b"not a tar archive")
+            validate_store_view_payloads(root, view, level="fast")
+            with self.assertRaisesRegex(ValueError, "not a valid tar archive"):
+                validate_store_view_payloads(root, view, level="normal")
+
+            with tarfile.open(shard, "w"):
+                pass
+            validate_store_view_payloads(root, view, level="normal")
+            with self.assertRaisesRegex(ValueError, "missing payload"):
+                validate_store_view_payloads(root, view, level="full")
+
+    def test_integrity_rejects_unknown_level(self):
+        with self.assertRaisesRegex(ValueError, "integrity level"):
+            validate_store_payloads((), level="unknown")  # type: ignore[arg-type]
 
 
 class StoreFilesCleanupTest(unittest.TestCase):

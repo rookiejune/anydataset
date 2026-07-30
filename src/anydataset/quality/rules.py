@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from enum import Enum, auto
 
 from .._compat import StrEnum
+from .._immutable import Immutable
 from ..filter import FilterDecision
 from ..filter.rules import label as filter_label
 from ..filter.types import FilterOutput, JsonValue
@@ -40,18 +41,19 @@ class Rule:
             raise TypeError("quality rule predicate must be callable.")
 
 
-@dataclass(frozen=True)
-class QualityChain:
-    rules: Sequence[Rule]
+@dataclass(init=False, unsafe_hash=True)
+class QualityChain(Immutable):
+    rules: tuple[Rule, ...]
 
-    def __post_init__(self) -> None:
-        rules = tuple(self.rules)
+    def __init__(self, rules: Sequence[Rule]) -> None:
+        rules = tuple(rules)
         if len(rules) == 0:
             raise ValueError("quality rule chain must not be empty.")
         names = [rule.name for rule in rules]
         if len(set(names)) != len(names):
             raise ValueError("quality rule names must be unique.")
-        object.__setattr__(self, "rules", rules)
+        self.rules = rules
+        self.seal()
 
     def __call__(self, sample: Sample) -> FilterDecision:
         label = QualityLabel.ACCEPT

@@ -2,23 +2,34 @@ from __future__ import annotations
 
 import tarfile
 from pathlib import Path
+from typing import Literal
 
 from ..types.item import Modality, Role, View
 from .manifestio import read_view_manifest
 from .paths import view_shard_path
 from .reader import read_store_views
 
+IntegrityLevel = Literal["fast", "normal", "full"]
 
-def validate_store_payloads(stores: tuple[Path, ...]) -> None:
+
+def validate_store_payloads(
+    stores: tuple[Path, ...],
+    *,
+    level: IntegrityLevel = "full",
+) -> None:
+    _validate_level(level)
     for store in stores:
         for view in read_store_views(store):
-            validate_store_view_payloads(store, view)
+            validate_store_view_payloads(store, view, level=level)
 
 
 def validate_store_view_payloads(
     root: Path,
     view: tuple[Role, Modality, View],
+    *,
+    level: IntegrityLevel = "full",
 ) -> None:
+    _validate_level(level)
     keys_by_shard: dict[str, set[str]] = {}
     for entry in read_view_manifest(root, view):
         if (entry.role, entry.modality, entry.view) != view:
@@ -46,8 +57,13 @@ def validate_store_view_payloads(
             raise FileNotFoundError(
                 f"View {_view_path(view)} is missing referenced shard {path}."
             )
+        if level == "fast":
+            continue
         try:
             with tarfile.open(path, "r") as archive:
+                if level == "normal":
+                    archive.getmembers()
+                    continue
                 missing = set(expected)
                 for member in archive:
                     if member.isfile():
@@ -59,6 +75,13 @@ def validate_store_view_payloads(
             raise ValueError(
                 f"View {_view_path(view)} shard {shard!r} is missing payload {key!r}."
             )
+
+
+def _validate_level(level: str) -> None:
+    if level not in {"fast", "normal", "full"}:
+        raise ValueError(
+            f"integrity level must be 'fast', 'normal', or 'full', got {level!r}."
+        )
 
 
 def _view_path(view: tuple[Role, Modality, View]) -> tuple[str, str, str]:

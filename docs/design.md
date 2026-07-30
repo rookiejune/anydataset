@@ -11,6 +11,15 @@
 - `Schema` 使用 `(Role, Modality) -> Requirement` 表达一次训练或读取真正需要的 view 和 meta。
 - `collate_fn(schema)` 只按照 schema 整理 batch，不为缺失字段补隐式默认值。
 
+Store reader 对 manifest 和 payload shard 使用带 fingerprint 的进程内句柄缓存；调用方可以
+通过 `StoreDataset.close()` 或 context manager 显式释放资源。写入完成的 store 还可以包含
+`payload-groups.json` 和每个 tar shard 的 offset index，它们都只是可失效的读取优化
+metadata，不改变核心 manifest schema；旧 store 或 sidecar 不可用时 reader 回退到完整
+manifest/tar 扫描。
+
+`torch.load` 读取 payload 属于 pickle 反序列化边界，store 必须来自可信来源。需要更快的
+发布校验时可显式选择 integrity `fast` 或 `normal`，默认 `full` 保持完整 payload key 校验。
+
 ## Schema 心智模型
 
 `Role` 描述 item 在样本里的位置，例如 `DEFAULT`、`SOURCE`、`TARGET`。同一个样本里有多份同模态数据时，用 role 区分，而不是发明新的字段名。
@@ -55,7 +64,8 @@ Preset 应该尽量保留数据集天然提供的信息。例如语音到语音�
   只重建对应 part。并发 prepare 只允许一个进程构建，其他进程等待已提交 manifest；
   构建进程退出时由下一个进程接管，超时则显式报错。读取侧通过 Parquet row group
   提供 map-style 随机访问，多设备和 DataLoader worker 由全局 sample index sampler
-  分片，不重复扫描全部 CSV。
+  分片，不重复扫描全部 CSV。`load_options.prepare_workers=0/1` 可显式禁用 process
+  pool，默认值保留自动并行策略。
 
 这些字符串 source 可以直接写在 `Spec(source=...)` 里，也可以通过
 `resolve_dataset("tsv://...")` 或 `resolve_dataset("sharded_csv://...")`
@@ -239,10 +249,9 @@ label 对应的原始样本下标。
 实例包进内部闭包再传给子进程。并行读写统一使用“每个 device 一个进程，进程内可选
 DataLoader workers”的模型；只解析出一个 device 时不启动外层 device worker。
 
-`FilterRule` 的缓存契约只包含 `name`。factory、predicate、parse function 和
-transforms 的语义版本不由库检查，调用方应把这些约定写进 `name`。这样 filter
-只负责可验证的数据结构、执行设备规划和缓存机制，不把用户业务规则伪装成库能自动
-理解的东西。
+`FilterRule` 保留 `name` 作为展示字段，并支持显式 `rule_id` 和 `version`。后两者会进入
+缓存路径、metadata、pickle/factory 恢复和 equality；修改 predicate、factory、parse function
+或 transforms 时应更新版本。未提供新字段的旧调用继续使用 name-only cache path。
 
 缓存根目录统一由 `ANYDATASET_HOME` 控制。物理 source prepare cache 写在
 `$ANYDATASET_HOME/cache/sources/<spec_id>`，只由 `Spec` 决定。filter cache 写在
@@ -264,7 +273,7 @@ reader 或 `lease_store_files(store_root)` 显式 lease 时直接报错，不静
 按物理 store 显式触发，后续访问会重新解包。
 物理 dataset 使用自动 identity；业务输入的内容或顺序改变时，调用方必须更新非空
 `input_id`。该 ID 补充而不替代自动 class、`Spec`、provenance 和 sample count identity。
-`FilterRule.name` 版本化 predicate，`input_id` 版本化输入状态；filtered factory、pickle
+`FilterRule.version` 版本化 predicate，`input_id` 版本化输入状态；filtered factory、pickle
 重建和链式过滤会继续携带上游 ID。
 
 运行时 warning 和 worker 日志同样由 `ANYDATASET_HOME` 控制，写入
@@ -293,5 +302,5 @@ reader/provider/writer 进度，便于非交互 job 判断停在哪个阶段。�
 - `quality.speech.SpeechQuality` 读取 audio item 和同 role text，输出 `accept` 或 `reject`，
   并把阈值命中、缺字段等审计信息放进 `FilterDecision.metrics`。
 
-如果接入神经网络评估器，模型路径、阈值和版本仍应体现在 `FilterRule.name` 或调用方
-配置里；filter cache 不会自动识别这些语义变化。
+如果接入神经网络评估器，模型路径、阈值和版本应体现在 `FilterRule.rule_id`、
+`FilterRule.version` 或调用方配置里；filter cache 不会自动推断这些语义变化。

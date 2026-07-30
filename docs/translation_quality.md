@@ -202,8 +202,8 @@ metrics 都会写入最终 audit row 的 `rules` 字段；顶层 `flags` 使用
 
 ## Cache Name
 
-`FilterRule.name` 是缓存契约。任何会改变 label 或 audit row 语义的内容都应该写进
-name，例如：
+`FilterRule.name` 是展示名称；建议用 `rule_id` 和 `version` 标识会改变 label 或
+audit row 语义的规则版本。省略它们时也可以继续把语义版本写进 name，例如：
 
 ```text
 mt_quality_rules_v1_en_zh_len_0p2_6p0_parser_v1

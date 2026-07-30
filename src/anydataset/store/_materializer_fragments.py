@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import multiprocessing
 import time
+from collections import deque
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
+from itertools import islice
 from pathlib import Path
-from typing import TYPE_CHECKING, Union
+from typing import TYPE_CHECKING, Deque, Union
 
 from .._compat import strict_zip
 from .._progress import Progress, ProgressDashboard, put_progress
@@ -34,7 +36,7 @@ class FragmentBatchWriter:
 
     def write(self, batches: Iterable[Sequence[tuple[int, Sample]]]) -> None:
         with self._sink() as sink:
-            pending_outputs: list[tuple[int, Sample]] = []
+            pending_outputs: Deque[tuple[int, Sample]] = deque()
             read_start = time.perf_counter()
             for batch in batches:
                 self._record_read(batch, read_start)
@@ -104,19 +106,21 @@ class FragmentBatchWriter:
     def _flush_ready(
         self,
         sink: BackgroundWriteSink[FragmentWriteJob],
-        pending_outputs: list[tuple[int, Sample]],
+        pending_outputs: Deque[tuple[int, Sample]],
     ) -> None:
         commit_samples = self.materializer.commit_samples
         if commit_samples is None:
             raise RuntimeError("materializer commit_samples was not initialized.")
         while len(pending_outputs) >= commit_samples:
-            self._submit(sink, pending_outputs[:commit_samples])
-            del pending_outputs[:commit_samples]
+            samples = tuple(islice(pending_outputs, commit_samples))
+            self._submit(sink, samples)
+            for _ in range(commit_samples):
+                pending_outputs.popleft()
 
     def _flush_remaining(
         self,
         sink: BackgroundWriteSink[FragmentWriteJob],
-        pending_outputs: list[tuple[int, Sample]],
+        pending_outputs: Deque[tuple[int, Sample]],
     ) -> None:
         if pending_outputs:
             self._submit(sink, pending_outputs)

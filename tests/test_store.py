@@ -1,3 +1,4 @@
+import os
 import tempfile
 import unittest
 from dataclasses import asdict
@@ -13,6 +14,7 @@ from anydataset.store.manifest import (
     ViewManifestEntry,
 )
 from anydataset.store.manifestio import (
+    ManifestParquetCache,
     read_samples_manifest,
     read_sample_manifest_index,
     read_view_manifest,
@@ -153,6 +155,67 @@ class StoreTest(unittest.TestCase):
 
         self.assertEqual(sample_index, ((0, "sample-0"),))
         self.assertEqual(view_indexes, (0,))
+
+    def test_manifest_cache_reuses_handles_until_fingerprint_changes(self):
+        import pyarrow.parquet as parquet
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            write_samples_manifest(
+                root,
+                [SampleManifestEntry(sample_id="sample-0", sample_index=0)],
+            )
+            cache = ManifestParquetCache()
+
+            with mock.patch(
+                "pyarrow.parquet.ParquetFile",
+                wraps=parquet.ParquetFile,
+            ) as open_parquet:
+                self.assertEqual(
+                    tuple(read_samples_manifest(root, cache=cache))[0].sample_id,
+                    "sample-0",
+                )
+                self.assertEqual(
+                    tuple(read_samples_manifest(root, cache=cache))[0].sample_id,
+                    "sample-0",
+                )
+                self.assertEqual(open_parquet.call_count, 1)
+
+                path = samples_parquet_path(root)
+                stat = path.stat()
+                os.utime(
+                    path,
+                    ns=(stat.st_atime_ns, stat.st_mtime_ns + 1),
+                )
+                tuple(read_samples_manifest(root, cache=cache))
+                self.assertEqual(open_parquet.call_count, 2)
+
+            cache.close()
+            self.assertFalse(cache._files)
+
+    def test_manifest_cache_discards_handles_after_fork(self):
+        import pyarrow.parquet as parquet
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            write_samples_manifest(
+                root,
+                [SampleManifestEntry(sample_id="sample-0", sample_index=0)],
+            )
+            cache = ManifestParquetCache()
+            tuple(read_samples_manifest(root, cache=cache))
+            self.assertEqual(len(cache._files), 1)
+            cache._pid = -1
+
+            with mock.patch(
+                "pyarrow.parquet.ParquetFile",
+                wraps=parquet.ParquetFile,
+            ) as open_parquet:
+                tuple(read_samples_manifest(root, cache=cache))
+
+            self.assertEqual(open_parquet.call_count, 1)
+            self.assertEqual(len(cache._files), 1)
+            cache.close()
 
 
 if __name__ == "__main__":

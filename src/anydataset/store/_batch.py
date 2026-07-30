@@ -14,35 +14,12 @@ import torch
 
 from .._compat import strict_zip
 from ..dataset.collate import Batch, collate_fn
-from ..types.item import (
-    AudioReq,
-    ImageReq,
-    Item,
-    Modality,
-    Requirement,
-    Role,
-    Sample,
-    TextReq,
-)
+from ..types.item import Item, Modality, Requirement, Role, Sample
 from ._modality import modality_inputs, role_items, with_modality_view
 from ._types import ModalityProviderLike, output_modality
 from ._view import with_view
 
 OomCallback = Callable[[int, int, int], None]
-
-
-def sample_batches(
-    samples: Iterable[Sample],
-    batch_size: int,
-) -> Iterator[tuple[Sample, ...]]:
-    batch: list[Sample] = []
-    for sample in samples:
-        batch.append(sample)
-        if len(batch) == batch_size:
-            yield tuple(batch)
-            batch = []
-    if batch:
-        yield tuple(batch)
 
 
 def indexed_sample_batches(
@@ -247,13 +224,7 @@ def _input_requirement(
         views.update(sample_item.views)
         meta.update(sample_item.meta)
 
-    if ref[1] is Modality.AUDIO:
-        return AudioReq.from_iter(views, meta)
-    if ref[1] is Modality.IMAGE:
-        return ImageReq.from_iter(views, meta)
-    if ref[1] is Modality.TEXT:
-        return TextReq.from_iter(views, meta)
-    raise TypeError(f"Unsupported sample reference: {ref!r}.")
+    return ref[1].requirement(views, meta)
 
 
 def _sorted_refs(

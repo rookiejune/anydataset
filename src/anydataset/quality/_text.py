@@ -15,6 +15,7 @@ from decimal import Decimal, InvalidOperation
 from functools import cached_property
 from math import isfinite
 
+from .._immutable import Immutable
 from .._validation import positive_int
 from ..types import Lang, Modality, Role, Sample, TextItem, TextMeta, TextView
 
@@ -70,39 +71,55 @@ _CYRILLIC_LANGS = frozenset(
 _ARABIC_LANGS = frozenset({Lang.AR, Lang.FA, Lang.PS, Lang.UR})
 
 
-@dataclass
-class TextQualityProfile:
-    min_chars: int = 1
-    min_script_ratio: float = 0.45
-    reject_script_ratio: float = 0.2
-    min_script_chars: int = 4
-    max_control_ratio: float = 0.02
-    max_repeated_run: int = 24
+@dataclass(init=False, unsafe_hash=True)
+class TextQualityProfile(Immutable):
+    min_chars: int
+    min_script_ratio: float
+    reject_script_ratio: float
+    min_script_chars: int
+    max_control_ratio: float
+    max_repeated_run: int
 
-    def __post_init__(self) -> None:
-        self.min_chars = positive_int("min_chars", self.min_chars)
-        self.min_script_chars = positive_int(
+    def __init__(
+        self,
+        min_chars: int = 1,
+        min_script_ratio: float = 0.45,
+        reject_script_ratio: float = 0.2,
+        min_script_chars: int = 4,
+        max_control_ratio: float = 0.02,
+        max_repeated_run: int = 24,
+    ) -> None:
+        normalized_min_chars = positive_int("min_chars", min_chars)
+        normalized_min_script_chars = positive_int(
             "min_script_chars",
-            self.min_script_chars,
+            min_script_chars,
         )
-        self.max_repeated_run = positive_int(
+        normalized_max_repeated_run = positive_int(
             "max_repeated_run",
-            self.max_repeated_run,
+            max_repeated_run,
         )
-        self.reject_script_ratio = unit_ratio(
+        normalized_reject_script_ratio = unit_ratio(
             "reject_script_ratio",
-            self.reject_script_ratio,
+            reject_script_ratio,
         )
-        self.min_script_ratio = unit_ratio(
+        normalized_min_script_ratio = unit_ratio(
             "min_script_ratio",
-            self.min_script_ratio,
+            min_script_ratio,
         )
-        if self.reject_script_ratio > self.min_script_ratio:
+        if normalized_reject_script_ratio > normalized_min_script_ratio:
             raise ValueError("reject_script_ratio must be <= min_script_ratio.")
-        self.max_control_ratio = unit_ratio(
+        normalized_max_control_ratio = unit_ratio(
             "max_control_ratio",
-            self.max_control_ratio,
+            max_control_ratio,
         )
+
+        self.min_chars = normalized_min_chars
+        self.min_script_ratio = normalized_min_script_ratio
+        self.reject_script_ratio = normalized_reject_script_ratio
+        self.min_script_chars = normalized_min_script_chars
+        self.max_control_ratio = normalized_max_control_ratio
+        self.max_repeated_run = normalized_max_repeated_run
+        self.seal()
 
 
 @dataclass

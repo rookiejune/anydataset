@@ -83,6 +83,6 @@ evaluator(audio, sample_rate, reference_text=reference_text, **decode_options)
 
 and must return finite scalar metrics named `utmos`, `wer`, `chrf`, and `bleu`.
 
-`FilterRule.name` remains the cache contract. Include any evaluator model,
-decode options, threshold, parser, and transform versions in the rule name when
-cache reuse should change.
+`FilterRule.name` is the display name. Put evaluator model, decode options,
+threshold, parser, and transform versions in `rule_id`/`version` when cache reuse
+should change; the legacy name-only form remains supported.

@@ -5,7 +5,9 @@ import csv
 import json
 import multiprocessing
 import os
+import resource
 import statistics
+import sys
 import tempfile
 import time
 from collections.abc import Callable, Iterator
@@ -154,6 +156,8 @@ def run_repeated(
         with tempfile.TemporaryDirectory(prefix="anydataset-bench-") as tmpdir:
             root = Path(tmpdir)
             measurement = benchmark(root)
+            measurement.detail.setdefault("max_rss_bytes", _max_rss_bytes())
+            measurement.detail.setdefault("open_fds", _open_fd_count())
             measurements.append(measurement)
     seconds = [measurement.seconds for measurement in measurements]
     return {
@@ -165,6 +169,23 @@ def run_repeated(
         },
         "detail": measurements[-1].detail,
     }
+
+
+def _max_rss_bytes() -> int:
+    value = int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
+    if sys.platform == "darwin":
+        return value
+    return value * 1024
+
+
+def _open_fd_count() -> int | None:
+    fd_dir = Path("/proc/self/fd")
+    if not fd_dir.is_dir():
+        return None
+    try:
+        return sum(1 for _ in fd_dir.iterdir())
+    except OSError:
+        return None
 
 
 def bench_store_commit(

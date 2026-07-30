@@ -18,6 +18,11 @@ from ._files import (
 )
 from .materializer import ModalityMaterializer, ViewMaterializer
 from .migration import migrate_store
+from ._integrity import (
+    IntegrityLevel,
+    validate_store_payloads,
+    validate_store_view_payloads,
+)
 from .writer import DatasetWriter
 
 __all__ = [
@@ -26,6 +31,7 @@ __all__ = [
     "BatchViewProvider",
     "FunctionModalityProvider",
     "FunctionViewProvider",
+    "IntegrityLevel",
     "ModalityMaterializer",
     "ModalityProvider",
     "ModalityTransform",
@@ -39,4 +45,6 @@ __all__ = [
     "cleanup_store_files",
     "lease_store_files",
     "migrate_store",
+    "validate_store_payloads",
+    "validate_store_view_payloads",
 ]

@@ -33,7 +33,7 @@ again = rule.apply(dataset_factory=dataset_factory, labels="accept", device="cpu
 
 The rule factory is called inside the process that executes the predicate. The
 predicate receives the full canonical `Sample` produced by the dataset.
-`FilteredDataset(...)` checks whether the named rule has a ready cache for the
+`FilteredDataset(...)` checks whether the rule identity has a ready cache for the
 base dataset; if not, it builds one. It selects all available labels by default.
 `FilteredDataset.select_by(...)` creates a label view over the same cache
 without rerunning the predicate. `FilterRule.apply(...)` is a convenience
@@ -66,10 +66,11 @@ Predicate return values are normalized to string labels:
   string.
 - `FilterDecision` carries a label plus optional per-sample metrics.
 
-`FilterRule` uses `name` as its cache contract. The factory, predicate, dataset
-`parse_fn`, and dataset transforms are deliberately not inspected by the
-library. Callers should include those semantic versions in `name` when cache
-reuse must change.
+`FilterRule.name` is the display name. The optional `rule_id` and `version` fields
+form the explicit cache identity; when omitted, `rule_id` defaults to `name` and
+the original name-only cache path remains compatible. The factory, predicate,
+dataset `parse_fn`, and dataset transforms are deliberately not inspected by the
+library. Update `version` (or the legacy `name`) when those semantics change.
 
 Cache layout:
 
@@ -119,11 +120,11 @@ filtered = rule.apply(
 snapshot. It supplements the automatic class, physical `Spec`, store provenance,
 and sample-count identity; it does not replace them. Change it when input content
 or ordering changes. The stored ID survives `FilteredDataset.dataset_factory`,
-pickle reconstruction, and chained filters. `FilterRule.name` still versions
+pickle reconstruction, and chained filters. `FilterRule.rule_id`/`version` identify
 the predicate contract, while `input_id` versions input state.
 
 `rule.json` stores the base physical `Spec` id or filtered-view lineage, scanned
-sample count, and rule name. When those values do not match, the rule is
+sample count, and rule identity. When those values do not match, the rule is
 recomputed. `partitions.json` stores labels, counts, and shard parquet file
 names. Each parquet file stores global sample-space indices for one label shard.
 `FilterRule.apply(..., max_shard_samples=...)`

@@ -16,7 +16,7 @@ from .generations import (
     filter_cache_root,
     filter_generation_lock_path,
 )
-from .rules import rule_cache_key
+from .rules import rule_cache_key, rule_identity
 
 if TYPE_CHECKING:
     from .api import FilteredDataset, FilterRule
@@ -67,7 +67,11 @@ def filter_identity(
             "view_schema_version": _FILTER_VIEW_SCHEMA_VERSION,
             "kind": "filtered",
             "base": filter_identity(dataset.base, input_id=dataset.input_id),
-            "rule": {"name": dataset.rule.name},
+            "rule": rule_identity(
+                dataset.rule.name,
+                dataset.rule.rule_id,
+                dataset.rule.version,
+            ),
             "labels": list(dataset.labels),
             "cache_key": filter_cache_root(dataset.cache_path).name,
             "sample_count": len(dataset),
@@ -124,7 +128,7 @@ def metadata(
             "identity_id": filter_identity_key(identity),
             "sample_count": base_count,
         },
-        "rule": {"name": rule.name},
+        "rule": rule_identity(rule.name, rule.rule_id, rule.version),
     }
     if identity.get("kind") == "physical":
         output["base"]["spec_id"] = identity["spec_id"]
@@ -142,7 +146,7 @@ def filter_path(
         / "cache"
         / "filters"
         / filter_identity_key(identity)
-        / rule_cache_key(rule.name)
+        / rule_cache_key(rule.name, rule.rule_id, rule.version)
     )
 
 

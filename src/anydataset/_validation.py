@@ -47,3 +47,12 @@ def optional_positive_float(name: str, value: float | None) -> float | None:
     if value is None:
         return None
     return positive_float(name, value)
+
+
+def validate_path_segment(name: str, value: str) -> None:
+    if not isinstance(value, str):
+        raise TypeError(f"{name} must be a string.")
+    if value in {"", ".", ".."}:
+        raise ValueError(f"{name} must be a non-empty path segment.")
+    if "/" in value or "\\" in value:
+        raise ValueError(f"{name} cannot contain path separators.")

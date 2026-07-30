@@ -8,12 +8,12 @@ import threading
 from pathlib import Path
 from typing import Any
 
+from .._io.files import stat_fingerprint
 from ..cache import anydataset_home
 from ..types.item import Modality, Role, View
 from .manifest import ViewManifestEntry
 from .paths import view_shard_path
 
-_StatFingerprint = tuple[int, int, int, int, int]
 _LEASES: dict[tuple[int, str], int] = {}
 _LEASES_LOCK = threading.Lock()
 
@@ -167,16 +167,6 @@ def lease_path(root: str | Path) -> Path:
 def store_id(root: str | Path) -> str:
     resolved = Path(root).expanduser().resolve()
     return hashlib.sha256(os.fsencode(resolved)).hexdigest()
-
-
-def stat_fingerprint(stat: os.stat_result) -> _StatFingerprint:
-    return (
-        stat.st_dev,
-        stat.st_ino,
-        stat.st_size,
-        stat.st_mtime_ns,
-        stat.st_ctime_ns,
-    )
 
 
 def _register(path: Path) -> None:

@@ -1,5 +1,6 @@
 import pickle
 import unittest
+from dataclasses import FrozenInstanceError
 from pathlib import Path
 from unittest import mock
 
@@ -91,6 +92,16 @@ class CanonicalDatasetTest(unittest.TestCase):
         with self.assertRaisesRegex(TypeError, "TextMeta.LANG"):
             TextItem(meta={TextMeta.LANG: [Lang.EN, "de"]})
 
+    def test_items_and_requirements_are_explicitly_mutable(self):
+        item = TextItem(views={TextView.TEXT: "before"})
+        requirement = TextReq(views={TextView.TEXT})
+
+        item.views = {TextView.TEXT: "after"}
+        requirement.views = frozenset()
+
+        self.assertEqual(item.views[TextView.TEXT], "after")
+        self.assertEqual(requirement.views, frozenset())
+
     def test_resolves_preset_to_spec(self):
         spec = resolve_dataset("fleurs:validation")
 
@@ -126,6 +137,14 @@ class CanonicalDatasetTest(unittest.TestCase):
 
         with self.assertRaises(TypeError):
             spec.load_options["streaming"] = False
+
+    def test_spec_fields_are_immutable(self):
+        spec = Spec(source=Source.HF, path="org/data")
+
+        with self.assertRaises(FrozenInstanceError):
+            spec.path = "other/data"
+        with self.assertRaises(FrozenInstanceError):
+            del spec.path
 
     def test_spec_rejects_invalid_physical_fields(self):
         cases = (
@@ -187,6 +206,18 @@ class CanonicalDatasetTest(unittest.TestCase):
 
         self.assertEqual(spec.id, before)
         self.assertEqual(values[spec], "cached")
+        self.assertEqual(spec.to_dict()["load_options"]["files"], ["a.jsonl"])
+
+    def test_spec_to_dict_does_not_expose_identity_state(self):
+        spec = Spec(
+            source=Source.HF,
+            path="org/data",
+            load_options={"files": ["a.jsonl"]},
+        )
+        payload = spec.to_dict()
+
+        payload["load_options"]["files"].append("b.jsonl")
+
         self.assertEqual(spec.to_dict()["load_options"]["files"], ["a.jsonl"])
 
     def test_spec_id_accepts_path_load_options(self):

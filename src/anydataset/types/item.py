@@ -26,7 +26,7 @@ def _select(
     return {key: values[key] for key in keys}
 
 
-@dataclass(frozen=True)
+@dataclass
 class _Requirement(Generic[ViewT, MetaT]):
     views: frozenset[ViewT] = frozenset()
     meta: frozenset[MetaT] = frozenset()
@@ -43,7 +43,7 @@ class _Requirement(Generic[ViewT, MetaT]):
         )
 
 
-@dataclass(frozen=True)
+@dataclass
 class _Item(Generic[ViewT, MetaT]):
     views: Mapping[ViewT, Any] = field(default_factory=dict)
     meta: Mapping[MetaT, Any] = field(default_factory=dict)
@@ -84,19 +84,11 @@ class SemanticAcousticView(TypedDict):
     acoustic: Tensor
 
 
-@dataclass(frozen=True)
+@dataclass
 class AudioItem(_Item[AudioView, AudioMeta]):
     def __post_init__(self) -> None:
-        object.__setattr__(
-            self,
-            "views",
-            _enum_mapping("AudioItem.views", self.views, AudioView),
-        )
-        object.__setattr__(
-            self,
-            "meta",
-            _enum_mapping("AudioItem.meta", self.meta, AudioMeta),
-        )
+        self.views = _enum_mapping("AudioItem.views", self.views, AudioView)
+        self.meta = _enum_mapping("AudioItem.meta", self.meta, AudioMeta)
 
 
 class ImageMeta(StrEnum):
@@ -107,19 +99,11 @@ class ImageView(StrEnum):
     PIXEL = auto()
 
 
-@dataclass(frozen=True)
+@dataclass
 class ImageItem(_Item[ImageView, ImageMeta]):
     def __post_init__(self) -> None:
-        object.__setattr__(
-            self,
-            "views",
-            _enum_mapping("ImageItem.views", self.views, ImageView),
-        )
-        object.__setattr__(
-            self,
-            "meta",
-            _enum_mapping("ImageItem.meta", self.meta, ImageMeta),
-        )
+        self.views = _enum_mapping("ImageItem.views", self.views, ImageView)
+        self.meta = _enum_mapping("ImageItem.meta", self.meta, ImageMeta)
 
 
 class TextMeta(StrEnum):
@@ -132,22 +116,14 @@ class TextView(StrEnum):
     SPEAKERS = auto()
 
 
-@dataclass(frozen=True)
+@dataclass
 class TextItem(_Item[TextView, TextMeta]):
     def __post_init__(self) -> None:
-        object.__setattr__(
-            self,
-            "views",
-            _enum_mapping("TextItem.views", self.views, TextView),
-        )
-        object.__setattr__(
-            self,
-            "meta",
-            _text_meta_mapping("TextItem.meta", self.meta),
-        )
+        self.views = _enum_mapping("TextItem.views", self.views, TextView)
+        self.meta = _text_meta_mapping("TextItem.meta", self.meta)
 
 
-@dataclass(frozen=True)
+@dataclass
 class AudioReq(
     _Requirement[
         AudioView,
@@ -155,19 +131,11 @@ class AudioReq(
     ]
 ):
     def __post_init__(self) -> None:
-        object.__setattr__(
-            self,
-            "views",
-            _enum_keys("AudioReq.views", self.views, AudioView),
-        )
-        object.__setattr__(
-            self,
-            "meta",
-            _enum_keys("AudioReq.meta", self.meta, AudioMeta),
-        )
+        self.views = _enum_keys("AudioReq.views", self.views, AudioView)
+        self.meta = _enum_keys("AudioReq.meta", self.meta, AudioMeta)
 
 
-@dataclass(frozen=True)
+@dataclass
 class ImageReq(
     _Requirement[
         ImageView,
@@ -175,19 +143,11 @@ class ImageReq(
     ]
 ):
     def __post_init__(self) -> None:
-        object.__setattr__(
-            self,
-            "views",
-            _enum_keys("ImageReq.views", self.views, ImageView),
-        )
-        object.__setattr__(
-            self,
-            "meta",
-            _enum_keys("ImageReq.meta", self.meta, ImageMeta),
-        )
+        self.views = _enum_keys("ImageReq.views", self.views, ImageView)
+        self.meta = _enum_keys("ImageReq.meta", self.meta, ImageMeta)
 
 
-@dataclass(frozen=True)
+@dataclass
 class TextReq(
     _Requirement[
         TextView,
@@ -195,16 +155,8 @@ class TextReq(
     ]
 ):
     def __post_init__(self) -> None:
-        object.__setattr__(
-            self,
-            "views",
-            _enum_keys("TextReq.views", self.views, TextView),
-        )
-        object.__setattr__(
-            self,
-            "meta",
-            _enum_keys("TextReq.meta", self.meta, TextMeta),
-        )
+        self.views = _enum_keys("TextReq.views", self.views, TextView)
+        self.meta = _enum_keys("TextReq.meta", self.meta, TextMeta)
 
 
 def _enum_mapping(name: str, value: object, key_type: type[KeyT]) -> Mapping[KeyT, Any]:
@@ -274,6 +226,60 @@ class Modality(StrEnum):
     AUDIO = auto()
     IMAGE = auto()
     TEXT = auto()
+
+    def item_type(self) -> type[Item]:
+        if self is Modality.AUDIO:
+            return AudioItem
+        if self is Modality.IMAGE:
+            return ImageItem
+        if self is Modality.TEXT:
+            return TextItem
+        raise ValueError(f"Unsupported modality: {self!r}.")
+
+    def view_type(self) -> type[View]:
+        if self is Modality.AUDIO:
+            return AudioView
+        if self is Modality.IMAGE:
+            return ImageView
+        if self is Modality.TEXT:
+            return TextView
+        raise ValueError(f"Unsupported modality: {self!r}.")
+
+    def meta_type(self) -> type[Meta]:
+        if self is Modality.AUDIO:
+            return AudioMeta
+        if self is Modality.IMAGE:
+            return ImageMeta
+        if self is Modality.TEXT:
+            return TextMeta
+        raise ValueError(f"Unsupported modality: {self!r}.")
+
+    def requirement_type(self) -> type[Requirement]:
+        if self is Modality.AUDIO:
+            return AudioReq
+        if self is Modality.IMAGE:
+            return ImageReq
+        if self is Modality.TEXT:
+            return TextReq
+        raise ValueError(f"Unsupported modality: {self!r}.")
+
+    def item(
+        self,
+        *,
+        views: Mapping[Any, Any],
+        meta: Mapping[Any, Any],
+    ) -> Item:
+        return self.item_type()(views=views, meta=meta)
+
+    def view(self, value: str) -> View:
+        return self.view_type()(value)
+
+    def requirement(
+        self,
+        views: Iterable[Any],
+        meta: Iterable[Any],
+    ) -> Requirement:
+        return self.requirement_type().from_iter(views, meta)
 
 
 Reference = tuple[Role, Modality]

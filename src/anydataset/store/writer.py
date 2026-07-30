@@ -1,119 +1,123 @@
+"""Public single-process and parallel writer for canonical sample stores."""
+
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from .._io.atomic import replace_dir
-from .._validation import positive_int
+from .._validation import non_negative_int, optional_positive_int, positive_int
+from ..dataset.write import DatasetFactory, ordered_samples, write_dataset_parts
 from ..types.item import Modality, Role, Sample, View
 from ._config import DEFAULT_MAX_SHARD_SAMPLES
-from ._sample_write import (
-    explicit_views,
-    sample_id,
-    sample_id_prefix,
-    sample_manifest_entry,
-    sample_view_refs,
-    sample_view_value,
-    validate_sample,
-    validate_view_sets,
-    view_path,
-)
-from .jsonio import write_json
-from .manifest import (
-    STORE_SCHEMA_VERSION,
-    DatasetManifest,
-    dataset_manifest_dict,
-    normalize_provenance,
-)
-from .manifestio import sample_manifest_writer
-from .paths import dataset_json_path, dataset_ready_path
-from .viewwriter import ViewWriter
+from ._part_writer import write_indexed_samples
+from ._payload_groups import write_payload_groups
+from ._sample_write import explicit_views
+from .manifest import normalize_provenance
+from .paths import dataset_ready_path
 
 
 @dataclass
 class DatasetWriter:
     output_dir: str | Path
-    dataset_id: str
+    dataset_id: str | None = None
     split: str | None = None
     views: tuple[tuple[Role, Modality, View], ...] | None = None
     max_shard_samples: int = DEFAULT_MAX_SHARD_SAMPLES
     provenance: Mapping[str, str] | None = None
+    num_shards: int = 1
+    num_workers: int = 0
+    prefetch_factor: int | None = None
 
     def __post_init__(self) -> None:
         self.output_dir = Path(self.output_dir)
+        if self.dataset_id is None:
+            self.dataset_id = self.output_dir.expanduser().name or "dataset"
         self.views = explicit_views(self.views)
         self.max_shard_samples = positive_int(
             "max_shard_samples",
             self.max_shard_samples,
         )
         self.provenance = normalize_provenance(self.provenance)
+        self.num_shards = positive_int("num_shards", self.num_shards)
+        self.num_workers = non_negative_int("num_workers", self.num_workers)
+        self.prefetch_factor = optional_positive_int(
+            "prefetch_factor",
+            self.prefetch_factor,
+        )
 
-    def write(self, samples: Iterable[Sample]) -> Path:
+    def __setstate__(self, state: dict[str, Any]) -> None:
+        self.__dict__.update(state)
+        if "provenance" not in state:
+            self.provenance = None
+        if "num_shards" not in state:
+            self.num_shards = 1
+        if "num_workers" not in state:
+            self.num_workers = 0
+        if "prefetch_factor" not in state:
+            self.prefetch_factor = None
+        self.__post_init__()
+
+    def write(
+        self,
+        samples: Any | None = None,
+        *,
+        dataset_factory: DatasetFactory | None = None,
+    ) -> Path:
+        if dataset_factory is None:
+            if samples is None:
+                raise TypeError("write requires samples or dataset_factory.")
+            if self.num_shards > 1 or self.num_workers > 0:
+                raise TypeError(
+                    "dataset_factory is required when num_shards or num_workers "
+                    "is greater than one."
+                )
+            return self._write_single(samples)
+
+        if samples is not None:
+            raise TypeError(
+                "write accepts either samples or dataset_factory, not both."
+            )
+        if self.num_shards == 1 and self.num_workers == 0:
+            return self._write_single(dataset_factory())
+        dataset_id, provenance = self._metadata()
+        return write_dataset_parts(
+            self.output_dir,
+            dataset_id=dataset_id,
+            split=self.split,
+            views=self.views,
+            max_shard_samples=self.max_shard_samples,
+            num_shards=self.num_shards,
+            num_workers=self.num_workers,
+            prefetch_factor=self.prefetch_factor,
+            provenance=provenance,
+            dataset_factory=dataset_factory,
+        )
+
+    def _write_single(self, samples: Any) -> Path:
         return replace_dir(
-            self.output_dir, lambda tmp: self._write_to_tmp(tmp, samples)
+            self.output_dir,
+            lambda tmp: self._write_to_tmp(tmp, ordered_samples(samples)),
         )
 
     def _write_to_tmp(self, root: Path, samples: Iterable[Sample]) -> Path:
-        provenance = self.provenance
-        if provenance is None:
-            raise RuntimeError("writer provenance was not initialized.")
-        sinks: dict[tuple[Role, Modality, View], ViewWriter] = {}
-        sample_views: dict[tuple[Role, Modality], frozenset[View]] = {}
-        sample_manifest = sample_manifest_writer(root)
-        sample_count = 0
-        prefix = sample_id_prefix(self.dataset_id)
+        dataset_id, provenance = self._metadata()
+        sample_count, written_views = write_indexed_samples(
+            root,
+            enumerate(samples),
+            dataset_id=dataset_id,
+            split=self.split,
+            views=self.views,
+            max_shard_samples=self.max_shard_samples,
+            provenance=provenance,
+        )
+        write_payload_groups(root, written_views, sample_count)
+        dataset_ready_path(root).touch()
+        return root
 
-        try:
-            for index, sample in enumerate(samples):
-                if not isinstance(sample, Mapping):
-                    raise TypeError("DatasetWriter.write expects Sample mappings.")
-                current_sample_id = sample_id(prefix, index)
-                validate_sample(sample)
-                views = (
-                    self.views if self.views is not None else sample_view_refs(sample)
-                )
-                if not views:
-                    raise ValueError(f"Sample {current_sample_id} has no views.")
-                if self.views is None:
-                    validate_view_sets(sample, sample_views, current_sample_id)
-                sample_manifest.write(
-                    sample_manifest_entry(sample, current_sample_id, index)
-                )
-                sample_count += 1
-                for view in views:
-                    value = sample_view_value(sample, view)
-                    if value is None:
-                        if self.views is not None:
-                            raise KeyError(
-                                f"Sample {current_sample_id} is missing view {view_path(view)}."
-                            )
-                        continue
-                    sink = sinks.get(view)
-                    if sink is None:
-                        sink = ViewWriter(
-                            root=root,
-                            view=view,
-                            max_shard_samples=self.max_shard_samples,
-                        )
-                        sinks[view] = sink
-                    sink.write(index, value)
-
-            manifest = DatasetManifest(
-                dataset_id=self.dataset_id,
-                schema_version=STORE_SCHEMA_VERSION,
-                split=self.split,
-                sample_count=sample_count,
-                provenance=provenance,
-            )
-            write_json(dataset_json_path(root), dataset_manifest_dict(manifest))
-            sample_manifest.close()
-            for sink in sinks.values():
-                sink.close()
-            dataset_ready_path(root).touch()
-            return root
-        except Exception:
-            sample_manifest.abort()
-            for sink in sinks.values():
-                sink.abort()
-            raise
+    def _metadata(self) -> tuple[str, Mapping[str, str]]:
+        if self.dataset_id is None or self.provenance is None:
+            raise RuntimeError("writer metadata was not initialized.")
+        return self.dataset_id, self.provenance

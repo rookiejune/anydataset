@@ -10,8 +10,16 @@ from unittest import mock
 import torch
 
 from anydataset.store.reader import read_store_dataset
-from anydataset.store.payload import PayloadCache, payload_value
+from anydataset.store.paths import view_shard_path
+from anydataset.store.payload import (
+    Payload,
+    PayloadCache,
+    add_payload,
+    payload_value,
+    write_payload_index,
+)
 from anydataset.store.writer import DatasetWriter
+from anydataset.store.jsonio import read_json, write_json
 from anydataset.types import AudioItem, AudioView, Modality, Role
 
 
@@ -82,6 +90,101 @@ class PayloadCacheTest(unittest.TestCase):
 
         self.assertTrue(torch.equal(first, torch.tensor([[0.0]])))
         self.assertTrue(torch.equal(second, torch.tensor([[1.0]])))
+
+    def test_payload_lookup_uses_index_for_each_shard(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output = Path(tmpdir) / "store"
+            ref = (Role.DEFAULT, Modality.AUDIO)
+            DatasetWriter(
+                output,
+                dataset_id="payload-index-shards",
+                max_shard_samples=1,
+            ).write(
+                [
+                    {
+                        ref: AudioItem(
+                            views={
+                                AudioView.WAVEFORM: (
+                                    torch.tensor([[float(index)]]),
+                                    16_000,
+                                )
+                            }
+                        )
+                    }
+                    for index in range(2)
+                ]
+            )
+            shards = output / "default" / "audio" / "waveform" / "shards"
+            self.assertTrue((shards / "000000.tar.index.json").is_file())
+            self.assertTrue((shards / "000001.tar.index.json").is_file())
+            dataset = read_store_dataset(output)
+
+            with mock.patch.object(
+                tarfile.TarFile,
+                "getmembers",
+                side_effect=AssertionError("sidecar index was ignored"),
+            ):
+                first = dataset[0][ref].views[AudioView.WAVEFORM][0]
+                second = dataset[1][ref].views[AudioView.WAVEFORM][0]
+
+        self.assertTrue(torch.equal(first, torch.tensor([[0.0]])))
+        self.assertTrue(torch.equal(second, torch.tensor([[1.0]])))
+
+    def test_payload_lookup_falls_back_for_corrupt_offset(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output = Path(tmpdir) / "store"
+            ref = (Role.DEFAULT, Modality.AUDIO)
+            DatasetWriter(output, dataset_id="payload-index-corrupt").write(
+                [
+                    {
+                        ref: AudioItem(
+                            views={
+                                AudioView.WAVEFORM: (
+                                    torch.tensor([[1.0]]),
+                                    16_000,
+                                )
+                            }
+                        )
+                    }
+                ]
+            )
+            sidecar = (
+                output
+                / "default"
+                / "audio"
+                / "waveform"
+                / "shards"
+                / "000000.tar.index.json"
+            )
+            data = read_json(sidecar)
+            member = next(iter(data["members"].values()))
+            member["offset"] += tarfile.BLOCKSIZE
+            write_json(sidecar, data)
+            dataset = read_store_dataset(output)
+
+            with mock.patch.object(
+                PayloadCache,
+                "_load_members",
+                wraps=PayloadCache._load_members,
+            ) as load_members:
+                waveform = dataset[0][ref].views[AudioView.WAVEFORM][0]
+
+        self.assertTrue(torch.equal(waveform, torch.tensor([[1.0]])))
+        self.assertEqual(load_members.call_count, 1)
+
+    def test_payload_index_rejects_duplicate_member_names(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            view = (Role.DEFAULT, Modality.AUDIO, AudioView.WAVEFORM)
+            shard = "000000.tar"
+            path = view_shard_path(root, view, shard)
+            path.parent.mkdir(parents=True)
+            with tarfile.open(path, "w") as archive:
+                add_payload(archive, Payload("duplicate.pt", b"first"))
+                add_payload(archive, Payload("duplicate.pt", b"later"))
+
+            with self.assertRaisesRegex(ValueError, "duplicate payload key"):
+                write_payload_index(root, view, shard)
 
 
 if __name__ == "__main__":

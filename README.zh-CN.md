@@ -202,7 +202,8 @@ dataset = IterableAnyDataset(
 prepare 使用 spawn process pool 并行转换变化文件，最后原子提交 cache manifest；
 dataset 随后通过 Parquet row group 提供 map-style 随机访问。动态 batch shuffle 会先
 打乱 row group 顺序，并且每次只物化一个 row group 的 index，不再分配全数据集 Python
-index list。
+index list。受限环境可以在 `Spec(load_options={"prepare_workers": 0})` 或 `1` 中显式关闭
+process pool；默认使用有界的自动并行策略。
 
 只需要得到 `Spec` 时，也可以使用字符串 shorthand：
 
@@ -427,9 +428,9 @@ rule = FilterRule("quality_v1_parse_v3_transform_none", quality_factory)
 again = rule.apply(dataset_factory=dataset_factory, labels="accept", device="cpu")
 ```
 
-predicate 返回 `True` 会归为 `"accept"`，返回 `False` 会归为 `"reject"`；也可以直接返回字符串或枚举值。`FilterRule` 的缓存契约就是用户提供的 `name`。predicate、parse function 和 transforms 的语义版本由调用方写进 `name`。
+predicate 返回 `True` 会归为 `"accept"`，返回 `False` 会归为 `"reject"`；也可以直接返回字符串或枚举值。`name` 是展示名称；可以用可选的 `rule_id` 和 `version` 显式标识 predicate、parse function 和 transforms 的语义版本。省略时 `rule_id` 默认使用 `name`，兼容旧的 name-only 缓存路径。
 
-`FilteredDataset(...)` 会先检查当前 base dataset 和 rule name 是否已经有可用缓存；没有就先构建。它默认选择缓存里所有 label；需要某些 label 时用 `select_by(...)` 基于同一份缓存派生视图。`FilterRule.apply(...)` 是便利入口，只是把自己的 `name` 和 `factory` 转发给 `FilteredDataset`。
+`FilteredDataset(...)` 会先检查当前 base dataset 和 rule identity 是否已经有可用缓存；没有就先构建。它默认选择缓存里所有 label；需要某些 label 时用 `select_by(...)` 基于同一份缓存派生视图。`FilterRule.apply(...)` 是便利入口，只是把自己的 rule identity 和 `factory` 转发给 `FilteredDataset`。
 
 物理 dataset 和 filtered view 的 filter cache identity 会自动生成。对于内容或顺序
 由业务工程管理、可能变化的输入，调用 `apply()` 或 `FilteredDataset(...)` 时传入非空
@@ -648,6 +649,44 @@ DatasetWriter(
 ).write(samples)
 ```
 
+`dataset_id` 可以省略；默认使用展开后的 `output_dir` 最后一段，如果路径没有名称则
+使用 `"dataset"`。`provenance` 用于在 dataset manifest 中记录输入的语义状态，只接受
+非空字符串 `input_id` 和 `provider_id`。当输入内容或 provider 行为无法由数据路径和配置
+完整表达时，用这两个字段显式版本化；它们也会参与下游 filter cache identity。
+
+`write(samples)` 和 `write(dataset_factory=...)` 互斥。默认配置
+（`num_shards=1`、`num_workers=0`）在调用进程中串行写入，两种输入形式都可使用。
+只要 `num_shards > 1` 或 `num_workers > 0`，就必须传 `dataset_factory`，让每个进程
+自行构造 dataset：
+
+```python
+from anydataset import AnyDataset
+from anydataset.store import DatasetWriter
+
+
+def dataset_factory():
+    return AnyDataset.from_store("/data/source_anydataset")
+
+
+if __name__ == "__main__":
+    DatasetWriter(
+        "/data/parallel_copy",
+        provenance={"input_id": "source-2026-07-30"},
+        num_shards=4,
+        num_workers=2,
+        prefetch_factor=4,
+    ).write(dataset_factory=dataset_factory)
+```
+
+`num_shards` 是 store 写进程数；`num_workers` 是每个写进程内部的 PyTorch
+`DataLoader` 读取进程数，因此完整并行时除写进程外最多还会启动
+`num_shards * num_workers` 个 loader workers。`prefetch_factor` 表示每个 loader
+worker 预取的一条样本 batch 数，只在 `num_workers > 0` 时生效，省略时默认为 `2`。
+并行 factory 必须可 pickle；默认 `spawn` 启动方式下通常应定义为模块顶层 callable，
+返回的 dataset 必须是 map-style，或实现 `iter_indexed_shard()`。应从应用主进程调用
+writer。当启用 loader workers 且 dataset 暴露 `prepare()` 时，writer 会在 spawn 前
+先在父进程调用一次，以便安全准备共享的 source 元数据。
+
 只选择训练需要的 view 读回来：
 
 ```python
@@ -701,6 +740,19 @@ anydataset-store migrate /data/my_anydataset_v1 /data/my_anydataset_v3
 
 更早的目录布局，或不完整匹配该 canonical schema 的 v1 manifest，不做猜测式迁移，
 必须用 `DatasetWriter` 从原始 canonical dataset 重新物化。
+
+发布或迁移 store 前可以使用公开 integrity API。`fast` 校验 manifest 引用和 shard
+存在性，`normal` 还会解析所有被引用的 tar，默认的 `full` 进一步核对每个 payload key：
+
+```python
+from pathlib import Path
+from anydataset.store import validate_store_payloads
+
+validate_store_payloads((Path("/data/my_anydataset"),), level="full")
+```
+
+reader 会保留 manifest 和 tar 句柄以复用随机读取；生命周期明确时使用
+`dataset.close()`，或把 `read_store_dataset(...)` 作为 context manager 使用。
 
 `AudioView.FILE` payload 会解包到 `$ANYDATASET_HOME/cache/store-files`。选择了 file
 view 的 reader 在自身生命周期内自动持有共享 lease，因此只要 reader 仍可达，cleanup

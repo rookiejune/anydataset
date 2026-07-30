@@ -6,7 +6,7 @@ from pathlib import Path
 
 from .._io.atomic import replace_dir
 from .._sharding import validate_shard
-from .._validation import positive_int
+from .._validation import positive_int, validate_path_segment
 from ..types.item import Modality, Role, Sample, View
 from ._config import DEFAULT_MAX_SHARD_SAMPLES
 from ._sample_write import (
@@ -32,6 +32,117 @@ from .paths import dataset_json_path, dataset_ready_path
 from .viewwriter import ViewWriter
 
 IndexedSample = tuple[int, Sample]
+
+
+def write_indexed_samples(
+    root: Path,
+    samples: Iterable[IndexedSample],
+    *,
+    dataset_id: str,
+    split: str | None,
+    views: tuple[tuple[Role, Modality, View], ...] | None,
+    max_shard_samples: int,
+    provenance: Mapping[str, str],
+    shard_prefix: str = "",
+) -> tuple[int, tuple[tuple[Role, Modality, View], ...]]:
+    sinks: dict[tuple[Role, Modality, View], ViewWriter] = {}
+    sample_views: dict[tuple[Role, Modality], frozenset[View]] = {}
+    sample_manifest = sample_manifest_writer(root)
+    sample_count = 0
+    previous_index: int | None = None
+    prefix = sample_id_prefix(dataset_id)
+
+    try:
+        for sample_index, sample in samples:
+            if previous_index is not None and sample_index <= previous_index:
+                raise ValueError("Materialized sample indexes must be increasing.")
+            previous_index = sample_index
+            if not isinstance(sample, Mapping):
+                raise TypeError("Store writers expect Sample mappings.")
+            current_sample_id = sample_id(prefix, sample_index)
+            validate_sample(sample)
+            selected = views if views is not None else sample_view_refs(sample)
+            if not selected:
+                raise ValueError(f"Sample {current_sample_id} has no views.")
+            if views is None:
+                validate_view_sets(sample, sample_views, current_sample_id)
+            sample_manifest.write(
+                sample_manifest_entry(sample, current_sample_id, sample_index)
+            )
+            sample_count += 1
+            for view in selected:
+                value = sample_view_value(sample, view)
+                if value is None:
+                    if views is not None:
+                        raise KeyError(
+                            f"Sample {current_sample_id} is missing view {view_path(view)}."
+                        )
+                    continue
+                sink = sinks.get(view)
+                if sink is None:
+                    sink = ViewWriter(
+                        root=root,
+                        view=view,
+                        max_shard_samples=max_shard_samples,
+                        shard_prefix=shard_prefix,
+                    )
+                    sinks[view] = sink
+                sink.write(sample_index, value)
+
+        manifest = DatasetManifest(
+            dataset_id=dataset_id,
+            schema_version=STORE_SCHEMA_VERSION,
+            split=split,
+            sample_count=sample_count,
+            provenance=provenance,
+        )
+        write_json(dataset_json_path(root), dataset_manifest_dict(manifest))
+        sample_manifest.close()
+        for sink in sinks.values():
+            sink.close()
+        return sample_count, tuple(sinks)
+    except Exception:
+        sample_manifest.abort()
+        for sink in sinks.values():
+            sink.abort()
+        raise
+
+
+def write_dataset_part(
+    root: Path,
+    samples: Iterable[IndexedSample],
+    *,
+    dataset_id: str,
+    split: str | None,
+    views: tuple[tuple[Role, Modality, View], ...] | None,
+    max_shard_samples: int,
+    provenance: Mapping[str, str],
+    shard_id: int,
+    num_shards: int,
+    shard_prefix: str,
+) -> tuple[int, tuple[tuple[Role, Modality, View], ...]]:
+    result = write_indexed_samples(
+        root,
+        samples,
+        dataset_id=dataset_id,
+        split=split,
+        views=views,
+        max_shard_samples=max_shard_samples,
+        provenance=provenance,
+        shard_prefix=shard_prefix,
+    )
+    sample_count, _written_views = result
+    write_json(
+        part_json_path(root),
+        {
+            "dataset_id": dataset_id,
+            "split": split,
+            "num_shards": num_shards,
+            "shard_id": shard_id,
+            "sample_count": sample_count,
+        },
+    )
+    return result
 
 
 @dataclass
@@ -65,80 +176,20 @@ class DatasetPartWriter:
         provenance = self.provenance
         if provenance is None:
             raise RuntimeError("part writer provenance was not initialized.")
-        sinks: dict[tuple[Role, Modality, View], ViewWriter] = {}
-        sample_views: dict[tuple[Role, Modality], frozenset[View]] = {}
-        sample_manifest = sample_manifest_writer(root)
-        sample_count = 0
-        previous_index: int | None = None
-        prefix = sample_id_prefix(self.dataset_id)
-
-        try:
-            for sample_index, sample in samples:
-                if previous_index is not None and sample_index <= previous_index:
-                    raise ValueError("Materialized sample indexes must be increasing.")
-                previous_index = sample_index
-                if not isinstance(sample, Mapping):
-                    raise TypeError("DatasetPartWriter.write expects Sample mappings.")
-                current_sample_id = sample_id(prefix, sample_index)
-                validate_sample(sample)
-                views = (
-                    self.views if self.views is not None else sample_view_refs(sample)
-                )
-                if not views:
-                    raise ValueError(f"Sample {current_sample_id} has no views.")
-                if self.views is None:
-                    validate_view_sets(sample, sample_views, current_sample_id)
-                sample_manifest.write(
-                    sample_manifest_entry(sample, current_sample_id, sample_index)
-                )
-                sample_count += 1
-                for view in views:
-                    value = sample_view_value(sample, view)
-                    if value is None:
-                        if self.views is not None:
-                            raise KeyError(
-                                f"Sample {current_sample_id} is missing view {view_path(view)}."
-                            )
-                        continue
-                    sink = sinks.get(view)
-                    if sink is None:
-                        sink = ViewWriter(
-                            root=root,
-                            view=view,
-                            max_shard_samples=self.max_shard_samples,
-                            shard_prefix=self._shard_prefix(),
-                        )
-                        sinks[view] = sink
-                    sink.write(sample_index, value)
-
-            manifest = DatasetManifest(
-                dataset_id=self.dataset_id,
-                schema_version=STORE_SCHEMA_VERSION,
-                split=self.split,
-                sample_count=sample_count,
-                provenance=provenance,
-            )
-            write_json(dataset_json_path(root), dataset_manifest_dict(manifest))
-            write_json(
-                part_json_path(root),
-                {
-                    "dataset_id": self.dataset_id,
-                    "split": self.split,
-                    "num_shards": self.num_shards,
-                    "shard_id": self.shard_id,
-                    "sample_count": sample_count,
-                },
-            )
-            sample_manifest.close()
-            for sink in sinks.values():
-                sink.close()
-            dataset_ready_path(root).touch()
-            return root
-        except Exception:
-            sample_manifest.abort()
-            for sink in sinks.values():
-                sink.abort()
-            raise
+        write_dataset_part(
+            root,
+            samples,
+            dataset_id=self.dataset_id,
+            split=self.split,
+            views=self.views,
+            max_shard_samples=self.max_shard_samples,
+            provenance=provenance,
+            shard_id=self.shard_id,
+            num_shards=self.num_shards,
+            shard_prefix=self._shard_prefix(),
+        )
+        dataset_ready_path(root).touch()
+        return root
 
     def _shard_prefix(self) -> str:
         if self.shard_prefix is not None:
@@ -157,7 +208,7 @@ class DatasetFragmentWriter:
 
     def __post_init__(self) -> None:
         self.output_dir = Path(self.output_dir)
-        validate_fragment_id(self.fragment_id)
+        validate_path_segment("fragment_id", self.fragment_id)
         self.max_shard_samples = positive_int(
             "max_shard_samples",
             self.max_shard_samples,
@@ -182,16 +233,21 @@ class DatasetFragmentWriter:
         samples: tuple[IndexedSample, ...],
         indexes: tuple[int, ...],
     ) -> Path:
-        DatasetPartWriter(
+        provenance = self.provenance
+        if provenance is None:
+            raise RuntimeError("fragment writer provenance was not initialized.")
+        write_dataset_part(
             root,
+            samples,
             dataset_id=self.dataset_id,
             split=self.split,
+            views=None,
+            max_shard_samples=self.max_shard_samples,
+            provenance=provenance,
             shard_id=0,
             num_shards=1,
-            max_shard_samples=self.max_shard_samples,
             shard_prefix=f"fragment-{self.fragment_id}-",
-            provenance=self.provenance,
-        )._write_to_tmp(root, samples)
+        )
         write_json(
             fragment_json_path(root),
             {
@@ -202,16 +258,8 @@ class DatasetFragmentWriter:
                 "sample_indexes": list(indexes),
             },
         )
+        dataset_ready_path(root).touch()
         return root
-
-
-def validate_fragment_id(value: str) -> None:
-    if not isinstance(value, str):
-        raise TypeError("fragment_id must be a string.")
-    if value in {"", ".", ".."}:
-        raise ValueError("fragment_id must be a non-empty path segment.")
-    if "/" in value:
-        raise ValueError("fragment_id cannot contain '/'.")
 
 
 def part_json_path(root: str | Path) -> Path:

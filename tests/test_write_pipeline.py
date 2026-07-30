@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import unittest
 from pathlib import Path
+from threading import Event
 
 from anydataset._write_pipeline import BackgroundWriteSink
 
@@ -56,6 +57,38 @@ class BackgroundWriteSinkTest(unittest.TestCase):
                 start_method="spawn",
             ) as sink:
                 sink.submit("bad")
+
+    def test_background_completions_preserve_submission_order(self):
+        first_started = Event()
+        second_done = Event()
+        release_first = Event()
+        completed = []
+
+        def write(value: str) -> None:
+            if value == "first":
+                first_started.set()
+                release_first.wait()
+            else:
+                second_done.set()
+
+        with BackgroundWriteSink(
+            write,
+            workers=2,
+            max_pending=2,
+            start_method="spawn",
+            on_complete=lambda job, _pending, _elapsed: completed.append(job),
+        ) as sink:
+            sink.submit("first")
+            self.assertTrue(first_started.wait(timeout=5))
+            sink.submit("second")
+            self.assertTrue(second_done.wait(timeout=5))
+            self.assertIsNone(sink._pending[1][1].result(timeout=5))
+
+            # The second worker may finish first, but completion callbacks are FIFO.
+            sink._drain_ready()
+            release_first.set()
+
+        self.assertEqual(completed, ["first", "second"])
 
     def test_abort_preserves_body_error(self):
         def write(value: str) -> None:

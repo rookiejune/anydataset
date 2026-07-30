@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import pickle
 import unittest
+from dataclasses import FrozenInstanceError
 from unittest import mock
 
 from anydataset.quality.rules import QualityChain, QualityLabel, Rule
@@ -71,6 +73,36 @@ class TranslationQualityTest(unittest.TestCase):
         predicate = Bicleaner(lambda _source, _target: float("nan"), Lang.EN, Lang.FR)
         with self.assertRaisesRegex(ValueError, "scorer output must be finite"):
             predicate(_text_pair("hello", "bonjour"))
+
+    def test_quality_configuration_is_immutable(self):
+        text_profile = TextQualityProfile()
+        translation_profile = TranslationQualityProfile(
+            source_lang=Lang.EN,
+            target_lang=Lang.FR,
+        )
+        text_quality = TextQuality(role=Role.SOURCE, lang=Lang.EN)
+        acceptability = TextAcceptability(role=Role.TARGET, lang=Lang.EN)
+        gec = ChineseGEC(role=Role.TARGET)
+        bicleaner = Bicleaner(lambda _source, _target: 0.5, Lang.EN, Lang.FR)
+        chain = QualityChain((Rule("text", text_quality),))
+
+        cases = (
+            (text_profile, "min_chars", 2),
+            (translation_profile, "review_min_ratio", 0.3),
+            (text_quality, "role", Role.TARGET),
+            (acceptability, "min_score", 0.4),
+            (gec, "max_edits", 2),
+            (bicleaner, "min_score", 0.4),
+            (chain, "rules", ()),
+        )
+        for config, name, value in cases:
+            with self.subTest(config=type(config).__name__, field=name):
+                with self.assertRaises(FrozenInstanceError):
+                    setattr(config, name, value)
+
+        self.assertIsInstance(chain.rules, tuple)
+        self.assertEqual(pickle.loads(pickle.dumps(text_profile)), text_profile)
+        self.assertEqual(hash(text_quality), hash(text_quality))
 
     def test_pair_accepts_clean_pair(self):
         predicate = TranslationQuality(

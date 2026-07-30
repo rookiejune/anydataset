@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from .._validation import validate_path_segment
 from ..types.item import Modality, Role, View
 
 
@@ -11,6 +12,10 @@ def dataset_json_path(root: str | Path) -> Path:
 
 def samples_parquet_path(root: str | Path) -> Path:
     return Path(root) / "samples.parquet"
+
+
+def payload_groups_path(root: str | Path) -> Path:
+    return Path(root) / "payload-groups.json"
 
 
 def dataset_ready_path(root: str | Path) -> Path:
@@ -51,14 +56,16 @@ def view_shard_path(
     view: tuple[Role, Modality, View],
     shard: str,
 ) -> Path:
-    _validate_segment("shard", shard)
+    validate_path_segment("shard", shard)
     return view_shards_dir(root, view) / str(shard)
 
 
-def _validate_segment(name: str, value: str) -> None:
-    if not isinstance(value, str):
-        raise TypeError(f"{name} must be a string.")
-    if value in {"", ".", ".."}:
-        raise ValueError(f"{name} must be a non-empty path segment.")
-    if "/" in value:
-        raise ValueError(f"{name} cannot contain '/'.")
+def view_shard_index_path(
+    root: str | Path,
+    view: tuple[Role, Modality, View],
+    shard: str,
+) -> Path:
+    """Return the optional payload offset index path for a shard."""
+
+    shard_path = view_shard_path(root, view, shard)
+    return shard_path.with_name(f"{shard_path.name}.index.json")

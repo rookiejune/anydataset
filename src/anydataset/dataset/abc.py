@@ -495,9 +495,9 @@ def _write_dataset(
     prefetch_factor: int | None,
     dataset_factory: Callable[[], Any] | None,
 ) -> Path:
-    from .write import DatasetStoreWriter
+    from ..store.writer import DatasetWriter
 
-    writer = DatasetStoreWriter(
+    writer = DatasetWriter(
         output_dir,
         dataset_id=dataset_id,
         split=split,

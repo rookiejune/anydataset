@@ -9,11 +9,11 @@ import sys
 import tempfile
 from bisect import bisect_right
 from collections import OrderedDict
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -22,6 +22,7 @@ from pyarrow.csv import ReadOptions  # pyright: ignore[reportPrivateImportUsage]
 from pyarrow.csv import read_csv  # pyright: ignore[reportPrivateImportUsage]
 
 from ..._compat import strict_zip
+from ..._io.files import atomic_write_text, stat_fingerprint
 from ..._parallel import multiprocessing_context
 from ..._logging import write_warning
 from ...cache import FileLock
@@ -42,10 +43,6 @@ _PREPARE_LOCK_TIMEOUT = 3600.0
 _PREPARE_LOCK_POLL = 0.2
 
 
-class _TextWriter(Protocol):
-    def write(self, text: str, /) -> object: ...
-
-
 @dataclass(frozen=True)
 class CsvShard:
     index: int
@@ -63,11 +60,15 @@ class CsvFile:
 
 class ShardedCsvSource:
     def prepare(self, spec: Spec, cache_path: Path) -> ShardedCsvDataset:
-        validate_load_options(spec, (), source="sharded_csv")
+        validate_load_options(spec, ("prepare_workers",), source="sharded_csv")
+        prepare_workers = spec.load_options.get("prepare_workers")
+        if prepare_workers is not None:
+            _validate_prepare_workers(prepare_workers)
         dataset = ShardedCsvDataset(
             Path(spec.path),
             split=spec.split,
             cache_path=cache_path,
+            prepare_workers=prepare_workers,
         )
         dataset.prepare()
         return dataset
@@ -89,10 +90,14 @@ class ShardedCsvDataset:
         split: str | None = None,
         *,
         cache_path: Path | None = None,
+        prepare_workers: int | None = None,
     ) -> None:
+        if prepare_workers is not None:
+            _validate_prepare_workers(prepare_workers)
         self.root = root
         self.split = split
         self.cache_path = cache_path
+        self.prepare_workers = prepare_workers
         self._shards_cache: tuple[CsvShard, ...] | None = None
         self._files_cache: tuple[CsvFile, ...] | None = None
         self._file_stops_cache: tuple[int, ...] | None = None
@@ -112,6 +117,8 @@ class ShardedCsvDataset:
 
     def __setstate__(self, state: dict[str, Any]) -> None:
         self.__dict__.update(state)
+        if "prepare_workers" not in state:
+            self.prepare_workers = None
 
     def close(self) -> None:
         parquets = tuple(self._parquet_cache.values())
@@ -186,8 +193,24 @@ class ShardedCsvDataset:
             raise ValueError("num_shards must be positive.")
         if shard_id < 0 or shard_id >= num_shards:
             raise ValueError("shard_id must satisfy 0 <= shard_id < num_shards.")
-        for index in range(shard_id, len(self), num_shards):
-            yield index, self[index]
+        # Scan each parquet row group once in physical order.  Calling
+        # ``self[index]`` for every selected index repeatedly performs the
+        # global file/row-group lookup and prevents sequential row-group IO.
+        for file in self._files():
+            for row_group, row_count in enumerate(file.row_groups):
+                if row_count == 0:
+                    continue
+                group_start = file.start + (
+                    0
+                    if row_group == 0
+                    else file.row_group_stops[row_group - 1]
+                )
+                first_offset = (shard_id - group_start) % num_shards
+                if first_offset >= row_count:
+                    continue
+                rows = self._read_parquet_group(file.path, row_group)
+                for offset in range(first_offset, row_count, num_shards):
+                    yield group_start + offset, rows[offset]
 
     def _base_dir(self) -> Path:
         return self.root / self.split if self.split is not None else self.root
@@ -339,7 +362,7 @@ class ShardedCsvDataset:
             records.append(None)
             jobs.append((len(records) - 1, source, cache_dir / part))
 
-        converted = _convert_files(jobs)
+        converted = _convert_files(jobs, workers=self.prepare_workers)
         for index, record in converted:
             records[index] = record
         complete = tuple(record for record in records if record is not None)
@@ -382,20 +405,28 @@ class ShardedCsvDataset:
         return self.cache_path / _CACHE_DIR
 
     def _read_parquet_row(self, file: CsvFile, index: int) -> dict[str, str]:
-        self._reset_after_fork()
         stops = file.row_group_stops
         row_group = bisect_right(stops, index)
         start = 0 if row_group == 0 else stops[row_group - 1]
-        key = (file.path, row_group)
+        rows = self._read_parquet_group(file.path, row_group)
+        return rows[index - start]
+
+    def _read_parquet_group(
+        self,
+        path: Path,
+        row_group: int,
+    ) -> tuple[dict[str, str], ...]:
+        self._reset_after_fork()
+        key = (path, row_group)
         rows = self._row_group_cache.get(key)
         if rows is None:
-            rows = tuple(self._parquet(file.path).read_row_group(row_group).to_pylist())
+            rows = tuple(self._parquet(path).read_row_group(row_group).to_pylist())
             self._row_group_cache[key] = rows
             while len(self._row_group_cache) > _MAX_CACHED_ROW_GROUPS:
                 self._row_group_cache.popitem(last=False)
         else:
             self._row_group_cache.move_to_end(key)
-        return rows[index - start]
+        return rows
 
     def _parquet(self, path: Path):
         parquet = self._parquet_cache.get(path)
@@ -462,20 +493,28 @@ def _csv_path_key(path: Path) -> int:
 
 
 def _source_record(path: Path) -> dict[str, Any]:
-    stat = path.stat()
+    device, inode, size, mtime_ns, ctime_ns = stat_fingerprint(path.stat())
     return {
         "path": str(path),
-        "size": stat.st_size,
-        "mtime_ns": stat.st_mtime_ns,
+        "device": device,
+        "inode": inode,
+        "size": size,
+        "mtime_ns": mtime_ns,
+        "ctime_ns": ctime_ns,
     }
 
 
 def _same_file_record(path: Path, record: JsonMapping) -> bool:
-    stat = path.stat()
     return (
         record.get("path") == str(path)
-        and record.get("size") == stat.st_size
-        and record.get("mtime_ns") == stat.st_mtime_ns
+        and (
+            record.get("device"),
+            record.get("inode"),
+            record.get("size"),
+            record.get("mtime_ns"),
+            record.get("ctime_ns"),
+        )
+        == stat_fingerprint(path.stat())
     )
 
 
@@ -494,8 +533,14 @@ def _valid_record(path: Path, record: JsonMapping, cache_dir: Path) -> bool:
         or sum(row_groups) != row_count
     ):
         return False
-    parquet = cache_dir / part
-    return parquet.is_file() and pq.ParquetFile(parquet).metadata.num_rows == row_count
+    parquet_path = cache_dir / part
+    if not parquet_path.is_file():
+        return False
+    parquet = pq.ParquetFile(parquet_path)
+    try:
+        return parquet.metadata.num_rows == row_count
+    finally:
+        parquet.close()
 
 
 def _part_name(path: Path) -> str:
@@ -505,11 +550,16 @@ def _part_name(path: Path) -> str:
 
 def _convert_files(
     jobs: Sequence[tuple[int, Path, Path]],
+    *,
+    workers: int | None = None,
 ) -> tuple[tuple[int, JsonMapping], ...]:
     if not jobs:
         return ()
-    workers = min(len(jobs), os.cpu_count() or 1, 8)
-    if workers == 1 or multiprocessing.current_process().daemon:
+    if workers is None:
+        workers = min(len(jobs), os.cpu_count() or 1, 8)
+    else:
+        workers = min(workers, len(jobs))
+    if workers <= 1 or multiprocessing.current_process().daemon:
         converted = (_convert_file_job(job) for job in jobs)
         return tuple(_conversion_progress(converted, total=len(jobs)))
     with ProcessPoolExecutor(
@@ -522,6 +572,13 @@ def _convert_files(
                 total=len(jobs),
             )
         )
+
+
+def _validate_prepare_workers(value: object) -> None:
+    if type(value) is not int:
+        raise TypeError("prepare_workers must be an integer or None.")
+    if value < 0:
+        raise ValueError("prepare_workers must be non-negative.")
 
 
 def _conversion_progress(
@@ -571,15 +628,18 @@ def _convert_file_job(job: tuple[int, Path, Path]) -> tuple[int, JsonMapping]:
             tmp.unlink()
         raise
     parquet = pq.ParquetFile(target)
-    record = {
-        **_source_record(source),
-        "part": target.name,
-        "row_count": int(parquet.metadata.num_rows),
-        "row_groups": [
-            int(parquet.metadata.row_group(group).num_rows)
-            for group in range(parquet.metadata.num_row_groups)
-        ],
-    }
+    try:
+        record = {
+            **_source_record(source),
+            "part": target.name,
+            "row_count": int(parquet.metadata.num_rows),
+            "row_groups": [
+                int(parquet.metadata.row_group(group).num_rows)
+                for group in range(parquet.metadata.num_row_groups)
+            ],
+        }
+    finally:
+        parquet.close()
     return index, record
 
 
@@ -608,40 +668,10 @@ def _read_json(path: Path) -> Any:
 
 
 def _write_json(path: Path, data: Mapping[str, Any]) -> None:
-    _atomic_write_text(
+    atomic_write_text(
         path,
         json.dumps(data, ensure_ascii=True, sort_keys=True, indent=2) + "\n",
     )
-
-
-def _atomic_write_text(path: Path, text: str) -> None:
-    def write(file: _TextWriter) -> None:
-        file.write(text)
-
-    _atomic_write(path, write)
-
-
-def _atomic_write(path: Path, write: Callable[[_TextWriter], None]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = None
-    try:
-        with tempfile.NamedTemporaryFile(
-            "w",
-            delete=False,
-            dir=path.parent,
-            encoding="utf-8",
-            prefix=f".{path.name}.",
-            suffix=".tmp",
-        ) as file:
-            tmp_path = Path(file.name)
-            write(file)
-            file.flush()
-            os.fsync(file.fileno())
-        os.replace(tmp_path, path)
-    except Exception:
-        if tmp_path is not None and tmp_path.exists():
-            tmp_path.unlink()
-        raise
 
 
 def _warn_missing_shards(base: Path, shards: Sequence[CsvShard]) -> None:

@@ -53,9 +53,30 @@ class WeightedRandomStrategy:
             if weight > 0:
                 active.append(iter(dataset))
                 active_weights.append(weight)
-        cumulative_weights = _cumulative_weights(active_weights)
         rng = random.Random(self.seed)
 
+        if len(active) <= 64:
+            yield from self._iter_choices(active, active_weights, rng)
+            return
+
+        sampler = _FenwickWeights(active_weights)
+        remaining = len(active)
+        while remaining:
+            index = sampler.choose(rng)
+            iterator = active[index]
+            try:
+                yield next(iterator)
+            except StopIteration:
+                sampler.remove(index)
+                remaining -= 1
+
+    def _iter_choices(
+        self,
+        active: list[Iterator[Sample]],
+        active_weights: list[float],
+        rng: random.Random,
+    ) -> Iterator[Sample]:
+        cumulative_weights = _cumulative_weights(active_weights)
         while active:
             index = rng.choices(
                 range(len(active)),
@@ -98,6 +119,41 @@ def _cumulative_weights(weights: Sequence[float]) -> list[float]:
         total += weight / scale
         output.append(total)
     return output
+
+
+class _FenwickWeights:
+    def __init__(self, weights: Sequence[float]) -> None:
+        scale = max(weights)
+        self._weights = [weight / scale for weight in weights]
+        self._tree = [0.0] * (len(self._weights) + 1)
+        for index, weight in enumerate(self._weights, start=1):
+            self._add(index, weight)
+        self._total = sum(self._weights)
+
+    def choose(self, rng: random.Random) -> int:
+        target = rng.random() * self._total
+        index = 0
+        step = 1 << (len(self._weights).bit_length() - 1)
+        while step:
+            candidate = index + step
+            if candidate < len(self._tree) and self._tree[candidate] <= target:
+                index = candidate
+                target -= self._tree[candidate]
+            step >>= 1
+        return index
+
+    def remove(self, index: int) -> None:
+        weight = self._weights[index]
+        if weight == 0.0:
+            return
+        self._weights[index] = 0.0
+        self._add(index + 1, -weight)
+        self._total -= weight
+
+    def _add(self, index: int, value: float) -> None:
+        while index < len(self._tree):
+            self._tree[index] += value
+            index += index & -index
 
 
 @dataclass

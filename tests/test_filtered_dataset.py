@@ -18,6 +18,8 @@ from enum import auto
 from functools import partial
 from pathlib import Path
 
+import anydataset.filter._factory as filter_factory_module
+import anydataset.filter.api as filter_api_module
 import torch
 from torch.utils.data import DataLoader
 
@@ -120,6 +122,63 @@ class FilteredDatasetTest(unittest.TestCase):
             self.assertEqual(read.call_count, 2)
             self.assertEqual(selected.indices, (0, 2, 3, 5))
             self.assertEqual(read.call_count, 4)
+
+    def test_iter_indices_and_partitions_are_lazy(self):
+        _register_rows_source("unit_test_filter_lazy_iterators")
+        with tempfile.TemporaryDirectory():
+            dataset = _dataset("unit_test_filter_lazy_iterators", list(range(6)))
+            result = FilterRule("mod_three", _mod_three_factory).apply(
+                dataset_factory=lambda: dataset,
+                device="cpu",
+                max_shard_samples=1,
+            ).select_by("zero", "two")
+
+            with mock.patch(
+                "anydataset.filter.storage.read_index_rows",
+                wraps=read_index_rows,
+            ) as read:
+                indices = result.iter_indices()
+                self.assertEqual(read.call_count, 0)
+                self.assertEqual(next(indices), 0)
+                self.assertGreater(read.call_count, 0)
+
+            partitions = dict(result.iter_partitions())
+            self.assertEqual(set(partitions), {"zero", "two"})
+            self.assertEqual(tuple(partitions["zero"]), (0, 3))
+            self.assertEqual(tuple(partitions["two"]), (2, 5))
+
+    def test_rule_version_and_id_isolated_in_cache_identity(self):
+        _register_rows_source("unit_test_filter_rule_identity")
+        with tempfile.TemporaryDirectory() as tmpdir, mock.patch.dict(
+            os.environ,
+            {"ANYDATASET_HOME": tmpdir},
+        ):
+            dataset = _dataset("unit_test_filter_rule_identity", [0, 1])
+            first = FilterRule(
+                "same",
+                lambda: lambda _sample: True,
+                rule_id="quality-check",
+                version="v1",
+            ).apply(dataset_factory=lambda: dataset, device="cpu")
+            second = FilterRule(
+                "same",
+                lambda: lambda _sample: False,
+                rule_id="quality-check",
+                version="v2",
+            ).apply(dataset_factory=lambda: dataset, device="cpu")
+
+            metadata = json.loads(
+                (first.cache_path / "rule.json").read_text(encoding="utf-8")
+            )
+
+        self.assertNotEqual(first.cache_path, second.cache_path)
+        self.assertEqual(metadata["rule"], {
+            "name": "same",
+            "rule_id": "quality-check",
+            "version": "v1",
+        })
+        self.assertEqual(first.rule.rule_id, "quality-check")
+        self.assertEqual(first.rule.version, "v1")
 
     def test_select_unknown_label_returns_empty_dataset(self):
         _register_rows_source("unit_test_filter_unknown")
@@ -915,6 +974,94 @@ class FilteredDatasetTest(unittest.TestCase):
         self.assertEqual(restored.input_id, "pickle-input-v1")
         self.assertEqual(_values(restored), [0, 2])
         self.assertEqual(len(list(restored.iter_metrics())), 4)
+
+    def test_filter_rule_restores_legacy_slots_pickle(self):
+        current = FilterRule(
+            "current",
+            _true_factory,
+            rule_id="stable-rule",
+            version="v2",
+        )
+        current_restored = pickle.loads(pickle.dumps(current))
+
+        self.assertEqual(current_restored, current)
+        self.assertIs(current_restored.factory, _true_factory)
+
+        legacy_rule_type = type(
+            "FilterRule",
+            (),
+            {
+                "__module__": filter_api_module.__name__,
+                "__slots__": ("_factory", "_name"),
+                "__init__": _init_legacy_filter_rule,
+            },
+        )
+        with mock.patch.object(filter_api_module, "FilterRule", legacy_rule_type):
+            payload = pickle.dumps(legacy_rule_type("legacy", _true_factory))
+
+        restored = pickle.loads(payload)
+
+        self.assertIsInstance(restored, FilterRule)
+        self.assertEqual(restored.name, "legacy")
+        self.assertIs(restored.factory, _true_factory)
+        self.assertEqual(restored.rule_id, "legacy")
+        self.assertIsNone(restored.version)
+
+    def test_filter_restores_legacy_reduce_signatures(self):
+        dataset_factory = partial(
+            _unpicklable_dataset,
+            "unit_test_filter_legacy_pickle",
+            list(range(4)),
+        )
+        with tempfile.TemporaryDirectory() as tmpdir, mock.patch.dict(
+            os.environ,
+            {"ANYDATASET_HOME": tmpdir},
+        ):
+            filtered = (
+                FilterRule("even", _metric_factory)
+                .apply(
+                    dataset_factory=dataset_factory,
+                    input_id="legacy-input",
+                    device="cpu",
+                )
+                .select_by("accept")
+            )
+            cache_pickle = _LegacyReduce(
+                filter_api_module._restore_filter_cache,
+                (
+                    dataset_factory,
+                    filtered.rule.name,
+                    filtered.cache_path,
+                    filtered.metrics_path,
+                    filtered.input_id,
+                ),
+            )
+            restored_cache = pickle.loads(pickle.dumps(cache_pickle))
+
+            current_factory = filtered.dataset_factory
+            factory_pickle = _LegacyReduce(
+                filter_factory_module.restore_filtered_dataset_factory,
+                (
+                    current_factory.base,
+                    current_factory.rule_name,
+                    current_factory.labels,
+                    current_factory.cache_path,
+                    current_factory.metrics_path,
+                    current_factory.input_id,
+                ),
+            )
+            restored_factory = pickle.loads(pickle.dumps(factory_pickle))
+            restored = restored_factory()
+
+            self.assertEqual(restored_cache.rule.name, "even")
+            self.assertEqual(restored_cache.rule.rule_id, "even")
+            self.assertIsNone(restored_cache.rule.version)
+            self.assertEqual(restored_cache.labels, ("accept", "reject"))
+            self.assertEqual(restored_factory.rule_id, "even")
+            self.assertIsNone(restored_factory.version)
+            self.assertEqual(restored.rule.rule_id, "even")
+            self.assertIsNone(restored.rule.version)
+            self.assertEqual(_values(restored), [0, 2])
 
     def test_filtered_dataset_factory_preserves_metrics(self):
         dataset_factory = partial(
@@ -1952,6 +2099,20 @@ def _use_filter_generation_after_release(dataset, ready, release) -> None:
 class _UnpicklableAnyDataset(AnyDataset):
     def __getstate__(self):
         raise TypeError("dataset instance must not be pickled")
+
+
+class _LegacyReduce:
+    def __init__(self, restore, args) -> None:
+        self.restore = restore
+        self.args = args
+
+    def __reduce__(self):
+        return self.restore, self.args
+
+
+def _init_legacy_filter_rule(self, name, factory) -> None:
+    self._name = name
+    self._factory = factory
 
 
 class _LazyIndex(Sequence[int]):

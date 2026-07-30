@@ -20,14 +20,21 @@ class FilteredDatasetFactory:
     cache_path: Path
     metrics_path: Path | None
     input_id: str | None
+    rule_id: str
     lease: GenerationLease = field(repr=False, compare=False)
+    version: str | None = None
 
     def __call__(self) -> FilterBase:
         from .api import FilteredDataset, FilterRule
 
         return FilteredDataset._from_generation(
             filter_base(self.base()),
-            FilterRule(self.rule_name, _unavailable_filter_factory),
+            FilterRule(
+                self.rule_name,
+                _unavailable_filter_factory,
+                rule_id=self.rule_id,
+                version=self.version,
+            ),
             self.cache_path,
             self.labels,
             dataset_factory=self.base,
@@ -45,6 +52,8 @@ class FilteredDatasetFactory:
                 self.cache_path,
                 self.metrics_path,
                 self.input_id,
+                self.rule_id,
+                self.version,
             ),
         )
 
@@ -64,6 +73,8 @@ def make_filtered_dataset_factory(
         cache_path,
         metrics_path,
         input_id,
+        rule.rule_id,
+        rule.version,
     )
 
 
@@ -74,6 +85,8 @@ def restore_filtered_dataset_factory(
     cache_path: Path,
     metrics_path: Path | None,
     input_id: str | None,
+    rule_id: str | None = None,
+    version: str | None = None,
 ) -> FilteredDatasetFactory:
     return _make_filtered_dataset_factory(
         base,
@@ -82,6 +95,8 @@ def restore_filtered_dataset_factory(
         cache_path,
         metrics_path,
         input_id,
+        rule_name if rule_id is None else rule_id,
+        version,
     )
 
 
@@ -92,6 +107,8 @@ def _make_filtered_dataset_factory(
     cache_path: Path,
     metrics_path: Path | None,
     input_id: str | None,
+    rule_id: str,
+    version: str | None,
 ) -> FilteredDatasetFactory:
     from .generations import lease_filter_generation
 
@@ -103,6 +120,8 @@ def _make_filtered_dataset_factory(
         cache_path=Path(cache_path),
         metrics_path=None if metrics_path is None else Path(metrics_path),
         input_id=input_id,
+        rule_id=rule_id,
+        version=version,
         lease=generation.lease,
     )
 

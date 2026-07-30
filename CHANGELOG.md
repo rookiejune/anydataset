@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Optimize store and source hot paths with manifest/tar handle caches, persisted
+  payload indexes and shard groups, lazy manifest reads, bounded CSV preparation,
+  and explicit resource cleanup.
+- Add integrity levels, filter rule identity/versioning, lazy filter index
+  iterators, bounded writer queues, allocation-efficient collation, and
+  large-dataset weighted sampling.
 - Change `SpeakerIdDataset` to accept explicit multi-reference
   `SpeakerAssignment` mappings, add generic grouped speaker-audio reads, and
   keep Qwen-specific synthesis outside the speaker dataset abstraction.

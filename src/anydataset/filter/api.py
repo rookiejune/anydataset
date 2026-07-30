@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from enum import Enum
 from pathlib import Path
 from types import MappingProxyType
@@ -35,29 +35,65 @@ from .types import (
 
 
 class FilterRule:
-    __slots__ = ("_factory", "_name")
+    __slots__ = ("_factory", "_name", "_rule_id", "_version")
 
     def __init__(
         self,
         name: str,
         factory: FilterFactory,
+        *,
+        rule_id: str | None = None,
+        version: str | None = None,
     ) -> None:
         validate_string("name", name)
         if not callable(factory):
             raise TypeError("factory must be callable.")
+        if rule_id is not None:
+            validate_string("rule_id", rule_id)
+        if version is not None:
+            validate_string("version", version)
         self._name = name
         self._factory = factory
+        self._rule_id = name if rule_id is None else rule_id
+        self._version = version
 
     def __repr__(self) -> str:
-        return f"FilterRule(name={self.name!r}, factory={self.factory!r})"
+        fields = [f"name={self.name!r}", f"factory={self.factory!r}"]
+        if self.rule_id != self.name:
+            fields.append(f"rule_id={self.rule_id!r}")
+        if self.version is not None:
+            fields.append(f"version={self.version!r}")
+        return f"FilterRule({', '.join(fields)})"
 
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, FilterRule):
             return NotImplemented
-        return self.name == other.name
+        return (
+            self.name == other.name
+            and self.rule_id == other.rule_id
+            and self.version == other.version
+        )
 
     def __hash__(self) -> int:
-        return hash(self.name)
+        return hash((self.name, self.rule_id, self.version))
+
+    def __setstate__(self, state: object) -> None:
+        if not isinstance(state, tuple) or len(state) != 2:
+            raise TypeError("invalid FilterRule pickle state.")
+        namespace, slots = state
+        if namespace is not None or not isinstance(slots, dict):
+            raise TypeError("invalid FilterRule pickle state.")
+        try:
+            name = slots["_name"]
+            factory = slots["_factory"]
+        except KeyError as exc:
+            raise ValueError("FilterRule pickle state is missing required fields.") from exc
+        self.__init__(
+            name,
+            factory,
+            rule_id=slots.get("_rule_id"),
+            version=slots.get("_version"),
+        )
 
     @property
     def name(self) -> str:
@@ -66,6 +102,14 @@ class FilterRule:
     @property
     def factory(self) -> FilterFactory:
         return self._factory
+
+    @property
+    def rule_id(self) -> str:
+        return self._rule_id
+
+    @property
+    def version(self) -> str | None:
+        return self._version
 
     def apply(
         self,
@@ -77,6 +121,8 @@ class FilterRule:
         return FilteredDataset(
             self.name,
             self.factory,
+            rule_id=self.rule_id,
+            version=self.version,
             dataset_factory=dataset_factory,
             labels=labels,
             **apply_kwargs,
@@ -150,6 +196,8 @@ class _FilterCache:
                 self.cache_path,
                 self.metrics_path,
                 self.input_id,
+                self.rule.rule_id,
+                self.rule.version,
             ),
         )
 
@@ -170,6 +218,12 @@ class _FilterCache:
         return MappingProxyType(
             {key: tuple(indices) for key, indices in self._indexes.items()}
         )
+
+    def iter_partitions(self) -> Iterator[tuple[str, Iterator[int]]]:
+        """Yield partition labels with lazy index iterators."""
+
+        for partition_label, indices in self._indexes.items():
+            yield partition_label, iter(indices)
 
     @property
     def rule(self) -> FilterRule:
@@ -209,6 +263,8 @@ class FilteredDataset(MapStyleABC):
         name: str,
         factory: FilterFactory,
         *,
+        rule_id: str | None = None,
+        version: str | None = None,
         dataset_factory: DatasetFactory,
         labels: FilterLabel | Sequence[FilterLabel] | None = None,
         **apply_kwargs: Unpack[FilterApplyKwargs],
@@ -216,7 +272,7 @@ class FilteredDataset(MapStyleABC):
         normalized = None if labels is None else normalized_labels(labels)
         options = apply_options(apply_kwargs)
         cache = apply_filter(
-            FilterRule(name, factory),
+            FilterRule(name, factory, rule_id=rule_id, version=version),
             input_id=options["input_id"],
             metrics=options["metrics"],
             device=options["device"],
@@ -315,6 +371,18 @@ class FilteredDataset(MapStyleABC):
     def indices(self) -> tuple[int, ...]:
         return tuple(self._indices)
 
+    def iter_indices(self) -> Iterator[int]:
+        """Iterate selected physical indexes without materializing a tuple."""
+
+        yield from self._indices
+
+    def iter_partitions(self) -> Iterator[tuple[str, Iterator[int]]]:
+        """Yield selected labels with lazy physical-index iterators."""
+
+        for partition_label in self.labels:
+            indexes = self._cache._indexes.get(partition_label, ())
+            yield partition_label, iter(indexes)
+
     def global_index(self, index: int) -> int:
         return int(self._indices[index])
 
@@ -379,13 +447,20 @@ def _restore_filter_cache(
     cache_path: Path,
     metrics_path: Path | None,
     input_id: str | None,
+    rule_id: str | None = None,
+    version: str | None = None,
 ) -> _FilterCache:
     generation = lease_filter_generation(cache_path)
     try:
         return _FilterCache(
             filter_base(dataset_factory()),
             read_partitions(generation.path),
-            FilterRule(rule_name, _unavailable_filter_factory),
+            FilterRule(
+                rule_name,
+                _unavailable_filter_factory,
+                rule_id=rule_id,
+                version=version,
+            ),
             generation.path,
             lease=generation.lease,
             dataset_factory=dataset_factory,

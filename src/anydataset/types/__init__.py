@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any, Callable, Mapping, Sequence, Union
 
 from . import item
 from .._compat import StrEnum
+from .._immutable import Immutable
 from .item import (
     AudioItem,
     AudioMeta,
@@ -52,35 +53,48 @@ class Source(StrEnum):
 SourceKey = Union[Source, str]
 
 
-@dataclass(frozen=True)
-class Spec:
+_EMPTY_LOAD_OPTIONS: Mapping[str, Any] = MappingProxyType({})
+
+
+@dataclass(init=False)
+class Spec(Immutable):
     source: SourceKey
     path: str
-    split: str | None = None
-    version: str | None = None
-    load_options: Mapping[str, Any] = field(default_factory=dict)
-    _identity: Mapping[str, Any] = field(init=False, repr=False, compare=False)
+    split: str | None
+    version: str | None
+    load_options: Mapping[str, Any]
     _id: str = field(init=False, repr=False, compare=False)
 
-    def __post_init__(self) -> None:
-        if not isinstance(self.source, (Source, str)):
+    def __init__(
+        self,
+        source: SourceKey,
+        path: str,
+        split: str | None = None,
+        version: str | None = None,
+        load_options: Mapping[str, Any] = _EMPTY_LOAD_OPTIONS,
+    ) -> None:
+        if not isinstance(source, (Source, str)):
             raise TypeError("Spec.source must be a Source or string source key.")
-        if not isinstance(self.path, str):
+        if not isinstance(path, str):
             raise TypeError("Spec.path must be a string.")
-        if not self.path:
+        if not path:
             raise ValueError("Spec.path must not be empty.")
-        for name, value in (("split", self.split), ("version", self.version)):
+        for name, value in (("split", split), ("version", version)):
             if value is not None and not isinstance(value, str):
                 raise TypeError(f"Spec.{name} must be a string or None.")
             if value == "":
                 raise ValueError(f"Spec.{name} must not be empty.")
-        if not isinstance(self.load_options, Mapping):
+        if not isinstance(load_options, Mapping):
             raise TypeError("Spec.load_options must be a mapping.")
-        frozen_options = _freeze_mapping(self.load_options)
-        object.__setattr__(self, "load_options", frozen_options)
+
+        self.source = source
+        self.path = path
+        self.split = split
+        self.version = version
+        self.load_options = _freeze_mapping(load_options)
         identity = _identity_payload(self)
-        object.__setattr__(self, "_identity", MappingProxyType(identity))
-        object.__setattr__(self, "_id", _stable_hash(identity))
+        self._id = _stable_hash(identity)
+        self.seal()
 
     @property
     def id(self) -> str:
@@ -94,7 +108,7 @@ class Spec:
         return hash(self.id)
 
     def to_dict(self) -> dict[str, Any]:
-        return {"id": self.id, **self._identity}
+        return {"id": self.id, **_identity_payload(self)}
 
     def __reduce__(self):
         return (

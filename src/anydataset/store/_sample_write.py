@@ -1,19 +1,14 @@
 from __future__ import annotations
 
 import re
-from typing import Any
+from collections.abc import Mapping
+from typing import Any, cast
 
 from ..types.item import (
-    AudioItem,
-    AudioView,
-    ImageItem,
-    ImageView,
     Item,
     Modality,
     Role,
     Sample,
-    TextItem,
-    TextView,
     View,
 )
 from .manifest import SampleItem, SampleManifestEntry, string_key_dict
@@ -61,15 +56,11 @@ def explicit_views(
             raise TypeError("store view role must be a Role.")
         if not isinstance(modality, Modality):
             raise TypeError("store view modality must be a Modality.")
-        if modality is Modality.AUDIO:
-            if not isinstance(key, AudioView):
-                raise TypeError("audio store views must use AudioView values.")
-        elif modality is Modality.IMAGE:
-            if not isinstance(key, ImageView):
-                raise TypeError("image store views must use ImageView values.")
-        elif modality is Modality.TEXT:
-            if not isinstance(key, TextView):
-                raise TypeError("text store views must use TextView values.")
+        view_type = modality.view_type()
+        if not isinstance(key, view_type):
+            raise TypeError(
+                f"{modality.value} store views must use {view_type.__name__} values."
+            )
         view = role, modality, key
         if view in seen:
             raise ValueError(f"Duplicate store view {view_path(view)}.")
@@ -98,31 +89,20 @@ def sample_view_value(sample: Sample, view: tuple[Role, Modality, View]) -> Any:
     item = sample.get((role, modality))
     if item is None:
         return None
-    if modality is Modality.AUDIO:
-        if not isinstance(item, AudioItem) or not isinstance(key, AudioView):
-            raise TypeError("audio store view must reference an AudioItem.")
-        return item.views.get(key)
-    if modality is Modality.IMAGE:
-        if not isinstance(item, ImageItem) or not isinstance(key, ImageView):
-            raise TypeError("image store view must reference an ImageItem.")
-        return item.views.get(key)
-    if modality is Modality.TEXT:
-        if not isinstance(item, TextItem) or not isinstance(key, TextView):
-            raise TypeError("text store view must reference a TextItem.")
-        return item.views.get(key)
-    raise TypeError(f"Unsupported store modality: {modality!r}.")
+    item_type = modality.item_type()
+    if not isinstance(item, item_type) or not isinstance(key, modality.view_type()):
+        raise TypeError(
+            f"{modality.value} store view must reference an {item_type.__name__}."
+        )
+    return cast(Mapping[View, Any], item.views).get(key)
 
 
 def validate_item(modality: Modality, item: Item) -> None:
-    if modality is Modality.AUDIO:
-        if not isinstance(item, AudioItem):
-            raise TypeError("audio sample items must be AudioItem instances.")
-    elif modality is Modality.IMAGE:
-        if not isinstance(item, ImageItem):
-            raise TypeError("image sample items must be ImageItem instances.")
-    elif modality is Modality.TEXT:
-        if not isinstance(item, TextItem):
-            raise TypeError("text sample items must be TextItem instances.")
+    item_type = modality.item_type()
+    if not isinstance(item, item_type):
+        raise TypeError(
+            f"{modality.value} sample items must be {item_type.__name__} instances."
+        )
 
 
 def validate_sample(sample: Sample) -> None:

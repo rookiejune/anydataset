@@ -1,22 +1,28 @@
 from __future__ import annotations
 
 import hashlib
-import os
+import sqlite3
 import tempfile
-from array import array
-from bisect import bisect_left, bisect_right
-from collections import OrderedDict
-from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, overload
+from typing import Any, cast
 
-from ..cache import anydataset_home
+from .._io.files import StatFingerprint as _StatFingerprint
+from .._io.files import atomic_write_bytes, stat_fingerprint
+from ..cache import FileLock, anydataset_home
 from ..dataset.abc import MapStyleABC
 from ..dataset._shuffle import shuffle_index_groups
 from ..types import item
 from ..types.language import remap_lang
-from ._files import StoreFilesLease, lease_store_files, payload_path
+from ._files import StoreFilesLease, lease_store_files, payload_path, store_id
+from ._manifest_index import (
+    SampleManifestSequence,
+    StoreView,
+    StoreViews,
+    ViewEntryIndex as ViewEntryIndex,
+    view_path as _view_path,
+)
 from .jsonio import read_json
 from .manifest import (
     LEGACY_STORE_SCHEMA_VERSION,
@@ -28,58 +34,38 @@ from .manifest import (
     view_from_dict,
 )
 from .manifestio import (
+    ManifestParquetCache,
+    manifest_parquet_cache,
     read_sample_manifest_index,
-    read_samples_manifest_row_group,
-    read_view_manifest_indexes,
-    read_view_manifest_row_group,
     sample_manifest_layout,
     samples_manifest_exists,
-    view_manifest_layout,
+)
+from ._payload_groups import (
+    PayloadGroupCache,
+    ordered_payload_groups,
+    payload_groups,
 )
 from .paths import (
     dataset_json_path,
     dataset_ready_path,
     samples_parquet_path,
-    view_manifest_parquet_path,
-    view_ready_path,
 )
 from .payload import PayloadCache, payload_value, read_payload_bytes
 
-_StatFingerprint = tuple[int, int, int, int, int]
-_ViewRef = tuple[item.Role, item.Modality, item.View]
-_PayloadLayoutFingerprint = tuple[_StatFingerprint, ...]
 _SAMPLE_INDEX_VALIDATION_VERSION = 2
+_SAMPLE_ID_SET_LIMIT = 1_000_000
 _BASE_DATASET_MANIFEST_FIELDS = frozenset(
     {"dataset_id", "sample_count", "schema_version", "split"}
 )
 
-
-@dataclass(frozen=True)
-class _PayloadGroup:
-    start: int
-    stop: int
+# Pickles written before the payload grouping code moved out of this module refer
+# to this private symbol. Keep it bound to the replacement class during loading.
+_PayloadGroupCache = PayloadGroupCache
 
 
-class _PayloadGroupCache:
-    def __init__(self) -> None:
-        self.fingerprint: _PayloadLayoutFingerprint | None = None
-        self.groups: tuple[_PayloadGroup, ...] | None = None
-
-    def get(
-        self,
-        fingerprint: _PayloadLayoutFingerprint,
-        load: Callable[[], tuple[_PayloadGroup, ...]],
-    ) -> tuple[_PayloadGroup, ...]:
-        if self.fingerprint != fingerprint or self.groups is None:
-            self.groups = load()
-            self.fingerprint = fingerprint
-        return self.groups
-
-    def __getstate__(self) -> dict[str, object]:
-        return {}
-
-    def __setstate__(self, state: dict[str, object]) -> None:
-        self.__init__()
+@dataclass
+class _DatasetResourceState:
+    closed: bool = False
 
 
 @dataclass(frozen=True)
@@ -98,16 +84,28 @@ class StoreDataset(MapStyleABC):
         compare=False,
         repr=False,
     )
-    _payload_group_cache: _PayloadGroupCache = field(
+    _payload_group_cache: PayloadGroupCache = field(
         default_factory=_PayloadGroupCache,
+        compare=False,
+        repr=False,
+    )
+    _manifest_cache: ManifestParquetCache = field(
+        default_factory=ManifestParquetCache,
+        compare=False,
+        repr=False,
+    )
+    _resource_state: _DatasetResourceState = field(
+        default_factory=_DatasetResourceState,
         compare=False,
         repr=False,
     )
 
     def __len__(self) -> int:
+        self._ensure_open()
         return len(self.samples)
 
     def __getitem__(self, index: int) -> item.Sample:
+        self._ensure_open()
         if index < 0:
             index += len(self)
         if index < 0 or index >= len(self):
@@ -124,8 +122,20 @@ class StoreDataset(MapStyleABC):
         num_replicas: int,
         rank: int,
     ) -> Iterator[Sequence[int]]:
+        self._ensure_open()
+        groups = payload_groups(
+            self.root,
+            self.samples,
+            self.views,
+            self._payload_group_cache,
+        )
+        indexes: Iterable[Sequence[int]] = (
+            (group.indexes() for bucket in groups for group in bucket)
+            if shuffle
+            else ordered_payload_groups(groups)
+        )
         yield from shuffle_index_groups(
-            (range(group.start, group.stop) for group in _payload_groups(self)),
+            indexes,
             shuffle=shuffle,
             seed=seed,
             epoch=epoch,
@@ -133,290 +143,60 @@ class StoreDataset(MapStyleABC):
             rank=rank,
         )
 
+    @property
+    def closed(self) -> bool:
+        return self._resource_state.closed
 
-class SampleManifestSequence(Sequence[SampleManifestEntry]):
-    def __init__(
-        self,
-        root: Path,
-        *,
-        count: int,
-        row_groups: Sequence[int],
-        max_cached_groups: int = 2,
-    ) -> None:
-        self.root = root
-        self._count = count
-        self._row_groups = tuple(row_groups)
-        self._offsets = _offsets(self._row_groups)
-        self._max_cached_groups = max_cached_groups
-        self._cache: OrderedDict[int, tuple[SampleManifestEntry, ...]] = OrderedDict()
+    def close(self) -> None:
+        if self._resource_state.closed:
+            return
+        self._resource_state.closed = True
+        errors: list[Exception] = []
+        for resource in (
+            self._payloads,
+            self._manifest_cache,
+            self._file_lease,
+        ):
+            if resource is None:
+                continue
+            try:
+                resource.close()
+            except Exception as exc:
+                errors.append(exc)
+        if errors:
+            raise errors[0]
 
-    def __len__(self) -> int:
-        return self._count
+    def __enter__(self) -> StoreDataset:
+        self._ensure_open()
+        return self
 
-    @overload
-    def __getitem__(self, index: int) -> SampleManifestEntry: ...
-
-    @overload
-    def __getitem__(self, index: slice) -> tuple[SampleManifestEntry, ...]: ...
-
-    def __getitem__(
-        self,
-        index: int | slice,
-    ) -> SampleManifestEntry | tuple[SampleManifestEntry, ...]:
-        if isinstance(index, slice):
-            start, stop, step = index.indices(len(self))
-            return tuple(self[position] for position in range(start, stop, step))
-        if index < 0:
-            index += len(self)
-        if index < 0 or index >= len(self):
-            raise IndexError("sample manifest index out of range.")
-        row_group = bisect_right(self._offsets, index) - 1
-        rows = self._row_group(row_group)
-        return rows[index - self._offsets[row_group]]
-
-    def __iter__(self) -> Iterator[SampleManifestEntry]:
-        for row_group in range(len(self._row_groups)):
-            yield from self._row_group(row_group)
+    def __exit__(self, exc_type, exc, traceback) -> None:
+        self.close()
 
     def __getstate__(self) -> dict[str, Any]:
-        return {
-            "root": self.root,
-            "count": self._count,
-            "row_groups": self._row_groups,
-            "max_cached_groups": self._max_cached_groups,
-        }
+        return dict(self.__dict__)
 
     def __setstate__(self, state: dict[str, Any]) -> None:
-        self.__init__(
-            state["root"],
-            count=state["count"],
-            row_groups=state["row_groups"],
-            max_cached_groups=state["max_cached_groups"],
-        )
+        attributes = cast(dict[str, Any], self.__dict__)
+        attributes.update(state)
+        manifest_cache = state.get("_manifest_cache")
+        if not isinstance(manifest_cache, ManifestParquetCache):
+            manifest_cache = ManifestParquetCache()
+            attributes["_manifest_cache"] = manifest_cache
+        resource_state = state.get("_resource_state")
+        if not isinstance(resource_state, _DatasetResourceState):
+            attributes["_resource_state"] = _DatasetResourceState()
+        self.views.bind_manifest_cache(manifest_cache)
 
-    def _row_group(self, row_group: int) -> tuple[SampleManifestEntry, ...]:
-        cached = self._cache.get(row_group)
-        if cached is not None:
-            self._cache.move_to_end(row_group)
-            return cached
-        rows = read_samples_manifest_row_group(self.root, row_group)
-        start = self._offsets[row_group]
-        for offset, sample in enumerate(rows):
-            _validate_sample_entry(sample, start + offset)
-        self._cache[row_group] = rows
-        while len(self._cache) > self._max_cached_groups:
-            self._cache.popitem(last=False)
-        return rows
+    def __del__(self) -> None:
+        try:
+            self.close()
+        except Exception:
+            pass
 
-
-@dataclass(frozen=True)
-class StoreView:
-    view: tuple[item.Role, item.Modality, item.View]
-    entries_by_index: ViewEntryIndex
-
-
-class ViewEntryIndex:
-    def __init__(
-        self,
-        root: Path,
-        view: tuple[item.Role, item.Modality, item.View],
-        *,
-        sample_count: int,
-        row_groups: Sequence[int],
-        sample_indexes: array[int],
-        max_cached_groups: int = 2,
-    ) -> None:
-        self.root = root
-        self.view = view
-        self._sample_count = sample_count
-        self._row_groups = tuple(row_groups)
-        self._offsets = _offsets(self._row_groups)
-        self._sample_indexes = sample_indexes
-        self._max_cached_groups = max_cached_groups
-        self._cache: OrderedDict[int, tuple[ViewManifestEntry, ...]] = OrderedDict()
-
-    @classmethod
-    def load(
-        cls,
-        root: Path,
-        view: tuple[item.Role, item.Modality, item.View],
-        *,
-        sample_count: int,
-    ) -> ViewEntryIndex:
-        path = view_manifest_parquet_path(root, view)
-        fingerprint = _stat_fingerprint(path.stat())
-        row_count, row_groups = view_manifest_layout(root, view)
-        sample_indexes = array("q", read_view_manifest_indexes(root, view))
-        if len(sample_indexes) != row_count:
-            raise ValueError("View manifest row count changed while loading index.")
-        if _stat_fingerprint(path.stat()) != fingerprint:
-            raise ValueError("View manifest changed while loading index.")
-        _validate_view_indexes(view, sample_indexes, sample_count)
-        return cls(
-            root,
-            view,
-            sample_count=sample_count,
-            row_groups=row_groups,
-            sample_indexes=sample_indexes,
-        )
-
-    def __len__(self) -> int:
-        return self._sample_count
-
-    def __getitem__(self, sample_index: int) -> ViewManifestEntry | None:
-        if sample_index < 0:
-            sample_index += self._sample_count
-        if sample_index < 0 or sample_index >= self._sample_count:
-            raise IndexError("view entry index out of range.")
-        position = bisect_left(self._sample_indexes, sample_index)
-        if position >= len(self._sample_indexes):
-            return None
-        if self._sample_indexes[position] != sample_index:
-            return None
-        row_group = bisect_right(self._offsets, position) - 1
-        rows = self._row_group(row_group)
-        entry = rows[position - self._offsets[row_group]]
-        if entry.sample_index != sample_index:
-            raise ValueError(
-                f"View {_view_path(self.view)} index changed while reading."
-            )
-        return entry
-
-    def validate_coverage(
-        self,
-        expected_indexes: Iterable[int],
-    ) -> None:
-        actual_position = 0
-        actual_count = len(self._sample_indexes)
-        for expected in expected_indexes:
-            if actual_position >= actual_count:
-                _raise_view_coverage_error(self.view, missing=expected, extra=None)
-            actual = int(self._sample_indexes[actual_position])
-            if actual < expected:
-                _raise_view_coverage_error(self.view, missing=None, extra=actual)
-            if actual > expected:
-                _raise_view_coverage_error(self.view, missing=expected, extra=None)
-            actual_position += 1
-        if actual_position < actual_count:
-            _raise_view_coverage_error(
-                self.view,
-                missing=None,
-                extra=int(self._sample_indexes[actual_position]),
-            )
-
-    def validate_entries(self) -> None:
-        for row_group in range(len(self._row_groups)):
-            self._row_group(row_group)
-
-    def __getstate__(self) -> dict[str, Any]:
-        return {
-            "root": self.root,
-            "view": self.view,
-            "sample_count": self._sample_count,
-            "row_groups": self._row_groups,
-            "sample_indexes": self._sample_indexes,
-            "max_cached_groups": self._max_cached_groups,
-        }
-
-    def __setstate__(self, state: dict[str, Any]) -> None:
-        self.__init__(
-            state["root"],
-            state["view"],
-            sample_count=state["sample_count"],
-            row_groups=state["row_groups"],
-            sample_indexes=state["sample_indexes"],
-            max_cached_groups=state["max_cached_groups"],
-        )
-
-    def _row_group(self, row_group: int) -> tuple[ViewManifestEntry, ...]:
-        cached = self._cache.get(row_group)
-        if cached is not None:
-            self._cache.move_to_end(row_group)
-            return cached
-        rows = read_view_manifest_row_group(self.root, self.view, row_group)
-        start = self._offsets[row_group]
-        for offset, entry in enumerate(rows):
-            if _entry_view(entry) != self.view:
-                raise ValueError("View manifest entry ref must match its path.")
-            if entry.sample_index != self._sample_indexes[start + offset]:
-                raise ValueError(
-                    f"View {_view_path(self.view)} index changed while reading."
-                )
-        self._cache[row_group] = rows
-        while len(self._cache) > self._max_cached_groups:
-            self._cache.popitem(last=False)
-        return rows
-
-
-class StoreViews(Mapping[tuple[item.Role, item.Modality, item.View], StoreView]):
-    def __init__(
-        self,
-        root: Path,
-        samples: SampleManifestSequence,
-        views: Iterable[tuple[item.Role, item.Modality, item.View]],
-    ) -> None:
-        self.root = root
-        self.samples = samples
-        self._views = tuple(views)
-        self._view_set = frozenset(self._views)
-        views_by_ref: dict[
-            tuple[item.Role, item.Modality],
-            list[tuple[item.Role, item.Modality, item.View]],
-        ] = {}
-        for view in self._views:
-            views_by_ref.setdefault(view[:2], []).append(view)
-        self._views_by_ref = {
-            ref: tuple(ref_views) for ref, ref_views in views_by_ref.items()
-        }
-        self._cache: dict[tuple[item.Role, item.Modality, item.View], StoreView] = {}
-        self._validated: set[tuple[item.Role, item.Modality, item.View]] = set()
-
-    def __getitem__(
-        self,
-        view: tuple[item.Role, item.Modality, item.View],
-    ) -> StoreView:
-        if view not in self._view_set:
-            raise KeyError(view)
-        return self._view(view, validate_coverage=False)
-
-    def __iter__(self) -> Iterator[tuple[item.Role, item.Modality, item.View]]:
-        yield from self._views
-
-    def __len__(self) -> int:
-        return len(self._views)
-
-    def preload(self) -> None:
-        for view in self._views:
-            self._view(view, validate_coverage=True)
-
-    def for_ref(
-        self,
-        ref: tuple[item.Role, item.Modality],
-    ) -> Iterator[tuple[tuple[item.Role, item.Modality, item.View], StoreView]]:
-        for view in self._views_by_ref.get(ref, ()):
-            yield view, self[view]
-
-    def _view(
-        self,
-        view: tuple[item.Role, item.Modality, item.View],
-        *,
-        validate_coverage: bool,
-    ) -> StoreView:
-        cached = self._cache.get(view)
-        if cached is None:
-            cached = _load_view(
-                self.root,
-                view,
-                len(self.samples),
-            )
-            self._cache[view] = cached
-        if validate_coverage and view not in self._validated:
-            cached.entries_by_index.validate_entries()
-            cached.entries_by_index.validate_coverage(
-                _sample_indexes_for_ref(self.samples, view[:2])
-            )
-            self._validated.add(view)
-        return cached
+    def _ensure_open(self) -> None:
+        if self._resource_state.closed:
+            raise RuntimeError("StoreDataset is closed.")
 
 
 def read_store_dataset(
@@ -428,41 +208,61 @@ def read_store_dataset(
     root = Path(root).expanduser().resolve()
     _validate_dataset_root(root)
     manifest = read_store_manifest(root)
-    samples_path = samples_parquet_path(root)
-    fingerprint = _stat_fingerprint(samples_path.stat())
-    actual_sample_count, row_groups = sample_manifest_layout(root)
-    if actual_sample_count != manifest.sample_count:
-        raise ValueError(
-            "sample manifest row count must match dataset.json sample_count."
+    manifest_cache = ManifestParquetCache()
+    try:
+        samples_path = samples_parquet_path(root)
+        fingerprint = stat_fingerprint(samples_path.stat())
+        actual_sample_count, row_groups = sample_manifest_layout(
+            root,
+            cache=manifest_cache,
         )
-    _validate_sample_manifest_index(root, manifest.sample_count, fingerprint)
-    if _stat_fingerprint(samples_path.stat()) != fingerprint:
-        raise ValueError("Sample manifest changed while opening store.")
-    samples = SampleManifestSequence(
-        root,
-        count=manifest.sample_count,
-        row_groups=row_groups,
-    )
+        if actual_sample_count != manifest.sample_count:
+            raise ValueError(
+                "sample manifest row count must match dataset.json sample_count."
+            )
+        _validate_sample_manifest_index(
+            root,
+            manifest.sample_count,
+            fingerprint,
+            cache=manifest_cache,
+        )
+        if stat_fingerprint(samples_path.stat()) != fingerprint:
+            raise ValueError("Sample manifest changed while opening store.")
+        samples = SampleManifestSequence(
+            root,
+            count=manifest.sample_count,
+            row_groups=row_groups,
+            manifest_cache=manifest_cache,
+        )
 
-    selected_views = _select_views(_discover_views(root), views)
-    store_views = StoreViews(root, samples, selected_views)
-    if preload:
-        store_views.preload()
-    file_lease = (
-        lease_store_files(root)
-        if any(
-            modality is item.Modality.AUDIO and key == item.AudioView.FILE
-            for _role, modality, key in selected_views
+        selected_views = _select_views(_discover_views(root), views)
+        store_views = StoreViews(
+            root,
+            samples,
+            selected_views,
+            manifest_cache=manifest_cache,
         )
-        else None
-    )
-    return StoreDataset(
-        root=root,
-        manifest=manifest,
-        samples=samples,
-        views=store_views,
-        _file_lease=file_lease,
-    )
+        if preload:
+            store_views.preload()
+        file_lease = (
+            lease_store_files(root)
+            if any(
+                modality is item.Modality.AUDIO and key == item.AudioView.FILE
+                for _role, modality, key in selected_views
+            )
+            else None
+        )
+        return StoreDataset(
+            root=root,
+            manifest=manifest,
+            samples=samples,
+            views=store_views,
+            _file_lease=file_lease,
+            _manifest_cache=manifest_cache,
+        )
+    except Exception:
+        manifest_cache.close()
+        raise
 
 
 def read_store_manifest(root: str | Path) -> DatasetManifest:
@@ -552,30 +352,6 @@ def _validate_dataset_root(root: Path) -> None:
         raise FileNotFoundError(root / "samples.parquet")
 
 
-def _offsets(counts: Sequence[int]) -> tuple[int, ...]:
-    offsets = [0]
-    for count in counts:
-        offsets.append(offsets[-1] + count)
-    return tuple(offsets)
-
-
-def _load_view(
-    root: Path,
-    view: tuple[item.Role, item.Modality, item.View],
-    sample_count: int,
-) -> StoreView:
-    if not view_ready_path(root, view).exists():
-        raise ValueError(f"Store dataset view is not ready: {_view_path(view)}.")
-    return StoreView(
-        view=view,
-        entries_by_index=ViewEntryIndex.load(
-            root,
-            view,
-            sample_count=sample_count,
-        ),
-    )
-
-
 def _select_views(
     available: tuple[tuple[item.Role, item.Modality, item.View], ...],
     requested: Iterable[tuple[item.Role, item.Modality, item.View]] | None,
@@ -654,30 +430,87 @@ def _validate_sample_manifest_index(
     root: Path,
     sample_count: int,
     fingerprint: _StatFingerprint,
+    *,
+    cache: ManifestParquetCache | None = None,
+) -> None:
+    marker = _sample_index_validation_path(root, sample_count, fingerprint)
+    with FileLock(
+        marker.with_name(f".{marker.name}.lock"),
+        wait_timeout=3600.0,
+    ):
+        _validate_sample_manifest_index_locked(
+            root,
+            sample_count,
+            fingerprint,
+            cache=cache,
+            marker=marker,
+        )
+
+
+def _validate_sample_manifest_index_locked(
+    root: Path,
+    sample_count: int,
+    fingerprint: _StatFingerprint,
+    *,
+    cache: ManifestParquetCache | None,
+    marker: Path,
 ) -> None:
     path = samples_parquet_path(root)
-    marker = _sample_index_validation_path(root, sample_count, fingerprint)
     if marker.is_file():
         return
 
-    sample_ids: set[str] = set()
+    sample_ids: set[str] | None = (
+        set() if sample_count <= _SAMPLE_ID_SET_LIMIT else None
+    )
+    temporary: tempfile.TemporaryDirectory[str] | None = None
+    connection: sqlite3.Connection | None = None
+    if sample_ids is None:
+        temporary = tempfile.TemporaryDirectory(prefix="anydataset-sample-index-")
+        connection = sqlite3.connect(Path(temporary.name) / "ids.sqlite")
+        connection.execute(
+            "CREATE TABLE sample_ids (sample_id TEXT PRIMARY KEY)"
+        )
     count = 0
-    for index, (sample_index, sample_id) in enumerate(read_sample_manifest_index(root)):
-        if sample_index != index:
-            raise ValueError(
-                f"Sample manifest row {index} has sample_index {sample_index}."
-            )
-        if sample_id in sample_ids:
-            raise ValueError(f"Duplicate sample_id {sample_id!r}.")
-        sample_ids.add(sample_id)
-        count += 1
+    try:
+        active_cache = manifest_parquet_cache() if cache is None else cache
+        with active_cache.activate():
+            for index, (sample_index, sample_id) in enumerate(
+                read_sample_manifest_index(root)
+            ):
+                if sample_index != index:
+                    raise ValueError(
+                        f"Sample manifest row {index} has sample_index {sample_index}."
+                    )
+                if sample_ids is not None:
+                    if sample_id in sample_ids:
+                        raise ValueError(f"Duplicate sample_id {sample_id!r}.")
+                    sample_ids.add(sample_id)
+                else:
+                    if connection is None:
+                        raise RuntimeError("sample id validation database is missing.")
+                    try:
+                        connection.execute(
+                            "INSERT INTO sample_ids(sample_id) VALUES (?)",
+                            (sample_id,),
+                        )
+                    except sqlite3.IntegrityError as exc:
+                        raise ValueError(f"Duplicate sample_id {sample_id!r}.") from exc
+                count += 1
+                if connection is not None and count % 8192 == 0:
+                    connection.commit()
+    finally:
+        if connection is not None:
+            connection.commit()
+            connection.close()
+        if temporary is not None:
+            temporary.cleanup()
     if count != sample_count:
         raise ValueError(
             "sample manifest row count must match dataset.json sample_count."
         )
-    if _stat_fingerprint(path.stat()) != fingerprint:
+    if stat_fingerprint(path.stat()) != fingerprint:
         raise ValueError("Sample manifest changed while validating index.")
-    _atomic_write_bytes(marker, b"valid\n")
+    atomic_write_bytes(marker, b"valid\n")
 
 
 def _sample_index_validation_path(
@@ -698,88 +531,9 @@ def _sample_index_validation_path(
         anydataset_home()
         / "cache"
         / "store-validation"
-        / _store_id(root)
+        / store_id(root)
         / f"{validation_id}.ready"
     )
-
-
-def _validate_sample_entry(sample: SampleManifestEntry, index: int) -> None:
-    if sample.sample_index != index:
-        raise ValueError(
-            f"Sample manifest row {index} has sample_index {sample.sample_index}."
-        )
-    refs: set[tuple[item.Role, item.Modality]] = set()
-    for ref, _ in sample.items:
-        if ref in refs:
-            raise ValueError(f"Duplicate sample item ref {ref!r}.")
-        refs.add(ref)
-
-
-def _payload_groups(dataset: StoreDataset) -> tuple[_PayloadGroup, ...]:
-    fingerprint = _payload_layout_fingerprint(dataset)
-    return dataset._payload_group_cache.get(
-        fingerprint,
-        lambda: _scan_payload_groups(dataset),
-    )
-
-
-def _payload_layout_fingerprint(
-    dataset: StoreDataset,
-) -> _PayloadLayoutFingerprint:
-    paths = [samples_parquet_path(dataset.root)]
-    paths.extend(
-        view_manifest_parquet_path(dataset.root, view) for view in dataset.views
-    )
-    return tuple(_stat_fingerprint(path.stat()) for path in paths)
-
-
-def _scan_payload_groups(dataset: StoreDataset) -> tuple[_PayloadGroup, ...]:
-    views = tuple(dataset.views)
-    if not views:
-        raise ValueError("StoreDataset shuffle requires at least one store view.")
-
-    groups: list[_PayloadGroup] = []
-    current_key: tuple[tuple[_ViewRef, str], ...] | None = None
-    start = 0
-
-    for index in range(len(dataset)):
-        key = _payload_key(dataset, views, index)
-        if current_key is None:
-            current_key = key
-            start = index
-            continue
-        if key != current_key:
-            groups.append(_PayloadGroup(start=start, stop=index))
-            current_key = key
-            start = index
-
-    if current_key is not None:
-        groups.append(_PayloadGroup(start=start, stop=len(dataset)))
-    return tuple(groups)
-
-
-def _payload_key(
-    dataset: StoreDataset,
-    views: tuple[_ViewRef, ...],
-    index: int,
-) -> tuple[tuple[_ViewRef, str], ...]:
-    sample = dataset.samples[index]
-    sample_refs = frozenset(ref for ref, _meta in sample.items)
-    key: list[tuple[_ViewRef, str]] = []
-    for view in views:
-        if view[:2] not in sample_refs:
-            continue
-        entry = dataset.views[view].entries_by_index[index]
-        if entry is None:
-            raise ValueError(
-                f"Store view {_view_path(view)} is missing sample_index {index}."
-            )
-        key.append((view, entry.shard))
-    if not key:
-        raise ValueError(
-            f"Store sample_index {index} has no payload shard for selected views."
-        )
-    return tuple(key)
 
 
 def _validate_view_ref(view: tuple[item.Role, item.Modality, item.View]) -> None:
@@ -792,51 +546,6 @@ def _validate_view_ref(view: tuple[item.Role, item.Modality, item.View]) -> None
         raise TypeError("store view modality must be a Modality.")
     if not isinstance(key, (item.AudioView, item.ImageView, item.TextView)):
         raise TypeError("store view key must be a View.")
-
-
-def _validate_view_indexes(
-    view: tuple[item.Role, item.Modality, item.View],
-    indexes: Sequence[int],
-    sample_count: int,
-) -> None:
-    previous: int | None = None
-    for index in indexes:
-        if index < 0 or index >= sample_count:
-            raise ValueError(
-                f"View {_view_path(view)} has sample_index outside dataset: {index}."
-            )
-        if previous is not None:
-            if index == previous:
-                raise ValueError(f"Duplicate view entry for sample_index {index}.")
-            if index < previous:
-                raise ValueError(
-                    "View manifest entries must be ordered by sample_index."
-                )
-        previous = index
-
-
-def _sample_indexes_for_ref(
-    samples: Iterable[SampleManifestEntry],
-    ref: tuple[item.Role, item.Modality],
-) -> Iterator[int]:
-    for sample in samples:
-        if any(item_ref == ref for item_ref, _meta in sample.items):
-            yield sample.sample_index
-
-
-def _raise_view_coverage_error(
-    view: tuple[item.Role, item.Modality, item.View],
-    *,
-    missing: int | None,
-    extra: int | None,
-) -> None:
-    details = []
-    if missing is not None:
-        details.append(f"missing sample_index {missing}")
-    if extra is not None:
-        details.append(f"unexpected sample_index {extra}")
-    detail = ", ".join(details)
-    raise ValueError(f"View {_view_path(view)} sample coverage mismatch: {detail}.")
 
 
 def _sample_for_entry(
@@ -865,22 +574,12 @@ def _item_from_entry(
 ) -> item.Item:
     _, modality = sample_ref
     meta = {} if meta is None else dict(meta)
-    if modality is item.Modality.AUDIO:
-        return item.AudioItem(
-            views=views,
-            meta=_enum_keys(meta, item.AudioMeta),
-        )
-    if modality is item.Modality.IMAGE:
-        return item.ImageItem(
-            views=views,
-            meta=_enum_keys(meta, item.ImageMeta),
-        )
+    converted = _enum_keys(meta, modality.meta_type())
     if modality is item.Modality.TEXT:
-        return item.TextItem(
-            views=views,
-            meta=_text_meta(meta),
-        )
-    raise ValueError(f"Unsupported modality: {modality!r}.")
+        lang = converted.get(item.TextMeta.LANG)
+        if lang is not None:
+            converted[item.TextMeta.LANG] = remap_lang(lang)
+    return modality.item(views=views, meta=converted)
 
 
 def _view_value(
@@ -923,48 +622,8 @@ def _cached_file_payload(
             != target
         ):
             raise ValueError("View shard changed while caching file payload.")
-        _atomic_write_bytes(target, data)
+        atomic_write_bytes(target, data)
     return target
-
-
-def _store_id(root: Path) -> str:
-    return hashlib.sha256(os.fsencode(root.expanduser().resolve())).hexdigest()
-
-
-def _stat_fingerprint(stat: os.stat_result) -> _StatFingerprint:
-    return (
-        stat.st_dev,
-        stat.st_ino,
-        stat.st_size,
-        stat.st_mtime_ns,
-        stat.st_ctime_ns,
-    )
-
-
-def _atomic_write_bytes(path: Path, data: bytes) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp: Path | None = None
-    try:
-        with tempfile.NamedTemporaryFile(
-            "wb",
-            delete=False,
-            dir=path.parent,
-            prefix=f".{path.name}.",
-            suffix=".tmp",
-        ) as file:
-            tmp = Path(file.name)
-            file.write(data)
-            file.flush()
-            os.fsync(file.fileno())
-        if tmp is None:
-            raise RuntimeError(
-                "Atomic file cache write did not create a temporary file."
-            )
-        os.replace(tmp, path)
-    except Exception:
-        if tmp is not None and tmp.exists():
-            tmp.unlink()
-        raise
 
 
 def _enum_keys(values: Mapping[str, Any], enum_type):
@@ -972,26 +631,3 @@ def _enum_keys(values: Mapping[str, Any], enum_type):
     for key, value in values.items():
         converted[enum_type(key)] = value
     return converted
-
-
-def _text_meta(values: Mapping[str, Any]) -> Mapping[item.TextMeta, Any]:
-    converted = _enum_keys(values, item.TextMeta)
-    if item.TextMeta.LANG in converted:
-        converted[item.TextMeta.LANG] = remap_lang(converted[item.TextMeta.LANG])
-    return converted
-
-
-def _entry_view(entry: ViewManifestEntry) -> tuple[item.Role, item.Modality, item.View]:
-    return entry.role, entry.modality, entry.view
-
-
-def _view_path(
-    view: tuple[item.Role, item.Modality, item.View],
-) -> tuple[str, str, str]:
-    role, modality, key = view
-    return role.value, modality.value, key.value
-
-
-def _sample_ref_path(ref: tuple[item.Role, item.Modality]) -> tuple[str, str]:
-    role, modality = ref
-    return role.value, modality.value

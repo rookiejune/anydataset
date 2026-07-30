@@ -4,19 +4,22 @@ import os
 import tarfile
 import threading
 from collections import OrderedDict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from io import BytesIO
 from pathlib import Path
 from typing import Any, Callable, cast
 
 import torch
 
+from .._io.files import StatFingerprint as _StatFingerprint
+from .._io.files import stat_fingerprint as _stat_fingerprint
 from ..types.item import AudioView, Modality, Role, TextView, View
+from .jsonio import read_json, write_json
 from .manifest import ViewManifestEntry
-from .paths import view_shard_path
+from .paths import view_shard_index_path, view_shard_path
 
 _DEFAULT_MAX_OPEN_SHARDS = 8
-_StatFingerprint = tuple[int, int, int, int, int]
+PAYLOAD_INDEX_VERSION = 1
 
 
 @dataclass(frozen=True)
@@ -30,6 +33,8 @@ class _OpenArchive:
     archive: tarfile.TarFile
     members: dict[str, tarfile.TarInfo]
     fingerprint: _StatFingerprint
+    members_complete: bool = True
+    verified_members: set[str] = field(default_factory=set)
 
     def close(self) -> None:
         self.archive.close()
@@ -57,6 +62,25 @@ class PayloadCache:
         with self._lock:
             opened = self._archive(shard_path)
             member = opened.members.get(entry.key)
+            if member is None and not opened.members_complete:
+                # A sidecar is only a read optimization.  If it is incomplete
+                # or stale, fall back to the archive's authoritative member
+                # table rather than returning a false missing-payload error.
+                self._load_members(opened)
+                member = opened.members.get(entry.key)
+            elif (
+                member is not None
+                and not opened.members_complete
+                and entry.key not in opened.verified_members
+            ):
+                # Verify the indexed entry against its tar header before using
+                # it.  This keeps a damaged sidecar from silently returning a
+                # different member while retaining O(1) lookup for valid ones.
+                if not _indexed_member_matches(opened.archive, member, entry.key):
+                    self._load_members(opened)
+                    member = opened.members.get(entry.key)
+                else:
+                    opened.verified_members.add(entry.key)
             if member is None:
                 raise KeyError(
                     f"View shard {entry.shard!r} is missing payload {entry.key!r}."
@@ -110,15 +134,29 @@ class PayloadCache:
                 raise ValueError(f"View shard changed while opening: {path}")
             opened = _OpenArchive(
                 archive=archive,
-                members={member.name: member for member in archive.getmembers()},
+                members={},
                 fingerprint=opened_fingerprint,
+                members_complete=False,
             )
+            indexed = _read_payload_index(path, opened_fingerprint)
+            if indexed is None:
+                self._load_members(opened)
+            else:
+                opened.members = indexed
         except Exception:
             archive.close()
             raise
         self._archives[path] = opened
         self._evict()
         return opened
+
+    @staticmethod
+    def _load_members(opened: _OpenArchive) -> None:
+        opened.members = {
+            member.name: member for member in opened.archive.getmembers()
+        }
+        opened.members_complete = True
+        opened.verified_members.clear()
 
     def _evict(self) -> None:
         while len(self._archives) > self.max_open_shards:
@@ -135,16 +173,6 @@ class PayloadCache:
         self._pid = pid
         for archive in archives:
             archive.close()
-
-
-def _stat_fingerprint(stat: os.stat_result) -> _StatFingerprint:
-    return (
-        stat.st_dev,
-        stat.st_ino,
-        stat.st_size,
-        stat.st_mtime_ns,
-        stat.st_ctime_ns,
-    )
 
 
 def payload_for_view(
@@ -198,6 +226,45 @@ def add_payload(archive: tarfile.TarFile, payload: Payload) -> None:
     info.size = len(payload.data)
     info.mtime = 0
     archive.addfile(info, BytesIO(payload.data))
+
+
+def write_payload_index(
+    root: str | Path,
+    view: tuple[Role, Modality, View],
+    shard: str,
+) -> Path:
+    """Write a seekable payload offset index for a completed tar shard.
+
+    The index is deliberately treated as disposable metadata.  Its fingerprint
+    is checked by readers and a missing or malformed index falls back to the
+    regular tar member scan, so older stores remain fully readable.
+    """
+
+    path = view_shard_path(root, view, shard)
+    fingerprint = _stat_fingerprint(path.stat())
+    with tarfile.open(path, "r") as archive:
+        members: dict[str, dict[str, int]] = {}
+        for member in archive:
+            if not member.isfile():
+                continue
+            if member.name in members:
+                raise ValueError(
+                    f"View shard {path} has duplicate payload key {member.name!r}."
+                )
+            members[member.name] = {
+                "offset": member.offset_data,
+                "size": member.size,
+            }
+    index_path = view_shard_index_path(root, view, shard)
+    write_json(
+        index_path,
+        {
+            "version": PAYLOAD_INDEX_VERSION,
+            "fingerprint": list(fingerprint),
+            "members": members,
+        },
+    )
+    return index_path
 
 
 def _torch_payload(
@@ -305,3 +372,90 @@ def _payload_shard_path(
     if not shard_path.is_file():
         raise FileNotFoundError(shard_path)
     return shard_path
+
+
+def _read_payload_index(
+    shard_path: Path,
+    fingerprint: _StatFingerprint,
+) -> dict[str, tarfile.TarInfo] | None:
+    index_path = shard_path.with_name(f"{shard_path.name}.index.json")
+    try:
+        data = read_json(index_path)
+    except (FileNotFoundError, OSError, ValueError, TypeError):
+        return None
+    if not isinstance(data, dict) or data.get("version") != PAYLOAD_INDEX_VERSION:
+        return None
+    raw_fingerprint = data.get("fingerprint")
+    if (
+        not isinstance(raw_fingerprint, list)
+        or len(raw_fingerprint) != len(fingerprint)
+        or any(
+            not isinstance(value, int) or isinstance(value, bool)
+            for value in raw_fingerprint
+        )
+        or tuple(raw_fingerprint) != fingerprint
+    ):
+        return None
+    raw_members = data.get("members")
+    if not isinstance(raw_members, dict):
+        return None
+    members: dict[str, tarfile.TarInfo] = {}
+    for name, raw_member in raw_members.items():
+        if not isinstance(name, str) or Path(name).name != name:
+            return None
+        if not isinstance(raw_member, dict):
+            return None
+        offset = raw_member.get("offset")
+        size = raw_member.get("size")
+        if (
+            not isinstance(offset, int)
+            or isinstance(offset, bool)
+            or offset < 0
+            or not isinstance(size, int)
+            or isinstance(size, bool)
+            or size < 0
+            or offset < tarfile.BLOCKSIZE
+            or offset % tarfile.BLOCKSIZE != 0
+            or offset > fingerprint[2]
+            or size > fingerprint[2] - offset
+        ):
+            return None
+        member = tarfile.TarInfo(name)
+        member.offset_data = offset
+        member.size = size
+        members[name] = member
+    return members
+
+
+def _indexed_member_matches(
+    archive: tarfile.TarFile,
+    member: tarfile.TarInfo,
+    key: str,
+) -> bool:
+    offset = member.offset_data
+    if offset < tarfile.BLOCKSIZE or offset % tarfile.BLOCKSIZE != 0:
+        return False
+    fileobj = archive.fileobj
+    if fileobj is None:
+        return False
+    position: int | None = None
+    try:
+        position = fileobj.tell()
+        fileobj.seek(offset - tarfile.BLOCKSIZE)
+        header = fileobj.read(tarfile.BLOCKSIZE)
+        if len(header) != tarfile.BLOCKSIZE:
+            return False
+        actual = tarfile.TarInfo.frombuf(
+            header,
+            archive.encoding,
+            archive.errors,
+        )
+        return actual.isreg() and actual.name == key and actual.size == member.size
+    except (EOFError, IndexError, OSError, tarfile.TarError, ValueError):
+        return False
+    finally:
+        if position is not None:
+            try:
+                fileobj.seek(position)
+            except OSError:
+                pass

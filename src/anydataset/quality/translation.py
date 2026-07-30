@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from functools import cached_property
 
 from .._compat import Self
+from .._immutable import Immutable
 from .._validation import positive_float, positive_int
 from ..filter import FilterDecision
 from ..filter.types import JsonValue
@@ -22,49 +23,67 @@ from .rules import QualityLabel
 Scorer = Callable[[str, str], float]
 
 
-@dataclass
-class TranslationQualityProfile:
+@dataclass(init=False, unsafe_hash=True)
+class TranslationQualityProfile(Immutable):
     source_lang: Lang
     target_lang: Lang
-    review_min_ratio: float = 0.2
-    review_max_ratio: float = 6.0
-    reject_min_ratio: float = 0.05
-    reject_max_ratio: float = 20.0
-    min_identical_script_chars: int = 4
+    review_min_ratio: float
+    review_max_ratio: float
+    reject_min_ratio: float
+    reject_max_ratio: float
+    min_identical_script_chars: int
 
-    def __post_init__(self) -> None:
-        self.source_lang = _lang("source_lang", self.source_lang)
-        self.target_lang = _lang("target_lang", self.target_lang)
-        self.min_identical_script_chars = positive_int(
+    def __init__(
+        self,
+        source_lang: Lang,
+        target_lang: Lang,
+        review_min_ratio: float = 0.2,
+        review_max_ratio: float = 6.0,
+        reject_min_ratio: float = 0.05,
+        reject_max_ratio: float = 20.0,
+        min_identical_script_chars: int = 4,
+    ) -> None:
+        normalized_source_lang = _lang("source_lang", source_lang)
+        normalized_target_lang = _lang("target_lang", target_lang)
+        normalized_min_identical_script_chars = positive_int(
             "min_identical_script_chars",
-            self.min_identical_script_chars,
+            min_identical_script_chars,
         )
-        self.reject_min_ratio = positive_float(
+        normalized_reject_min_ratio = positive_float(
             "reject_min_ratio",
-            self.reject_min_ratio,
+            reject_min_ratio,
         )
-        self.review_min_ratio = positive_float(
+        normalized_review_min_ratio = positive_float(
             "review_min_ratio",
-            self.review_min_ratio,
+            review_min_ratio,
         )
-        self.review_max_ratio = positive_float(
+        normalized_review_max_ratio = positive_float(
             "review_max_ratio",
-            self.review_max_ratio,
+            review_max_ratio,
         )
-        self.reject_max_ratio = positive_float(
+        normalized_reject_max_ratio = positive_float(
             "reject_max_ratio",
-            self.reject_max_ratio,
+            reject_max_ratio,
         )
         if not (
-            self.reject_min_ratio
-            <= self.review_min_ratio
-            <= self.review_max_ratio
-            <= self.reject_max_ratio
+            normalized_reject_min_ratio
+            <= normalized_review_min_ratio
+            <= normalized_review_max_ratio
+            <= normalized_reject_max_ratio
         ):
             raise ValueError(
                 "length ratios must satisfy reject_min_ratio <= review_min_ratio "
                 "<= review_max_ratio <= reject_max_ratio."
             )
+
+        self.source_lang = normalized_source_lang
+        self.target_lang = normalized_target_lang
+        self.review_min_ratio = normalized_review_min_ratio
+        self.review_max_ratio = normalized_review_max_ratio
+        self.reject_min_ratio = normalized_reject_min_ratio
+        self.reject_max_ratio = normalized_reject_max_ratio
+        self.min_identical_script_chars = normalized_min_identical_script_chars
+        self.seal()
 
 
 @dataclass
@@ -105,23 +124,27 @@ class _Decision:
 _Rule = Callable[[_Metrics, TranslationQualityProfile], _Decision]
 
 
-@dataclass(frozen=True)
-class Bicleaner:
+@dataclass(init=False, unsafe_hash=True)
+class Bicleaner(Immutable):
     scorer: Scorer
     source_lang: Lang
     target_lang: Lang
-    min_score: float = 0.6
+    min_score: float
 
-    def __post_init__(self) -> None:
-        if not callable(self.scorer):
+    def __init__(
+        self,
+        scorer: Scorer,
+        source_lang: Lang,
+        target_lang: Lang,
+        min_score: float = 0.6,
+    ) -> None:
+        if not callable(scorer):
             raise TypeError("bicleaner scorer must be callable.")
-        object.__setattr__(
-            self,
-            "min_score",
-            text.unit_ratio("bicleaner min_score", self.min_score),
-        )
-        object.__setattr__(self, "source_lang", _lang("source_lang", self.source_lang))
-        object.__setattr__(self, "target_lang", _lang("target_lang", self.target_lang))
+        self.scorer = scorer
+        self.source_lang = _lang("source_lang", source_lang)
+        self.target_lang = _lang("target_lang", target_lang)
+        self.min_score = text.unit_ratio("bicleaner min_score", min_score)
+        self.seal()
 
     @classmethod
     def from_preset(

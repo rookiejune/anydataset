@@ -90,10 +90,26 @@
 - 新任务的 missing index 使用 `range`；续跑中 missing 较少时只物化 missing tuple，
   completed 较少时使用保存已完成下标的可 pickle lazy complement，避免按样本总数建立
   大型 Python tuple。
-- `PayloadCache` 对已打开的 tar shard 做进程内 LRU 缓存，并在每个打开的 archive 上缓存
-  `payload key -> TarInfo` 映射；连续随机读取不再反复打开 tar 或线性扫描 member。该索引
-  不持久化，archive 被淘汰或进程退出后随句柄释放；同一路径的 shard fingerprint 变化时
-  再次访问会关闭旧句柄，避免 store 重建后复用旧 payload。
+- `PayloadCache` 对已打开的 tar shard 做进程内 LRU 缓存，并优先读取每个 shard 的
+  `*.tar.index.json` offset sidecar；sidecar 通过 tar fingerprint 和 header 校验后建立
+  `payload key -> TarInfo` 映射，缺失、损坏或旧 store 自动回退 `getmembers()`。archive
+  被淘汰或进程退出后随句柄释放；同一路径的 shard fingerprint 变化时再次访问会关闭旧句柄，
+  避免 store 重建后复用旧 payload。
+- manifest reader 使用按 path、fingerprint 和 pid 隔离的 `ParquetFile` LRU；fork 后不继承
+  父进程句柄。`StoreDataset.close()` 和 context manager 会显式释放 manifest、payload archive
+  与 file lease，析构函数只作为兜底。
+- 最终 store 写入 `payload-groups.json`，按实际 shard 组合保存压缩的等差 sample-index
+  分组；多 part 的 modulo 索引不会退化为每样本一条 JSON 记录。shuffle 优先读取该
+  sidecar，缺失、损坏或 fingerprint 失效时回退逐样本扫描并生成同样的压缩分组，因此旧
+  store 无需迁移即可读取；非 shuffle 读取始终保持全局 sample-index 顺序。
+- `sharded_csv` 的 indexed shard 按 Parquet file/row group 顺序读取，只对当前 shard
+  过滤全局 sample index；CSV cache fingerprint 额外包含 device、inode 和 ctime，旧记录
+  缺少这些字段时自动失效重建。
+- materializer 的 pending output 使用 deque，commit 阶段一次构建 `ref -> sample indexes`
+  覆盖缓存，后台 writer 用完成队列降低 pending 扫描成本；collate 对 schema 计划预编译，
+  变长 tensor 使用一次性 batch/mask 分配。
+- integrity 校验提供 `fast`、`normal` 和 `full` 三档，默认仍为 `full`；JSON 和目录原子
+  替换在支持的文件系统上额外同步父目录，便于断电恢复场景。
 - materializer resume metadata 除自动 factory 标识外，还接受显式 `input_id` 和
   `provider_id` 语义版本。它们共同决定 fragment 是否可复用，避免 mutable input 或模型
   checkpoint 变化后错误续跑。

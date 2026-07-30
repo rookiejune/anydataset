@@ -10,7 +10,7 @@ from .manifest import (
 )
 from .manifestio import view_manifest_writer
 from .paths import view_ready_path, view_shard_path
-from .payload import add_payload, payload_for_view
+from .payload import add_payload, payload_for_view, write_payload_index
 
 
 class ViewWriter:
@@ -56,11 +56,10 @@ class ViewWriter:
 
     def close_payload(self) -> None:
         if not self.closed:
-            self.tar.close()
-            self.closed = True
+            self._close_shard(write_index=True)
 
     def abort(self) -> None:
-        self.close_payload()
+        self._close_shard(write_index=False)
         self.manifest.abort()
 
     def _should_roll(self) -> bool:
@@ -69,11 +68,20 @@ class ViewWriter:
         return self.shard_samples >= self.max_shard_samples
 
     def _roll_shard(self) -> None:
-        self.tar.close()
+        self._close_shard(write_index=True)
         self.shard_index += 1
         self.shard = _shard_name(self.shard_index, self.shard_prefix)
         self.shard_samples = 0
         self.tar = self._open_shard(self.shard)
+        self.closed = False
+
+    def _close_shard(self, *, write_index: bool) -> None:
+        if self.closed:
+            return
+        self.tar.close()
+        self.closed = True
+        if write_index:
+            write_payload_index(self.root, self.view, self.shard)
 
     def _open_shard(self, shard: str) -> tarfile.TarFile:
         path = view_shard_path(self.root, self.view, shard)

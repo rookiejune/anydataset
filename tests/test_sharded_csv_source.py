@@ -1,3 +1,4 @@
+import json
 import os
 from pathlib import Path
 import tempfile
@@ -17,10 +18,24 @@ from anydataset import (
 )
 from anydataset._parallel import can_select_indexes, map_style_indexed_loader
 from anydataset.cache import FileLock
-from anydataset.dataset.source.sharded_csv import CsvShard, _missing_shard_ranges
+from anydataset.dataset.source.sharded_csv import (
+    CsvShard,
+    ShardedCsvDataset,
+    _missing_shard_ranges,
+)
 
 
 class ShardedCsvSourceTest(unittest.TestCase):
+    def test_restores_pickle_state_without_prepare_workers(self):
+        dataset = ShardedCsvDataset(Path("unused"))
+        state = dataset.__getstate__()
+        state.pop("prepare_workers")
+
+        restored = ShardedCsvDataset.__new__(ShardedCsvDataset)
+        restored.__setstate__(state)
+
+        self.assertIsNone(restored.prepare_workers)
+
     def test_registered_as_builtin_source(self):
         self.assertTrue(has_source("sharded_csv"))
 
@@ -37,6 +52,49 @@ class ShardedCsvSourceTest(unittest.TestCase):
             TypeError,
             "Unexpected sharded_csv load option: unknown",
         ):
+            dataset.prepare()
+
+    def test_prepare_workers_zero_uses_inline_conversion(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            shard = Path(tmpdir) / "shard_0"
+            shard.mkdir()
+            (shard / "0.csv").write_text("value\nzero\n", encoding="utf-8")
+            dataset = AnyDataset(
+                Spec(
+                    source="sharded_csv",
+                    path=tmpdir,
+                    load_options={"prepare_workers": 0},
+                )
+            )
+
+            with mock.patch(
+                "anydataset.dataset.source.sharded_csv.ProcessPoolExecutor",
+                side_effect=AssertionError("inline preparation should not spawn"),
+            ):
+                self.assertEqual(len(dataset), 1)
+                self.assertEqual(dataset[0]["value"], "zero")
+
+    def test_rejects_invalid_prepare_workers(self):
+        for value in (True, 1.5):
+            with self.subTest(value=value):
+                dataset = AnyDataset(
+                    Spec(
+                        source="sharded_csv",
+                        path="unused",
+                        load_options={"prepare_workers": value},
+                    )
+                )
+                with self.assertRaisesRegex(TypeError, "prepare_workers"):
+                    dataset.prepare()
+
+        dataset = AnyDataset(
+            Spec(
+                source="sharded_csv",
+                path="unused",
+                load_options={"prepare_workers": -1},
+            )
+        )
+        with self.assertRaisesRegex(ValueError, "prepare_workers"):
             dataset.prepare()
 
     def test_resolves_registered_source_shorthand(self):
@@ -287,6 +345,54 @@ class ShardedCsvSourceTest(unittest.TestCase):
 
             self.assertEqual(parquet.call_count, 1)
             prepared.close()
+
+    def test_indexed_shard_reads_each_row_group_in_order(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            shard = Path(tmpdir) / "shard_0"
+            shard.mkdir()
+            (shard / "0.csv").write_text(
+                "value\n0\n1\n2\n3\n4\n",
+                encoding="utf-8",
+            )
+            with mock.patch(
+                "anydataset.dataset.source.sharded_csv._PARQUET_ROW_GROUP_SIZE",
+                2,
+            ):
+                dataset = AnyDataset(Spec(source="sharded_csv", path=tmpdir))
+                prepared = dataset.dataset
+                with mock.patch.object(
+                    prepared,
+                    "_read_parquet_group",
+                    wraps=prepared._read_parquet_group,
+                ) as read_group:
+                    rows = list(prepared.iter_indexed_shard(3, 1))
+
+            self.assertEqual(
+                [(index, row["value"]) for index, row in rows],
+                [(1, "1"), (4, "4")],
+            )
+            self.assertEqual(
+                [call.args[1] for call in read_group.call_args_list],
+                [0, 2],
+            )
+            prepared.close()
+
+    def test_parquet_manifest_records_file_identity(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            shard = Path(tmpdir) / "shard_0"
+            shard.mkdir()
+            (shard / "0.csv").write_text("value\nzero\n", encoding="utf-8")
+
+            dataset = AnyDataset(Spec(source="sharded_csv", path=tmpdir))
+            self.assertEqual(len(dataset), 1)
+            manifest = next(
+                dataset.cache_manager.root.rglob("sharded_csv_parquet.json")
+            )
+            record = json.loads(manifest.read_text(encoding="utf-8"))["files"][0]
+
+        self.assertIn("device", record)
+        self.assertIn("inode", record)
+        self.assertIn("ctime_ns", record)
 
     def test_reuses_prepared_parquet_cache(self):
         with tempfile.TemporaryDirectory() as tmpdir:

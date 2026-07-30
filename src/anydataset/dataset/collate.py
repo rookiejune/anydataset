@@ -43,10 +43,10 @@ class Batch:
 
 @dataclass(frozen=True)
 class _Collator:
-    schema: item.Schema
+    fields: tuple[tuple[item.Reference, item.Requirement], ...]
 
     def __call__(self, samples: Sequence[item.Sample]) -> Batch:
-        return _collate_samples(samples, self.schema)
+        return _collate_samples(samples, self.fields)
 
 
 def field_lengths(batch: Batch, field: FieldRef) -> torch.Tensor:
@@ -65,19 +65,19 @@ def field_lengths(batch: Batch, field: FieldRef) -> torch.Tensor:
 def collate_fn(
     schema: item.Schema,
 ) -> Callable[[Sequence[item.Sample]], Batch]:
-    return _Collator(dict(schema))
+    return _Collator(tuple(schema.items()))
 
 
 def _collate_samples(
     samples: Sequence[item.Sample],
-    schema: item.Schema,
+    fields: Sequence[tuple[item.Reference, item.Requirement]],
 ) -> Batch:
     if not samples:
         raise ValueError("Cannot collate an empty sample batch.")
 
     sample: dict[item.Reference, item.Item] = {}
     masks: dict[FieldRef, torch.Tensor] = {}
-    for ref, requirement in schema.items():
+    for ref, requirement in fields:
         items = [_sample_item(row, ref) for row in samples]
         item, item_masks = _collate_item(ref, items, requirement)
         sample[ref] = item
@@ -90,17 +90,9 @@ def _sample_item(
     ref: item.Reference,
 ) -> item.Item:
     sample_item = sample[ref]
-    if ref[1] is item.Modality.AUDIO:
-        if not isinstance(sample_item, item.AudioItem):
-            raise TypeError(f"{ref!r} requires AudioItem samples.")
-    elif ref[1] is item.Modality.IMAGE:
-        if not isinstance(sample_item, item.ImageItem):
-            raise TypeError(f"{ref!r} requires ImageItem samples.")
-    elif ref[1] is item.Modality.TEXT:
-        if not isinstance(sample_item, item.TextItem):
-            raise TypeError(f"{ref!r} requires TextItem samples.")
-    else:
-        raise TypeError(f"Unsupported sample reference: {ref!r}.")
+    item_type = ref[1].item_type()
+    if not isinstance(sample_item, item_type):
+        raise TypeError(f"{ref!r} requires {item_type.__name__} samples.")
     return sample_item
 
 
@@ -123,22 +115,7 @@ def _collate_item(
     )
 
     masks = view_masks | meta_masks
-    if ref[1] is item.Modality.AUDIO:
-        return item.AudioItem(
-            views=views,
-            meta=meta,
-        ), masks
-    if ref[1] is item.Modality.IMAGE:
-        return item.ImageItem(
-            views=views,
-            meta=meta,
-        ), masks
-    if ref[1] is item.Modality.TEXT:
-        return item.TextItem(
-            views=views,
-            meta=meta,
-        ), masks
-    raise TypeError(f"Unsupported sample reference: {ref!r}.")
+    return ref[1].item(views=views, meta=meta), masks
 
 
 def _collate_group(
@@ -430,18 +407,23 @@ def _batch_tensors(
         raise ValueError(f"Only the last tensor dimension may vary for {field!r}.")
 
     max_len = max(shape[-1] for shape in shapes)
-    padded: list[torch.Tensor] = []
-    masks: list[torch.Tensor] = []
-    for tensor in tensors:
+    device = tensors[0].device
+    if any(tensor.device != device for tensor in tensors[1:]):
+        raise ValueError(f"Tensor values must share one device for {field!r}.")
+    dtype = tensors[0].dtype
+    for tensor in tensors[1:]:
+        dtype = torch.promote_types(dtype, tensor.dtype)
+    batch_shape = (len(tensors), *prefix, max_len)
+    batch = tensors[0].new_zeros(batch_shape, dtype=dtype)
+    mask_batch = torch.zeros(
+        batch_shape,
+        dtype=torch.bool,
+        device=device,
+    )
+    for index, tensor in enumerate(tensors):
         length = tensor.shape[-1]
-        if length < max_len:
-            padding = tensor.new_zeros((*prefix, max_len - length))
-            tensor = torch.cat((tensor, padding), dim=-1)
-        padded.append(tensor)
-
-        mask = tensor.new_zeros((*prefix, max_len), dtype=torch.bool)
         slices = (*[slice(None)] * len(prefix), slice(0, length))
-        mask[slices] = True
-        masks.append(mask)
+        batch[(index, *slices)] = tensor
+        mask_batch[(index, *slices)] = True
 
-    return torch.stack(tuple(padded)), torch.stack(tuple(masks))
+    return batch, mask_batch
