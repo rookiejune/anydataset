@@ -3,6 +3,23 @@ from .abc import (
     IterableAnyDataset,
     MapStyleABC,
 )
+from .morphology import (
+    AudioBatch,
+    AudioLoader,
+    Morphology,
+    SpeechBatch,
+    SpeechGridBatch,
+    SpeechGridView,
+    audio_collate,
+    build_toy_audio_dataset,
+    build_toy_speech_dataset,
+    build_toy_speech_grid,
+    load_audio_file,
+    prepare_audio,
+    speech_collate,
+    speech_grid_batch,
+    speech_grid_collate,
+)
 from .multiple import (
     IterationStrategy,
     MultipleAnyDataset,
@@ -10,6 +27,7 @@ from .multiple import (
     SequentialStrategy,
     WeightedRandomStrategy,
 )
+from .selection import IndexSelection
 from .speaker import (
     GroupedSpeakerAudioDataset,
     SpeakerAudioBlock,
@@ -27,9 +45,13 @@ from .speaker import (
 
 __all__ = [
     "AnyDataset",
+    "AudioBatch",
+    "AudioLoader",
     "IterableAnyDataset",
+    "IndexSelection",
     "IterationStrategy",
     "MapStyleABC",
+    "Morphology",
     "MultipleAnyDataset",
     "RoundRobinStrategy",
     "SequentialStrategy",
@@ -42,8 +64,20 @@ __all__ = [
     "SpeakerCartesianDataset",
     "SpeakerIdDataset",
     "SpeakerMode",
+    "SpeechBatch",
+    "SpeechGridBatch",
+    "SpeechGridView",
     "TextRef",
     "WeightedRandomStrategy",
+    "audio_collate",
+    "build_toy_audio_dataset",
+    "build_toy_speech_dataset",
+    "build_toy_speech_grid",
+    "load_audio_file",
+    "prepare_audio",
     "speaker_cartesian_indexes",
     "speaker_for_index",
+    "speech_collate",
+    "speech_grid_batch",
+    "speech_grid_collate",
 ]

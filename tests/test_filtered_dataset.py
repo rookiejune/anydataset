@@ -129,11 +129,15 @@ class FilteredDatasetTest(unittest.TestCase):
         _register_rows_source("unit_test_filter_lazy_iterators")
         with tempfile.TemporaryDirectory():
             dataset = _dataset("unit_test_filter_lazy_iterators", list(range(6)))
-            result = FilterRule("mod_three", _mod_three_factory).apply(
-                dataset_factory=lambda: dataset,
-                device="cpu",
-                max_shard_samples=1,
-            ).select_by("zero", "two")
+            result = (
+                FilterRule("mod_three", _mod_three_factory)
+                .apply(
+                    dataset_factory=lambda: dataset,
+                    device="cpu",
+                    max_shard_samples=1,
+                )
+                .select_by("zero", "two")
+            )
 
             with mock.patch(
                 "anydataset.filter.storage.read_index_rows",
@@ -151,9 +155,12 @@ class FilteredDatasetTest(unittest.TestCase):
 
     def test_rule_version_and_id_isolated_in_cache_identity(self):
         _register_rows_source("unit_test_filter_rule_identity")
-        with tempfile.TemporaryDirectory() as tmpdir, mock.patch.dict(
-            os.environ,
-            {"ANYDATASET_HOME": tmpdir},
+        with (
+            tempfile.TemporaryDirectory() as tmpdir,
+            mock.patch.dict(
+                os.environ,
+                {"ANYDATASET_HOME": tmpdir},
+            ),
         ):
             dataset = _dataset("unit_test_filter_rule_identity", [0, 1])
             first = FilterRule(
@@ -174,11 +181,14 @@ class FilteredDatasetTest(unittest.TestCase):
             )
 
         self.assertNotEqual(first.cache_path, second.cache_path)
-        self.assertEqual(metadata["rule"], {
-            "name": "same",
-            "rule_id": "quality-check",
-            "version": "v1",
-        })
+        self.assertEqual(
+            metadata["rule"],
+            {
+                "name": "same",
+                "rule_id": "quality-check",
+                "version": "v1",
+            },
+        )
         self.assertEqual(first.rule.rule_id, "quality-check")
         self.assertEqual(first.rule.version, "v1")
 
@@ -368,9 +378,11 @@ class FilteredDatasetTest(unittest.TestCase):
         dataset = _dataset("unit_test_filter_live_snapshot", [0, 1, 2, 3])
         rule = FilterRule(
             "all_with_metrics",
-            lambda: lambda sample: FilterDecision(
-                label=True,
-                metrics={"score": _value(sample)},
+            lambda: (
+                lambda sample: FilterDecision(
+                    label=True,
+                    metrics={"score": _value(sample)},
+                )
             ),
         )
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -443,7 +455,9 @@ class FilteredDatasetTest(unittest.TestCase):
                 self.assertNotEqual(current.cache_path, old_path)
                 self.assertFalse(old_path.exists())
 
-    @unittest.skipUnless("fork" in multiprocessing.get_all_start_methods(), "requires fork")
+    @unittest.skipUnless(
+        "fork" in multiprocessing.get_all_start_methods(), "requires fork"
+    )
     def test_fork_child_close_does_not_release_parent_generation_lease(self):
         _register_rows_source("unit_test_filter_fork_generation_lease")
         dataset = _dataset("unit_test_filter_fork_generation_lease", [0, 1])
@@ -480,7 +494,9 @@ class FilteredDatasetTest(unittest.TestCase):
                     (old_path,),
                 )
 
-    @unittest.skipUnless("fork" in multiprocessing.get_all_start_methods(), "requires fork")
+    @unittest.skipUnless(
+        "fork" in multiprocessing.get_all_start_methods(), "requires fork"
+    )
     def test_fork_parent_close_does_not_release_child_generation_lease(self):
         _register_rows_source("unit_test_filter_fork_child_generation_lease")
         dataset = _dataset("unit_test_filter_fork_child_generation_lease", [0, 1])
@@ -601,9 +617,11 @@ class FilteredDatasetTest(unittest.TestCase):
         calls = []
         rule = FilterRule(
             "metrics_count",
-            lambda: lambda sample: FilterDecision(
-                label=True,
-                metrics={"score": calls.append(_value(sample)) or _value(sample)},
+            lambda: (
+                lambda sample: FilterDecision(
+                    label=True,
+                    metrics={"score": calls.append(_value(sample)) or _value(sample)},
+                )
             ),
         )
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -727,9 +745,7 @@ class FilteredDatasetTest(unittest.TestCase):
             (
                 _FilterChunk(
                     partitions={"accept": [0]},
-                    metrics=(
-                        _FilterMetricsRow(index=0, label="reject", metrics={}),
-                    ),
+                    metrics=(_FilterMetricsRow(index=0, label="reject", metrics={}),),
                 ),
                 True,
                 "metrics do not match partitions",
@@ -848,10 +864,14 @@ class FilteredDatasetTest(unittest.TestCase):
             calls = root / "chain-calls.txt"
             marker = root / "chain-failed.txt"
             dataset = _dataset("unit_test_filter_chain_resume", [0, 1, 2, 3, 4])
-            first = FilterRule(
-                name="gte_two",
-                factory=lambda: lambda sample: _value(sample) >= 2,
-            ).apply(dataset_factory=lambda: dataset, device="cpu").select_by("accept")
+            first = (
+                FilterRule(
+                    name="gte_two",
+                    factory=lambda: lambda sample: _value(sample) >= 2,
+                )
+                .apply(dataset_factory=lambda: dataset, device="cpu")
+                .select_by("accept")
+            )
             calls.write_text("", encoding="utf-8")
             second = FilterRule(
                 name="resume_chain_even",
@@ -919,13 +939,17 @@ class FilteredDatasetTest(unittest.TestCase):
                 name="same_name",
                 factory=lambda: lambda sample: True,
             )
-            first_result = first_rule.apply(dataset_factory=lambda: dataset, device="cpu")
+            first_result = first_rule.apply(
+                dataset_factory=lambda: dataset, device="cpu"
+            )
             second_rule = FilterRule(
                 name="same_name",
                 factory=lambda: lambda sample: calls.append(sample) or False,
             )
 
-            second_result = second_rule.apply(dataset_factory=lambda: dataset, device="cpu")
+            second_result = second_rule.apply(
+                dataset_factory=lambda: dataset, device="cpu"
+            )
 
         self.assertEqual(first_result.cache_path, second_result.cache_path)
         self.assertEqual(calls, [])
@@ -938,7 +962,11 @@ class FilteredDatasetTest(unittest.TestCase):
             dataset = _dataset("unit_test_filter_direct_select", [0, 1, 2])
             rule = FilterRule(
                 name="even",
-                factory=lambda: lambda sample: calls.append(_value(sample)) or _value(sample) % 2 == 0,
+                factory=lambda: (
+                    lambda sample: (
+                        calls.append(_value(sample)) or _value(sample) % 2 == 0
+                    )
+                ),
             )
 
             result = rule.apply(dataset_factory=lambda: dataset, device="cpu")
@@ -999,10 +1027,14 @@ class FilteredDatasetTest(unittest.TestCase):
         _register_rows_source("unit_test_filter_shards")
         with tempfile.TemporaryDirectory():
             dataset = _dataset("unit_test_filter_shards", [0, 1, 2, 3, 4])
-            filtered = FilterRule(
-                name="all",
-                factory=lambda: lambda sample: True,
-            ).apply(dataset_factory=lambda: dataset, device="cpu").select_by("accept")
+            filtered = (
+                FilterRule(
+                    name="all",
+                    factory=lambda: lambda sample: True,
+                )
+                .apply(dataset_factory=lambda: dataset, device="cpu")
+                .select_by("accept")
+            )
 
             shard = [_value(sample) for sample in filtered.iter_shard(2, 1)]
 
@@ -1012,10 +1044,14 @@ class FilteredDatasetTest(unittest.TestCase):
         _register_rows_source("unit_test_filter_indexed_shards")
         with tempfile.TemporaryDirectory():
             dataset = _dataset("unit_test_filter_indexed_shards", [0, 1, 2, 3, 4])
-            filtered = FilterRule(
-                name="even",
-                factory=lambda: lambda sample: _value(sample) % 2 == 0,
-            ).apply(dataset_factory=lambda: dataset, device="cpu").select_by("accept")
+            filtered = (
+                FilterRule(
+                    name="even",
+                    factory=lambda: lambda sample: _value(sample) % 2 == 0,
+                )
+                .apply(dataset_factory=lambda: dataset, device="cpu")
+                .select_by("accept")
+            )
 
             shard = [
                 (index, filtered.global_index(index), _value(sample))
@@ -1092,9 +1128,12 @@ class FilteredDatasetTest(unittest.TestCase):
             "unit_test_filter_legacy_pickle",
             list(range(4)),
         )
-        with tempfile.TemporaryDirectory() as tmpdir, mock.patch.dict(
-            os.environ,
-            {"ANYDATASET_HOME": tmpdir},
+        with (
+            tempfile.TemporaryDirectory() as tmpdir,
+            mock.patch.dict(
+                os.environ,
+                {"ANYDATASET_HOME": tmpdir},
+            ),
         ):
             filtered = (
                 FilterRule("even", _metric_factory)
@@ -1213,10 +1252,14 @@ class FilteredDatasetTest(unittest.TestCase):
         _register_rows_source("unit_test_filter_repr")
         with tempfile.TemporaryDirectory():
             dataset = _dataset("unit_test_filter_repr", [0, 1, 2])
-            filtered = FilterRule(
-                name="all",
-                factory=lambda: lambda sample: True,
-            ).apply(dataset_factory=lambda: dataset, device="cpu").select_by("accept")
+            filtered = (
+                FilterRule(
+                    name="all",
+                    factory=lambda: lambda sample: True,
+                )
+                .apply(dataset_factory=lambda: dataset, device="cpu")
+                .select_by("accept")
+            )
 
             text = repr(filtered)
 
@@ -1234,12 +1277,18 @@ class FilteredDatasetTest(unittest.TestCase):
             )
 
             result = rule.apply(dataset_factory=lambda: dataset, device="cpu")
-            metadata = json.loads((result.cache_path / "rule.json").read_text(encoding="utf-8"))
-            manifest = json.loads((result.cache_path / "partitions.json").read_text(encoding="utf-8"))
+            metadata = json.loads(
+                (result.cache_path / "rule.json").read_text(encoding="utf-8")
+            )
+            manifest = json.loads(
+                (result.cache_path / "partitions.json").read_text(encoding="utf-8")
+            )
 
         cache_root = result.cache_path.parents[1]
         current = json.loads((cache_root / "current.json").read_text(encoding="utf-8"))
-        self.assertEqual(result.cache_path.parents[3], anydataset_home() / "cache" / "filters")
+        self.assertEqual(
+            result.cache_path.parents[3], anydataset_home() / "cache" / "filters"
+        )
         self.assertEqual(result.cache_path.parent.name, "generations")
         self.assertEqual(current["schema_version"], 1)
         self.assertEqual(current["generation"], result.cache_path.name)
@@ -1272,8 +1321,11 @@ class FilteredDatasetTest(unittest.TestCase):
             ).write([sample])
             rule = FilterRule(
                 name="has-longcat",
-                factory=lambda: lambda value: AudioView.LONGCAT
-                in value[Role.DEFAULT, Modality.AUDIO].views,
+                factory=lambda: (
+                    lambda value: (
+                        AudioView.LONGCAT in value[Role.DEFAULT, Modality.AUDIO].views
+                    )
+                ),
             )
             first = rule.apply(
                 dataset_factory=lambda: AnyDataset(
@@ -1343,8 +1395,15 @@ class FilteredDatasetTest(unittest.TestCase):
                 factory=lambda: lambda sample: True,
             )
 
-            result = rule.apply(dataset_factory=lambda: dataset, device="cpu", commit_samples=2, max_shard_samples=2)
-            manifest = json.loads((result.cache_path / "partitions.json").read_text(encoding="utf-8"))
+            result = rule.apply(
+                dataset_factory=lambda: dataset,
+                device="cpu",
+                commit_samples=2,
+                max_shard_samples=2,
+            )
+            manifest = json.loads(
+                (result.cache_path / "partitions.json").read_text(encoding="utf-8")
+            )
             selected = result.select_by("accept")
 
         files = manifest["partitions"][0]["files"]
@@ -1423,6 +1482,63 @@ class FilteredDatasetTest(unittest.TestCase):
         self.assertEqual(result.counts, {"zero": 3, "one": 2, "two": 2})
         self.assertEqual(result.select_by("one", "two").indices, (1, 2, 4, 5))
 
+    def test_rule_apply_uses_predicate_call_batch_in_sample_order(self):
+        with tempfile.TemporaryDirectory():
+            dataset = _dataset(
+                "unit_test_filter_predicate_batch",
+                list(range(7)),
+            )
+
+            result = FilterRule(
+                name="batch_mod_three",
+                factory=_BatchModThree,
+            ).apply(
+                dataset_factory=lambda: dataset,
+                device="cpu",
+                batch_size=3,
+            )
+
+        self.assertEqual(result.counts, {"zero": 3, "one": 2, "two": 2})
+        self.assertEqual(result.select_by("one").indices, (1, 4))
+        self.assertEqual(result.select_by("two").indices, (2, 5))
+
+    def test_rule_apply_rejects_wrong_predicate_batch_output_count(self):
+        with tempfile.TemporaryDirectory():
+            dataset = _dataset(
+                "unit_test_filter_predicate_batch_count",
+                [0, 1, 2],
+            )
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "one output per input sample",
+            ):
+                FilterRule(
+                    name="bad_batch_count",
+                    factory=_ShortBatchFilter,
+                ).apply(
+                    dataset_factory=lambda: dataset,
+                    device="cpu",
+                    batch_size=3,
+                )
+
+    def test_rule_apply_requires_ordered_predicate_batch_output(self):
+        with tempfile.TemporaryDirectory():
+            dataset = _dataset(
+                "unit_test_filter_predicate_batch_order",
+                [0, 1],
+            )
+
+            with self.assertRaisesRegex(TypeError, "ordered sequence"):
+                FilterRule(
+                    name="unordered_batch",
+                    factory=_IterableBatchFilter,
+                ).apply(
+                    dataset_factory=lambda: dataset,
+                    device="cpu",
+                    batch_size=2,
+                )
+
     def test_rule_apply_parallel_loader_workers_cover_all_samples(self):
         with tempfile.TemporaryDirectory():
             dataset_factory = partial(
@@ -1483,7 +1599,12 @@ class FilteredDatasetTest(unittest.TestCase):
                 factory=_metric_factory,
             )
 
-            result = rule.apply(dataset_factory=lambda: dataset, metrics=True, device="cpu", max_shard_samples=2)
+            result = rule.apply(
+                dataset_factory=lambda: dataset,
+                metrics=True,
+                device="cpu",
+                max_shard_samples=2,
+            )
             rows = list(result.iter_metrics())
             manifest = json.loads(
                 (result.metrics_path / "metrics.json").read_text(encoding="utf-8")
@@ -1494,9 +1615,21 @@ class FilteredDatasetTest(unittest.TestCase):
         self.assertEqual(
             rows,
             [
-                {"index": 0, "label": "accept", "metrics": {"score": 0, "tags": ["even"]}},
-                {"index": 1, "label": "reject", "metrics": {"score": 1, "tags": ["odd"]}},
-                {"index": 2, "label": "accept", "metrics": {"score": 2, "tags": ["even"]}},
+                {
+                    "index": 0,
+                    "label": "accept",
+                    "metrics": {"score": 0, "tags": ["even"]},
+                },
+                {
+                    "index": 1,
+                    "label": "reject",
+                    "metrics": {"score": 1, "tags": ["odd"]},
+                },
+                {
+                    "index": 2,
+                    "label": "accept",
+                    "metrics": {"score": 2, "tags": ["even"]},
+                },
             ],
         )
         self.assertEqual(manifest["count"], 3)
@@ -1514,9 +1647,14 @@ class FilteredDatasetTest(unittest.TestCase):
             ).apply(dataset_factory=lambda: dataset, metrics=True, device="cpu")
             result = FilterRule(
                 name="same",
-                factory=lambda: lambda sample: calls.append(sample) or FilterDecision(
-                    label=False,
-                    metrics={"score": -1},
+                factory=lambda: (
+                    lambda sample: (
+                        calls.append(sample)
+                        or FilterDecision(
+                            label=False,
+                            metrics={"score": -1},
+                        )
+                    )
                 ),
             ).apply(dataset_factory=lambda: dataset, metrics=True, device="cpu")
             rows = list(result.iter_metrics())
@@ -1536,14 +1674,22 @@ class FilteredDatasetTest(unittest.TestCase):
             ).apply(dataset_factory=lambda: dataset, device="cpu")
             result = FilterRule(
                 name="same",
-                factory=lambda: lambda sample: calls.append(sample) or _metric_decision(sample),
+                factory=lambda: (
+                    lambda sample: calls.append(sample) or _metric_decision(sample)
+                ),
             ).apply(dataset_factory=lambda: dataset, metrics=True, device="cpu")
             rows = list(result.iter_metrics())
 
         self.assertEqual(len(calls), 1)
         self.assertEqual(
             rows,
-            [{"index": 0, "label": "accept", "metrics": {"score": 0, "tags": ["even"]}}],
+            [
+                {
+                    "index": 0,
+                    "label": "accept",
+                    "metrics": {"score": 0, "tags": ["even"]},
+                }
+            ],
         )
 
     def test_rule_apply_logs_cache_build_reason(self):
@@ -1618,9 +1764,11 @@ class FilteredDatasetTest(unittest.TestCase):
             dataset = _dataset("unit_test_filter_metrics_json", [0])
             rule = FilterRule(
                 name="bad",
-                factory=lambda: lambda sample: FilterDecision(
-                    label=True,
-                    metrics={"score": math.nan},
+                factory=lambda: (
+                    lambda sample: FilterDecision(
+                        label=True,
+                        metrics={"score": math.nan},
+                    )
                 ),
             )
 
@@ -1633,9 +1781,11 @@ class FilteredDatasetTest(unittest.TestCase):
             dataset = _dataset("unit_test_filter_metrics_keys", [0])
             rule = FilterRule(
                 name="bad",
-                factory=lambda: lambda sample: FilterDecision(
-                    label=True,
-                    metrics={1: "bad"},
+                factory=lambda: (
+                    lambda sample: FilterDecision(
+                        label=True,
+                        metrics={1: "bad"},
+                    )
                 ),
             )
 
@@ -1694,8 +1844,7 @@ class FilteredDatasetTest(unittest.TestCase):
                     device=("cpu:0", "cpu:1"),
                 )
                 log_texts = [
-                    log.read_text(encoding="utf-8")
-                    for log in _filter_worker_logs(home)
+                    log.read_text(encoding="utf-8") for log in _filter_worker_logs(home)
                 ]
             rows = list(result.iter_metrics())
 
@@ -1749,11 +1898,7 @@ class FilteredDatasetTest(unittest.TestCase):
                 )
             )
 
-            indexes = [
-                row.index
-                for chunk in chunks
-                for row in chunk.metrics
-            ]
+            indexes = [row.index for chunk in chunks for row in chunk.metrics]
 
             self.assertEqual(indexes, [2, 5, 9])
 
@@ -1952,17 +2097,23 @@ class FilteredDatasetTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             Path(tmpdir)
             dataset = _dataset("unit_test_filter_chain", [0, 1, 2, 3, 4])
-            first = FilterRule(
-                name="gte_two",
-                factory=lambda: lambda sample: _value(sample) >= 2,
-            ).apply(dataset_factory=lambda: dataset, device="cpu").select_by("accept")
+            first = (
+                FilterRule(
+                    name="gte_two",
+                    factory=lambda: lambda sample: _value(sample) >= 2,
+                )
+                .apply(dataset_factory=lambda: dataset, device="cpu")
+                .select_by("accept")
+            )
             seen = []
             second_rule = FilterRule(
                 name="even_after_gte_two",
                 factory=lambda: lambda sample: _track_even(sample, seen),
             )
 
-            result = second_rule.apply(dataset_factory=first.dataset_factory, device="cpu")
+            result = second_rule.apply(
+                dataset_factory=first.dataset_factory, device="cpu"
+            )
             selected = result.select_by("accept")
 
         self.assertEqual(seen, [2, 3, 4])
@@ -1987,14 +2138,18 @@ class FilteredDatasetTest(unittest.TestCase):
                 dataset_factory=even.apply(
                     dataset_factory=lambda: dataset,
                     device="cpu",
-                ).select_by("accept").dataset_factory,
+                )
+                .select_by("accept")
+                .dataset_factory,
                 device="cpu",
             ).select_by("accept")
             gte_then_even = even.apply(
                 dataset_factory=gte_six.apply(
                     dataset_factory=lambda: dataset,
                     device="cpu",
-                ).select_by("accept").dataset_factory,
+                )
+                .select_by("accept")
+                .dataset_factory,
                 device="cpu",
             ).select_by("accept")
 
@@ -2007,10 +2162,14 @@ class FilteredDatasetTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             Path(tmpdir)
             dataset = _dataset("unit_test_filter_chain_metrics", [0, 1, 2, 3, 4])
-            first = FilterRule(
-                name="gte_two",
-                factory=lambda: lambda sample: _value(sample) >= 2,
-            ).apply(dataset_factory=lambda: dataset, device="cpu").select_by("accept")
+            first = (
+                FilterRule(
+                    name="gte_two",
+                    factory=lambda: lambda sample: _value(sample) >= 2,
+                )
+                .apply(dataset_factory=lambda: dataset, device="cpu")
+                .select_by("accept")
+            )
 
             result = FilterRule(
                 name="even_after_gte_two",
@@ -2021,9 +2180,21 @@ class FilteredDatasetTest(unittest.TestCase):
         self.assertEqual(
             rows,
             [
-                {"index": 2, "label": "accept", "metrics": {"score": 2, "tags": ["even"]}},
-                {"index": 3, "label": "reject", "metrics": {"score": 3, "tags": ["odd"]}},
-                {"index": 4, "label": "accept", "metrics": {"score": 4, "tags": ["even"]}},
+                {
+                    "index": 2,
+                    "label": "accept",
+                    "metrics": {"score": 2, "tags": ["even"]},
+                },
+                {
+                    "index": 3,
+                    "label": "reject",
+                    "metrics": {"score": 3, "tags": ["odd"]},
+                },
+                {
+                    "index": 4,
+                    "label": "accept",
+                    "metrics": {"score": 4, "tags": ["even"]},
+                },
             ],
         )
 
@@ -2032,17 +2203,23 @@ class FilteredDatasetTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             Path(tmpdir)
             dataset = _dataset("unit_test_filter_chain_cache", [0, 1, 2, 3])
-            first = FilterRule(
-                name="gte_two",
-                factory=lambda: lambda sample: _value(sample) >= 2,
-            ).apply(dataset_factory=lambda: dataset, device="cpu").select_by("accept")
+            first = (
+                FilterRule(
+                    name="gte_two",
+                    factory=lambda: lambda sample: _value(sample) >= 2,
+                )
+                .apply(dataset_factory=lambda: dataset, device="cpu")
+                .select_by("accept")
+            )
             second_rule = FilterRule(
                 name="even",
                 factory=lambda: lambda sample: _value(sample) % 2 == 0,
             )
 
             physical = second_rule.apply(dataset_factory=lambda: dataset, device="cpu")
-            chained = second_rule.apply(dataset_factory=first.dataset_factory, device="cpu")
+            chained = second_rule.apply(
+                dataset_factory=first.dataset_factory, device="cpu"
+            )
             metadata = json.loads(
                 (chained.cache_path / "rule.json").read_text(encoding="utf-8")
             )
@@ -2265,6 +2442,30 @@ class _SlowFilterFactory:
 
     def __call__(self):
         return _SlowFilter(delay=self.delay)
+
+
+class _BatchModThree:
+    def __call__(self, sample):
+        raise AssertionError("batched predicate should use call_batch()")
+
+    def call_batch(self, samples):
+        return tuple(_mod_three(sample) for sample in samples)
+
+
+class _ShortBatchFilter:
+    def __call__(self, sample):
+        raise AssertionError("batched predicate should use call_batch()")
+
+    def call_batch(self, samples):
+        return [True] * (len(samples) - 1)
+
+
+class _IterableBatchFilter:
+    def __call__(self, sample):
+        raise AssertionError("batched predicate should use call_batch()")
+
+    def call_batch(self, samples):
+        return (True for _sample in samples)
 
 
 class _FailOnceMetricFilter(_FailOnceFilter):

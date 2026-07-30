@@ -412,6 +412,9 @@ method, both dataset and predicate factories should be module-level picklable
 callables.
 Pass `num_workers` to let each execution process read samples through a PyTorch
 `DataLoader`; `batch_size` controls the loader batch size.
+Predicates may implement `call_batch(samples)` to consume that batch directly.
+The method must return an ordered sequence with exactly one output per input;
+predicates without it continue to run through per-sample `__call__`.
 
 Partition index files are sharded by `max_shard_samples` (default: 1,000,000),
 so large labels do not need one huge parquet file. `commit_samples` (default:
@@ -444,6 +447,11 @@ when an older partition cache has no metrics side output, the rule is rebuilt.
 Completed caches are immutable generations with reader leases. See
 [`docs/filter_cache.md`](docs/filter_cache.md) for their cleanup contract and
 the `cleanup_filter_generations(...)` API.
+
+For rare CPU-only hard failures after an accept partition is selected, wrap the
+map-style dataset with `RejectReplaceDataset` (sequential look-ahead, then a
+worker-local accept buffer). It is not a substitute for cached partitions; see
+[`docs/online_filter.md`](docs/online_filter.md).
 
 ## Quality Rules
 
@@ -544,6 +552,13 @@ Speech quality warnings such as missing waveform or missing same-role text are
 audit signals in the metrics payload. A non-finite waveform is a hard rejection
 before evaluator execution; otherwise a checked audio item is rejected when it
 fails a configured threshold.
+
+Pass an existing `CodecProvider` as `SpeechQuality(codec_provider=provider)` to
+evaluate reconstructed audio for `provider.output`. This path reads only that
+codec view, batches equal-length codes through `provider.codec.decode()`, and
+uses `provider.codec.sample_rate`; it never falls back to an original waveform.
+Version the filter rule when the codec view, checkpoint, or decoder
+configuration changes.
 
 ## Store
 
@@ -898,10 +913,10 @@ python -m pytest -q
 ```
 
 Additional design notes live in `docs/design.md`, filter cache details in
-`docs/filter_cache.md`, and quality-filter notes in
-`docs/translation_quality.md` and `docs/speech_quality.md`. Advanced process
-ownership and remote model serving are covered in
-`docs/provider_service.md`.
+`docs/filter_cache.md`, online reject-replace notes in `docs/online_filter.md`,
+and quality-filter notes in `docs/translation_quality.md` and
+`docs/speech_quality.md`. Advanced process ownership and remote model serving
+are covered in `docs/provider_service.md`.
 
 ## Release
 

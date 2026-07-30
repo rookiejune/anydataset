@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum
-from typing import TYPE_CHECKING, TypedDict, Union
+from typing import TYPE_CHECKING, Protocol, TypedDict, Union, runtime_checkable
 
 from .._compat import NotRequired
 from .._devices import Devices
@@ -33,6 +33,14 @@ class FilterDecision:
 FilterOutput = Union[FilterLabel, FilterDecision]
 FilterPredicate = Callable[[Sample], FilterOutput]
 FilterFactory = Callable[[], FilterPredicate]
+
+
+@runtime_checkable
+class BatchFilterPredicate(Protocol):
+    def __call__(self, sample: Sample) -> FilterOutput: ...
+
+    def call_batch(self, samples: Sequence[Sample]) -> Sequence[FilterOutput]: ...
+
 
 if TYPE_CHECKING:
     from ..dataset.abc import AnyDataset

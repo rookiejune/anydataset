@@ -197,6 +197,13 @@ Pass `num_workers` to let each execution process read samples through a PyTorch
 `dataset_factory` is the only dataset entry point. This keeps single-device,
 DataLoader-worker, multi-device, and chained filtering on the same contract.
 
+A predicate may implement `call_batch(samples)` to process one loader batch at
+once. It must return an ordered sequence containing exactly one filter output
+for each input sample; outputs are matched to inputs by position. Predicates
+without `call_batch` keep the per-sample `__call__` path. Resume indexes are
+removed before either path runs, so a batched predicate never receives rows
+that are already committed.
+
 With the default `"spawn"` start method, multi-device workers must receive
 picklable factories instead of an already constructed dataset instance:
 
@@ -263,3 +270,10 @@ without `metrics/metrics.json`, the rule is rebuilt so
 `available_labels` and `available_counts` for every label in the cache. It also
 exposes `cache_path`, preserves map-style indexing, and provides
 `iter_shard(num_shards, shard_id)` over the selected global-index order.
+
+## Online safety net
+
+For rare CPU-only rejects after an accept partition is already selected, wrap
+the map-style dataset with `RejectReplaceDataset`. It does not write filter
+cache, does not support GPU predicates, and hard-fails when reject rates are
+high. See [`online_filter.md`](online_filter.md).

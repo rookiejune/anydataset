@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Add `RejectReplaceDataset` for low reject-rate online CPU safety nets that
+  replace rejects via sequential look-ahead and a worker-local accept buffer.
+- Add `dataset.morphology` audio/speech/speech_grid batch contracts and
+  `IndexSelection` for stable map-style index views.
+- Extend speech quality filtering and filter collect/type contracts used by
+  cached partitions.
 - Optimize store and source hot paths with manifest/tar handle caches, persisted
   payload indexes and shard groups, lazy manifest reads, bounded CSV preparation,
   and explicit resource cleanup.

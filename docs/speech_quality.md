@@ -9,8 +9,15 @@ meant to be used with `FilterRule`.
 - Dataset loading stays in `Spec`, `Preset`, `AnyDataset`, or `Source.STORE`.
 - Cache construction stays in `anydataset.filter`.
 - `SpeechQuality` reads every `(role, Modality.AUDIO)` item in a sample.
-- Each checked audio item must expose `AudioView.WAVEFORM` and same-role
-  `(role, Modality.TEXT)` with `TextView.TEXT`.
+- Without a codec provider, each checked audio item must expose
+  `AudioView.WAVEFORM` and same-role `(role, Modality.TEXT)` with
+  `TextView.TEXT`.
+- With `codec_provider=CodecProvider(...)`, `SpeechQuality` reads only
+  `codec_provider.output`, decodes those frame codes with
+  `codec_provider.codec.decode(...)`, and evaluates the reconstructed audio at
+  `codec_provider.codec.sample_rate`.
+- The codec path never falls back to an original waveform. A missing codec
+  view or malformed codec tensor is an input-contract error.
 - Missing waveform or same-role text is recorded as an audit warning. It does
   not reject the sample by itself.
 - A waveform containing NaN or infinity is rejected before evaluator execution.
@@ -58,6 +65,29 @@ result = FilterRule("speech_quality_v1_en", factory).apply(
 accepted = result.select_by("accept")
 ```
 
+To evaluate one materialized codec view, construct the existing
+`CodecProvider` in the filter predicate factory and pass it directly to
+`SpeechQuality`:
+
+```python
+import os
+
+from anydataset.provider import CodecProvider
+from anydataset.quality.speech import SpeechQuality
+from anydataset.types import AudioView
+
+def codec_speech_factory():
+    codec = load_codec(device=os.environ["ANYDATASET_FILTER_DEVICE"])
+    provider = CodecProvider(codec, AudioView.LONGCAT)
+    return SpeechQuality(codec_provider=provider)
+```
+
+When filter `batch_size` is greater than one, codec inputs with equal frame
+length are stacked for `codec.decode(...)`. Reconstructed waveforms are then
+restored to sample order and passed to the speech evaluator one at a time.
+Text and speech predicates can therefore be chained against the same codec
+store without materializing reconstructed waveform views.
+
 Each metrics payload includes:
 
 - `decision`: normalized label.
@@ -86,4 +116,6 @@ and must return finite scalar metrics named `utmos`, `wer`, `chrf`, and `bleu`.
 `FilterRule.name` is the human-readable name and remains part of cache identity
 for compatibility. Put evaluator model, decode options, threshold, parser, and
 transform versions in `rule_id`/`version`; changing any identity field selects a
-different cache. The legacy name-only form remains supported.
+different cache. For codec filtering, include the selected `AudioView`, codec
+checkpoint, and decoder configuration in that caller-managed version. The
+legacy name-only form remains supported.

@@ -27,6 +27,24 @@ class FakeSpeechEvaluator:
         return dict(self.metrics[index])
 
 
+class FakeFrameCodec:
+    sample_rate = 24000
+
+    def __init__(self):
+        self.calls = []
+
+    def decode(self, codes):
+        self.calls.append(codes.clone())
+        values = codes[:, 0, 0].float().div(10.0)
+        return values[:, None, None].expand(-1, 1, 4).clone()
+
+
+class FakeCodecProvider:
+    def __init__(self, codec, output=AudioView.LONGCAT):
+        self.codec = codec
+        self.output = output
+
+
 class SpeechQualityTest(unittest.TestCase):
     def test_accepts_every_checked_audio_when_metrics_pass(self):
         source_wave = torch.full((1, 16000), 0.1)
@@ -217,6 +235,83 @@ class SpeechQualityTest(unittest.TestCase):
         self.assertEqual(decision.metrics["items"][0]["text_units"], 4)
         self.assertEqual(decision.metrics["items"][0]["seconds_per_text_unit"], 0.25)
 
+    def test_codec_provider_decodes_configured_view_instead_of_waveform(self):
+        codec = FakeFrameCodec()
+        evaluator = FakeSpeechEvaluator(
+            [{"utmos": 4.0, "wer": 0.1, "chrf": 80.0, "bleu": 70.0}]
+        )
+        predicate = SpeechQuality(
+            evaluator=evaluator,
+            codec_provider=FakeCodecProvider(codec),
+        )
+        original = torch.full((1, 8), 0.9)
+        sample = _codec_sample(7, frames=2, text="hello", waveform=original)
+
+        decision = predicate(sample)
+
+        self.assertEqual(decision.label, QualityLabel.ACCEPT)
+        self.assertEqual(len(codec.calls), 1)
+        self.assertEqual(tuple(codec.calls[0].shape), (1, 2, 1))
+        self.assertTrue(
+            torch.equal(
+                codec.calls[0][0],
+                sample[Role.DEFAULT, Modality.AUDIO].views[AudioView.LONGCAT],
+            )
+        )
+        audio, sample_rate, reference_text, _options = evaluator.calls[0]
+        self.assertTrue(torch.equal(audio, torch.full((1, 4), 0.7)))
+        self.assertFalse(torch.equal(audio, original))
+        self.assertEqual(sample_rate, 24000)
+        self.assertEqual(reference_text, "hello")
+
+    def test_codec_batch_groups_equal_lengths_and_restores_sample_order(self):
+        codec = FakeFrameCodec()
+        evaluator = FakeSpeechEvaluator(
+            [
+                {"utmos": 4.0, "wer": 0.1, "chrf": 80.0, "bleu": 70.0},
+                {"utmos": 4.0, "wer": 0.1, "chrf": 80.0, "bleu": 70.0},
+                {"utmos": 4.0, "wer": 0.1, "chrf": 80.0, "bleu": 70.0},
+            ]
+        )
+        predicate = SpeechQuality(
+            evaluator=evaluator,
+            codec_provider=FakeCodecProvider(codec),
+        )
+
+        decisions = predicate.call_batch(
+            (
+                _codec_sample(1, frames=2, text="first"),
+                _codec_sample(2, frames=3, text="second"),
+                _codec_sample(3, frames=2, text="third"),
+            )
+        )
+
+        self.assertEqual(
+            [decision.label for decision in decisions],
+            [QualityLabel.ACCEPT, QualityLabel.ACCEPT, QualityLabel.ACCEPT],
+        )
+        self.assertEqual(
+            [tuple(codes.shape) for codes in codec.calls],
+            [(2, 2, 1), (1, 3, 1)],
+        )
+        self.assertEqual(
+            [call[2] for call in evaluator.calls],
+            ["first", "second", "third"],
+        )
+        torch.testing.assert_close(
+            torch.tensor([call[0][0, 0] for call in evaluator.calls]),
+            torch.tensor([0.1, 0.2, 0.3]),
+        )
+
+    def test_codec_provider_does_not_fall_back_when_codec_view_is_missing(self):
+        predicate = SpeechQuality(
+            evaluator=FakeSpeechEvaluator([]),
+            codec_provider=FakeCodecProvider(FakeFrameCodec()),
+        )
+
+        with self.assertRaisesRegex(ValueError, "expects audio view 'longcat'"):
+            predicate(_sample(torch.ones(1, 4), 16000, "hello"))
+
     def test_skips_audio_without_waveform_and_records_warning(self):
         evaluator = FakeSpeechEvaluator([])
         predicate = SpeechQuality(evaluator=evaluator)
@@ -319,6 +414,26 @@ def _sample(waveform, sample_rate: int, text: str):
         (Role.DEFAULT, Modality.AUDIO): AudioItem(
             views={AudioView.WAVEFORM: (waveform, sample_rate)},
         ),
+        (Role.DEFAULT, Modality.TEXT): TextItem(
+            views={TextView.TEXT: text},
+        ),
+    }
+
+
+def _codec_sample(
+    value: int,
+    *,
+    frames: int,
+    text: str,
+    waveform=None,
+):
+    views = {
+        AudioView.LONGCAT: torch.full((frames, 1), value, dtype=torch.int64),
+    }
+    if waveform is not None:
+        views[AudioView.WAVEFORM] = (waveform, 16000)
+    return {
+        (Role.DEFAULT, Modality.AUDIO): AudioItem(views=views),
         (Role.DEFAULT, Modality.TEXT): TextItem(
             views={TextView.TEXT: text},
         ),

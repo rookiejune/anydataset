@@ -25,9 +25,11 @@ from .._parallel import (
     worker_configs,
 )
 from ..runtime import Runtime
+from ..types import Sample
 from .rules import label
 from .storage import validate_metrics
 from .types import (
+    BatchFilterPredicate,
     DatasetFactory,
     FilterDecision,
     FilterFactory,
@@ -134,10 +136,15 @@ def collect_ranges_sequential(
         sample_indexes=sample_indexes,
     )
     for batch in loader:
-        for index, sample in batch:
-            if index in skip_indexes:
-                continue
-            output = decision(predicate(sample), metrics=write_metrics)
+        selected = tuple(
+            (index, sample) for index, sample in batch if index not in skip_indexes
+        )
+        outputs = _predicate_outputs(
+            predicate,
+            tuple(sample for _index, sample in selected),
+        )
+        for (index, _sample), value in zip(selected, outputs):
+            output = decision(value, metrics=write_metrics)
             if output.label not in partitions:
                 partitions[output.label] = array("q")
             partitions[output.label].append(index)
@@ -346,10 +353,15 @@ def collect_indexed_shard(
         runtime=runtime,
         sample_indexes=sample_indexes,
     ):
-        for index, sample in batch:
-            if index in skip_indexes:
-                continue
-            output = decision(predicate(sample), metrics=write_metrics)
+        selected = tuple(
+            (index, sample) for index, sample in batch if index not in skip_indexes
+        )
+        outputs = _predicate_outputs(
+            predicate,
+            tuple(sample for _index, sample in selected),
+        )
+        for (index, _sample), value in zip(selected, outputs):
+            output = decision(value, metrics=write_metrics)
             if write_metrics and output.metrics is None:
                 raise TypeError(
                     "filter predicate must return FilterDecision when metrics=True."
@@ -368,6 +380,28 @@ def collect_indexed_shard(
                 rows = []
     if rows:
         yield _IndexedFilterChunk(rank=int(os.environ["RANK"]), rows=tuple(rows))
+
+
+def _predicate_outputs(
+    predicate: FilterPredicate,
+    samples: Sequence[Sample],
+) -> Sequence[FilterOutput]:
+    if not samples:
+        return ()
+    if not isinstance(predicate, BatchFilterPredicate):
+        return tuple(predicate(sample) for sample in samples)
+
+    outputs = predicate.call_batch(samples)
+    if isinstance(outputs, (str, bytes)) or not isinstance(outputs, Sequence):
+        raise TypeError(
+            "filter predicate call_batch() must return an ordered sequence."
+        )
+    if len(outputs) != len(samples):
+        raise ValueError(
+            "filter predicate call_batch() must return one output per input "
+            f"sample; received {len(outputs)} outputs for {len(samples)} samples."
+        )
+    return outputs
 
 
 def _worker_commit_samples(commit_samples: int) -> int:

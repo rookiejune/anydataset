@@ -487,6 +487,11 @@ metrics 会写在 filter cache 下面，每行包含原始样本下标、归一�
 `cleanup_filter_generations(...)` 入口见
 [`docs/filter_cache.md`](docs/filter_cache.md)。
 
+对已经选好的 accept 分区，偶发的廉价 CPU 硬失败可以用
+`RejectReplaceDataset` 在线替换（顺序 look-ahead，再回退到 worker 本地 accept
+buffer）。它不是缓存分区的替代品；见
+[`docs/online_filter.md`](docs/online_filter.md)。
+
 ## 质量过滤规则
 
 质量模块提供可复用的 `FilterRule` 规则类；它们不负责加载数据集，也不替调用方
@@ -1030,7 +1035,8 @@ python -m pytest -q
 ```
 
 设计说明在 [docs/design.md](docs/design.md)，filter cache 细节在
-[docs/filter_cache.md](docs/filter_cache.md)，质量过滤说明在
+[docs/filter_cache.md](docs/filter_cache.md)，在线 reject 替换说明在
+[docs/online_filter.md](docs/online_filter.md)，质量过滤说明在
 [docs/translation_quality.md](docs/translation_quality.md) 和
 [docs/speech_quality.md](docs/speech_quality.md)，远端模型进程和 runtime 配置在
 [docs/provider_service.md](docs/provider_service.md)，性能验证结果在

@@ -243,6 +243,13 @@ TTS provider 只消费已经存在的 `TextView.TEXT`、`TextView.SPEAKERS` 和�
 predicate 直接作用在 dataset 产出的完整 canonical `Sample` 上，返回 bool、字符串、
 枚举值或带 metrics 的 `FilterDecision`。库统一归一化为字符串 label，并缓存每个
 label 对应的原始样本下标。
+predicate 可选实现 `call_batch(samples)`；返回值必须是与输入等长、按位置对应的有序
+sequence。未实现时仍逐样本调用 `__call__`。
+
+在线 `RejectReplaceDataset` 不是缓存分区的替代品。它只对已经物化的 map-style
+dataset 做廉价 CPU reject 替换：顺序 look-ahead，失败后再用 worker 本地 accept
+buffer 回填，并在拒绝率偏高时 warning 或硬失败。GPU / 重模型质量规则仍走
+`FilterRule.apply`；详见 [`online_filter.md`](online_filter.md)。
 
 多设备过滤按 `Runtime.process_start_method` 启动外层进程，默认值是 `"spawn"`；默认
 配置下调用方要显式传入可 pickle 的 `dataset_factory`。库不会把已经构造好的 dataset
@@ -302,6 +309,9 @@ reader/provider/writer 进度，便于非交互 job 判断停在哪个阶段。�
   `accept`、`review`、`reject` 的链式转移。
 - `quality.speech.SpeechQuality` 读取 audio item 和同 role text，输出 `accept` 或 `reject`，
   并把阈值命中、缺字段等审计信息放进 `FilterDecision.metrics`。
+- `SpeechQuality(codec_provider=provider)` 只读取 `provider.output` 的 frame codes，通过
+  `provider.codec.decode()` 评估 codec 重建音频，不回退原始 waveform。同长度 codes 在
+  predicate batch 内合并解码，speech evaluator 仍按原样本顺序逐条执行。
 
 如果接入神经网络评估器，模型路径、阈值和版本应体现在 `FilterRule.rule_id`、
 `FilterRule.version` 或调用方配置里；filter cache 不会自动推断这些语义变化。
