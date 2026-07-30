@@ -25,6 +25,7 @@ from ..._compat import strict_zip
 from ..._io.files import atomic_write_text, stat_fingerprint
 from ..._parallel import multiprocessing_context
 from ..._logging import write_warning
+from ..._validation import validate_path_segment
 from ...cache import FileLock
 from ...types import Spec
 from .protocol import validate_load_options
@@ -331,7 +332,7 @@ class ShardedCsvDataset:
         data = _read_json(path)
         if not isinstance(data, Mapping):
             raise ValueError(f"Invalid sharded CSV parquet manifest: {path}")
-        if data.get("schema_version") != _CACHE_SCHEMA_VERSION:
+        if not _valid_cache_schema(data):
             return None
         records = data.get("files")
         if not isinstance(records, list) or len(records) != len(paths):
@@ -382,10 +383,7 @@ class ShardedCsvDataset:
         if path is None or not path.is_file():
             return {}
         data = _read_json(path)
-        if (
-            not isinstance(data, Mapping)
-            or data.get("schema_version") != _CACHE_SCHEMA_VERSION
-        ):
+        if not isinstance(data, Mapping) or not _valid_cache_schema(data):
             return {}
         records = data.get("files")
         if not isinstance(records, list):
@@ -504,6 +502,11 @@ def _source_record(path: Path) -> dict[str, Any]:
     }
 
 
+def _valid_cache_schema(data: Mapping[str, object]) -> bool:
+    version = data.get("schema_version")
+    return type(version) is int and version == _CACHE_SCHEMA_VERSION
+
+
 def _same_file_record(path: Path, record: JsonMapping) -> bool:
     return (
         record.get("path") == str(path)
@@ -526,19 +529,30 @@ def _valid_record(path: Path, record: JsonMapping, cache_dir: Path) -> bool:
     row_groups = record.get("row_groups")
     if (
         not isinstance(part, str)
-        or not isinstance(row_count, int)
+        or type(row_count) is not int
         or row_count < 0
         or not isinstance(row_groups, list)
-        or any(not isinstance(value, int) or value < 0 for value in row_groups)
+        or any(type(value) is not int or value < 0 for value in row_groups)
         or sum(row_groups) != row_count
     ):
+        return False
+    try:
+        validate_path_segment("cached parquet part", part)
+    except (TypeError, ValueError):
         return False
     parquet_path = cache_dir / part
     if not parquet_path.is_file():
         return False
-    parquet = pq.ParquetFile(parquet_path)
     try:
-        return parquet.metadata.num_rows == row_count
+        parquet = pq.ParquetFile(parquet_path)
+    except (OSError, pa.ArrowException):
+        return False
+    try:
+        actual_groups = [
+            int(parquet.metadata.row_group(group).num_rows)
+            for group in range(parquet.metadata.num_row_groups)
+        ]
+        return parquet.metadata.num_rows == row_count and actual_groups == row_groups
     finally:
         parquet.close()
 
@@ -603,6 +617,7 @@ def _conversion_progress(
 
 def _convert_file_job(job: tuple[int, Path, Path]) -> tuple[int, JsonMapping]:
     index, source, target = job
+    source_record = _source_record(source)
     names = _csv_names(source)
     table = read_csv(
         source,
@@ -612,6 +627,7 @@ def _convert_file_job(job: tuple[int, Path, Path]) -> tuple[int, JsonMapping]:
             strings_can_be_null=False,
         ),
     )
+    _validate_unchanged_source(source, source_record)
     tmp = None
     try:
         with tempfile.NamedTemporaryFile(
@@ -622,6 +638,7 @@ def _convert_file_job(job: tuple[int, Path, Path]) -> tuple[int, JsonMapping]:
         ) as file:
             tmp = Path(file.name)
         pq.write_table(table, tmp, row_group_size=_PARQUET_ROW_GROUP_SIZE)
+        _validate_unchanged_source(source, source_record)
         os.replace(tmp, target)
     except Exception:
         if tmp is not None and tmp.exists():
@@ -630,7 +647,7 @@ def _convert_file_job(job: tuple[int, Path, Path]) -> tuple[int, JsonMapping]:
     parquet = pq.ParquetFile(target)
     try:
         record = {
-            **_source_record(source),
+            **source_record,
             "part": target.name,
             "row_count": int(parquet.metadata.num_rows),
             "row_groups": [
@@ -640,7 +657,13 @@ def _convert_file_job(job: tuple[int, Path, Path]) -> tuple[int, JsonMapping]:
         }
     finally:
         parquet.close()
+    _validate_unchanged_source(source, source_record)
     return index, record
+
+
+def _validate_unchanged_source(path: Path, record: JsonMapping) -> None:
+    if not _same_file_record(path, record):
+        raise ValueError(f"CSV source changed while preparing parquet cache: {path}")
 
 
 def _csv_names(path: Path) -> tuple[str, ...]:

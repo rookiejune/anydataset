@@ -176,6 +176,14 @@ def sample_manifest_row_count(
     return sample_manifest_layout(root, cache=cache)[0]
 
 
+def sample_manifest_row_groups(
+    root: str | Path,
+    *,
+    cache: ManifestParquetCache | None = None,
+) -> tuple[int, ...]:
+    return sample_manifest_layout(root, cache=cache)[1]
+
+
 def sample_manifest_layout(
     root: str | Path,
     *,
@@ -254,6 +262,24 @@ def read_view_manifest(
 ) -> Iterator[ViewManifestEntry]:
     for row in _read_view_manifest_rows(root, view, cache=cache):
         yield _view_entry(row)
+
+
+def view_manifest_row_count(
+    root: str | Path,
+    view: tuple[Role, Modality, View],
+    *,
+    cache: ManifestParquetCache | None = None,
+) -> int:
+    return view_manifest_layout(root, view, cache=cache)[0]
+
+
+def view_manifest_row_groups(
+    root: str | Path,
+    view: tuple[Role, Modality, View],
+    *,
+    cache: ManifestParquetCache | None = None,
+) -> tuple[int, ...]:
+    return view_manifest_layout(root, view, cache=cache)[1]
 
 
 def view_manifest_layout(

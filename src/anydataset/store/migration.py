@@ -9,6 +9,7 @@ from typing_extensions import TypeGuard
 
 from .._io.atomic import replace_dir
 from .._io.parquet import parquet_schema, pyarrow
+from .._validation import validate_path_segment
 from ..types.item import Modality, Role, View
 from ._integrity import validate_store_payloads
 from .jsonio import read_json, write_json
@@ -301,8 +302,10 @@ def _view_path(view: tuple[Role, Modality, View]) -> tuple[str, str, str]:
 
 
 def _path_name(value: object) -> TypeGuard[str]:
-    return (
-        isinstance(value, str)
-        and value not in {"", ".", ".."}
-        and Path(value).name == value
-    )
+    if not isinstance(value, str):
+        return False
+    try:
+        validate_path_segment("path name", value)
+    except ValueError:
+        return False
+    return True

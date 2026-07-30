@@ -305,6 +305,48 @@ class DatasetWriterTest(unittest.TestCase):
             self.assertEqual(indexes, [0, 1, 2])
             self.assertTrue(dataset_ready_path(output).exists())
 
+    def test_fragment_metadata_rejects_boolean_integer_fields(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            fragments = root / "fragments"
+            fragment = fragments / "batch-000000000000-000000000000-a"
+            DatasetFragmentWriter(
+                fragment,
+                dataset_id="toy-audio",
+                fragment_id=fragment.name,
+            ).write(
+                [
+                    (
+                        0,
+                        audio_sample(
+                            waveform=torch.tensor([[1.0]]),
+                            sample_rate=4,
+                        ),
+                    )
+                ]
+            )
+            metadata_path = fragment / "fragment.json"
+            original = read_json(metadata_path)
+            for field, value, message in (
+                (
+                    "sample_indexes",
+                    [True],
+                    "sample_indexes entries must be integers",
+                ),
+                ("sample_count", True, "sample_count must be an integer"),
+                ("sample_count", 1.0, "sample_count must be an integer"),
+            ):
+                with self.subTest(field=field, value=value):
+                    metadata = dict(original)
+                    metadata[field] = value
+                    write_json(metadata_path, metadata)
+
+                    with self.assertRaisesRegex(ValueError, message):
+                        completed_fragment_indexes(
+                            fragments,
+                            dataset_id="toy-audio",
+                        )
+
     def test_fragment_manifest_merge_reads_one_row_per_store_lazily(self):
         stores = (Path("fragment-a"), Path("fragment-b"))
         consumed = {store: 0 for store in stores}
@@ -774,6 +816,52 @@ class DatasetWriterTest(unittest.TestCase):
             with self.assertRaisesRegex(
                 ValueError,
                 "Unsupported store schema_version: None; expected 2 or 3",
+            ):
+                commit_store_parts(
+                    root / "output",
+                    parts,
+                    dataset_id="toy-audio",
+                )
+
+    def test_commit_parts_rejects_non_integer_metadata(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            parts, part, _view, _entry = _single_audio_part(root)
+            metadata_path = part / "part.json"
+            original = read_json(metadata_path)
+
+            for field, value in (
+                ("num_shards", "1"),
+                ("num_shards", 1.0),
+                ("num_shards", True),
+                ("shard_id", "0"),
+                ("shard_id", "invalid"),
+                ("shard_id", 0.0),
+                ("shard_id", False),
+                ("sample_count", True),
+                ("sample_count", 1.0),
+            ):
+                with self.subTest(field=field, value=value):
+                    metadata = dict(original)
+                    metadata[field] = value
+                    write_json(metadata_path, metadata)
+
+                    with self.assertRaisesRegex(
+                        ValueError,
+                        rf"Part {field} must be an integer",
+                    ):
+                        commit_store_parts(
+                            root / "output",
+                            parts,
+                            dataset_id="toy-audio",
+                        )
+
+            metadata = dict(original)
+            del metadata["shard_id"]
+            write_json(metadata_path, metadata)
+            with self.assertRaisesRegex(
+                ValueError,
+                "Part shard_id must be an integer",
             ):
                 commit_store_parts(
                     root / "output",

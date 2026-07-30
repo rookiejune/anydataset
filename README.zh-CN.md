@@ -428,7 +428,7 @@ rule = FilterRule("quality_v1_parse_v3_transform_none", quality_factory)
 again = rule.apply(dataset_factory=dataset_factory, labels="accept", device="cpu")
 ```
 
-predicate 返回 `True` 会归为 `"accept"`，返回 `False` 会归为 `"reject"`；也可以直接返回字符串或枚举值。`name` 是展示名称；可以用可选的 `rule_id` 和 `version` 显式标识 predicate、parse function 和 transforms 的语义版本。省略时 `rule_id` 默认使用 `name`，兼容旧的 name-only 缓存路径。
+predicate 返回 `True` 会归为 `"accept"`，返回 `False` 会归为 `"reject"`；也可以直接返回字符串或枚举值。`name` 是可读规则名，同时为了兼容旧缓存仍参与 identity；可选的 `rule_id` 和 `version` 会增加显式的 predicate、parse function 和 transforms 语义 identity。修改三者中的任一项都会选择不同缓存。省略新字段时 `rule_id` 默认使用 `name`，兼容旧的 name-only 缓存路径。
 
 `FilteredDataset(...)` 会先检查当前 base dataset 和 rule identity 是否已经有可用缓存；没有就先构建。它默认选择缓存里所有 label；需要某些 label 时用 `select_by(...)` 基于同一份缓存派生视图。`FilterRule.apply(...)` 是便利入口，只是把自己的 rule identity 和 `factory` 转发给 `FilteredDataset`。
 
@@ -742,7 +742,8 @@ anydataset-store migrate /data/my_anydataset_v1 /data/my_anydataset_v3
 必须用 `DatasetWriter` 从原始 canonical dataset 重新物化。
 
 发布或迁移 store 前可以使用公开 integrity API。`fast` 校验 manifest 引用和 shard
-存在性，`normal` 还会解析所有被引用的 tar，默认的 `full` 进一步核对每个 payload key：
+存在性，`normal` 还会解析所有被引用的 tar 并拒绝非法或重复的 regular file member，
+默认的 `full` 进一步核对每个 manifest payload key：
 
 ```python
 from pathlib import Path

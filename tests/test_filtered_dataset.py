@@ -37,8 +37,10 @@ from anydataset.filter import (
     FilteredDataset,
     cleanup_filter_generations,
 )
+from anydataset.filter.generations import current_filter_generation
 from anydataset.filter.resume import (
     iter_filter_fragment_chunks,
+    prepare_filter_resume_dir,
     write_filter_fragment,
 )
 from anydataset.filter.types import _FilterChunk, _FilterMetricsRow
@@ -52,7 +54,7 @@ from anydataset.types import (
     Role,
 )
 from anydataset.filter.collect import collect_ranges_parallel
-from anydataset.filter.storage import read_index_rows, write_index_rows
+from anydataset.filter.storage import metrics_ready, read_index_rows, write_index_rows
 from anydataset.store import DatasetWriter
 from anydataset.store.jsonio import (
     read_json as read_store_json,
@@ -345,6 +347,22 @@ class FilteredDatasetTest(unittest.TestCase):
         self.assertEqual(_values(restored), [0])
         self.assertEqual(calls, [0, 0])
 
+    def test_current_generation_rejects_non_integer_schema_version(self):
+        for version in (True, 1.0):
+            with self.subTest(version=version):
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    root = Path(tmpdir)
+                    write_store_json(
+                        root / "current.json",
+                        {
+                            "schema_version": version,
+                            "generation": "0" * 32,
+                        },
+                    )
+
+                    with self.assertRaisesRegex(ValueError, "schema_version mismatch"):
+                        current_filter_generation(root)
+
     def test_live_lazy_index_keeps_immutable_generation(self):
         _register_rows_source("unit_test_filter_live_snapshot")
         dataset = _dataset("unit_test_filter_live_snapshot", [0, 1, 2, 3])
@@ -611,6 +629,22 @@ class FilteredDatasetTest(unittest.TestCase):
         self.assertEqual(len(rows), 2)
         self.assertEqual(calls, [0, 1, 0, 1])
 
+    def test_metrics_manifest_rejects_non_integer_schema_version(self):
+        for version in (True, 1.0):
+            with self.subTest(version=version):
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    path = Path(tmpdir)
+                    write_store_json(
+                        path / "metrics.json",
+                        {
+                            "schema_version": version,
+                            "count": 0,
+                            "files": [],
+                        },
+                    )
+
+                    self.assertFalse(metrics_ready(path, expected_count=0))
+
     def test_filter_resume_rejects_duplicate_partition_labels(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir)
@@ -627,6 +661,51 @@ class FilteredDatasetTest(unittest.TestCase):
 
             with self.assertRaisesRegex(ValueError, "Duplicate.*partition label"):
                 tuple(iter_filter_fragment_chunks(path, metrics=False))
+
+    def test_filter_resume_fragment_rejects_non_integer_schema_version(self):
+        for version in (True, 1.0):
+            with self.subTest(version=version):
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    path = Path(tmpdir)
+                    write_filter_fragment(
+                        path,
+                        (0,),
+                        _FilterChunk(partitions={"accept": [0]}, metrics=()),
+                    )
+                    fragment = next(child for child in path.iterdir() if child.is_dir())
+                    manifest_path = fragment / "fragment.json"
+                    manifest = read_store_json(manifest_path)
+                    manifest["schema_version"] = version
+                    write_store_json(manifest_path, manifest)
+
+                    with self.assertRaisesRegex(ValueError, "schema_version mismatch"):
+                        tuple(iter_filter_fragment_chunks(path, metrics=False))
+
+    def test_filter_resume_metadata_rejects_non_integer_schema_version(self):
+        for version in (True, 1.0):
+            with self.subTest(version=version):
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    cache_path = Path(tmpdir) / "cache"
+                    path = prepare_filter_resume_dir(
+                        cache_path,
+                        {"identity": "same"},
+                        metrics=False,
+                    )
+                    metadata_path = path / "resume.json"
+                    metadata = read_store_json(metadata_path)
+                    metadata["schema_version"] = version
+                    write_store_json(metadata_path, metadata)
+                    stale = path / "stale"
+                    stale.write_text("stale", encoding="utf-8")
+
+                    restored = prepare_filter_resume_dir(
+                        cache_path,
+                        {"identity": "same"},
+                        metrics=False,
+                    )
+
+                    self.assertEqual(restored, path)
+                    self.assertFalse(stale.exists())
 
     def test_filter_resume_validates_rows_against_scan_count(self):
         cases = (

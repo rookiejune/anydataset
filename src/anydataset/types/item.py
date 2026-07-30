@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any, Generic, TypeVar, Union, cast
 from typing_extensions import TypedDict
 
 from .._compat import Self, StrEnum
+from .._immutable import Immutable
 from .language import Lang
 
 KeyT = TypeVar("KeyT")
@@ -26,10 +27,29 @@ def _select(
     return {key: values[key] for key in keys}
 
 
-@dataclass
-class _Requirement(Generic[ViewT, MetaT]):
+def _restore_state(value: Immutable, state: object, kind: str) -> None:
+    if not isinstance(state, dict):
+        raise TypeError(f"invalid {kind} pickle state.")
+    if any(not isinstance(name, str) for name in state):
+        raise TypeError(f"invalid {kind} pickle state.")
+    if not {"views", "meta"}.issubset(state):
+        raise ValueError(f"{kind} pickle state is missing required fields.")
+    for name, field_value in state.items():
+        if name != "_immutable_sealed":
+            setattr(value, name, field_value)
+
+
+@dataclass(unsafe_hash=True)
+class _Requirement(Immutable, Generic[ViewT, MetaT]):
     views: frozenset[ViewT] = frozenset()
     meta: frozenset[MetaT] = frozenset()
+
+    def __post_init__(self) -> None:
+        self.seal()
+
+    def __setstate__(self, state: object) -> None:
+        _restore_state(self, state, "requirement")
+        self.__post_init__()
 
     @classmethod
     def from_iter(
@@ -43,10 +63,17 @@ class _Requirement(Generic[ViewT, MetaT]):
         )
 
 
-@dataclass
-class _Item(Generic[ViewT, MetaT]):
+@dataclass(unsafe_hash=True)
+class _Item(Immutable, Generic[ViewT, MetaT]):
     views: Mapping[ViewT, Any] = field(default_factory=dict)
     meta: Mapping[MetaT, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        self.seal()
+
+    def __setstate__(self, state: object) -> None:
+        _restore_state(self, state, "item")
+        self.__post_init__()
 
     def select_by(
         self,
@@ -84,11 +111,12 @@ class SemanticAcousticView(TypedDict):
     acoustic: Tensor
 
 
-@dataclass
+@dataclass(unsafe_hash=True)
 class AudioItem(_Item[AudioView, AudioMeta]):
     def __post_init__(self) -> None:
         self.views = _enum_mapping("AudioItem.views", self.views, AudioView)
         self.meta = _enum_mapping("AudioItem.meta", self.meta, AudioMeta)
+        self.seal()
 
 
 class ImageMeta(StrEnum):
@@ -99,11 +127,12 @@ class ImageView(StrEnum):
     PIXEL = auto()
 
 
-@dataclass
+@dataclass(unsafe_hash=True)
 class ImageItem(_Item[ImageView, ImageMeta]):
     def __post_init__(self) -> None:
         self.views = _enum_mapping("ImageItem.views", self.views, ImageView)
         self.meta = _enum_mapping("ImageItem.meta", self.meta, ImageMeta)
+        self.seal()
 
 
 class TextMeta(StrEnum):
@@ -116,14 +145,15 @@ class TextView(StrEnum):
     SPEAKERS = auto()
 
 
-@dataclass
+@dataclass(unsafe_hash=True)
 class TextItem(_Item[TextView, TextMeta]):
     def __post_init__(self) -> None:
         self.views = _enum_mapping("TextItem.views", self.views, TextView)
         self.meta = _text_meta_mapping("TextItem.meta", self.meta)
+        self.seal()
 
 
-@dataclass
+@dataclass(unsafe_hash=True)
 class AudioReq(
     _Requirement[
         AudioView,
@@ -133,9 +163,10 @@ class AudioReq(
     def __post_init__(self) -> None:
         self.views = _enum_keys("AudioReq.views", self.views, AudioView)
         self.meta = _enum_keys("AudioReq.meta", self.meta, AudioMeta)
+        self.seal()
 
 
-@dataclass
+@dataclass(unsafe_hash=True)
 class ImageReq(
     _Requirement[
         ImageView,
@@ -145,9 +176,10 @@ class ImageReq(
     def __post_init__(self) -> None:
         self.views = _enum_keys("ImageReq.views", self.views, ImageView)
         self.meta = _enum_keys("ImageReq.meta", self.meta, ImageMeta)
+        self.seal()
 
 
-@dataclass
+@dataclass(unsafe_hash=True)
 class TextReq(
     _Requirement[
         TextView,
@@ -157,6 +189,7 @@ class TextReq(
     def __post_init__(self) -> None:
         self.views = _enum_keys("TextReq.views", self.views, TextView)
         self.meta = _enum_keys("TextReq.meta", self.meta, TextMeta)
+        self.seal()
 
 
 def _enum_mapping(name: str, value: object, key_type: type[KeyT]) -> Mapping[KeyT, Any]:

@@ -771,9 +771,28 @@ def _validate_fragment_roots_with_info(
     )
 
 
+def _read_metadata(path: Path, kind: str) -> Mapping[str, object]:
+    data = read_json(path)
+    if not isinstance(data, Mapping):
+        raise ValueError(f"{kind} metadata must be a JSON object.")
+    return data
+
+
+def _metadata_integer(
+    data: Mapping[str, object],
+    name: str,
+    *,
+    kind: str,
+) -> int:
+    value = data.get(name)
+    if type(value) is not int:
+        raise ValueError(f"{kind} {name} must be an integer.")
+    return value
+
+
 def _part_sort_key(path: Path) -> tuple[int, str]:
-    data = read_json(_part_json_path(path))
-    return int(data["shard_id"]), path.name
+    data = _read_metadata(_part_json_path(path), "Part")
+    return _metadata_integer(data, "shard_id", kind="Part"), path.name
 
 
 def _validate_parts(
@@ -786,7 +805,7 @@ def _validate_parts(
     num_shards: int | None = None
     shard_ids: set[int] = set()
     for part in parts:
-        data = read_json(_part_json_path(part))
+        data = _read_metadata(_part_json_path(part), "Part")
         manifest = read_store_manifest(part)
         if data.get("dataset_id") != dataset_id:
             raise ValueError(f"Part {part} dataset_id does not match {dataset_id!r}.")
@@ -800,13 +819,14 @@ def _validate_parts(
             raise ValueError(
                 f"Part {part} store manifest split does not match metadata."
             )
-        if manifest.sample_count != data.get("sample_count"):
+        sample_count = _metadata_integer(data, "sample_count", kind="Part")
+        if manifest.sample_count != sample_count:
             raise ValueError(
                 f"Part {part} store manifest sample_count does not match metadata."
             )
         _validate_manifest_sample_count(part, manifest.sample_count, kind="Part")
-        part_num_shards = int(data["num_shards"])
-        shard_id = int(data["shard_id"])
+        part_num_shards = _metadata_integer(data, "num_shards", kind="Part")
+        shard_id = _metadata_integer(data, "shard_id", kind="Part")
         validate_shard(part_num_shards, shard_id)
         if num_shards is None:
             num_shards = part_num_shards
@@ -827,7 +847,7 @@ def _read_fragment_info(
     dataset_id: str,
     split: str | None,
 ) -> _FragmentInfo:
-    data = read_json(_fragment_json_path(path))
+    data = _read_metadata(_fragment_json_path(path), "Fragment")
     if data.get("dataset_id") != dataset_id:
         raise ValueError(f"Fragment {path} dataset_id does not match {dataset_id!r}.")
     if data.get("split") != split:
@@ -886,10 +906,10 @@ def _fragment_sample_indexes(data: Mapping[str, object]) -> tuple[int, ...]:
         raise ValueError("Fragment sample_indexes must be a list.")
     indexes: list[int] = []
     for value in raw:
-        if not isinstance(value, int):
+        if type(value) is not int:
             raise ValueError("Fragment sample_indexes entries must be integers.")
         indexes.append(value)
-    if data.get("sample_count") != len(indexes):
+    if _metadata_integer(data, "sample_count", kind="Fragment") != len(indexes):
         raise ValueError("Fragment sample_count does not match sample_indexes.")
     return tuple(indexes)
 

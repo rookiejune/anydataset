@@ -17,6 +17,8 @@ from ..store.jsonio import read_json, write_json
 from .rules import label_file_id
 from .types import JsonValue, _FilterMetricsRow, _Index
 
+_METRICS_SCHEMA_VERSION = 1
+
 
 def read_partitions(path: Path) -> dict[str, _Index]:
     path = Path(path)
@@ -65,7 +67,8 @@ def metrics_ready(path: Path, *, expected_count: int) -> bool:
     if not manifest_path.is_file():
         return False
     manifest = read_json(manifest_path)
-    if manifest.get("schema_version") != 1:
+    version = manifest.get("schema_version")
+    if type(version) is not int or version != _METRICS_SCHEMA_VERSION:
         return False
     files = list(metrics_files(manifest))
     file_count = sum(int(file["count"]) for file in manifest["files"])
@@ -154,7 +157,7 @@ class MetricsWriter:
         write_json(
             self._path / "metrics.json",
             {
-                "schema_version": 1,
+                "schema_version": _METRICS_SCHEMA_VERSION,
                 "count": self._shards.count,
                 "files": list(self._shards.files),
             },

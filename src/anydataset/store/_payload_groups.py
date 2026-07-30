@@ -107,7 +107,8 @@ def read_payload_groups(root: str | Path) -> dict[str, Any] | None:
         return None
     if not isinstance(data, dict):
         return None
-    if data.get("version") != PAYLOAD_GROUPS_VERSION:
+    version = data.get("version")
+    if type(version) is not int or version != PAYLOAD_GROUPS_VERSION:
         return None
     if type(data.get("sample_count")) is not int:
         return None

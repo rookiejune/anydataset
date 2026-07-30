@@ -25,6 +25,7 @@ from ._validation import validate_path_segment
 T = TypeVar("T")
 
 _COMPLETED_INDEX_CACHE = ".completed-indexes.jsonl"
+_COMPLETED_INDEX_CACHE_SCHEMA_VERSION = 1
 
 
 def resume_root(output_dir: str | Path) -> Path:
@@ -292,11 +293,11 @@ def append_completed_index_cache(
 
 def _completed_index_row(fragment_id: str, indexes: Sequence[int]) -> dict[str, object]:
     validate_path_segment("fragment id", fragment_id)
-    ordered = tuple(int(index) for index in indexes)
+    ordered = tuple(_completed_index(index) for index in indexes)
     if len(set(ordered)) != len(ordered):
         raise ValueError("completed indexes must be unique.")
     return {
-        "schema_version": 1,
+        "schema_version": _COMPLETED_INDEX_CACHE_SCHEMA_VERSION,
         "fragment_id": fragment_id,
         "indexes": list(ordered),
     }
@@ -309,9 +310,25 @@ def _read_completed_index_entries(path: Path) -> dict[str, tuple[int, ...]]:
             if not line.strip():
                 continue
             data = json.loads(line)
-            if data.get("schema_version") != 1:
+            if not isinstance(data, dict):
+                raise ValueError("Completed index cache row must be an object.")
+            version = data.get("schema_version")
+            if (
+                type(version) is not int
+                or version != _COMPLETED_INDEX_CACHE_SCHEMA_VERSION
+            ):
                 raise ValueError("Completed index cache schema_version mismatch.")
-            fragment_id = str(data["fragment_id"])
+            fragment_id = data.get("fragment_id")
+            if not isinstance(fragment_id, str):
+                raise ValueError(
+                    "Completed index cache fragment_id must be a path segment."
+                )
+            try:
+                validate_path_segment("Completed index cache fragment_id", fragment_id)
+            except ValueError as exc:
+                raise ValueError(
+                    "Completed index cache fragment_id must be a path segment."
+                ) from exc
             raw = data.get("indexes")
             if not isinstance(raw, list):
                 raise ValueError("Completed index cache indexes must be a list.")

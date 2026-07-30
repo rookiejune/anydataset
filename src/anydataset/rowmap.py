@@ -58,6 +58,14 @@ def labels(name: str) -> Labels:
     return Labels(name=name)
 
 
+def audio_map(fields: AudioFields) -> AudioMap:
+    return AudioMap(fields=fields)
+
+
+def image_map(fields: ImageFields) -> ImageMap:
+    return ImageMap(fields=fields)
+
+
 def text_map(
     fields: TextFields,
     *,

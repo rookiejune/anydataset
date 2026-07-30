@@ -19,7 +19,10 @@ from anydataset.store.manifestio import (
     read_sample_manifest_index,
     read_view_manifest,
     read_view_manifest_indexes,
+    sample_manifest_row_groups,
     samples_manifest_exists,
+    view_manifest_row_count,
+    view_manifest_row_groups,
     write_samples_manifest,
     write_view_manifest,
 )
@@ -126,6 +129,9 @@ class StoreTest(unittest.TestCase):
             self.assertTrue(samples_manifest_exists(root))
             self.assertEqual(tuple(read_samples_manifest(root)), (sample,))
             self.assertEqual(tuple(read_view_manifest(root, view)), (payload,))
+            self.assertEqual(sample_manifest_row_groups(root), (1,))
+            self.assertEqual(view_manifest_row_count(root, view), 1)
+            self.assertEqual(view_manifest_row_groups(root, view), (1,))
 
     def test_manifest_index_helpers_do_not_materialize_row_dicts(self):
         with tempfile.TemporaryDirectory() as tmpdir:

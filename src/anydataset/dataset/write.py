@@ -1,8 +1,7 @@
 """Parallel worker helpers for `anydataset.store.DatasetWriter`.
 
-`DatasetStoreWriter` remains available as a lazy compatibility alias. Keeping
-the import lazy avoids a cycle while `anydataset.store.writer` imports these
-helpers.
+`DatasetStoreWriter` preserves the pre-unification constructor and write
+contract while delegating storage work to the public writer.
 """
 
 from __future__ import annotations
@@ -14,7 +13,7 @@ from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from .._progress import Progress, iter_with_progress, put_progress, watch_workers
 from .._io.atomic import validate_empty_target
@@ -28,20 +27,64 @@ from .._parallel import (
     set_worker_environment,
     validate_spawn_value,
 )
+from ..store._config import DEFAULT_MAX_SHARD_SAMPLES
 from ..store._part_commit import commit_store_parts
 from ..store._part_writer import DatasetPartWriter
 from ..types.item import Modality, Role, Sample, View
 
+if TYPE_CHECKING:
+    from ..store.writer import DatasetWriter
+
 DatasetFactory = Callable[[], Any]
 
 
-def __getattr__(name: str) -> Any:
-    if name != "DatasetStoreWriter":
-        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-    from ..store.writer import DatasetWriter
+@dataclass
+class DatasetStoreWriter:
+    """Compatibility wrapper for the original parallel writer API."""
 
-    globals()[name] = DatasetWriter
-    return DatasetWriter
+    output_dir: str | Path
+    dataset_id: str | None = None
+    split: str | None = None
+    views: tuple[tuple[Role, Modality, View], ...] | None = None
+    max_shard_samples: int = DEFAULT_MAX_SHARD_SAMPLES
+    num_shards: int = 1
+    num_workers: int = 0
+    prefetch_factor: int | None = None
+
+    def __post_init__(self) -> None:
+        writer = self._writer()
+        self.output_dir = writer.output_dir
+        self.dataset_id = writer.dataset_id
+        self.views = writer.views
+        self.max_shard_samples = writer.max_shard_samples
+        self.num_shards = writer.num_shards
+        self.num_workers = writer.num_workers
+        self.prefetch_factor = writer.prefetch_factor
+
+    def write(
+        self,
+        dataset: Any | None = None,
+        *,
+        dataset_factory: DatasetFactory | None = None,
+    ) -> Path:
+        writer = self._writer()
+        if dataset is None:
+            return writer.write(dataset_factory=dataset_factory)
+        return writer.write(dataset, dataset_factory=dataset_factory)
+
+    def _writer(self) -> DatasetWriter:
+        from ..store.writer import DatasetWriter
+
+        return DatasetWriter(
+            self.output_dir,
+            dataset_id=self.dataset_id,
+            split=self.split,
+            views=self.views,
+            max_shard_samples=self.max_shard_samples,
+            num_shards=self.num_shards,
+            num_workers=self.num_workers,
+            prefetch_factor=self.prefetch_factor,
+        )
 
 
 def write_dataset_parts(

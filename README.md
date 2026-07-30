@@ -372,10 +372,11 @@ again = rule.apply(dataset_factory=dataset_factory, labels="accept", device="cpu
 ```
 
 `True` maps to `"accept"` and `False` maps to `"reject"`. String and enum
-labels are stored as their own partitions. `name` is the display name; use the
-optional `rule_id` and `version` fields to explicitly version predicate, parser,
-and transform semantics. When omitted, `rule_id` defaults to `name` and the
-legacy name-only cache path remains compatible.
+labels are stored as their own partitions. `name` is the human-readable rule
+name and remains part of the cache identity; optional `rule_id` and `version`
+fields add explicit predicate, parser, and transform identity. Changing any of
+these fields selects a different cache. When omitted, `rule_id` defaults to
+`name` and the legacy name-only cache path remains compatible.
 
 `FilteredDataset(...)` checks whether the rule identity already has a ready cache
 for the base dataset. If not, it builds the cache. It selects every available
@@ -655,7 +656,8 @@ fields or alignment.
 
 Use the public integrity API before publishing or moving a store. `fast` checks
 manifest references and shard existence, `normal` also parses every referenced
-tar archive, and the default `full` level verifies every referenced payload key:
+tar archive and rejects invalid or duplicate file members, and the default
+`full` level additionally verifies every referenced payload key:
 
 ```python
 from pathlib import Path

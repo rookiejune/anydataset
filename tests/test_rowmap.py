@@ -11,7 +11,7 @@ from anydataset.types import (
     TextMeta,
     TextView,
 )
-from anydataset.rowmap import labels, sample_from_row, text_map
+from anydataset.rowmap import audio_map, image_map, labels, sample_from_row, text_map
 from anydataset import remap_lang
 
 
@@ -142,6 +142,31 @@ class RowMapTest(unittest.TestCase):
         self.assertEqual(source.meta[TextMeta.LANG], Lang.EN)
         self.assertEqual(target.views[TextView.TEXT], "Der Tee ist heiss.")
         self.assertEqual(target.meta[TextMeta.LANG], Lang.DE)
+
+    def test_audio_and_image_map_helpers_preserve_multi_role_api(self):
+        sample = sample_from_row(
+            {
+                "audio": {"array": [0.1], "sampling_rate": 16_000},
+                "image": [[1]],
+            },
+            items={
+                (Role.SOURCE, Modality.AUDIO): audio_map(
+                    {"audio": AudioView.WAVEFORM}
+                ),
+                (Role.TARGET, Modality.IMAGE): image_map(
+                    {"image": ImageView.PIXEL}
+                ),
+            },
+        )
+
+        self.assertEqual(
+            sample[Role.SOURCE, Modality.AUDIO].views[AudioView.WAVEFORM],
+            ([0.1], 16_000),
+        )
+        self.assertEqual(
+            sample[Role.TARGET, Modality.IMAGE].views[ImageView.PIXEL],
+            [[1]],
+        )
 
     def test_sample_from_row_rejects_duplicate_references(self):
         with self.assertRaises(ValueError):

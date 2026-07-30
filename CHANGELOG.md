@@ -8,6 +8,9 @@
 - Add integrity levels, filter rule identity/versioning, lazy filter index
   iterators, bounded writer queues, allocation-efficient collation, and
   large-dataset weighted sampling.
+- Harden tar and cache sidecar validation, preserve sampling across extreme
+  finite weight ranges, and retain legacy writer, row-map, and manifest helper
+  contracts while internals use the optimized paths.
 - Change `SpeakerIdDataset` to accept explicit multi-reference
   `SpeakerAssignment` mappings, add generic grouped speaker-audio reads, and
   keep Qwen-specific synthesis outside the speaker dataset abstraction.

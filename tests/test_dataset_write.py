@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import pickle
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -14,9 +15,55 @@ def _dataset_factory() -> tuple[()]:
 
 
 class DatasetWriteTest(unittest.TestCase):
-    def test_dataset_store_writer_is_a_lazy_compatibility_alias(self):
-        self.assertIs(DatasetStoreWriter, DatasetWriter)
-        self.assertIsInstance(DatasetStoreWriter("unused"), DatasetWriter)
+    def test_dataset_store_writer_preserves_legacy_positional_constructor(self):
+        writer = DatasetStoreWriter(
+            "legacy-output",
+            "legacy",
+            "train",
+            None,
+            100,
+            4,
+            2,
+            3,
+        )
+
+        self.assertEqual(writer.output_dir, Path("legacy-output"))
+        self.assertEqual(writer.dataset_id, "legacy")
+        self.assertEqual(writer.split, "train")
+        self.assertEqual(writer.max_shard_samples, 100)
+        self.assertEqual(writer.num_shards, 4)
+        self.assertEqual(writer.num_workers, 2)
+        self.assertEqual(writer.prefetch_factor, 3)
+
+    def test_dataset_store_writer_preserves_dataset_keyword_and_factory(self):
+        writer = DatasetStoreWriter("unused")
+        delegate = mock.Mock()
+        delegate.write.side_effect = (Path("dataset"), Path("factory"))
+        dataset = ("sample",)
+
+        with mock.patch.object(writer, "_writer", return_value=delegate):
+            dataset_path = writer.write(dataset=dataset)
+            factory_path = writer.write(dataset_factory=_dataset_factory)
+
+        self.assertEqual(dataset_path, Path("dataset"))
+        self.assertEqual(factory_path, Path("factory"))
+        self.assertEqual(
+            delegate.write.call_args_list,
+            [
+                mock.call(dataset, dataset_factory=None),
+                mock.call(dataset_factory=_dataset_factory),
+            ],
+        )
+
+    def test_dataset_store_writer_remains_picklable_at_legacy_import_path(self):
+        writer = DatasetStoreWriter("legacy-output", "legacy", num_shards=2)
+
+        restored = pickle.loads(pickle.dumps(writer))
+
+        self.assertIs(type(restored), DatasetStoreWriter)
+        self.assertEqual(restored.output_dir, Path("legacy-output"))
+        self.assertEqual(restored.dataset_id, "legacy")
+        self.assertEqual(restored.num_shards, 2)
 
     def test_dataset_writer_restores_pre_parallel_pickle_state(self):
         restored = DatasetWriter.__new__(DatasetWriter)

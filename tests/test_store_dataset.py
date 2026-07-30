@@ -36,7 +36,7 @@ from anydataset.store.manifestio import (
     read_view_manifest_indexes,
     write_samples_manifest,
 )
-from anydataset.store._payload_groups import PayloadGroupCache
+from anydataset.store._payload_groups import PayloadGroupCache, read_payload_groups
 from anydataset.store.paths import (
     dataset_ready_path,
     payload_groups_path,
@@ -794,6 +794,19 @@ class StoreSourceTest(unittest.TestCase):
                 sorted(sorted(group) for group in groups),
                 [[0, 1], [2, 3]],
             )
+
+    def test_payload_groups_rejects_non_integer_version(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output = Path(tmpdir) / "dataset"
+            DatasetWriter(output, dataset_id="toy-audio").write(
+                [_audio_sample(waveform=torch.tensor([[1.0]]))]
+            )
+            path = payload_groups_path(output)
+            sidecar = read_json(path)
+            sidecar["version"] = 2.0
+            write_json(path, sidecar)
+
+            self.assertIsNone(read_payload_groups(output))
 
     def test_store_shuffle_scans_when_payload_group_checksum_is_invalid(self):
         with tempfile.TemporaryDirectory() as tmpdir:

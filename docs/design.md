@@ -249,9 +249,10 @@ label 对应的原始样本下标。
 实例包进内部闭包再传给子进程。并行读写统一使用“每个 device 一个进程，进程内可选
 DataLoader workers”的模型；只解析出一个 device 时不启动外层 device worker。
 
-`FilterRule` 保留 `name` 作为展示字段，并支持显式 `rule_id` 和 `version`。后两者会进入
-缓存路径、metadata、pickle/factory 恢复和 equality；修改 predicate、factory、parse function
-或 transforms 时应更新版本。未提供新字段的旧调用继续使用 name-only cache path。
+`FilterRule` 保留 `name` 作为可读名称和缓存 identity 的兼容字段，并支持显式 `rule_id` 和
+`version`。三者都会进入缓存路径、metadata、pickle/factory 恢复和 equality；修改其中任一项
+都会选择不同缓存。修改 predicate、factory、parse function 或 transforms 时应更新版本。
+未提供新字段的旧调用继续使用 name-only cache path。
 
 缓存根目录统一由 `ANYDATASET_HOME` 控制。物理 source prepare cache 写在
 `$ANYDATASET_HOME/cache/sources/<spec_id>`，只由 `Spec` 决定。filter cache 写在

@@ -13,6 +13,7 @@ import torch
 
 from .._io.files import StatFingerprint as _StatFingerprint
 from .._io.files import stat_fingerprint as _stat_fingerprint
+from .._validation import validate_path_segment
 from ..types.item import AudioView, Modality, Role, TextView, View
 from .jsonio import read_json, write_json
 from .manifest import ViewManifestEntry
@@ -152,9 +153,7 @@ class PayloadCache:
 
     @staticmethod
     def _load_members(opened: _OpenArchive) -> None:
-        opened.members = {
-            member.name: member for member in opened.archive.getmembers()
-        }
+        opened.members = _payload_members(opened.archive)
         opened.members_complete = True
         opened.verified_members.clear()
 
@@ -212,7 +211,12 @@ def read_payload_bytes(
         return cache.read(root, view, entry)
     shard_path = _payload_shard_path(root, view, entry)
     with tarfile.open(shard_path, "r") as archive:
-        payload = archive.extractfile(entry.key)
+        member = _payload_members(archive).get(entry.key)
+        if member is None:
+            raise KeyError(
+                f"View shard {entry.shard!r} is missing payload {entry.key!r}."
+            )
+        payload = archive.extractfile(member)
         if payload is None:
             raise KeyError(
                 f"View shard {entry.shard!r} is missing payload {entry.key!r}."
@@ -222,6 +226,7 @@ def read_payload_bytes(
 
 
 def add_payload(archive: tarfile.TarFile, payload: Payload) -> None:
+    _validate_payload_key(payload.key)
     info = tarfile.TarInfo(payload.key)
     info.size = len(payload.data)
     info.mtime = 0
@@ -243,18 +248,13 @@ def write_payload_index(
     path = view_shard_path(root, view, shard)
     fingerprint = _stat_fingerprint(path.stat())
     with tarfile.open(path, "r") as archive:
-        members: dict[str, dict[str, int]] = {}
-        for member in archive:
-            if not member.isfile():
-                continue
-            if member.name in members:
-                raise ValueError(
-                    f"View shard {path} has duplicate payload key {member.name!r}."
-                )
-            members[member.name] = {
+        members = {
+            member.name: {
                 "offset": member.offset_data,
                 "size": member.size,
             }
+            for member in _payload_members(archive).values()
+        }
     index_path = view_shard_index_path(root, view, shard)
     write_json(
         index_path,
@@ -358,8 +358,21 @@ def _waveform_value(value: Any) -> tuple[torch.Tensor, int]:
 
 
 def _validate_payload_key(key: str) -> None:
-    if Path(key).name != key:
-        raise ValueError("View payload keys cannot contain path separators.")
+    validate_path_segment("View payload key", key)
+
+
+def _payload_members(archive: tarfile.TarFile) -> dict[str, tarfile.TarInfo]:
+    members: dict[str, tarfile.TarInfo] = {}
+    for member in archive.getmembers():
+        if not member.isfile():
+            continue
+        if member.name in members:
+            raise ValueError(
+                f"View shard has duplicate payload key {member.name!r}."
+            )
+        _validate_payload_key(member.name)
+        members[member.name] = member
+    return members
 
 
 def _payload_shard_path(
@@ -383,7 +396,14 @@ def _read_payload_index(
         data = read_json(index_path)
     except (FileNotFoundError, OSError, ValueError, TypeError):
         return None
-    if not isinstance(data, dict) or data.get("version") != PAYLOAD_INDEX_VERSION:
+    if not isinstance(data, dict):
+        return None
+    version = data.get("version")
+    if (
+        not isinstance(version, int)
+        or isinstance(version, bool)
+        or version != PAYLOAD_INDEX_VERSION
+    ):
         return None
     raw_fingerprint = data.get("fingerprint")
     if (
@@ -401,7 +421,9 @@ def _read_payload_index(
         return None
     members: dict[str, tarfile.TarInfo] = {}
     for name, raw_member in raw_members.items():
-        if not isinstance(name, str) or Path(name).name != name:
+        try:
+            _validate_payload_key(name)
+        except (TypeError, ValueError):
             return None
         if not isinstance(raw_member, dict):
             return None

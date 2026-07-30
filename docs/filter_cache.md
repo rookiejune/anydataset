@@ -66,11 +66,13 @@ Predicate return values are normalized to string labels:
   string.
 - `FilterDecision` carries a label plus optional per-sample metrics.
 
-`FilterRule.name` is the display name. The optional `rule_id` and `version` fields
-form the explicit cache identity; when omitted, `rule_id` defaults to `name` and
-the original name-only cache path remains compatible. The factory, predicate,
-dataset `parse_fn`, and dataset transforms are deliberately not inspected by the
-library. Update `version` (or the legacy `name`) when those semantics change.
+`FilterRule.name` is the human-readable rule name and remains part of the cache
+identity. The optional `rule_id` and `version` fields add explicit identity;
+changing any of the three fields selects a different cache. When omitted,
+`rule_id` defaults to `name` and the original name-only cache path remains
+compatible. The factory, predicate, dataset `parse_fn`, and dataset transforms
+are deliberately not inspected by the library. Update `version` (or the legacy
+`name`) when those semantics change.
 
 Cache layout:
 

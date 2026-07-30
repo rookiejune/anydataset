@@ -3,7 +3,7 @@ from __future__ import annotations
 import random
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
-from math import isfinite
+from math import isfinite, nextafter
 from typing import Iterator, Protocol
 
 from torch.utils.data import IterableDataset
@@ -59,7 +59,7 @@ class WeightedRandomStrategy:
             yield from self._iter_choices(active, active_weights, rng)
             return
 
-        sampler = _FenwickWeights(active_weights)
+        sampler = _WeightTree(active_weights)
         remaining = len(active)
         while remaining:
             index = sampler.choose(rng)
@@ -121,39 +121,54 @@ def _cumulative_weights(weights: Sequence[float]) -> list[float]:
     return output
 
 
-class _FenwickWeights:
+class _WeightTree:
     def __init__(self, weights: Sequence[float]) -> None:
-        scale = max(weights)
-        self._weights = [weight / scale for weight in weights]
-        self._tree = [0.0] * (len(self._weights) + 1)
-        for index, weight in enumerate(self._weights, start=1):
-            self._add(index, weight)
-        self._total = sum(self._weights)
+        self._weights = list(weights)
+        self._active = sum(weight > 0.0 for weight in self._weights)
+        self._size = 1 << (len(self._weights) - 1).bit_length()
+        self._tree = [0.0] * (self._size * 2)
+        self._rebuild()
 
     def choose(self, rng: random.Random) -> int:
-        target = rng.random() * self._total
-        index = 0
-        step = 1 << (len(self._weights).bit_length() - 1)
-        while step:
-            candidate = index + step
-            if candidate < len(self._tree) and self._tree[candidate] <= target:
-                index = candidate
-                target -= self._tree[candidate]
-            step >>= 1
-        return index
+        total = self._tree[1]
+        if total <= 0.0:
+            raise RuntimeError("weighted sampler has no active weight.")
+        target = min(rng.random() * total, nextafter(total, 0.0))
+        node = 1
+        while node < self._size:
+            left = node * 2
+            left_weight = self._tree[left]
+            if target < left_weight:
+                node = left
+            else:
+                target = min(
+                    target - left_weight,
+                    nextafter(self._tree[left + 1], 0.0),
+                )
+                node = left + 1
+        return node - self._size
 
     def remove(self, index: int) -> None:
         weight = self._weights[index]
         if weight == 0.0:
             return
         self._weights[index] = 0.0
-        self._add(index + 1, -weight)
-        self._total -= weight
+        self._active -= 1
+        node = self._size + index
+        self._tree[node] = 0.0
+        while node > 1:
+            node //= 2
+            self._tree[node] = self._tree[node * 2] + self._tree[node * 2 + 1]
+        if self._active > 0 and self._tree[1] == 0.0:
+            self._rebuild()
 
-    def _add(self, index: int, value: float) -> None:
-        while index < len(self._tree):
-            self._tree[index] += value
-            index += index & -index
+    def _rebuild(self) -> None:
+        scale = max(self._weights)
+        for index in range(self._size):
+            weight = self._weights[index] if index < len(self._weights) else 0.0
+            self._tree[self._size + index] = weight / scale if scale > 0.0 else 0.0
+        for node in range(self._size - 1, 0, -1):
+            self._tree[node] = self._tree[node * 2] + self._tree[node * 2 + 1]
 
 
 @dataclass

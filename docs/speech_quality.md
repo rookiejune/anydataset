@@ -83,6 +83,7 @@ evaluator(audio, sample_rate, reference_text=reference_text, **decode_options)
 
 and must return finite scalar metrics named `utmos`, `wer`, `chrf`, and `bleu`.
 
-`FilterRule.name` is the display name. Put evaluator model, decode options,
-threshold, parser, and transform versions in `rule_id`/`version` when cache reuse
-should change; the legacy name-only form remains supported.
+`FilterRule.name` is the human-readable name and remains part of cache identity
+for compatibility. Put evaluator model, decode options, threshold, parser, and
+transform versions in `rule_id`/`version`; changing any identity field selects a
+different cache. The legacy name-only form remains supported.

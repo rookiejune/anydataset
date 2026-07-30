@@ -104,6 +104,22 @@ class TranslationQualityTest(unittest.TestCase):
         self.assertEqual(pickle.loads(pickle.dumps(text_profile)), text_profile)
         self.assertEqual(hash(text_quality), hash(text_quality))
 
+    def test_quality_configuration_restores_legacy_unsealed_pickle_state(self):
+        current = TextQualityProfile()
+        state = vars(current).copy()
+        state.pop("_immutable_sealed")
+        legacy = TextQualityProfile.__new__(TextQualityProfile)
+        vars(legacy).update(state)
+
+        restored = pickle.loads(pickle.dumps(legacy))
+
+        self.assertEqual(restored, current)
+        with self.assertRaises(FrozenInstanceError):
+            restored.min_chars = 2
+        invalid = TextQualityProfile.__new__(TextQualityProfile)
+        with self.assertRaisesRegex(TypeError, "invalid immutable pickle state"):
+            invalid.__setstate__(("not", "a", "dict"))
+
     def test_pair_accepts_clean_pair(self):
         predicate = TranslationQuality(
             TranslationQualityProfile(source_lang=Lang.EN, target_lang=Lang.FR)

@@ -93,7 +93,8 @@ def current_filter_generation(path: Path) -> Path:
     value = read_json(root / _CURRENT_FILE)
     if not isinstance(value, Mapping):
         raise ValueError("Filter current generation pointer must be a mapping.")
-    if value.get("schema_version") != _POINTER_SCHEMA_VERSION:
+    version = value.get("schema_version")
+    if type(version) is not int or version != _POINTER_SCHEMA_VERSION:
         raise ValueError("Filter current generation pointer schema_version mismatch.")
     generation = value.get("generation")
     if not isinstance(generation, str) or not _valid_generation_id(generation):

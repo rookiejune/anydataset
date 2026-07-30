@@ -35,6 +35,7 @@ from .types import JsonValue, _FilterChunk, _FilterMetricsRow
 _INDEXES_FILE = "indexes.parquet"
 _METRICS_FILE = "metrics.parquet"
 _RESUME_DIR = "filter"
+_SCHEMA_VERSION = 1
 
 
 def prepare_filter_resume_dir(
@@ -142,7 +143,7 @@ def _write_fragment(
     write_json(
         path / "fragment.json",
         {
-            "schema_version": 1,
+            "schema_version": _SCHEMA_VERSION,
             "pid": os.getpid(),
             "fragment_id": fragment_id,
             "scan_count": len(scan_indexes),
@@ -163,7 +164,7 @@ def _resume_metadata(
     metrics: bool,
 ) -> dict[str, object]:
     return {
-        "schema_version": 1,
+        "schema_version": _SCHEMA_VERSION,
         "metrics": metrics,
         "cache_metadata": dict(metadata),
     }
@@ -173,7 +174,13 @@ def _stored_resume_metadata(path: Path) -> Mapping[str, object] | None:
     metadata_path = path / "resume.json"
     if not metadata_path.is_file():
         return None
-    return read_json(metadata_path)
+    data = read_json(metadata_path)
+    if not isinstance(data, Mapping):
+        return None
+    version = data.get("schema_version")
+    if type(version) is not int or version != _SCHEMA_VERSION:
+        return None
+    return data
 
 
 def _read_fragment_chunk(path: Path, *, metrics: bool) -> _FilterChunk:
@@ -284,7 +291,8 @@ def _fragment_scan_count(data: Mapping[str, object]) -> int:
 
 def _read_fragment_manifest(path: Path) -> Mapping[str, object]:
     data = read_json(path / "fragment.json")
-    if data.get("schema_version") != 1:
+    version = data.get("schema_version")
+    if type(version) is not int or version != _SCHEMA_VERSION:
         raise ValueError("Filter resume fragment schema_version mismatch.")
     if data.get("fragment_id") != path.name:
         raise ValueError(f"Filter resume fragment {path} id mismatch.")

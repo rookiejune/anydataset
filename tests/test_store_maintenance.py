@@ -9,7 +9,9 @@ import sys
 import tarfile
 import tempfile
 import unittest
+from io import BytesIO
 from pathlib import Path
+from unittest import mock
 
 import torch
 
@@ -23,7 +25,7 @@ from anydataset.store import (
     validate_store_view_payloads,
 )
 from anydataset.store.jsonio import read_json, write_json
-from anydataset.store.manifest import STORE_SCHEMA_VERSION
+from anydataset.store.manifest import STORE_SCHEMA_VERSION, ViewManifestEntry
 from anydataset.store.manifestio import read_sample_manifest_index
 from anydataset.store.paths import view_manifest_parquet_path, view_shard_path
 from anydataset.store.reader import read_store_dataset
@@ -134,6 +136,23 @@ class StoreMigrationTest(unittest.TestCase):
             ):
                 migrate_store(source, output)
 
+    def test_migrate_store_rejects_non_portable_v1_path_segments(self):
+        view = (Role.DEFAULT, Modality.TEXT, TextView.TEXT)
+        for column, value, message in (
+            ("shard", "nested\\000000.tar", "invalid shard name"),
+            ("key", "nested\\payload.txt", "invalid payload key"),
+        ):
+            with self.subTest(column=column), tempfile.TemporaryDirectory() as tmpdir:
+                source = Path(tmpdir) / "v1"
+                output = Path(tmpdir) / "output"
+                _write_v1_store(source)
+                _replace_first_view_value(source, view, column, value)
+
+                with self.assertRaisesRegex(ValueError, message):
+                    migrate_store(source, output)
+
+                self.assertFalse(output.exists())
+
 
 class StoreIntegrityTest(unittest.TestCase):
     def test_integrity_levels_validate_increasing_payload_detail(self):
@@ -158,6 +177,65 @@ class StoreIntegrityTest(unittest.TestCase):
     def test_integrity_rejects_unknown_level(self):
         with self.assertRaisesRegex(ValueError, "integrity level"):
             validate_store_payloads((), level="unknown")  # type: ignore[arg-type]
+
+    def test_fast_integrity_rejects_non_portable_manifest_payload_keys(self):
+        view = (Role.DEFAULT, Modality.TEXT, TextView.TEXT)
+        for key in ("", ".", "..", "nested/payload.txt", "nested\\payload.txt"):
+            entry = ViewManifestEntry(*view, 0, "000000.tar", key)
+            with self.subTest(key=key), mock.patch(
+                "anydataset.store._integrity.read_view_manifest",
+                return_value=iter((entry,)),
+            ):
+                with self.assertRaisesRegex(ValueError, "invalid payload key"):
+                    validate_store_view_payloads(Path("unused"), view, level="fast")
+
+    def test_integrity_rejects_duplicate_tar_payload_members(self):
+        view = (Role.DEFAULT, Modality.TEXT, TextView.TEXT)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir) / "store"
+            _write_store(root)
+            shard = view_shard_path(root, view, "000000.tar")
+            with tarfile.open(shard, "w") as archive:
+                _add_tar_member(archive, "000000000000.txt")
+                _add_tar_member(archive, "000000000000.txt")
+
+            validate_store_view_payloads(root, view, level="fast")
+            for level in ("normal", "full"):
+                with self.subTest(level=level):
+                    with self.assertRaisesRegex(ValueError, "duplicate payload key"):
+                        validate_store_view_payloads(root, view, level=level)
+
+    def test_integrity_ignores_non_file_member_with_payload_name(self):
+        view = (Role.DEFAULT, Modality.TEXT, TextView.TEXT)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir) / "store"
+            _write_store(root)
+            shard = view_shard_path(root, view, "000000.tar")
+            with tarfile.open(shard, "w") as archive:
+                _add_tar_member(archive, "000000000000.txt")
+                _add_tar_member(archive, "000000000001.txt")
+                directory = tarfile.TarInfo("000000000000.txt")
+                directory.type = tarfile.DIRTYPE
+                archive.addfile(directory)
+
+            for level in ("normal", "full"):
+                with self.subTest(level=level):
+                    validate_store_view_payloads(root, view, level=level)
+
+    def test_integrity_rejects_non_portable_tar_payload_keys(self):
+        view = (Role.DEFAULT, Modality.TEXT, TextView.TEXT)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir) / "store"
+            _write_store(root)
+            shard = view_shard_path(root, view, "000000.tar")
+            with tarfile.open(shard, "w") as archive:
+                _add_tar_member(archive, "nested\\payload.txt")
+
+            validate_store_view_payloads(root, view, level="fast")
+            for level in ("normal", "full"):
+                with self.subTest(level=level):
+                    with self.assertRaisesRegex(ValueError, "invalid payload key"):
+                        validate_store_view_payloads(root, view, level=level)
 
 
 class StoreFilesCleanupTest(unittest.TestCase):
@@ -378,16 +456,25 @@ def _rewrite_view_manifest_as_v1(root: Path, view) -> None:
 
 
 def _replace_first_sample_id(root: Path, view, sample_id: str) -> None:
+    _replace_first_view_value(root, view, "sample_id", sample_id)
+
+
+def _replace_first_view_value(
+    root: Path,
+    view,
+    column_name: str,
+    value: str,
+) -> None:
     import pyarrow as pa
     import pyarrow.parquet as pq
 
     path = view_manifest_parquet_path(root, view)
     table = pq.read_table(path)
-    column = table.schema.get_field_index("sample_id")
-    values = table["sample_id"].to_pylist()
-    values[0] = sample_id
+    column = table.schema.get_field_index(column_name)
+    values = table[column_name].to_pylist()
+    values[0] = value
     pq.write_table(
-        table.set_column(column, "sample_id", pa.array(values)),
+        table.set_column(column, column_name, pa.array(values)),
         path,
     )
 
@@ -415,6 +502,13 @@ raise SystemExit(1)
         text=True,
         env=env,
     )
+
+
+def _add_tar_member(archive: tarfile.TarFile, name: str) -> None:
+    data = b"payload"
+    info = tarfile.TarInfo(name)
+    info.size = len(data)
+    archive.addfile(info, BytesIO(data))
 
 
 if __name__ == "__main__":

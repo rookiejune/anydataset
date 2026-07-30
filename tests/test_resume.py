@@ -1,3 +1,4 @@
+import json
 import pickle
 import tempfile
 import unittest
@@ -155,6 +156,52 @@ class ResumeHelpersTest(unittest.TestCase):
                 cached_completed_indexes(root, ("batch-b", "batch-a")),
                 frozenset({0, 2, 3}),
             )
+
+    def test_completed_index_cache_rejects_non_integer_schema_version(self):
+        for version in (True, 1.0):
+            with self.subTest(version=version):
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    root = Path(tmpdir)
+                    write_completed_index_cache(root, (("batch-a", (0,)),))
+                    path = root / ".completed-indexes.jsonl"
+                    row = json.loads(path.read_text(encoding="utf-8"))
+                    row["schema_version"] = version
+                    path.write_text(json.dumps(row) + "\n", encoding="utf-8")
+
+                    with self.assertRaisesRegex(ValueError, "schema_version mismatch"):
+                        cached_completed_indexes(root, ("batch-a",))
+
+    def test_completed_index_cache_rejects_non_integer_write_indexes(self):
+        for index in (True, 1.0, "1"):
+            with self.subTest(index=index):
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    with self.assertRaisesRegex(ValueError, "entries must be integers"):
+                        write_completed_index_cache(
+                            Path(tmpdir),
+                            (("batch-a", (index,)),),
+                        )
+
+    def test_completed_index_cache_rejects_invalid_serialized_rows(self):
+        cases = (
+            ([], "row must be an object"),
+            (
+                {"schema_version": 1, "fragment_id": 1, "indexes": [0]},
+                "fragment_id must be a path segment",
+            ),
+            (
+                {"schema_version": 1, "fragment_id": "../batch-a", "indexes": [0]},
+                "fragment_id must be a path segment",
+            ),
+        )
+        for row, message in cases:
+            with self.subTest(row=row):
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    root = Path(tmpdir)
+                    path = root / ".completed-indexes.jsonl"
+                    path.write_text(json.dumps(row) + "\n", encoding="utf-8")
+
+                    with self.assertRaisesRegex(ValueError, message):
+                        cached_completed_indexes(root, ("batch-a",))
 
     def test_completed_index_cache_ignores_fragment_mismatch(self):
         with tempfile.TemporaryDirectory() as tmpdir:

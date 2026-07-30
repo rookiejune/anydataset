@@ -36,6 +36,10 @@ from anydataset.types import (
 from anydataset.presets import WMT19
 
 
+class _ExtendedTextReq(TextReq):
+    tag: str
+
+
 class CanonicalDatasetTest(unittest.TestCase):
     def test_dataset_uses_falsey_callable_parser(self):
         dataset = AnyDataset(
@@ -92,15 +96,62 @@ class CanonicalDatasetTest(unittest.TestCase):
         with self.assertRaisesRegex(TypeError, "TextMeta.LANG"):
             TextItem(meta={TextMeta.LANG: [Lang.EN, "de"]})
 
-    def test_items_and_requirements_are_explicitly_mutable(self):
+    def test_items_and_requirements_are_immutable(self):
         item = TextItem(views={TextView.TEXT: "before"})
         requirement = TextReq(views={TextView.TEXT})
 
-        item.views = {TextView.TEXT: "after"}
-        requirement.views = frozenset()
+        with self.assertRaises(FrozenInstanceError):
+            item.views = {TextView.TEXT: "after"}
+        with self.assertRaises(FrozenInstanceError):
+            requirement.views = frozenset()
+        with self.assertRaises(FrozenInstanceError):
+            del item.meta
+        restored = pickle.loads(pickle.dumps(requirement))
+        with self.assertRaises(FrozenInstanceError):
+            restored.meta = frozenset()
+        legacy_item = TextItem.__new__(TextItem)
+        legacy_item.__setstate__(
+            {
+                "views": {TextView.TEXT: "legacy"},
+                "meta": {},
+            }
+        )
+        with self.assertRaises(FrozenInstanceError):
+            legacy_item.views = {}
+        legacy_requirement = TextReq.__new__(TextReq)
+        legacy_requirement.__setstate__(
+            {
+                "views": frozenset({TextView.TEXT}),
+                "meta": frozenset(),
+            }
+        )
+        with self.assertRaises(FrozenInstanceError):
+            legacy_requirement.views = frozenset()
+        extended_requirement = _ExtendedTextReq.__new__(_ExtendedTextReq)
+        extended_requirement.__setstate__(
+            {
+                "views": frozenset({TextView.TEXT}),
+                "meta": frozenset(),
+                "tag": "preserved",
+            }
+        )
+        with self.assertRaises(FrozenInstanceError):
+            extended_requirement.tag = "changed"
+        invalid_legacy_item = AudioItem.__new__(AudioItem)
+        with self.assertRaises(TypeError):
+            invalid_legacy_item.__setstate__(
+                {
+                    "views": {TextView.TEXT: "wrong"},
+                    "meta": {},
+                }
+            )
 
-        self.assertEqual(item.views[TextView.TEXT], "after")
-        self.assertEqual(requirement.views, frozenset())
+        self.assertEqual(item.views[TextView.TEXT], "before")
+        self.assertEqual(requirement.views, frozenset({TextView.TEXT}))
+        self.assertEqual(hash(requirement), hash(TextReq(views={TextView.TEXT})))
+        self.assertEqual(legacy_item.views[TextView.TEXT], "legacy")
+        self.assertEqual(hash(legacy_requirement), hash(requirement))
+        self.assertEqual(extended_requirement.tag, "preserved")
 
     def test_resolves_preset_to_spec(self):
         spec = resolve_dataset("fleurs:validation")
