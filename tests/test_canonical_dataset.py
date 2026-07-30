@@ -10,7 +10,6 @@ import torch
 from anydataset import (
     AnyDataset,
     IterableAnyDataset,
-    MultipleAnyDataset,
     Preset,
     Source,
     Spec,
@@ -646,47 +645,6 @@ class CanonicalDatasetTest(unittest.TestCase):
             values = list(dataset.iter_indexed_runtime_shard())
 
         self.assertEqual(values, [(1, 1), (3, 3), (5, 5), (7, 7)])
-
-    def test_multiple_dataset_splits_pytorch_workers(self):
-        dataset = MultipleAnyDataset([_map_dataset(range(6))])
-        worker = _WorkerInfo(num_workers=2, id=1)
-
-        with mock.patch("anydataset._sharding.get_worker_info", return_value=worker):
-            values = list(dataset)
-
-        self.assertEqual(values, [1, 3, 5])
-
-    def test_multiple_dataset_merges_rank_and_worker_shards(self):
-        dataset = MultipleAnyDataset([_map_dataset(range(24))])
-        worker = _WorkerInfo(num_workers=4, id=2)
-
-        with (
-            mock.patch("anydataset._sharding.dist.is_available", return_value=True),
-            mock.patch("anydataset._sharding.dist.is_initialized", return_value=True),
-            mock.patch("anydataset._sharding.dist.get_world_size", return_value=3),
-            mock.patch("anydataset._sharding.dist.get_rank", return_value=1),
-            mock.patch("anydataset._sharding.get_worker_info", return_value=worker),
-        ):
-            values = list(dataset)
-
-        self.assertEqual(values, [7, 19])
-
-    def test_multiple_dataset_uses_child_runtime_rank_shards(self):
-        values_by_rank: list[list[int]] = []
-
-        for rank in range(4):
-            dataset = MultipleAnyDataset([_map_dataset(range(7))])
-            worker = _WorkerInfo(num_workers=8, id=0)
-            with (
-                mock.patch("anydataset._sharding.dist.is_available", return_value=True),
-                mock.patch("anydataset._sharding.dist.is_initialized", return_value=True),
-                mock.patch("anydataset._sharding.dist.get_world_size", return_value=4),
-                mock.patch("anydataset._sharding.dist.get_rank", return_value=rank),
-                mock.patch("anydataset._sharding.get_worker_info", return_value=worker),
-            ):
-                values_by_rank.append(list(dataset))
-
-        self.assertEqual(values_by_rank, [[0], [1], [2], [3]])
 
     def test_collate_fn_pads_tensor_last_dim_and_returns_masks(self):
         ref = (Role.DEFAULT, Modality.AUDIO)

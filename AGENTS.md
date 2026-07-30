@@ -7,7 +7,6 @@
 - `Preset` 负责把内置数据集映射到具体 `Spec`，并通过 `parse_fn` 把 raw row 转成 canonical `Sample`。
 - `Sample` 统一使用 `Mapping[tuple[Role, Modality], Item]`，不要恢复旧的 wrapper / `.data` 结构。
 - `AnyDataset` 表示 map-style 数据集；`IterableAnyDataset` 表示 iterable 数据集。
-- `MultipleAnyDataset` 只组合已经构造好的 dataset，迭代顺序交给 `IterationStrategy`；组合本身不作为 filter cache 身份。
 - store 的公开入口是 `DatasetWriter`、`ViewMaterializer`、
   `ModalityMaterializer`、provider 类型和 `Source.STORE`。part、fragment、manifest
   读写与 commit helper 都是内部实现。

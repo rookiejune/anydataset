@@ -20,13 +20,6 @@ from .morphology import (
     speech_grid_batch,
     speech_grid_collate,
 )
-from .multiple import (
-    IterationStrategy,
-    MultipleAnyDataset,
-    RoundRobinStrategy,
-    SequentialStrategy,
-    WeightedRandomStrategy,
-)
 from .selection import IndexSelection
 from .speaker import (
     GroupedSpeakerAudioDataset,
@@ -49,12 +42,8 @@ __all__ = [
     "AudioLoader",
     "IterableAnyDataset",
     "IndexSelection",
-    "IterationStrategy",
     "MapStyleABC",
     "Morphology",
-    "MultipleAnyDataset",
-    "RoundRobinStrategy",
-    "SequentialStrategy",
     "GroupedSpeakerAudioDataset",
     "SpeakerAudioBlock",
     "SpeakerAudioGrid",
@@ -68,7 +57,6 @@ __all__ = [
     "SpeechGridBatch",
     "SpeechGridView",
     "TextRef",
-    "WeightedRandomStrategy",
     "audio_collate",
     "build_toy_audio_dataset",
     "build_toy_speech_dataset",

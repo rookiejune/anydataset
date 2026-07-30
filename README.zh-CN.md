@@ -255,51 +255,6 @@ Hugging Face `streaming=True` 会被拒绝；请使用非 streaming 的 `Source.
 `Source.HF_DISK`。`IterableAnyDataset.iter_shard` 与 `iter_indexed_shard` 共用同一
 dense global modulo 分区，不会机会主义地调用 raw dataset 的 `shard()`。
 
-## 组合数据集
-
-`MultipleAnyDataset` 可以把多个数据集组合成一个 iterable dataset。组合后的迭代顺序由
-strategy 决定；默认 `SequentialStrategy` 会按顺序耗尽每个 child。
-
-```python
-from anydataset import AnyDataset, MultipleAnyDataset
-from anydataset.dataset import RoundRobinStrategy
-
-dataset = MultipleAnyDataset(
-    datasets=[
-        AnyDataset.preset("fleurs", split="train", config_name="en_us"),
-        AnyDataset.preset("librispeech_asr", split="train.100"),
-    ],
-    strategy=RoundRobinStrategy(),
-)
-```
-
-按权重决定下一个读取哪个 active child：
-
-```python
-from anydataset import AnyDataset, MultipleAnyDataset
-from anydataset.dataset import WeightedRandomStrategy
-
-dataset = MultipleAnyDataset(
-    datasets=[
-        AnyDataset.preset("fleurs", split="train", config_name="en_us"),
-        AnyDataset.preset("librispeech_asr", split="train.100"),
-    ],
-    strategy=WeightedRandomStrategy(weights=[1.0, 2.0], seed=13),
-)
-```
-
-`WeightedRandomStrategy` 只改变交错顺序，不做有放回重采样；所有正权重 child 最终都会
-被耗尽。`RoundRobinStrategy` 则在仍有数据的 child 之间均匀轮转。
-
-分布式训练或多 worker 读取时，可以在 dataset 层做 shard：
-
-```python
-rank_iter = dataset.iter_shard(num_shards=8, shard_id=0)
-```
-
-`MultipleAnyDataset` 本身不作为 filter cache identity；应先过滤或缓存各 child，再进行
-组合。
-
 ## 用 Schema 构造 DataLoader
 
 `Schema` 是从 `(Role, Modality)` 到 requirement 的映射。requirement 指定这个 batch 需要哪些 view 和字段。
@@ -310,6 +265,12 @@ rank_iter = dataset.iter_shard(num_shards=8, shard_id=0)
 - `Modality` 表达数据类型，例如 `AUDIO`、`TEXT`、`IMAGE`。
 - `View` 表达同一份数据的具体表示，例如音频的 waveform、file、LongCat codes。
 - `Meta` 表达标签、语言等旁信息。
+
+分布式训练或多 worker 读取时，可以在 dataset 层做 shard：
+
+```python
+rank_iter = dataset.iter_shard(num_shards=8, shard_id=0)
+```
 
 ```python
 from anydataset.types import (
@@ -615,7 +576,7 @@ from anydataset.types import ImageMeta
 labels = batch.sample[(Role.DEFAULT, Modality.IMAGE)].meta[ImageMeta.LABEL]
 ```
 
-schema 里声明的 meta 字段必须在 batch 的每条样本中都存在；如果某个数据集不支持该字段，应在 dataset 组合或 `IterationStrategy` 层按任务拆开，而不是让 collator 在同一个 batch 里补空位。非 tensor 值会返回 list。
+schema 里声明的 meta 字段必须在 batch 的每条样本中都存在；如果某个数据集不支持该字段，应在 dataset 组合层按任务拆开，而不是让 collator 在同一个 batch 里补空位。非 tensor 值会返回 list。
 
 ## Store 和多视图
 

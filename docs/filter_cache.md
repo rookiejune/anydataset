@@ -116,9 +116,7 @@ $ANYDATASET_HOME/
 
 `dataset_hash` is derived from the dataset class and physical `Spec` id for a
 single physical dataset. Store manifest provenance is included automatically,
-so a materializer input or provider version change selects a new cache. A
-`MultipleAnyDataset` is not a filter cache identity; filter or cache the child
-datasets independently before combining them.
+so a materializer input or provider version change selects a new cache.
 
 For a mutable or application-owned input, pass a non-empty `input_id`:
 

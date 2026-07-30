@@ -239,38 +239,13 @@ time, so it does not allocate a full-dataset Python index list. Set
 preparation in restricted environments; the default uses bounded automatic
 parallelism.
 
-## Multiple Datasets
-
-Combine already-created datasets with `MultipleAnyDataset`.
-
-```python
-from anydataset import AnyDataset, MultipleAnyDataset
-from anydataset.dataset import RoundRobinStrategy
-
-dataset = MultipleAnyDataset(
-    [
-        AnyDataset.preset("fleurs", split="train"),
-        AnyDataset.preset("librispeech_asr", split="train.100"),
-    ],
-    strategy=RoundRobinStrategy(),
-)
-```
-
-Every dataset exposes `iter_shard(num_shards, shard_id)` for distributed reads.
-`MultipleAnyDataset` itself is not a filter cache identity; filter or cache the
-child datasets before combining them.
-
-The default `SequentialStrategy` exhausts each child in order.
-`RoundRobinStrategy` interleaves active children evenly, while
-`WeightedRandomStrategy(weights=..., seed=...)` uses weights to choose the next
-active child. It changes interleaving order rather than resampling: every child
-with a positive weight is still exhausted.
-
 ## DataLoader Schemas
 
 `Schema` maps each `(Role, Modality)` reference to the views and metadata that
 a training batch needs. `collate_fn(schema)` selects those fields and returns a
 `Batch`; it does not fill in missing fields implicitly.
+
+Every dataset exposes `iter_shard(num_shards, shard_id)` for distributed reads.
 
 ```python
 from torch.utils.data import DataLoader

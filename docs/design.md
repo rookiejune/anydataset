@@ -94,8 +94,7 @@ pool，默认值保留自动并行策略。`prepare_workers` 只影响转换并�
 modulo 分区。`IterableAnyDataset` 不会机会主义地调用 raw dataset 的 `shard()`。
 
 Map-style `iter_runtime_shard` 在多卡时会丢弃不能被 `rank_count` 整除的尾部样本；
-iterable 路径不做该截断。混合 `MultipleAnyDataset([map, iterable])` 时，各子数据集
-相对长度可能因该差异而不一致，调用方需自行对齐或显式配置。
+iterable 路径不做该截断。
 
 ## 派生 View
 
@@ -276,8 +275,7 @@ DataLoader workers”的模型；只解析出一个 device 时不启动外层 de
 `$ANYDATASET_HOME/cache/filters/<dataset_id>/<rule_id>`，其中物理 dataset 的
 `dataset_id` 由 dataset class、`Spec` 和 store manifest provenance 决定；filtered view
 会把上游 identity、rule 和 label 纳入 identity。对于内容或顺序由业务工程管理的输入，
-调用方用非空 `input_id` 版本化整个输入快照，并在输入变化时更新。`MultipleAnyDataset`
-不作为整体建立 filter cache identity；调用方应先对各子 dataset 做过滤或缓存，再组合。
+调用方用非空 `input_id` 版本化整个输入快照，并在输入变化时更新。
 store 的 `AudioView.FILE` payload 解包到
 `$ANYDATASET_HOME/cache/store-files/<store_id>`，cache identity 包含 view、shard、
 payload key 和 shard fingerprint，写入使用同目录原子替换。派生文件被外部清理后会按需

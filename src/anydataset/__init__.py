@@ -1,7 +1,6 @@
 from ._version import __version__
 from .cache import anydataset_home
 from .dataset.abc import AnyDataset, IterableAnyDataset
-from .dataset.multiple import MultipleAnyDataset
 from .dataset.source import has_source, register_source
 from .filter import FilterRule
 from .types import Lang, Preset, Source, Spec, Task, remap_lang
@@ -12,7 +11,6 @@ __all__ = [
     "FilterRule",
     "IterableAnyDataset",
     "Lang",
-    "MultipleAnyDataset",
     "Preset",
     "Source",
     "Spec",
