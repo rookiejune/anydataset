@@ -9,7 +9,11 @@ from ..view import (
     ViewProvider,
     ViewTransform,
 )
-from .materialize.materializer import ModalityMaterializer, ViewMaterializer
+from .materialize.materializer import (
+    MaterializationStatus,
+    ModalityMaterializer,
+    ViewMaterializer,
+)
 from .writer import DatasetWriter
 
 __all__ = [
@@ -19,6 +23,7 @@ __all__ = [
     "FunctionModalityProvider",
     "FunctionViewProvider",
     "ModalityMaterializer",
+    "MaterializationStatus",
     "ModalityProvider",
     "ModalityTransform",
     "Provider",

@@ -15,7 +15,7 @@ from anydataset import AnyDataset, Source, Spec
 from anydataset.dataset.collate import FieldGroup, FieldRef
 from anydataset.provider_service import ProviderServer, RemoteProviderFactory
 from anydataset.runtime import Runtime
-from anydataset.store import ModalityMaterializer
+from anydataset.store import MaterializationStatus, ModalityMaterializer
 from anydataset.types import (
     AudioItem,
     AudioMeta,
@@ -932,6 +932,61 @@ class ViewMaterializerTest(unittest.TestCase):
             self.assertTrue(torch.equal(source_waveform, torch.tensor([[5.0]])))
             self.assertTrue(torch.equal(target_waveform, torch.tensor([[2.0]])))
 
+    def test_modality_materializer_limits_roles(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = root / "target"
+            samples = (
+                _role_text_sample(source_text="hello", target_text="hi"),
+            )
+
+            ModalityMaterializer(
+                target,
+                split="train",
+                roles={Role.TARGET},
+            ).write(
+                dataset_factory=_DatasetFactory(samples),
+                provider_factory=_TTSProviderFactory(),
+                devices="cpu",
+            )
+
+            stored = read_store_dataset(target)
+            self.assertEqual(
+                set(stored[0]),
+                {(Role.TARGET, Modality.AUDIO)},
+            )
+
+    def test_modality_materializer_limits_batch_roles(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = root / "target"
+            samples = (
+                _role_text_sample(source_text="hello", target_text="hi"),
+                _role_text_sample(source_text="world", target_text="ok"),
+            )
+            provider = _MultiRoleTTSProvider()
+
+            ModalityMaterializer(
+                target,
+                split="train",
+                batch_size=2,
+                roles={Role.TARGET},
+            ).write(
+                dataset_factory=_DatasetFactory(samples),
+                provider_factory=_StaticProviderFactory(provider),
+                devices="cpu",
+            )
+
+            self.assertEqual(
+                provider.batch_refs,
+                [((Role.TARGET, Modality.TEXT),)],
+            )
+            stored = read_store_dataset(target)
+            self.assertEqual(
+                set(stored[0]),
+                {(Role.TARGET, Modality.AUDIO)},
+            )
+
     def test_modality_materializer_uses_batch_only_provider_at_batch_size_one(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -1439,6 +1494,197 @@ class ViewMaterializerTest(unittest.TestCase):
                         torch.tensor([[index]]),
                     )
                 )
+
+    def test_materializer_stages_max_new_samples_then_finalizes(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = root / "target"
+            samples = tuple(
+                _audio_sample(torch.tensor([[float(index)]]))
+                for index in range(5)
+            )
+            dataset_factory = _DatasetFactory(samples)
+            provider_factory = _ProviderFactory()
+            materializer = ViewMaterializer(
+                target,
+                split="train",
+                commit_samples=2,
+            )
+
+            first = materializer.write(
+                dataset_factory=dataset_factory,
+                provider_factory=provider_factory,
+                devices="cpu",
+                max_new_samples=2,
+                finalize=False,
+            )
+            self.assertIsInstance(first, MaterializationStatus)
+            self.assertEqual(first.completed, 2)
+            self.assertEqual(first.expected, 5)
+            self.assertEqual(first.pending, 3)
+            self.assertFalse(target.exists())
+
+            second = materializer.write(
+                dataset_factory=dataset_factory,
+                provider_factory=provider_factory,
+                devices="cpu",
+                max_new_samples=2,
+                finalize=False,
+            )
+            self.assertIsInstance(second, MaterializationStatus)
+            self.assertEqual(second.completed, 4)
+            self.assertEqual(second.pending, 1)
+
+            output = materializer.write(
+                dataset_factory=dataset_factory,
+                provider_factory=provider_factory,
+                devices="cpu",
+            )
+            self.assertEqual(output, target)
+            self.assertEqual(len(read_store_dataset(target)), 5)
+            self.assertFalse((root / ".target.resume").exists())
+
+    def test_materializer_stages_explicit_sample_indexes(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = root / "target"
+            samples = tuple(
+                _audio_sample(torch.tensor([[float(index)]]))
+                for index in range(5)
+            )
+            dataset_factory = _DatasetFactory(samples)
+            provider_factory = _ProviderFactory()
+            materializer = ViewMaterializer(target, split="train")
+
+            status = materializer.write(
+                dataset_factory=dataset_factory,
+                provider_factory=provider_factory,
+                devices="cpu",
+                sample_indexes=(1, 3),
+                finalize=False,
+            )
+            self.assertIsInstance(status, MaterializationStatus)
+            self.assertEqual(status.completed, 2)
+
+            materializer.write(
+                dataset_factory=dataset_factory,
+                provider_factory=provider_factory,
+                devices="cpu",
+            )
+            self.assertEqual(
+                [entry.sample_index for entry in read_samples_manifest(target)],
+                list(range(5)),
+            )
+
+    def test_materializer_snapshot_publishes_dense_prefix(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = root / "target"
+            snapshot = root / "snapshot"
+            samples = tuple(
+                _audio_sample(torch.tensor([[float(index)]]))
+                for index in range(5)
+            )
+            dataset_factory = _DatasetFactory(samples)
+            provider_factory = _ProviderFactory()
+            materializer = ViewMaterializer(target, split="train")
+
+            materializer.write(
+                dataset_factory=dataset_factory,
+                provider_factory=provider_factory,
+                devices="cpu",
+                max_new_samples=2,
+                finalize=False,
+            )
+            materializer.snapshot(
+                snapshot,
+                dataset_factory=dataset_factory,
+                provider_factory=provider_factory,
+            )
+
+            self.assertFalse(target.exists())
+            self.assertEqual(len(read_store_dataset(snapshot)), 2)
+            self.assertTrue((root / ".target.resume").exists())
+
+            materializer.write(
+                dataset_factory=dataset_factory,
+                provider_factory=provider_factory,
+                devices="cpu",
+            )
+            self.assertEqual(len(read_store_dataset(target)), 5)
+            self.assertEqual(len(read_store_dataset(snapshot)), 2)
+
+    def test_materializer_snapshot_rejects_sparse_completion(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = root / "target"
+            samples = tuple(
+                _audio_sample(torch.tensor([[float(index)]]))
+                for index in range(4)
+            )
+            dataset_factory = _DatasetFactory(samples)
+            provider_factory = _ProviderFactory()
+            materializer = ViewMaterializer(target, split="train")
+
+            materializer.write(
+                dataset_factory=dataset_factory,
+                provider_factory=provider_factory,
+                devices="cpu",
+                sample_indexes=(1, 3),
+                finalize=False,
+            )
+
+            with self.assertRaisesRegex(ValueError, "dense completed prefix"):
+                materializer.snapshot(
+                    root / "snapshot",
+                    dataset_factory=dataset_factory,
+                    provider_factory=provider_factory,
+                )
+
+    def test_materializer_rejects_bounded_finalization(self):
+        materializer = ViewMaterializer("target")
+
+        with self.assertRaisesRegex(ValueError, "require finalize=False"):
+            materializer.write(
+                dataset_factory=_DatasetFactory(()),
+                provider_factory=_ProviderFactory(),
+                devices="cpu",
+                max_new_samples=1,
+            )
+
+    def test_materializer_stages_parallel_work_then_finalizes(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = root / "target"
+            samples = tuple(
+                _audio_sample(torch.tensor([[float(index)]]))
+                for index in range(4)
+            )
+            dataset_factory = _DatasetFactory(samples)
+            provider_factory = _ParallelProviderFactory()
+            materializer = ViewMaterializer(
+                target,
+                split="train",
+                commit_samples=1,
+            )
+
+            status = materializer.write(
+                dataset_factory=dataset_factory,
+                provider_factory=provider_factory,
+                devices=("cpu:0", "cpu:1"),
+                max_new_samples=2,
+                finalize=False,
+            )
+            self.assertIsInstance(status, MaterializationStatus)
+            self.assertEqual(status.completed, 2)
+
+            materializer.write(
+                dataset_factory=dataset_factory,
+                provider_factory=provider_factory,
+                devices=("cpu:0", "cpu:1"),
+            )
+            self.assertEqual(len(read_store_dataset(target)), 4)
+            self.assertFalse((root / ".target.resume").exists())
 
     def test_modality_materializer_resume_continues_from_completed_batches(self):
         with tempfile.TemporaryDirectory() as tmpdir:

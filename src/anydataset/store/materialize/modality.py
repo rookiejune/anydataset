@@ -6,7 +6,7 @@ exactly one non-output input modality, and generated items do not inherit meta.
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Mapping
+from collections.abc import Collection, Iterator, Mapping
 from typing import Any
 
 from ...types.item import (
@@ -28,22 +28,25 @@ from .types import ModalityProviderLike, output_modality, views
 def with_modality_provider(
     sample: Sample,
     provider: ModalityProviderLike,
+    *,
+    roles: Collection[Role] | None = None,
 ) -> Sample:
     output = provider.output
     out_modality = output_modality(output)
     reference_role = getattr(provider, "reference_role", None)
-    roles = role_items(sample)
+    role_map = role_items(sample)
     return {
         (role, out_modality): with_modality_view(
             output,
             provider(
-                input_views(roles, role, input_item, out_modality, reference_role)
+                input_views(role_map, role, input_item, out_modality, reference_role)
             ),
         )
         for role, input_item in modality_inputs(
-            roles,
+            role_map,
             out_modality,
             reference_role,
+            selected_roles=roles,
         )
     }
 
@@ -62,6 +65,7 @@ def modality_inputs(
     roles: Mapping[Role, Mapping[Modality, Item]],
     output: Modality,
     reference_role: Role | None = None,
+    selected_roles: Collection[Role] | None = None,
 ) -> Iterator[tuple[Role, Item]]:
     if reference_role is not None:
         reference_items = roles.get(reference_role)
@@ -72,6 +76,8 @@ def modality_inputs(
             )
 
     for role, items in roles.items():
+        if selected_roles is not None and role not in selected_roles:
+            continue
         if output in items:
             if role is reference_role:
                 continue

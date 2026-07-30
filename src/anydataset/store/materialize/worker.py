@@ -16,7 +16,7 @@ from ..._runtime.parallel import (
 )
 from ..._runtime.progress import Progress, put_progress
 from ...runtime import Runtime
-from ...types.item import Schema
+from ...types.item import Role, Schema
 from .types import MaterializerProvider
 from ..part.commit import commit_fragment_part, store_fragments
 
@@ -37,6 +37,7 @@ class WorkerConfig:
     write_workers: int
     write_prefetch: int | None
     keep_schema: Schema | None
+    roles: frozenset[Role] | None
     mode: MaterializerMode
     runtime: Runtime
     use_map_style_loader: bool
@@ -51,6 +52,7 @@ class WorkerConfig:
     shard_id: int
     master_addr: str
     master_port: str
+    finalize: bool
 
 
 def materialize_worker(
@@ -99,22 +101,23 @@ def materialize_worker(
                 progress=progress,
                 worker_id=config.shard_id,
             )
-            logger.info("waiting to merge shard %s fragments", config.shard_id)
-            barrier.wait()
-            fragments = store_fragments(
-                config.fragments_dir,
-                dataset_id=materializer._dataset_id,
-                split=config.split,
-            )
-            assigned = fragments[config.shard_id :: config.num_shards]
-            commit_fragment_part(
-                config.parts_dir / f"part-{config.shard_id:05d}",
-                assigned,
-                dataset_id=materializer._dataset_id,
-                split=config.split,
-                shard_id=config.shard_id,
-                num_shards=config.num_shards,
-            )
+            if config.finalize:
+                logger.info("waiting to merge shard %s fragments", config.shard_id)
+                barrier.wait()
+                fragments = store_fragments(
+                    config.fragments_dir,
+                    dataset_id=materializer._dataset_id,
+                    split=config.split,
+                )
+                assigned = fragments[config.shard_id :: config.num_shards]
+                commit_fragment_part(
+                    config.parts_dir / f"part-{config.shard_id:05d}",
+                    assigned,
+                    dataset_id=materializer._dataset_id,
+                    split=config.split,
+                    shard_id=config.shard_id,
+                    num_shards=config.num_shards,
+                )
         except Exception:
             error = traceback.format_exc()
             logger.error("worker failed\n%s", error)
@@ -130,8 +133,8 @@ def worker_materializer(config: WorkerConfig):
     from .materializer import ModalityMaterializer, ViewMaterializer
 
     cls = ModalityMaterializer if config.mode == "modality" else ViewMaterializer
-    return cls(
-        config.output_dir,
+    kwargs = dict(
+        output_dir=config.output_dir,
         split=config.split,
         max_shard_samples=config.max_shard_samples,
         batch_size=config.batch_size,
@@ -143,6 +146,9 @@ def worker_materializer(config: WorkerConfig):
         keep_schema=config.keep_schema,
         runtime=config.runtime,
     )
+    if config.mode == "modality":
+        kwargs["roles"] = config.roles
+    return cls(**kwargs)
 
 
 def shard_missing_count(indexes: Sequence[int], num_shards: int, shard_id: int) -> int:

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from collections.abc import Callable, Iterable, Iterator, Sequence
+from collections.abc import Callable, Collection, Iterable, Iterator, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, cast
@@ -37,14 +37,19 @@ from ..._runtime.resume import (
     indexes_complete,
     log_resume_summary,
     missing_indexes,
+    resume_dir,
     validate_completed_indexes,
 )
-from ..._validation import non_negative_int, optional_positive_int, positive_int
+from ..._validation import (
+    non_negative_int,
+    optional_positive_int,
+    positive_int,
+)
 from ...cache import FileLock
 from ...runtime import Runtime
 from ...types._sample import combine as combine_samples
 from ...types._sample import select as select_sample
-from ...types.item import Sample, Schema
+from ...types.item import Role, Sample, Schema
 from ...view import Provider
 from .batch import (
     indexed_sample_batches,
@@ -59,6 +64,7 @@ from .identity import callable_id, metadata_value, optional_semantic_id
 from .resume import (
     materializer_lock_path,
     prepare_materializer_resume_dir,
+    stored_resume_metadata,
 )
 from .worker import WorkerConfig, materialize_worker
 from .modality import with_modality_provider
@@ -85,6 +91,20 @@ _COMMIT_PROGRESS_STAGES = (
     "link-shards",
 )
 DEFAULT_COMMIT_SAMPLES = 1024
+
+
+@dataclass(frozen=True)
+class MaterializationStatus:
+    """Progress returned when a materialization is intentionally left open."""
+
+    output_dir: Path
+    expected: int
+    completed: int
+    finalized: bool = False
+
+    @property
+    def pending(self) -> int:
+        return self.expected - self.completed
 
 
 @dataclass
@@ -147,7 +167,22 @@ class ViewMaterializer:
         dataset_factory: DatasetFactory,
         provider_factory: ProviderFactory,
         devices: Devices = "auto",
-    ) -> Path:
+        sample_indexes: Sequence[int] | None = None,
+        max_new_samples: int | None = None,
+        finalize: bool = True,
+    ) -> Path | MaterializationStatus:
+        if not isinstance(finalize, bool):
+            raise TypeError("finalize must be a boolean.")
+        if sample_indexes is not None and max_new_samples is not None:
+            raise ValueError(
+                "sample_indexes and max_new_samples are mutually exclusive."
+            )
+        if finalize and (sample_indexes is not None or max_new_samples is not None):
+            raise ValueError(
+                "sample_indexes and max_new_samples require finalize=False."
+            )
+        if max_new_samples is not None:
+            max_new_samples = positive_int("max_new_samples", max_new_samples)
         resolved = resolve_devices(devices)
         if len(resolved) > 1 or self.num_workers > 0:
             validate_process_parent(
@@ -160,6 +195,67 @@ class ViewMaterializer:
                 dataset_factory=dataset_factory,
                 provider_factory=provider_factory,
                 devices=resolved,
+                sample_indexes=sample_indexes,
+                max_new_samples=max_new_samples,
+                finalize=finalize,
+            )
+
+    def snapshot(
+        self,
+        output_dir: str | Path,
+        *,
+        dataset_factory: DatasetFactory,
+        provider_factory: ProviderFactory,
+    ) -> Path:
+        """Publish the currently completed dense prefix without closing the run."""
+
+        target = Path(output_dir).expanduser()
+        source = Path(self.output_dir).expanduser()
+        if target.resolve() == source.resolve():
+            raise ValueError(
+                "snapshot output_dir must differ from materializer output_dir."
+            )
+        with FileLock(materializer_lock_path(source)):
+            fragments_dir = resume_dir(source, "fragments")
+            dataset = dataset_factory()
+            expected = dataset_sample_count(dataset, context="snapshot")
+            expected_metadata = self._resume_metadata(
+                dataset,
+                dataset_factory=dataset_factory,
+                provider_factory=provider_factory,
+                expected=expected,
+                use_map_style_loader=can_select_indexes(dataset),
+            )
+            if stored_resume_metadata(fragments_dir) != expected_metadata:
+                raise ValueError(
+                    "Snapshot materializer identity does not match the resume state."
+                )
+            completed = tuple(
+                sorted(
+                    validate_completed_indexes(
+                        completed_fragment_indexes(
+                            fragments_dir,
+                            dataset_id=self._dataset_id,
+                            split=self.split,
+                        ),
+                        expected,
+                    )
+                )
+            )
+            if not completed:
+                raise ValueError("No completed materialization samples to snapshot.")
+            if completed != tuple(range(len(completed))):
+                raise ValueError(
+                    "A materialization snapshot requires a dense completed prefix "
+                    "starting at sample index 0."
+                )
+            return commit_store_fragments(
+                target,
+                fragments_dir,
+                dataset_id=self._dataset_id,
+                split=self.split,
+                expected_sample_count=len(completed),
+                provenance=self._provenance,
             )
 
     def _write_resumable(
@@ -168,7 +264,10 @@ class ViewMaterializer:
         dataset_factory: DatasetFactory,
         provider_factory: ProviderFactory,
         devices: tuple[str, ...],
-    ) -> Path:
+        sample_indexes: Sequence[int] | None,
+        max_new_samples: int | None,
+        finalize: bool,
+    ) -> Path | MaterializationStatus:
         if len(devices) == 1:
             device = devices[0]
             if self.runtime.uses_local_device:
@@ -177,11 +276,17 @@ class ViewMaterializer:
                 dataset_factory=dataset_factory,
                 provider_factory=provider_factory,
                 device=device,
+                sample_indexes=sample_indexes,
+                max_new_samples=max_new_samples,
+                finalize=finalize,
             )
         return self._write_resumable_devices(
             dataset_factory=dataset_factory,
             provider_factory=provider_factory,
             devices=devices,
+            sample_indexes=sample_indexes,
+            max_new_samples=max_new_samples,
+            finalize=finalize,
         )
 
     def _write_resumable_devices(
@@ -190,7 +295,10 @@ class ViewMaterializer:
         dataset_factory: DatasetFactory,
         provider_factory: ProviderFactory,
         devices: tuple[str, ...],
-    ) -> Path:
+        sample_indexes: Sequence[int] | None,
+        max_new_samples: int | None,
+        finalize: bool,
+    ) -> Path | MaterializationStatus:
         validate_process_value(
             "dataset_factory",
             dataset_factory,
@@ -224,10 +332,19 @@ class ViewMaterializer:
             ),
             expected,
         )
-        if indexes_complete(completed, expected):
-            return self._commit_fragments(fragments_dir, expected)
-
-        missing = missing_indexes(completed, expected)
+        missing = self._work_indexes(
+            completed,
+            expected,
+            sample_indexes=sample_indexes,
+            max_new_samples=max_new_samples,
+            use_map_style_loader=use_map_style_loader,
+        )
+        if not missing:
+            return self._finish_resumable(
+                fragments_dir,
+                expected,
+                finalize=finalize,
+            )
         log_resume_summary(
             "materializer",
             expected=expected,
@@ -249,8 +366,24 @@ class ViewMaterializer:
             use_map_style_loader=use_map_style_loader,
             completed_count=len(completed),
             missing_indexes=missing,
+            finalize=finalize,
         )
-        return self._commit_parts(fragments_dir / ".parts")
+        if not finalize:
+            completed = validate_completed_indexes(
+                completed_fragment_indexes(
+                    fragments_dir,
+                    dataset_id=self._dataset_id,
+                    split=self.split,
+                ),
+                expected,
+            )
+            return self._status(expected, completed)
+        return self._finish_resumable(
+            fragments_dir,
+            expected,
+            finalize=True,
+            parts=True,
+        )
 
     def _write_resumable_single(
         self,
@@ -258,7 +391,10 @@ class ViewMaterializer:
         dataset_factory: DatasetFactory,
         provider_factory: ProviderFactory,
         device: str,
-    ) -> Path:
+        sample_indexes: Sequence[int] | None,
+        max_new_samples: int | None,
+        finalize: bool,
+    ) -> Path | MaterializationStatus:
         output_dir = Path(self.output_dir).expanduser()
         dataset = dataset_factory()
         expected = dataset_sample_count(dataset, context="resume")
@@ -281,10 +417,19 @@ class ViewMaterializer:
             ),
             expected,
         )
-        if indexes_complete(completed, expected):
-            return self._commit_fragments(fragments_dir, expected)
-
-        missing = missing_indexes(completed, expected)
+        missing = self._work_indexes(
+            completed,
+            expected,
+            sample_indexes=sample_indexes,
+            max_new_samples=max_new_samples,
+            use_map_style_loader=use_map_style_loader,
+        )
+        if not missing:
+            return self._finish_resumable(
+                fragments_dir,
+                expected,
+                finalize=finalize,
+            )
         log_resume_summary(
             "materializer",
             expected=expected,
@@ -334,7 +479,79 @@ class ViewMaterializer:
                     expected=expected,
                     progress=progress,
                 )
-        return self._commit_fragments(fragments_dir, expected)
+        return self._finish_resumable(
+            fragments_dir,
+            expected,
+            finalize=finalize,
+        )
+
+    def _work_indexes(
+        self,
+        completed: frozenset[int],
+        expected: int,
+        *,
+        sample_indexes: Sequence[int] | None,
+        max_new_samples: int | None,
+        use_map_style_loader: bool,
+    ) -> Sequence[int]:
+        if sample_indexes is not None:
+            if not use_map_style_loader:
+                raise TypeError(
+                    "sample_indexes requires a map-style dataset."
+                )
+            selected = _validate_sample_indexes(sample_indexes, expected)
+            return tuple(index for index in selected if index not in completed)
+        missing = missing_indexes(completed, expected)
+        if max_new_samples is not None:
+            if not use_map_style_loader:
+                raise TypeError(
+                    "max_new_samples requires a map-style dataset."
+                )
+            return missing[:max_new_samples]
+        return missing
+
+    def _finish_resumable(
+        self,
+        fragments_dir: Path,
+        expected: int,
+        *,
+        finalize: bool,
+        parts: bool = False,
+    ) -> Path | MaterializationStatus:
+        completed = validate_completed_indexes(
+            completed_fragment_indexes(
+                fragments_dir,
+                dataset_id=self._dataset_id,
+                split=self.split,
+            ),
+            expected,
+        )
+        if not indexes_complete(completed, expected):
+            if finalize:
+                raise RuntimeError(
+                    "Materialization is incomplete; call write(finalize=False) "
+                    "for staged work or provide the remaining samples. "
+                    f"{expected - len(completed)} samples remain."
+                )
+            return self._status(expected, completed)
+        if not finalize:
+            return self._status(expected, completed)
+        if parts:
+            path = self._commit_parts(fragments_dir / ".parts")
+        else:
+            path = self._commit_fragments(fragments_dir, expected)
+        return path
+
+    def _status(
+        self,
+        expected: int,
+        completed: Collection[int],
+    ) -> MaterializationStatus:
+        return MaterializationStatus(
+            output_dir=Path(self.output_dir).expanduser(),
+            expected=expected,
+            completed=len(completed),
+        )
 
     def _commit_fragments(
         self,
@@ -466,6 +683,7 @@ class ViewMaterializer:
         use_map_style_loader: bool,
         completed_count: int,
         missing_indexes: Sequence[int],
+        finalize: bool = True,
     ) -> None:
         commit_samples = self.commit_samples
         if commit_samples is None:
@@ -490,6 +708,7 @@ class ViewMaterializer:
                         write_workers=self.write_workers,
                         write_prefetch=self.write_prefetch,
                         keep_schema=self.keep_schema,
+                        roles=self._materializer_roles,
                         mode=self._materializer_mode,
                         runtime=self.runtime,
                         use_map_style_loader=use_map_style_loader,
@@ -504,6 +723,7 @@ class ViewMaterializer:
                         shard_id=shard_id,
                         master_addr=master_addr,
                         master_port=master_port,
+                        finalize=finalize,
                     ),
                     dataset_factory,
                     provider_factory,
@@ -552,6 +772,10 @@ class ViewMaterializer:
     def _materializer_mode(self) -> _MaterializerMode:
         return "view"
 
+    @property
+    def _materializer_roles(self) -> frozenset[Role] | None:
+        return None
+
     def _resume_metadata(
         self,
         dataset: Any,
@@ -562,7 +786,7 @@ class ViewMaterializer:
         use_map_style_loader: bool,
     ) -> dict[str, object]:
         return {
-            "schema_version": 3,
+            "schema_version": 4,
             "materializer": {
                 "mode": self._materializer_mode,
                 "dataset_id": self._dataset_id,
@@ -570,6 +794,7 @@ class ViewMaterializer:
                 "max_shard_samples": self.max_shard_samples,
                 "batch_size": self.batch_size,
                 "keep_schema": metadata_value(self.keep_schema),
+                "roles": metadata_value(self._materializer_roles),
             },
             "input": {
                 "type": f"{type(dataset).__module__}.{type(dataset).__qualname__}",
@@ -706,6 +931,24 @@ class ViewMaterializer:
 
 @dataclass
 class ModalityMaterializer(ViewMaterializer):
+    roles: frozenset[Role] | None = None
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        if self.roles is not None:
+            if not isinstance(self.roles, (set, frozenset, tuple, list)):
+                raise TypeError("roles must be a collection of Role values or None.")
+            normalized = frozenset(self.roles)
+            if not normalized:
+                raise ValueError("roles must not be empty.")
+            if any(not isinstance(role, Role) for role in normalized):
+                raise TypeError("roles must contain at least one Role value.")
+            self.roles = normalized
+
+    @property
+    def _materializer_roles(self) -> frozenset[Role] | None:
+        return self.roles
+
     @property
     def _materializer_mode(self) -> _MaterializerMode:
         return "modality"
@@ -717,7 +960,11 @@ class ModalityMaterializer(ViewMaterializer):
     ) -> Sample:
         return self._output_sample(
             sample,
-            with_modality_provider(sample, cast(ModalityProviderLike, provider)),
+            with_modality_provider(
+                sample,
+                cast(ModalityProviderLike, provider),
+                roles=self.roles,
+            ),
         )
 
     def _samples_with_batch_provider(
@@ -730,6 +977,7 @@ class ModalityMaterializer(ViewMaterializer):
             with_batch_modality_provider(
                 samples,
                 cast(ModalityProviderLike, provider),
+                selected_roles=self.roles,
             ),
         )
 
@@ -764,3 +1012,28 @@ def _commit_progress(dashboard: ProgressDashboard) -> Callable[[str, int], None]
 
 def _dataset_id(output_dir: str | Path) -> str:
     return Path(output_dir).expanduser().name or "dataset"
+
+
+def _validate_sample_indexes(
+    indexes: Sequence[int],
+    expected: int,
+) -> tuple[int, ...]:
+    if isinstance(indexes, (str, bytes, bytearray)) or not isinstance(
+        indexes,
+        Sequence,
+    ):
+        raise TypeError("sample_indexes must be a sequence of integers.")
+    result: list[int] = []
+    previous = -1
+    for position, index in enumerate(indexes):
+        if type(index) is not int:
+            raise TypeError(f"sample_indexes[{position}] must be an integer.")
+        if index <= previous:
+            raise ValueError("sample_indexes must be strictly increasing.")
+        if index < 0 or index >= expected:
+            raise ValueError(
+                f"sample_indexes[{position}] is outside the dataset: {index}."
+            )
+        result.append(index)
+        previous = index
+    return tuple(result)

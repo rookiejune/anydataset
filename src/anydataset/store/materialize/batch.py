@@ -6,7 +6,7 @@ CUDA out-of-memory batches by splitting them into smaller calls.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
 from typing import Any
 
 import torch
@@ -94,11 +94,18 @@ def with_batch_view_provider(
 def with_batch_modality_provider(
     samples: Sequence[Sample],
     provider: ModalityProviderLike,
+    *,
+    selected_roles: Collection[Role] | None = None,
 ) -> Iterator[Sample]:
     output = provider.output
     out_modality = output_modality(output)
     reference_role = getattr(provider, "reference_role", None)
-    roles = _batch_modality_input_roles(samples, out_modality, reference_role)
+    roles = _batch_modality_input_roles(
+        samples,
+        out_modality,
+        reference_role,
+        selected_roles=selected_roles,
+    )
     outputs: list[dict[tuple[Role, Modality], Item]] = [{} for _ in samples]
     input_refs = {
         role: _batch_modality_input_ref(samples, role, out_modality)
@@ -144,6 +151,8 @@ def _batch_modality_input_roles(
     samples: Sequence[Sample],
     output: Modality,
     reference_role: Role | None,
+    *,
+    selected_roles: Collection[Role] | None = None,
 ) -> tuple[Role, ...]:
     if not samples:
         return ()
@@ -155,6 +164,7 @@ def _batch_modality_input_roles(
                     role_items(samples[0]),
                     output,
                     reference_role,
+                    selected_roles=selected_roles,
                 )
             ),
             key=lambda role: role.value,
@@ -169,6 +179,7 @@ def _batch_modality_input_roles(
                         role_items(sample),
                         output,
                         reference_role,
+                        selected_roles=selected_roles,
                     )
                 ),
                 key=lambda role: role.value,
@@ -359,4 +370,3 @@ def _release_exception(error: BaseException) -> None:
         current.__traceback__ = None
         current.__cause__ = None
         current.__context__ = None
-

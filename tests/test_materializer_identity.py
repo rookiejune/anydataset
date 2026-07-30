@@ -120,7 +120,7 @@ class MaterializerIdentityTest(unittest.TestCase):
             use_map_style_loader=True,
         )
 
-        self.assertEqual(metadata["schema_version"], 3)
+        self.assertEqual(metadata["schema_version"], 4)
         self.assertEqual(metadata["input"]["semantic_id"], "input-v2")
         self.assertEqual(metadata["provider"]["semantic_id"], "provider-v3")
 

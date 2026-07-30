@@ -160,8 +160,14 @@ materializer 必须报错，不静默覆盖。
 多设备 materializer 只负责为每个设备启动独立进程并按 rank 分片，不初始化
 `torch.distributed` process group；需要 collective 的 provider 负责显式创建和释放
 自己的 process group，并定义各 rank 的同步契约。
-`commit_samples` 控制 checkpoint 粒度，默认是 `max(batch_size, 32)`，避免默认可续跑时
+`commit_samples` 控制 checkpoint 粒度，默认是 `max(batch_size, 1024)`，避免默认可续跑时
 产生过多小文件；需要更细断点时可以显式调低。
+调用方可以通过 `max_new_samples` 或显式递增的 `sample_indexes` 配合
+`finalize=False`，只完成本轮计划范围并保留同一份完整输入 identity 下的 resume
+fragment。最终一次调用不再传范围并使用默认 `finalize=True`，只补齐缺失 index，覆盖
+完整输入后原子发布 store。限定范围不允许同时 finalize，避免多设备 worker 生成不完整
+part。需要读取阶段性稠密前缀时，可以从 resume fragment 发布独立 snapshot；snapshot
+校验 dataset/provider identity，不修改 resume 状态。
 resume metadata 与本次运行不兼容时，旧目录会先原子重命名为相邻的
 `.<output>.resume.stale-*` 目录，避免在共享文件系统上同步递归
 删除大量 fragment 阻塞新任务。运行日志会记录该目录；确认不再需要后由调用方清理。
@@ -177,6 +183,8 @@ factory 标识会纳入函数代码、默认参数、closure 值和 callable 实
 每个 materializer rank 的 writer 完成 fragment 后，会在 rank 进程内把确定性分配给
 自己的 fragment 归并成一个 rank part。主进程最终只归并这些 part，并负责全局索引
 覆盖校验、统一 manifest 和原子 ready 标记，不再逐个扫描全部 fragment。
+`ModalityMaterializer.roles` 可以显式限制生成角色；未设置时处理全部符合条件的 role。
+角色选择属于 materializer 语义 identity，变更后不能复用旧 resume fragment。
 
 重模型 provider 或 filter predicate 可以通过 `ProviderServer`、
 `RemoteProviderFactory` 和 `RemoteFilterFactory` 常驻独立进程。

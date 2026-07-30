@@ -758,8 +758,9 @@ resumable fragments:
 completed provider batches are grouped into checkpoint chunks under a hidden
 sibling resume directory, and reruns skip completed global sample indexes
 before atomically committing the final store. `commit_samples` controls that
-checkpoint granularity and defaults to `max(batch_size, 32)` to avoid excessive
-small resume files; lower it when a workload needs finer recovery points.
+checkpoint granularity and defaults to `max(batch_size, 1024)` to avoid
+excessive small resume files; lower it when a workload needs finer recovery
+points.
 Resume compatibility includes an automatically derived identity for both
 factories. Set `input_id` and `provider_id` to explicit semantic versions when
 the input snapshot or provider behavior depends on state that the callables do
@@ -768,6 +769,44 @@ rather than replace, the factory identities; changing either one quarantines
 the old resume directory instead of reusing incompatible fragments. The same
 IDs are written to the final store manifest provenance and participate in
 downstream filter cache identity.
+
+Materialization can be intentionally staged without changing the input
+identity. Pass `max_new_samples` or explicit increasing `sample_indexes` and
+`finalize=False`; the call returns a `MaterializationStatus` and leaves its
+hidden fragments available for the next call. The later call must use the same
+dataset/provider identities and can omit the bound to process all remaining
+indexes and atomically publish the final store:
+
+```python
+status = materializer.write(
+    dataset_factory=dataset_factory,
+    provider_factory=provider_factory,
+    devices="auto",
+    max_new_samples=50_000,
+    finalize=False,
+)
+assert status.completed <= 50_000
+
+output = materializer.write(
+    dataset_factory=dataset_factory,
+    provider_factory=provider_factory,
+    devices="auto",
+)
+```
+
+`max_new_samples` and `sample_indexes` are supported for map-style datasets
+only. A partial run is not a readable store until finalized. To publish a dense
+completed prefix for inspection while keeping the run open, call
+`snapshot()`; snapshots do not clean up or advance the resume state:
+
+```python
+preview = materializer.snapshot(
+    "/data/my_anydataset_audio-50k",
+    dataset_factory=dataset_factory,
+    provider_factory=provider_factory,
+)
+```
+
 Multi-device materialization uses the configured process start method, so
 `dataset_factory` and `provider_factory` must be picklable, module-level
 callables when that method is `"spawn"`. Like filtering,
@@ -841,11 +880,12 @@ so directly loaded store views are not range-checked by readers or collation.
 provider declares its output view; the materializer infers the output modality
 from that view and uses the role's single remaining modality as input. It raises
 when the output modality already exists or when the input modality is ambiguous.
-Generated items start with empty metadata.
+Generated items start with empty metadata. Pass `roles={Role.TARGET}` to limit
+generation to selected roles; by default every eligible role is materialized.
 
 ```python
 from anydataset.store import ModalityMaterializer
-from anydataset.types import AudioView, TextView
+from anydataset.types import AudioView, Role, TextView
 
 
 class ToyTTS:
@@ -862,6 +902,7 @@ def tts_provider_factory(_device: str):
 
 output = ModalityMaterializer(
     output_dir="/data/my_anydataset_tts",
+    roles={Role.TARGET},
 ).write(
     dataset_factory=dataset_factory,
     provider_factory=tts_provider_factory,
