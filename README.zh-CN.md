@@ -40,7 +40,7 @@ pip install -e '.[huggingface,audio,dev]'
 from torch.utils.data import DataLoader
 
 from anydataset import AnyDataset
-from anydataset.dataset import collate_fn
+from anydataset.dataset.collate import collate_fn
 from anydataset.types import (
     ImageMeta,
     ImageReq,
@@ -292,7 +292,7 @@ schema = {
 ```python
 from torch.utils.data import DataLoader
 
-from anydataset.dataset import collate_fn
+from anydataset.dataset.collate import collate_fn
 
 loader = DataLoader(
     dataset,
@@ -302,13 +302,19 @@ loader = DataLoader(
 )
 ```
 
-如果内置 task 的默认 schema 已经够用，也可以直接用 `Task`：
+常用训练输入也建议保留为显式 schema。项目里可以写一个小 helper，然后交给通用
+collator：
 
 ```python
-from anydataset import Task
+from anydataset.dataset.collate import collate_fn
+from anydataset.types import AudioReq, AudioView, Modality, Role
 
-schema = Task.AUDIO_CODEC.schema()
-loader = DataLoader(dataset, batch_size=16, collate_fn=Task.AUDIO_CODEC.collate_fn())
+audio_codec_schema = {
+    (Role.DEFAULT, Modality.AUDIO): AudioReq(
+        views=frozenset({AudioView.WAVEFORM}),
+    )
+}
+loader = DataLoader(dataset, batch_size=16, collate_fn=collate_fn(audio_codec_schema))
 ```
 
 一个样本里有多个同模态 item 时，用 role 区分。例如机器翻译可以有 source text 和 target text：
@@ -328,7 +334,7 @@ schema = {
 }
 ```
 
-语音到语音翻译也可以用同一套结构表达。preset 可以产出 source audio 和 target audio；训练时如果只需要 LongCat codes，用户自己写 schema 即可，不需要为这个组合任务新增内置 `Task`：
+语音到语音翻译也可以用同一套结构表达。preset 可以产出 source audio 和 target audio；训练时如果只需要 LongCat codes，用户自己写 schema 即可，不需要把这个组合任务放进核心 API：
 
 ```python
 from anydataset.types import (
@@ -362,7 +368,7 @@ schema = {
 }
 ```
 
-一般来说，preset 负责尽量保留数据集天然提供的信息，schema 负责声明本次训练真正需要的字段。内置 `Task` 只适合非常稳定、跨数据集一致的默认 schema；组合型或研究型任务建议由用户显式写 schema。
+一般来说，preset 负责尽量保留数据集天然提供的信息，schema 负责声明本次训练真正需要的字段。组合型或研究型任务应由用户显式写 schema，不放进核心 API 猜测。
 
 ## 缓存过滤分区
 
@@ -671,7 +677,7 @@ store payload 按 view 写入 tar shard。普通 `DataLoader(shuffle=True)` 会�
 `dataset.dataloader(..., shuffle=True)` 入口即可保持 local-aware：
 
 ```python
-from anydataset.dataset import collate_fn
+from anydataset.dataset.collate import collate_fn
 
 loader = dataset.dataloader(
     costs=lengths,
@@ -691,15 +697,22 @@ shuffle 配置，不再需要单独导入 store 专用 sampler。
 
 reader 显式支持 `schema_version: 2` 和当前的 `schema_version: 3`。v2 store 没有
 provenance，仍可直接读取；新写入的 v3 store 会保存 materializer 的 `input_id` 和
-`provider_id`。更早的 canonical store 使用相同的 sample manifest 和目录布局，但
-dataset manifest 没有版本号，view manifest 使用 `sample_id` 对齐，必须离线迁移到新目录：
+`provider_id`。
+
+> 警告：v2 兼容只是旧数据读取支持，不是推荐的生产格式。读取 v2 store 会发出
+> `RuntimeWarning`；缺失的 provenance 会按空值参与下游 cache identity，无法区分
+> input/provider 的语义版本。发布 store 或基于它生成 cache-sensitive 派生数据前，
+> 请重新物化或迁移到 v3。
+
+更早的 canonical store 使用相同的 sample manifest 和目录布局，但 dataset manifest
+没有版本号，view manifest 使用 `sample_id` 对齐，必须离线迁移到新目录：
 
 ```bash
 anydataset-store migrate /data/my_anydataset_v1 /data/my_anydataset_v3
 ```
 
 等价 Python 入口是
-`anydataset.store.migrate_store("/data/my_anydataset_v1", "/data/my_anydataset_v2")`。
+`anydataset.store.migrate_store("/data/my_anydataset_v1", "/data/my_anydataset_v3")`。
 
 更早的目录布局，或不完整匹配该 canonical schema 的 v1 manifest，不做猜测式迁移，
 必须用 `DatasetWriter` 从原始 canonical dataset 重新物化。

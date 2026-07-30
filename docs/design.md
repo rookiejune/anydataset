@@ -30,7 +30,7 @@ manifest/tar 扫描。
 
 `Meta` 描述旁信息，例如 label、labels、language。meta 必须在 schema 中显式声明后才会进入 batch。
 
-## Preset 和 Task
+## Preset 和 Schema
 
 Preset 应该尽量保留数据集天然提供的信息。例如语音到语音翻译数据集可以同时产出 source audio、target audio、source text 和 target text。是否把这些字段用于训练，由用户 schema 决定。
 
@@ -45,7 +45,7 @@ canonical `Sample` 的映射放进 preset；过滤、模型编码、训练采样
 `hf_hub_download`，保证列举与下载来自同一版本；空 revision 和其他未知 load option
 会显式报错。
 
-`Task` 只适合非常稳定、跨数据集一致的默认 schema，例如图像分类、基础 audio codec 或机器翻译文本对。组合型、研究型或仍在快速变化的任务不应急着进入 `Task` 枚举，用户显式写 schema 更清楚。
+核心 API 不内置任务枚举。即使是图像分类、基础 audio codec 或机器翻译文本对这类常见布局，也应通过显式 schema helper 表达；组合型、研究型或仍在快速变化的任务尤其不应由底层猜测。
 
 ## Source 注册
 
@@ -137,8 +137,10 @@ index list 和跨 row group 随机读取；其他 map-style dataset 使用有界
 只维护 `planning_window` 个候选，DDP 按固定 plan window 同步并只裁剪 rank-local 最终
 batch 尾部，不修改通用 `iter_indexed_shard()` 的 modulo 契约。
 reader 显式支持字段和 Parquet manifest 结构完整的 `schema_version: 2` 和 `3` store；
-v2 store 没有 provenance，仍可读取。新写入的 v3 store 在 dataset manifest 中保存
-materializer 的 `input_id` 和 `provider_id`。更早格式必须先显式迁移或重新物化，
+v2 store 没有 provenance，仍可读取，但读取时必须发出明确的 `RuntimeWarning`。
+v2 缺失的 provenance 只能按空值参与 identity，不能静默猜测 input/provider 语义；
+发布 store 或生成 cache-sensitive 派生数据前应重新物化或迁移到 v3。新写入的 v3 store
+在 dataset manifest 中保存 materializer 的 `input_id` 和 `provider_id`。更早格式必须先显式迁移或重新物化，
 不在读取时按 `sample_id` 静默补齐。
 离线 `migrate_store(source, output)` 只处理真实存在过的上一版 canonical 布局：dataset
 manifest 没有 `schema_version`（也接受显式的 `1`），sample manifest 已包含稠密稳定的

@@ -15,11 +15,17 @@
   iterators, bounded writer queues, allocation-efficient collation, and
   large-dataset weighted sampling.
 - Harden tar and cache sidecar validation, preserve sampling across extreme
-  finite weight ranges, and retain legacy writer, row-map, and manifest helper
-  contracts while internals use the optimized paths.
+  finite weight ranges, and retain row-map and manifest helper contracts while
+  internals use the optimized paths.
 - Change `SpeakerIdDataset` to accept explicit multi-reference
   `SpeakerAssignment` mappings, add generic grouped speaker-audio reads, and
   keep Qwen-specific synthesis outside the speaker dataset abstraction.
+- Remove the legacy public `Task` enum and `anydataset.dataset.write`
+  compatibility writer path; callers should use explicit schemas with
+  `collate_fn(schema)` and the public `DatasetWriter` entry point.
+- Keep schema-v2 store reads compatible, but emit a `RuntimeWarning` because
+  v2 stores lack provenance and should be rematerialized or migrated before
+  production publication or cache-sensitive derivation.
 
 ## 1.0.0 - 2026-07-03
 

@@ -13,7 +13,6 @@ from anydataset import (
     Preset,
     Source,
     Spec,
-    Task,
     resolve_dataset,
 )
 from anydataset.dataset.collate import FieldGroup, FieldRef, collate_fn
@@ -33,6 +32,22 @@ from anydataset.types import (
     TextReq,
 )
 from anydataset.presets import WMT19
+
+
+def _audio_codec_schema():
+    return {
+        (Role.DEFAULT, Modality.AUDIO): AudioReq(
+            views=frozenset({AudioView.WAVEFORM}),
+        )
+    }
+
+
+def _machine_translation_schema():
+    text = TextReq(views=frozenset({TextView.TEXT}))
+    return {
+        (Role.SOURCE, Modality.TEXT): text,
+        (Role.TARGET, Modality.TEXT): text,
+    }
 
 
 class _ExtendedTextReq(TextReq):
@@ -307,15 +322,15 @@ class CanonicalDatasetTest(unittest.TestCase):
             ).id,
         )
 
-    def test_task_schema_uses_role_modality_keys(self):
-        schema = Task.AUDIO_CODEC.schema()
+    def test_audio_codec_schema_uses_role_modality_keys(self):
+        schema = _audio_codec_schema()
 
         req = schema[Role.DEFAULT, Modality.AUDIO]
         self.assertEqual(req.views, frozenset({AudioView.WAVEFORM}))
         self.assertEqual(req.meta, frozenset())
 
     def test_machine_translation_schema_uses_source_target_text_roles(self):
-        schema = Task.MACHINE_TRANSLATION.schema()
+        schema = _machine_translation_schema()
 
         source = schema[Role.SOURCE, Modality.TEXT]
         target = schema[Role.TARGET, Modality.TEXT]
@@ -667,7 +682,7 @@ class CanonicalDatasetTest(unittest.TestCase):
             },
         ]
 
-        batch = Task.AUDIO_CODEC.collate_fn()(samples)
+        batch = collate_fn(_audio_codec_schema())(samples)
 
         audio = batch.sample[ref]
         waveform, sample_rates = audio.views[AudioView.WAVEFORM]
@@ -687,7 +702,7 @@ class CanonicalDatasetTest(unittest.TestCase):
 
     def test_collate_fn_is_picklable(self):
         ref = (Role.DEFAULT, Modality.AUDIO)
-        collator = pickle.loads(pickle.dumps(Task.AUDIO_CODEC.collate_fn()))
+        collator = pickle.loads(pickle.dumps(collate_fn(_audio_codec_schema())))
 
         batch = collator(
             [

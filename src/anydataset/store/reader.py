@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import sqlite3
 import tempfile
+import warnings
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -285,6 +286,15 @@ def read_store_manifest(root: str | Path) -> DatasetManifest:
             "Unsupported store schema_version: "
             f"{version!r}; expected {LEGACY_STORE_SCHEMA_VERSION} or "
             f"{STORE_SCHEMA_VERSION}.{migration}"
+        )
+    if version == LEGACY_STORE_SCHEMA_VERSION:
+        warnings.warn(
+            "Reading store schema_version 2 without provenance. "
+            "Compatibility is for legacy reads only; rematerialize or migrate "
+            "to schema_version 3 before publishing the store or using it as "
+            "the basis for cache-sensitive derived data.",
+            RuntimeWarning,
+            stacklevel=2,
         )
     return _dataset_manifest(data, schema_version=version)
 

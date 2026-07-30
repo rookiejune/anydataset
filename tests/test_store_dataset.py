@@ -117,7 +117,8 @@ class StoreSourceTest(unittest.TestCase):
             del manifest["provenance"]
             write_json(output / "dataset.json", manifest)
 
-            dataset = read_store_dataset(output)
+            with self.assertWarnsRegex(RuntimeWarning, "schema_version 2"):
+                dataset = read_store_dataset(output)
 
             self.assertEqual(dataset.manifest.schema_version, 2)
             self.assertEqual(dataset.manifest.provenance, {})

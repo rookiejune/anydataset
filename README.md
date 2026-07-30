@@ -250,7 +250,7 @@ Every dataset exposes `iter_shard(num_shards, shard_id)` for distributed reads.
 ```python
 from torch.utils.data import DataLoader
 
-from anydataset.dataset import collate_fn
+from anydataset.dataset.collate import collate_fn
 from anydataset.types import AudioReq, AudioView, Modality, Role
 
 schema = {
@@ -281,17 +281,22 @@ schema = {
 }
 ```
 
-When a built-in task already describes the required fields, use its default
-schema or collator directly:
+Keep reusable training inputs as explicit schemas. A project can define a small
+helper for common layouts, then pass it to the generic collator:
 
 ```python
-from anydataset import Task
+from anydataset.dataset.collate import collate_fn
+from anydataset.types import AudioReq, AudioView, Modality, Role
 
-schema = Task.AUDIO_CODEC.schema()
+audio_codec_schema = {
+    (Role.DEFAULT, Modality.AUDIO): AudioReq(
+        views=frozenset({AudioView.WAVEFORM}),
+    )
+}
 loader = DataLoader(
     dataset,
     batch_size=16,
-    collate_fn=Task.AUDIO_CODEC.collate_fn(),
+    collate_fn=collate_fn(audio_codec_schema),
 )
 ```
 
@@ -623,19 +628,26 @@ crossing shard-group boundaries. Use
 
 Readers explicitly support store `schema_version: 2` and the current
 `schema_version: 3`. Version 2 stores have no provenance but remain readable;
-new v3 stores persist materializer `input_id` and `provider_id`. The preceding
-canonical store format used the same sample manifest and directory layout, but
-had no dataset schema version and keyed view manifests by `sample_id`. Migrate
-that format offline into a new directory; the source is never modified, and
-the destination is published only after its manifests, coverage, shards, and
-payload keys pass the v3 checks:
+new v3 stores persist materializer `input_id` and `provider_id`.
+
+> Warning: v2 compatibility is legacy read support, not a recommended production
+> format. Reading a v2 store emits a `RuntimeWarning`; its missing provenance is
+> treated as empty, so downstream cache identity cannot distinguish input or
+> provider semantic versions. Rematerialize or migrate to v3 before publishing a
+> store or using it as the basis for cache-sensitive derived data.
+
+The preceding canonical store format used the same sample manifest and directory
+layout, but had no dataset schema version and keyed view manifests by
+`sample_id`. Migrate that format offline into a new directory; the source is
+never modified, and the destination is published only after its manifests,
+coverage, shards, and payload keys pass the v3 checks:
 
 ```bash
 anydataset-store migrate /data/my_anydataset_v1 /data/my_anydataset_v3
 ```
 
 The equivalent Python API is
-`migrate_store("/data/my_anydataset_v1", "/data/my_anydataset_v2")` from
+`migrate_store("/data/my_anydataset_v1", "/data/my_anydataset_v3")` from
 `anydataset.store.manifest.migration`.
 
 Older layouts or v1 manifests that do not exactly match that canonical schema
