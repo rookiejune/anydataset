@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TypeVar
+from typing import TypeVar, Union
 
 import torch
 from torch import Tensor
@@ -21,7 +21,7 @@ from ...types import (
 from .types import AudioBatch, SpeechBatch
 
 ItemT = TypeVar("ItemT")
-AudioLoader = Callable[[str | Path], tuple[Tensor, int]]
+AudioLoader = Callable[[Union[str, Path]], tuple[Tensor, int]]
 
 
 def load_audio_file(path: str | Path) -> tuple[Tensor, int]:
@@ -171,7 +171,9 @@ def _optional_speaker_id(audio: AudioItem) -> str | None:
     value = audio.meta.get(AudioMeta.SPEAKER_ID)
     if value is None:
         return None
-    return str(value)
+    if not isinstance(value, str):
+        raise TypeError("AudioMeta.SPEAKER_ID must be a string when present.")
+    return value
 
 
 def _sample_item(
