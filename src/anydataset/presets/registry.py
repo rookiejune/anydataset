@@ -58,7 +58,7 @@ def preset_spec(
         )
     elif preset is Preset.FSD50K:
         spec = Spec(
-            source=Source.HF,
+            source="fsd50k",
             path="Fhrozen/FSD50k",
             split="dev",
             load_options={"revision": "main"},

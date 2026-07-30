@@ -1,23 +1,12 @@
 from __future__ import annotations
 
-import json
-import os
-from collections.abc import Mapping
 from functools import partial
-from pathlib import Path
-from typing import Any, Iterator
-from urllib.parse import quote, urlsplit, urlunsplit
-from urllib.request import Request, urlopen
+from typing import Any
 
-import torch
-
-from .._runtime.sharding import validate_shard
-from ..cache import FileLock
-from ..types import AudioView
 from ..dataset.abc import AnyDataset
-from ..types import Preset
-from ..types.item import Sample, Transforms
 from ..rowmap import sample_from_row
+from ..types import AudioView, Preset
+from ..types.item import Transforms
 from .registry import preset_spec
 
 
@@ -30,7 +19,7 @@ class FSD50K(AnyDataset):
         **load_options: Any,
     ) -> None:
         if split is not None and split not in _VALID_SPLITS:
-            raise ValueError("FSD50K split must be `dev` or `eval`.")
+            raise ValueError("FSD50K split must be 'dev' or 'eval'.")
         extra = set(load_options) - {"revision"}
         if extra:
             name = min(extra)
@@ -49,205 +38,5 @@ class FSD50K(AnyDataset):
             transforms=transforms,
         )
 
-    def prepare(self) -> dict[str, Any]:
-        if self._dataset is not None:
-            return self._dataset
-
-        cache = self.cache_manager.prepare(self.spec)
-        split = self.spec.split or "dev"
-        revision = str(self.spec.load_options["revision"])
-
-        manifest_path = cache.cache_path / f"{split}_files.json"
-        with FileLock(cache.lock_path, wait_timeout=3600.0):
-            files: list[str] | None = None
-            if manifest_path.exists():
-                files = _read_manifest(manifest_path, split)
-            if files is None:
-                files = _manifest_files(
-                    _list_files(self.spec.path, split, revision),
-                    split,
-                )
-                _write_manifest(manifest_path, files)
-
-        self._dataset = {
-            "repo_id": self.spec.path,
-            "revision": revision,
-            "split": split,
-            "files": files,
-            "cache_path": cache.cache_path,
-        }
-        return self._dataset
-
-    def __len__(self) -> int:
-        return len(self.dataset["files"])
-
-    def __getitem__(self, index: int) -> Sample:
-        return self.transform_sample(self.parse_fn(_row_for(self.dataset, index)))
-
-    def iter_shard(self, num_shards: int, shard_id: int) -> Iterator[Sample]:
-        validate_shard(num_shards, shard_id)
-        for index in range(shard_id, len(self), num_shards):
-            yield self[index]
-
 
 _VALID_SPLITS = frozenset({"dev", "eval"})
-_HUB_PAGE_LIMIT = 1000
-_MANIFEST_SCHEMA_VERSION = 1
-
-
-def _row_for(state: dict[str, Any], index: int) -> dict[str, Any]:
-    file_name = state["files"][index]
-    local_path = _download_file(state, file_name)
-    waveform, sample_rate = _load_audio(local_path)
-    return {
-        "audio": {
-            "array": waveform,
-            "sampling_rate": sample_rate,
-        },
-        "path": file_name,
-        "audio_path": str(local_path),
-    }
-
-
-def _list_files(repo_id: str, split: str, revision: str) -> list[str]:
-    endpoint = os.environ.get("HF_ENDPOINT", "https://huggingface.co").rstrip("/")
-    url = (
-        f"{endpoint}/api/datasets/{repo_id}/tree/{quote(revision, safe='')}/clips/{split}"
-        f"?recursive=true&expand=false&limit={_HUB_PAGE_LIMIT}"
-    )
-    files: list[str] = []
-    seen_urls: set[str] = set()
-    while url:
-        if url in seen_urls:
-            raise RuntimeError("FSD50K Hub pagination returned a repeated URL.")
-        seen_urls.add(url)
-        request = Request(url, headers={"User-Agent": "anydataset"})
-        with urlopen(request, timeout=60) as response:
-            rows = json.loads(response.read().decode("utf-8"))
-            if not isinstance(rows, list) or any(
-                not isinstance(row, Mapping) for row in rows
-            ):
-                raise ValueError("FSD50K Hub tree response must be a list of mappings.")
-            for row in rows:
-                path = row.get("path")
-                if row.get("type") != "file":
-                    continue
-                if not isinstance(path, str):
-                    raise ValueError("FSD50K Hub file entries must contain a path.")
-                if path.endswith(".wav"):
-                    files.append(path)
-            next_url = response.headers.get("Link")
-        url = _next_link_url(next_url, endpoint)
-        if len(rows) >= _HUB_PAGE_LIMIT and url is None:
-            raise RuntimeError(
-                "FSD50K Hub listing truncated: full page without next Link."
-            )
-    return sorted(files)
-
-
-def _manifest_files(value: object, split: str) -> list[str]:
-    if not isinstance(value, list) or not value:
-        raise ValueError("FSD50K file manifest must be a non-empty list.")
-    prefix = f"clips/{split}/"
-    files = []
-    for file_name in value:
-        if (
-            not isinstance(file_name, str)
-            or not file_name.startswith(prefix)
-            or not file_name.endswith(".wav")
-        ):
-            raise ValueError(
-                f"FSD50K file manifest entries must be WAV paths under {prefix}."
-            )
-        files.append(file_name)
-    if len(set(files)) != len(files):
-        raise ValueError("FSD50K file manifest entries must be unique.")
-    return files
-
-
-def _read_manifest(path: Path, split: str) -> list[str] | None:
-    raw = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(raw, dict):
-        return None
-    if (
-        raw.get("schema_version") != _MANIFEST_SCHEMA_VERSION
-        or raw.get("listed_complete") is not True
-    ):
-        return None
-    return _manifest_files(raw.get("files"), split)
-
-
-def _write_manifest(path: Path, files: list[str]) -> None:
-    _write_json(
-        path,
-        {
-            "schema_version": _MANIFEST_SCHEMA_VERSION,
-            "listed_complete": True,
-            "files": files,
-        },
-    )
-
-
-def _next_link_url(link_header: str | None, endpoint: str) -> str | None:
-    if not link_header:
-        return None
-    for part in link_header.split(","):
-        if 'rel="next"' not in part:
-            continue
-        start = part.find("<")
-        end = part.find(">")
-        if start == -1 or end == -1 or end <= start:
-            raise ValueError("FSD50K Hub Link header next URL is malformed.")
-        return _rewrite_endpoint(part[start + 1 : end], endpoint)
-    return None
-
-
-def _rewrite_endpoint(url: str, endpoint: str) -> str:
-    target = urlsplit(url)
-    replacement = urlsplit(endpoint)
-    return urlunsplit(
-        (
-            replacement.scheme,
-            replacement.netloc,
-            target.path,
-            target.query,
-            target.fragment,
-        )
-    )
-
-
-def _download_file(state: dict[str, Any], file_name: str) -> str:
-    try:
-        from huggingface_hub import hf_hub_download
-    except ImportError as exc:
-        raise ImportError(
-            "FSD50K support requires `pip install anydataset[huggingface]`."
-        ) from exc
-
-    return hf_hub_download(
-        repo_id=state["repo_id"],
-        repo_type="dataset",
-        revision=state["revision"],
-        filename=file_name,
-        cache_dir=str(Path(state["cache_path"]) / "hf"),
-    )
-
-
-def _load_audio(path: str | Path) -> tuple[torch.Tensor, int]:
-    try:
-        import torchaudio
-    except (ImportError, OSError) as exc:
-        raise ImportError(
-            "FSD50K audio loading requires a working torchaudio installation "
-            "(`pip install anydataset[audio]`)."
-        ) from exc
-
-    waveform, sample_rate = torchaudio.load(str(path))
-    return waveform.to(dtype=torch.float32), int(sample_rate)
-
-
-def _write_json(path: Path, value: Any) -> None:
-    payload = json.dumps(value, ensure_ascii=False, indent=2) + "\n"
-    tmp_path = path.with_name(f".{path.name}.tmp")
-    tmp_path.write_text(payload, encoding="utf-8")
-    tmp_path.replace(path)

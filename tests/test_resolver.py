@@ -37,7 +37,7 @@ class ResolverTest(unittest.TestCase):
 
         preset = resolve_dataset(Preset.FSD50K)
 
-        self.assertEqual(preset.source, Source.HF)
+        self.assertEqual(preset.source, "fsd50k")
         self.assertEqual(preset.path, "Fhrozen/FSD50k")
         self.assertEqual(preset.split, "dev")
         self.assertEqual(preset.load_options["revision"], "main")

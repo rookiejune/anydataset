@@ -17,17 +17,21 @@ import torch
 
 from anydataset.store import (
     DatasetWriter,
-    StoreFilesInUseError,
-    cleanup_store_files,
-    lease_store_files,
-    migrate_store,
-    validate_store_payloads,
-    validate_store_view_payloads,
 )
+from anydataset.store.manifest.migration import migrate_store
 from anydataset.store.jsonio import read_json, write_json
 from anydataset.store.manifest.schema import STORE_SCHEMA_VERSION, ViewManifestEntry
 from anydataset.store.manifest.io import read_sample_manifest_index
 from anydataset.store.paths import view_manifest_parquet_path, view_shard_path
+from anydataset.store.payload.files import (
+    StoreFilesInUseError,
+    cleanup_store_files,
+    lease_store_files,
+)
+from anydataset.store.payload.integrity import (
+    validate_store_payloads,
+    validate_store_view_payloads,
+)
 from anydataset.store.reader import read_store_dataset
 from anydataset.types import (
     AudioItem,
@@ -487,7 +491,7 @@ def _cleanup_in_subprocess(store: Path) -> subprocess.CompletedProcess[str]:
     )
     code = """
 import sys
-from anydataset.store import StoreFilesInUseError, cleanup_store_files
+from anydataset.store.payload.files import StoreFilesInUseError, cleanup_store_files
 
 try:
     cleanup_store_files(sys.argv[1])

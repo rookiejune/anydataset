@@ -17,14 +17,14 @@ class FSD50KPresetTest(unittest.TestCase):
             with (
                 mock.patch.dict("os.environ", {"ANYDATASET_HOME": tmpdir}),
                 mock.patch(
-                    "anydataset.presets.fsd50k._list_files",
+                    "anydataset.dataset.source.fsd50k._list_files",
                     return_value=["clips/dev/example.wav"],
                 ) as list_files,
             ):
                 state = dataset.prepare()
 
         self.assertEqual(dataset.spec.load_options["revision"], "refs/convert/parquet")
-        self.assertEqual(state["revision"], "refs/convert/parquet")
+        self.assertEqual(state.revision, "refs/convert/parquet")
         list_files.assert_called_once_with(
             "Fhrozen/FSD50k",
             "dev",
@@ -62,7 +62,7 @@ class FSD50KPresetTest(unittest.TestCase):
             with (
                 mock.patch.dict("os.environ", {"ANYDATASET_HOME": tmpdir}),
                 mock.patch(
-                    "anydataset.presets.fsd50k._list_files",
+                    "anydataset.dataset.source.fsd50k._list_files",
                     return_value=["clips/dev/example.wav"],
                 ) as list_files,
             ):
@@ -73,11 +73,11 @@ class FSD50KPresetTest(unittest.TestCase):
                 )
                 state = dataset.prepare()
 
-            self.assertEqual(state["files"], ["clips/dev/example.wav"])
+            self.assertEqual(state.files, ("clips/dev/example.wav",))
             list_files.assert_called_once()
 
     def test_rejects_full_hub_page_without_next_link(self):
-        from anydataset.presets import fsd50k as module
+        from anydataset.dataset.source import fsd50k as module
 
         rows = [
             {"type": "file", "path": f"clips/dev/{index:04d}.wav"}
@@ -88,12 +88,12 @@ class FSD50KPresetTest(unittest.TestCase):
         response.read.return_value = json.dumps(rows).encode("utf-8")
         response.headers = {}
 
-        with mock.patch("anydataset.presets.fsd50k.urlopen", return_value=response):
+        with mock.patch("anydataset.dataset.source.fsd50k.urlopen", return_value=response):
             with self.assertRaisesRegex(RuntimeError, "full page without next Link"):
                 module._list_files("Fhrozen/FSD50k", "dev", "main")
 
     def test_rejects_malformed_hub_next_link(self):
-        from anydataset.presets import fsd50k as module
+        from anydataset.dataset.source import fsd50k as module
 
         with self.assertRaisesRegex(ValueError, "Link header next URL is malformed"):
             module._next_link_url('rel="next"', "https://huggingface.co")
@@ -109,7 +109,7 @@ class FSD50KPresetTest(unittest.TestCase):
             with (
                 mock.patch.dict("os.environ", {"ANYDATASET_HOME": tmpdir}),
                 mock.patch(
-                    "anydataset.presets.fsd50k.urlopen",
+                    "anydataset.dataset.source.fsd50k.urlopen",
                     return_value=response,
                 ),
             ):
@@ -148,7 +148,7 @@ class FSD50KPresetTest(unittest.TestCase):
             with (
                 mock.patch.dict("os.environ", {"ANYDATASET_HOME": tmpdir}),
                 mock.patch(
-                    "anydataset.presets.fsd50k._list_files",
+                    "anydataset.dataset.source.fsd50k._list_files",
                     side_effect=list_files,
                 ),
             ):

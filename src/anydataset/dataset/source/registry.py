@@ -32,11 +32,13 @@ def has_source(source: SourceKey) -> bool:
 
 
 def _register_builtin_sources() -> None:
+    from .fsd50k import FSD50K_SOURCE, FSD50KSource
     from .huggingface import HuggingFaceDiskSource, HuggingFaceSource
     from .sharded_csv import ShardedCsvSource
     from .store import StoreSource
     from .tsv import TsvSource
 
+    register_source(FSD50K_SOURCE, FSD50KSource)
     register_source(Source.HF, HuggingFaceSource)
     register_source(Source.HF_DISK, HuggingFaceDiskSource)
     register_source(Source.STORE, StoreSource)

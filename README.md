@@ -636,20 +636,20 @@ anydataset-store migrate /data/my_anydataset_v1 /data/my_anydataset_v3
 
 The equivalent Python API is
 `migrate_store("/data/my_anydataset_v1", "/data/my_anydataset_v2")` from
-`anydataset.store`.
+`anydataset.store.manifest.migration`.
 
 Older layouts or v1 manifests that do not exactly match that canonical schema
 must be re-materialized with `DatasetWriter`; migration does not guess missing
 fields or alignment.
 
-Use the public integrity API before publishing or moving a store. `fast` checks
+Use the integrity maintenance helper before publishing or moving a store. `fast` checks
 manifest references and shard existence, `normal` also parses every referenced
 tar archive and rejects invalid or duplicate file members, and the default
 `full` level additionally verifies every referenced payload key:
 
 ```python
 from pathlib import Path
-from anydataset.store import validate_store_payloads
+from anydataset.store.payload.integrity import validate_store_payloads
 
 validate_store_payloads((Path("/data/my_anydataset"),), level="full")
 ```
@@ -666,7 +666,7 @@ outlive the reader, then clean that physical store when no reader or explicit
 lease is active:
 
 ```python
-from anydataset.store import cleanup_store_files, lease_store_files
+from anydataset.store.payload.files import cleanup_store_files, lease_store_files
 
 with lease_store_files("/data/my_anydataset"):
     retained_path = dataset[0][Role.DEFAULT, Modality.AUDIO].views[AudioView.FILE]

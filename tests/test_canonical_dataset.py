@@ -166,12 +166,12 @@ class CanonicalDatasetTest(unittest.TestCase):
     def test_spec_id_is_stable_physical_identity(self):
         spec = Preset.FSD50K.spec(split="dev")
         same = Spec(
-            source=Source.HF,
+            source="fsd50k",
             path="Fhrozen/FSD50k",
             split="dev",
             load_options={"revision": "main"},
         )
-        different = Spec(source=Source.HF, path="Fhrozen/FSD50k", split="train")
+        different = Spec(source="fsd50k", path="Fhrozen/FSD50k", split="train")
         different_revision = Preset.FSD50K.spec(split="dev", revision="v1")
 
         self.assertEqual(spec.id, same.id)

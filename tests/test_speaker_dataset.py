@@ -4,7 +4,7 @@ from typing import Optional
 
 import torch
 
-from anydataset.dataset import (
+from anydataset.dataset.speaker import (
     GroupedSpeakerAudioDataset,
     SpeakerAudioBlock,
     SpeakerAudioGrid,

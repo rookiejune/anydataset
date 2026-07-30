@@ -1,4 +1,5 @@
 from .protocol import DatasetSource, IndexedShardingSource
+from .fsd50k import FSD50KDataset, FSD50KSource
 from .huggingface import (
     HuggingFaceDiskSource,
     HuggingFaceSource,
@@ -12,6 +13,8 @@ from .tsv import TsvDataset, TsvSource
 
 __all__ = [
     "DatasetSource",
+    "FSD50KDataset",
+    "FSD50KSource",
     "HuggingFaceDiskSource",
     "HuggingFaceSource",
     "IndexedShardingSource",
