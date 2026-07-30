@@ -4,14 +4,14 @@ from functools import partial
 from typing import Any
 
 from ..types import Modality, Role, TextMeta, TextView
-from ..dataset.abc import IterableAnyDataset
+from ..dataset.abc import AnyDataset
 from ..types import Preset
 from ..types.item import Transforms
 from ..rowmap import sample_from_row, text_map
 from .registry import preset_spec
 
 
-class WMT19(IterableAnyDataset):
+class WMT19(AnyDataset):
     def __init__(
         self,
         split: str | None = None,

@@ -1,9 +1,13 @@
 from pathlib import Path
+import os
 import tempfile
 import unittest
+from unittest import mock
+
+import anydataset.dataset.source._tabular_parquet as tabular_parquet
 
 from anydataset import (
-    IterableAnyDataset,
+    AnyDataset,
     Spec,
     has_source,
     resolve_dataset,
@@ -33,15 +37,18 @@ class TsvSourceTest(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            dataset = IterableAnyDataset(
+            dataset = AnyDataset(
                 Spec(source="tsv", path=tmpdir, split="train"),
                 parse_fn=lambda row: row["sentence"],
             )
 
+            self.assertEqual(len(dataset), 2)
+            self.assertEqual(dataset[0], "hello")
+            self.assertEqual(dataset[1], "tea")
             self.assertEqual(list(dataset), ["hello", "tea"])
 
     def test_rejects_unknown_load_options(self):
-        dataset = IterableAnyDataset(
+        dataset = AnyDataset(
             Spec(
                 source="tsv",
                 path="unused",
@@ -53,7 +60,7 @@ class TsvSourceTest(unittest.TestCase):
             dataset.prepare()
 
     def test_rejects_non_string_encoding(self):
-        dataset = IterableAnyDataset(
+        dataset = AnyDataset(
             Spec(
                 source="tsv",
                 path="unused",
@@ -82,7 +89,7 @@ class TsvSourceTest(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            dataset = IterableAnyDataset(
+            dataset = AnyDataset(
                 Spec(
                     source="tsv",
                     path=tmpdir,
@@ -102,8 +109,9 @@ class TsvSourceTest(unittest.TestCase):
                     ("ni hao", str(zh)),
                 ],
             )
+            self.assertEqual(dataset[1], ("ni hao", str(zh)))
 
-    def test_shards_rows_by_index_modulo(self):
+    def test_indexed_shard_uses_native_path(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             (root / "train.tsv").write_text(
@@ -114,12 +122,43 @@ class TsvSourceTest(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            dataset = IterableAnyDataset(
+            dataset = AnyDataset(
                 Spec(source="tsv", path=tmpdir, split="train"),
                 parse_fn=lambda row: row["sentence"],
             )
+            prepared = dataset.dataset
 
+            self.assertEqual(
+                [(index, row["sentence"]) for index, row in prepared.iter_indexed_shard(2, 1)],
+                [(1, "one")],
+            )
             self.assertEqual(list(dataset.iter_shard(2, 1)), ["one"])
+
+    def test_reuses_prepared_parquet_cache(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            data = root / "data"
+            home = root / "home"
+            data.mkdir()
+            home.mkdir()
+            (data / "train.tsv").write_text(
+                "sentence\nhello\ntea\n",
+                encoding="utf-8",
+            )
+            spec = Spec(source="tsv", path=str(data), split="train")
+            with mock.patch.dict(os.environ, {"ANYDATASET_HOME": str(home)}):
+                first = AnyDataset(spec, parse_fn=lambda row: row["sentence"])
+                self.assertEqual(list(first), ["hello", "tea"])
+                manifests = list(first.cache_manager.root.rglob("tsv_parquet.json"))
+                self.assertEqual(len(manifests), 1)
+
+                second = AnyDataset(spec, parse_fn=lambda row: row["sentence"])
+                with mock.patch.object(
+                    tabular_parquet,
+                    "convert_file_job",
+                ) as convert:
+                    self.assertEqual(list(second), ["hello", "tea"])
+                convert.assert_not_called()
 
 
 if __name__ == "__main__":

@@ -5,6 +5,8 @@ from enum import Enum, auto
 
 from torch import Tensor
 
+from ..._compat import strict_zip
+
 
 class Morphology(Enum):
     """Top-level sample shape for audio-task loaders."""
@@ -68,7 +70,7 @@ class SpeechGridBatch:
         max_speakers = int(self.waveforms.shape[1])
         max_texts = int(self.waveforms.shape[2])
         for index, (speakers, sample_texts) in enumerate(
-            zip(self.speaker_ids, self.texts, strict=True)
+            strict_zip(self.speaker_ids, self.texts)
         ):
             if not speakers or not sample_texts:
                 raise ValueError(

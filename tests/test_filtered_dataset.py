@@ -193,6 +193,51 @@ class FilteredDatasetTest(unittest.TestCase):
         self.assertEqual(first.rule.rule_id, "quality-check")
         self.assertEqual(first.rule.version, "v1")
 
+    def test_rule_content_id_isolated_in_cache_identity(self):
+        _register_rows_source("unit_test_filter_content_id")
+        with (
+            tempfile.TemporaryDirectory() as tmpdir,
+            mock.patch.dict(os.environ, {"ANYDATASET_HOME": tmpdir}),
+        ):
+            dataset = _dataset("unit_test_filter_content_id", [0, 1])
+            first = FilterRule(
+                "same",
+                lambda: lambda _sample: True,
+                content_id="sha-a",
+            ).apply(dataset_factory=lambda: dataset, device="cpu")
+            second = FilterRule(
+                "same",
+                lambda: lambda _sample: False,
+                content_id="sha-b",
+            ).apply(dataset_factory=lambda: dataset, device="cpu")
+            metadata = json.loads(
+                (first.cache_path / "rule.json").read_text(encoding="utf-8")
+            )
+
+        self.assertNotEqual(first.cache_path, second.cache_path)
+        self.assertEqual(
+            metadata["rule"],
+            {"name": "same", "content_id": "sha-a"},
+        )
+        self.assertEqual(first.rule.content_id, "sha-a")
+
+    def test_rebuild_forces_new_generation_under_same_identity(self):
+        _register_rows_source("unit_test_filter_rebuild")
+        dataset = _dataset("unit_test_filter_rebuild", [0, 1])
+        rule = FilterRule("all", _true_factory)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with mock.patch.dict(os.environ, {"ANYDATASET_HOME": tmpdir}):
+                first = rule.apply(dataset_factory=lambda: dataset, device="cpu")
+                first_path = first.cache_path
+                second = rule.apply(
+                    dataset_factory=lambda: dataset,
+                    device="cpu",
+                    rebuild=True,
+                )
+
+                self.assertNotEqual(first_path, second.cache_path)
+                self.assertEqual(_values(second), [0, 1])
+
     def test_select_unknown_label_returns_empty_dataset(self):
         _register_rows_source("unit_test_filter_unknown")
         with tempfile.TemporaryDirectory():
@@ -2316,18 +2361,26 @@ class FilteredDatasetTest(unittest.TestCase):
         self.assertFalse(hasattr(rule, "identity"))
         self.assertFalse(hasattr(rule, "id"))
 
-    def test_filter_rule_equality_uses_name(self):
+    def test_filter_rule_equality_uses_identity_fields(self):
         first = FilterRule(
             name="same",
             factory=lambda: lambda sample: True,
+            content_id="sha-a",
         )
         second = FilterRule(
             name="same",
             factory=lambda: lambda sample: False,
+            content_id="sha-a",
+        )
+        third = FilterRule(
+            name="same",
+            factory=lambda: lambda sample: True,
+            content_id="sha-b",
         )
 
         self.assertEqual(first, second)
         self.assertEqual(hash(first), hash(second))
+        self.assertNotEqual(first, third)
 
     def test_filter_rule_attributes_are_read_only(self):
         rule = FilterRule(

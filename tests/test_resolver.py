@@ -26,7 +26,7 @@ class ResolverTest(unittest.TestCase):
         self.assertEqual(spec.path, "google/fleurs")
         self.assertEqual(spec.split, "validation")
         self.assertEqual(spec.load_options["config_name"], "en_us")
-        self.assertEqual(spec.load_options["streaming"], True)
+        self.assertNotIn("streaming", spec.load_options)
 
     def test_resolve_dataset_accepts_string_preset_and_spec(self):
         spec = resolve_dataset("mnist:train")

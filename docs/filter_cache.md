@@ -71,10 +71,13 @@ identity. The optional `rule_id` and `version` fields add explicit identity;
 changing any of the three fields selects a different cache. When omitted,
 `rule_id` defaults to `name` and the original name-only cache path remains
 compatible. The factory, predicate, dataset `parse_fn`, and dataset transforms
-are deliberately not inspected by the library. Update `version` (or the legacy
-`name`) whenever those semantics change—including after a failed resume or
-partial publish—so rebuilds do not replay stale decisions under the same rule
-identity.
+are deliberately not inspected by the library. Update `version` or pass an
+explicit `content_id` (for example a git sha or config hash) when those
+semantics change—including after a failed resume or partial publish—so rebuilds
+do not replay stale decisions under the same rule identity. Callers can also
+pass `rebuild=True` to `FilterRule.apply` / `FilteredDataset` to drop the current
+generation pointer and resume fragments and force a fresh publish under the same
+declared identity.
 
 When a downstream rule is applied to an upstream `FilteredDataset` view, the
 downstream cache identity also pins the upstream **generation id**. Republishing

@@ -52,6 +52,7 @@ def apply_filter(
     write_prefetch: int | None,
     worker_timeout: float | None,
     runtime: Runtime,
+    rebuild: bool,
     dataset_factory: DatasetFactory,
 ) -> _FilterCache:
     from .api import _FilterCache
@@ -72,6 +73,7 @@ def apply_filter(
         write_prefetch=write_prefetch,
         worker_timeout=worker_timeout,
         runtime=runtime,
+        rebuild=rebuild,
         dataset_factory=dataset_factory,
     )
     try:
@@ -106,15 +108,19 @@ def ensure_filter(
     write_prefetch: int | None,
     worker_timeout: float | None,
     runtime: Runtime,
+    rebuild: bool,
     dataset_factory: DatasetFactory,
 ) -> FilterGeneration:
     from .api import FilterRule
+    from .resume import cleanup_filter_resume_dir
 
     dataset = filter_base(dataset)
     if not isinstance(rule, FilterRule):
         raise TypeError("rule must be a FilterRule.")
     if not isinstance(metrics, bool):
         raise TypeError("metrics must be a bool.")
+    if not isinstance(rebuild, bool):
+        raise TypeError("rebuild must be a bool.")
     devices = resolve_devices(device)
     batch_size = positive_int("batch_size", batch_size)
     num_workers = non_negative_int("num_workers", num_workers)
@@ -133,20 +139,7 @@ def ensure_filter(
     expected = metadata(identity, base_count, rule)
     cache_path = filter_path(rule, identity)
 
-    generation, reason = ready_filter_generation(
-        cache_path,
-        expected,
-        metrics=metrics,
-    )
-    if generation is not None:
-        return generation
-
-    lock_path = filter_lock_path(rule, identity)
-    with FileLock(
-        lock_path,
-        wait_timeout=_CACHE_LOCK_TIMEOUT,
-        poll_interval=_CACHE_LOCK_POLL,
-    ):
+    if not rebuild:
         generation, reason = ready_filter_generation(
             cache_path,
             expected,
@@ -154,8 +147,29 @@ def ensure_filter(
         )
         if generation is not None:
             return generation
-        if reason is None:
-            raise RuntimeError("filter cache miss must include a reason.")
+
+    lock_path = filter_lock_path(rule, identity)
+    with FileLock(
+        lock_path,
+        wait_timeout=_CACHE_LOCK_TIMEOUT,
+        poll_interval=_CACHE_LOCK_POLL,
+    ):
+        if rebuild:
+            cleanup_filter_resume_dir(cache_path)
+            current = cache_path / "current.json"
+            if current.is_file():
+                current.unlink()
+            reason = "rebuild requested"
+        else:
+            generation, reason = ready_filter_generation(
+                cache_path,
+                expected,
+                metrics=metrics,
+            )
+            if generation is not None:
+                return generation
+            if reason is None:
+                raise RuntimeError("filter cache miss must include a reason.")
         log_filter_cache_miss(
             cache_path,
             rule,

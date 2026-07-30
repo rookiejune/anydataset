@@ -13,14 +13,14 @@
   `Runtime(reader_start_method="auto")` 在没有 server 时使用 spawn，在
   `server_start_method` 非空时使用 fork。后台 writer 默认使用 thread backend；只有显式
   使用 process writer backend 时才读取 `writer_start_method`。
-- 默认用户数据集以 map-style 为主；streaming/iterable 数据集需要保留支持。当前
-  `StoreDataset`、`FilteredDataset` 这类默认 map-style shard 语义的
-  materializer/filter 热路径会使用 map-style indexed loader；`AnyDataset` 仍优先保留
-  source-aware indexed shard 路径，避免把顺序 source 退化成随机访问。`sharded_csv`
-  prepare 后使用按源文件生成的 Parquet cache，因此也走 map-style indexed loader。
-- iterable source 只有显式实现全局 indexed-sharding 契约时才会走 source-native 路径；
-  契约要求返回原始全局 `sample_index`，并由入口校验已产出值的稠密 modulo 序列。HF
-  streaming 和 TSV 无法通过公开 API 保留该索引，因此继续使用完整流 modulo fallback。
+- 默认用户数据集以 map-style 为主。`StoreDataset`、`FilteredDataset` 这类默认
+  map-style shard 语义的 materializer/filter 热路径会使用 map-style indexed
+  loader；`AnyDataset` 仍优先保留 source-aware indexed shard 路径，避免把顺序
+  source 退化成随机访问。`tsv` 和 `sharded_csv` prepare 后使用按源文件生成的
+  Parquet cache，因此也走 map-style indexed loader。
+- iterable source 只有显式实现全局 indexed-sharding 契约时才会走 source-native
+  路径；契约要求返回原始全局 `sample_index`，并由入口校验已产出值的稠密 modulo
+  序列。Hugging Face `streaming=True` 已拒绝；不要依赖 streaming 做训练吞吐。
 - store 格式保持稳定；reader 侧可以只读 parquet metadata 和轻量 index 列，按 row group
   懒加载 sample/view manifest 的完整行。`preload=True` 仍表示显式加载并校验所有 view
   manifest。
@@ -51,8 +51,8 @@
   loader。
 - `IterableAnyDataset` 的 `iter_shard` / `iter_indexed_shard` 共用同一 dense global
   modulo 分区；原生加速只通过 source 的 `IndexedShardingSource` opt-in，不调用 raw
-  dataset 的 `shard()` 或局部 indexed 方法。内建 `hf-disk`、`store` 和 `sharded_csv`
-  通过随机访问实现该路径，避免每个逻辑 shard 重扫全部输入。
+  dataset 的 `shard()` 或局部 indexed 方法。内建 `hf-disk`、`store`、`tsv` 和
+  `sharded_csv` 通过随机访问实现该路径。`Source.HF` 拒绝 `streaming=True`。
 - server 模式下 reader/writer worker 默认用 fork；无 server 的本地路径保持 spawn，避免
   本地 torch/CUDA/provider 状态被 worker 继承。
 - `StoreDataset` 打开时不再把 `samples.parquet` 全量转成 Python tuple；`samples` 保留

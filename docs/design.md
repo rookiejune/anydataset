@@ -35,11 +35,12 @@ manifest/tar 扫描。
 Preset 应该尽量保留数据集天然提供的信息。例如语音到语音翻译数据集可以同时产出 source audio、target audio、source text 和 target text。是否把这些字段用于训练，由用户 schema 决定。
 
 当前内置 preset 是 `MNIST`、`CIFAR10`、`FLEURS`、`LIBRISPEECH_ASR`、
-`COMMON_VOICE`、`ESC50`、`NSYNTH`、`FSD50K` 和 `WMT19`。新增 preset 时只把
-物理 `Spec` 和 raw row 到 canonical `Sample` 的映射放进 preset；过滤、模型编码、
-训练采样权重等业务规则留在调用方或更高层模块。
+`COMMON_VOICE`、`ESC50`、`NSYNTH`、`FSD50K` 和 `WMT19`，全部为 map-style，通过
+`AnyDataset.preset()` 创建。新增 preset 时只把物理 `Spec` 和 raw row 到
+canonical `Sample` 的映射放进 preset；过滤、模型编码、训练采样权重等业务规则留在
+调用方或更高层模块。Hugging Face `streaming=True` 被显式拒绝。
 
-`FSD50K` 是 map-style preset，只接受可选的 Hugging Face `revision`，默认值为
+`FSD50K` 只接受可选的 Hugging Face `revision`，默认值为
 `main`。revision 同时进入 `Spec`/source cache identity、Hub 文件列表 URL 和
 `hf_hub_download`，保证列举与下载来自同一版本；空 revision 和其他未知 load option
 会显式报错。
@@ -53,9 +54,13 @@ Preset 应该尽量保留数据集天然提供的信息。例如语音到语音�
 
 - `tsv` 面向本地表格调试和 Common Voice 本地包，读取文件路径、
   `<path>/<split>.tsv`，或按 `subdirs` load option 的顺序读取各子目录下的同名
-  split。Common Voice 默认只选择最新 `cv-corpus-*`，语言目录来自该 corpus；
-  如果旧 corpus 有最新 corpus 缺失的语言，preset 显式报错，调用方应手动整理或
-  建立符号链接。
+  split。TSV 保持为可读的事实来源；source prepare 与 `sharded_csv` 共用
+  delimited→Parquet 缓存逻辑，在物理 `Spec` cache 下按文件生成 Parquet part，
+  读取侧通过 row group 提供 map-style 随机访问，并声明 `IndexedShardingSource`。
+  `root_field` 在读取时注入，不写入 Parquet 列。`prepare_workers` 语义与
+  `sharded_csv` 相同，且不进入 `Spec.id`。Common Voice 默认只选择最新
+  `cv-corpus-*`，语言目录来自该 corpus；如果旧 corpus 有最新 corpus 缺失的语言，
+  preset 显式报错，调用方应手动整理或建立符号链接。
 - `sharded_csv` 面向已经物理分片的 CSV 目录，读取
   `shard_<index>/<number>.csv` 数字文件名，设置 split 时读取
   `<path>/<split>/shard_<index>/<number>.csv`。非数字 CSV 文件名会被忽略并写
@@ -82,12 +87,11 @@ pool，默认值保留自动并行策略。`prepare_workers` 只影响转换并�
 `shard()` 或 `iter_indexed_shard()` 不构成 opt-in，避免把 native shard 内从零开始的
 局部编号误当成全局 cache 对齐键。
 
-`hf-disk`、`store` 和 `sharded_csv` 的 prepared dataset 支持按全局下标随机读取，因此
-实现该契约且不扫描其他 shard。TSV 只能顺序解析文件；Hugging Face streaming 的公开
-`shard()` 按底层 data source 分片，但不返回每行分片前的全局下标。两者都不声明 indexed
-能力，`IterableAnyDataset.iter_shard()` / `iter_indexed_shard()` 对它们都使用完整流上的
-modulo fallback；该 fallback 成本较高，但训练、写入与过滤共用同一分区函数。
-`IterableAnyDataset` 不会机会主义地调用 raw dataset 的 `shard()`。
+`hf-disk`、`store`、`tsv` 和 `sharded_csv` 的 prepared dataset 支持按全局下标随机读取，
+因此实现该契约且不扫描其他 shard。Hugging Face `streaming=True` 在 `Source.HF`
+入口显式拒绝；需要可索引本地数据时使用 `Source.HF_DISK`。
+`IterableAnyDataset.iter_shard()` / `iter_indexed_shard()` 共用同一 dense global
+modulo 分区。`IterableAnyDataset` 不会机会主义地调用 raw dataset 的 `shard()`。
 
 Map-style `iter_runtime_shard` 在多卡时会丢弃不能被 `rank_count` 整除的尾部样本；
 iterable 路径不做该截断。混合 `MultipleAnyDataset([map, iterable])` 时，各子数据集
@@ -129,8 +133,8 @@ store 的 map-style `__getitem__` 保持全局下标随机访问语义，不隐�
 `dataset.dataloader(..., shuffle=...)` 入口。底层 `StoreDataset` 通过私有 `_shuffle`
 生成 payload-shard-local 读取计划：先按已选择 view manifest 的 shard group 排序或
 shuffle，再在 group 内 shuffle 样本；batch planner 只在同一个 group 内组 batch。
-`sharded_csv` 使用 Parquet row group 作为同类 index group，避免全量样本 index list
-和跨 row group 随机读取；其他 map-style dataset 使用有界连续 index group。planner
+`sharded_csv` 和 `tsv` 使用 Parquet row group 作为同类 index group，避免全量样本
+index list 和跨 row group 随机读取；其他 map-style dataset 使用有界连续 index group。planner
 只维护 `planning_window` 个候选，DDP 按固定 plan window 同步并只裁剪 rank-local 最终
 batch 尾部，不修改通用 `iter_indexed_shard()` 的 modulo 契约。
 reader 显式支持字段和 Parquet manifest 结构完整的 `schema_version: 2` 和 `3` store；

@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any, Union
 
 from ..types import AudioMeta, AudioView, TextMeta, TextView
-from ..dataset.abc import IterableAnyDataset
+from ..dataset.abc import AnyDataset
 from ..types import Spec
 from ..types.item import Transforms
 from ..rowmap import labels, sample_from_row
@@ -41,7 +41,7 @@ _AUDIO_LABEL_FIELDS = (
 )
 
 
-class CommonVoice(IterableAnyDataset):
+class CommonVoice(AnyDataset):
     def __init__(
         self,
         split: str | None = None,
@@ -145,7 +145,7 @@ def create_common_voice(
     version: str | None = None,
     transforms: Transforms | None = None,
     **load_options: Any,
-) -> IterableAnyDataset:
+) -> AnyDataset:
     return CommonVoice(
         split=split,
         root=root,

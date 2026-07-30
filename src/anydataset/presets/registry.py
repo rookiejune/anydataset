@@ -26,7 +26,6 @@ def preset_spec(
             split="train",
             load_options={
                 "config_name": "en_us",
-                "streaming": True,
             },
         )
     elif preset is Preset.LIBRISPEECH_ASR:
@@ -36,7 +35,6 @@ def preset_spec(
             split="train.100",
             load_options={
                 "config_name": "clean",
-                "streaming": True,
             },
         )
     elif preset is Preset.COMMON_VOICE:
@@ -48,7 +46,6 @@ def preset_spec(
             source=Source.HF,
             path="ashraq/esc50",
             split="train",
-            load_options={"streaming": True},
         )
     elif preset is Preset.NSYNTH:
         spec = Spec(
@@ -57,7 +54,6 @@ def preset_spec(
             split="train",
             load_options={
                 "config_name": "instrument",
-                "streaming": True,
             },
         )
     elif preset is Preset.FSD50K:
@@ -74,7 +70,6 @@ def preset_spec(
             split="train",
             load_options={
                 "config_name": "cs-en",
-                "streaming": True,
             },
         )
     else:
@@ -105,17 +100,10 @@ def create_map_preset(
         from .fsd50k import FSD50K
 
         return FSD50K(split=split, transforms=transforms, **load_options)
-    raise ValueError(
-        f"Preset {preset.value!r} is iterable; use IterableAnyDataset.preset()."
-    )
+    if preset is Preset.COMMON_VOICE:
+        from .common_voice import create_common_voice
 
-
-def create_iterable_preset(
-    preset: Preset,
-    split: str | None = None,
-    transforms: Transforms | None = None,
-    **load_options: Any,
-) -> IterableAnyDataset:
+        return create_common_voice(split=split, transforms=transforms, **load_options)
     if preset is Preset.FLEURS:
         from .fleurs import Fleurs
 
@@ -124,10 +112,6 @@ def create_iterable_preset(
         from .librispeech_asr import LibriSpeechASR
 
         return LibriSpeechASR(split=split, transforms=transforms, **load_options)
-    if preset is Preset.COMMON_VOICE:
-        from .common_voice import create_common_voice
-
-        return create_common_voice(split=split, transforms=transforms, **load_options)
     if preset is Preset.ESC50:
         from .esc50 import ESC50
 
@@ -140,4 +124,16 @@ def create_iterable_preset(
         from .wmt19 import WMT19
 
         return WMT19(split=split, transforms=transforms, **load_options)
-    raise ValueError(f"Preset {preset.value!r} is map-style; use AnyDataset.preset().")
+    raise ValueError(f"Unsupported preset: {preset.value!r}.")
+
+
+def create_iterable_preset(
+    preset: Preset,
+    split: str | None = None,
+    transforms: Transforms | None = None,
+    **load_options: Any,
+) -> IterableAnyDataset:
+    del split, transforms, load_options
+    raise ValueError(
+        f"Preset {preset.value!r} is map-style; use AnyDataset.preset()."
+    )

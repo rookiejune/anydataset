@@ -4,14 +4,14 @@ from functools import partial
 from typing import Any
 
 from ..types import AudioMeta, AudioView
-from ..dataset.abc import IterableAnyDataset
+from ..dataset.abc import AnyDataset
 from ..types import Preset
 from ..types.item import Transforms
 from ..rowmap import labels, sample_from_row
 from .registry import preset_spec
 
 
-class ESC50(IterableAnyDataset):
+class ESC50(AnyDataset):
     def __init__(
         self,
         split: str | None = None,

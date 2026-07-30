@@ -7,6 +7,7 @@ from typing import Any, cast
 import torch
 from torch import Tensor
 
+from ..._compat import strict_zip
 from ...types import AudioView, TextItem, TextView
 from ..speaker import SpeakerAudioBlock, SpeakerAudioGrid
 from .types import SpeechGridBatch
@@ -115,7 +116,7 @@ def speech_grid_collate(samples: Sequence[SpeechGridBatch]) -> SpeechGridBatch:
         if not isinstance(sample, SpeechGridBatch):
             raise TypeError("speech_grid_collate expects SpeechGridBatch samples.")
         for batch_index, (speakers, sample_texts) in enumerate(
-            zip(sample.speaker_ids, sample.texts, strict=True)
+            strict_zip(sample.speaker_ids, sample.texts)
         ):
             n_speaker = len(speakers)
             n_text = len(sample_texts)

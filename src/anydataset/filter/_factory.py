@@ -23,6 +23,7 @@ class FilteredDatasetFactory:
     rule_id: str
     lease: GenerationLease = field(repr=False, compare=False)
     version: str | None = None
+    content_id: str | None = None
 
     def __call__(self) -> FilterBase:
         from .api import FilteredDataset, FilterRule
@@ -34,6 +35,7 @@ class FilteredDatasetFactory:
                 _unavailable_filter_factory,
                 rule_id=self.rule_id,
                 version=self.version,
+                content_id=self.content_id,
             ),
             self.cache_path,
             self.labels,
@@ -54,6 +56,7 @@ class FilteredDatasetFactory:
                 self.input_id,
                 self.rule_id,
                 self.version,
+                self.content_id,
             ),
         )
 
@@ -75,6 +78,7 @@ def make_filtered_dataset_factory(
         input_id,
         rule.rule_id,
         rule.version,
+        rule.content_id,
     )
 
 
@@ -87,6 +91,7 @@ def restore_filtered_dataset_factory(
     input_id: str | None,
     rule_id: str | None = None,
     version: str | None = None,
+    content_id: str | None = None,
 ) -> FilteredDatasetFactory:
     return _make_filtered_dataset_factory(
         base,
@@ -97,6 +102,7 @@ def restore_filtered_dataset_factory(
         input_id,
         rule_name if rule_id is None else rule_id,
         version,
+        content_id,
     )
 
 
@@ -109,6 +115,7 @@ def _make_filtered_dataset_factory(
     input_id: str | None,
     rule_id: str,
     version: str | None,
+    content_id: str | None,
 ) -> FilteredDatasetFactory:
     from .generations import lease_filter_generation
 
@@ -122,6 +129,7 @@ def _make_filtered_dataset_factory(
         input_id=input_id,
         rule_id=rule_id,
         version=version,
+        content_id=content_id,
         lease=generation.lease,
     )
 

@@ -38,19 +38,19 @@ evaluator, `anydataset[text]` for `TextAcceptability` and `ChineseGEC`, or
 
 ## Presets
 
-Use `AnyDataset.preset()` or `IterableAnyDataset.preset()` when a built-in
-dataset already knows both its source and parser.
-Map-style presets are `MNIST`, `CIFAR10`, and `FSD50K`. Iterable presets are
-`FLEURS`, `LIBRISPEECH_ASR`, `COMMON_VOICE`, `ESC50`, `NSYNTH`, and `WMT19`.
-Using a preset through the wrong dataset type raises an error. Both constructors
-accept `transforms=...` for item-level transforms after parsing.
+Use `AnyDataset.preset()` when a built-in dataset already knows both its source
+and parser. Built-in presets are all map-style: `MNIST`, `CIFAR10`, `FSD50K`,
+`COMMON_VOICE`, `FLEURS`, `LIBRISPEECH_ASR`, `ESC50`, `NSYNTH`, and `WMT19`.
+`IterableAnyDataset.preset()` raises; use `IterableAnyDataset` only for custom
+sources that are truly stream-only. Both constructors accept `transforms=...`
+for item-level transforms after parsing.
 
 ```python
-from anydataset import IterableAnyDataset
+from anydataset import AnyDataset
 from anydataset.types import AudioView, Modality, Role
 
-dataset = IterableAnyDataset.preset("fleurs", split="validation")
-sample = next(iter(dataset))
+dataset = AnyDataset.preset("fleurs", split="validation")
+sample = dataset[0]
 
 audio = sample[Role.DEFAULT, Modality.AUDIO]
 waveform, sample_rate = audio.views[AudioView.WAVEFORM]
@@ -173,7 +173,9 @@ Built-in enum sources are `Source.HF`, `Source.HF_DISK`, and `Source.STORE`.
 The registry also includes string source keys `tsv` and `sharded_csv`; because
 they are registered, they can be used in `Spec(source=...)` and in
 `resolve_dataset("<source>://...")` shorthands. `tsv` reads a file path,
-`<path>/<split>.tsv`, or the same split under ordered `subdirs` load options;
+`<path>/<split>.tsv`, or the same split under ordered `subdirs` load options,
+and prepares Parquet parts for map-style random access (shared with
+`sharded_csv`); `root_field` is injected at read time.
 `sharded_csv` reads numeric CSV files under
 `shard_<index>/<number>.csv`, optionally under `<path>/<split>/`. Non-numeric
 CSV file names are ignored and logged as warnings.
@@ -206,12 +208,11 @@ row-to-index association. A raw dataset `shard()` or `iter_indexed_shard()`
 method alone is not sufficient, because a locally enumerated native shard does
 not preserve global indexes.
 
-The built-in `hf-disk`, `store`, and `sharded_csv` sources provide this indexed
-path through random access. TSV and Hugging Face streaming datasets use the
-full-stream modulo fallback because their public shard APIs do not propagate
-original global row indexes. `IterableAnyDataset.iter_shard` and
-`iter_indexed_shard` share that same dense global modulo partition; raw dataset
-`shard()` methods are never called opportunistically.
+The built-in `hf-disk`, `store`, `tsv`, and `sharded_csv` sources provide this
+indexed path through random access. Hugging Face `streaming=True` is rejected;
+use non-streaming `Source.HF` or `Source.HF_DISK`. `IterableAnyDataset.iter_shard`
+and `iter_indexed_shard` share that same dense global modulo partition; raw
+dataset `shard()` methods are never called opportunistically.
 
 Caches are rooted at `ANYDATASET_HOME`, or `~/.cache/anydataset` when the
 environment variable is unset. Source prepare caches live under
@@ -227,8 +228,8 @@ prepare cache identity. Change `version` or a physical load option when the same
 path denotes a different physical snapshot; source prepare caches are reused only
 for the resulting identity.
 
-The built-in `sharded_csv` source keeps CSV files as the readable source of
-truth and prepares one Parquet cache part per CSV file under
+The built-in `tsv` and `sharded_csv` sources keep delimited text files as the
+readable source of truth and prepare one Parquet cache part per source file under
 `$ANYDATASET_HOME/cache/sources`. Preparation converts changed files in a
 spawned process pool and atomically commits the cache manifest. Dataset reads
 then use Parquet row groups for map-style random access. Dynamic-batch shuffle
@@ -243,13 +244,13 @@ parallelism.
 Combine already-created datasets with `MultipleAnyDataset`.
 
 ```python
-from anydataset import IterableAnyDataset, MultipleAnyDataset
+from anydataset import AnyDataset, MultipleAnyDataset
 from anydataset.dataset import RoundRobinStrategy
 
 dataset = MultipleAnyDataset(
     [
-        IterableAnyDataset.preset("fleurs", split="train"),
-        IterableAnyDataset.preset("librispeech_asr", split="train.100"),
+        AnyDataset.preset("fleurs", split="train"),
+        AnyDataset.preset("librispeech_asr", split="train.100"),
     ],
     strategy=RoundRobinStrategy(),
 )
@@ -462,34 +463,27 @@ worker-local accept buffer). It is not a substitute for cached partitions; see
 Quality modules provide reusable rule classes for `FilterRule`; they do not own
 dataset loading or cache naming.
 
-`FilterRule` accepts map-style inputs. Because WMT19 is an iterable preset,
-materialize it once to a store before filtering it:
+`FilterRule` accepts map-style inputs. WMT19 is map-style, so filter it directly:
 
 ```python
 from anydataset import (
     AnyDataset,
     FilterRule,
-    IterableAnyDataset,
     Lang,
     Preset,
-    Source,
-    Spec,
 )
 from anydataset.quality.rules import QualityChain, Rule
 from anydataset.quality.text import TextQuality
 from anydataset.quality.translation import TranslationQuality
 from anydataset.types import Role
 
-source = IterableAnyDataset.preset(
+source = AnyDataset.preset(
     "wmt19", source_lang="zh", target_lang="en"
 )
-source.write("/data/wmt19-zh-en", dataset_id="wmt19-zh-en", split="train")
 
 
 def dataset_factory():
-    return AnyDataset(
-        Spec(source=Source.STORE, path="/data/wmt19-zh-en", split="train")
-    )
+    return AnyDataset.preset("wmt19", source_lang="zh", target_lang="en")
 
 
 def translation_factory():

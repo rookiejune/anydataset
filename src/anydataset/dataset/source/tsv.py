@@ -1,34 +1,54 @@
 from __future__ import annotations
 
-import csv
+from bisect import bisect_right
 from collections.abc import Iterator, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
 from ...types import Spec
+from . import _tabular_parquet as tabular
 from .protocol import validate_load_options
 
 
 TsvRow = Mapping[str, str]
+
+_CACHE_MANIFEST = "tsv_parquet.json"
+_CACHE_DIR = "tsv_parquet"
 
 
 class TsvSource:
     def prepare(self, spec: Spec, cache_path: Path) -> TsvDataset:
         validate_load_options(
             spec,
-            {"encoding", "root_field", "subdirs"},
+            {"encoding", "root_field", "subdirs", "prepare_workers"},
             source="TSV",
         )
-        return TsvDataset(
+        prepare_workers = spec.load_options.get("prepare_workers")
+        if prepare_workers is not None:
+            tabular.validate_prepare_workers(prepare_workers)
+        dataset = TsvDataset(
             Path(spec.path),
             split=spec.split,
+            cache_path=cache_path,
             encoding=_required_str(
                 spec.load_options.get("encoding", "utf-8"),
                 "encoding",
             ),
             subdirs=_optional_str_sequence(spec.load_options.get("subdirs"), "subdirs"),
             root_field=_optional_str(spec.load_options.get("root_field"), "root_field"),
+            prepare_workers=prepare_workers,
         )
+        dataset.prepare()
+        return dataset
+
+    def iter_indexed_shard(
+        self,
+        dataset: TsvDataset,
+        *,
+        num_shards: int,
+        shard_id: int,
+    ) -> Iterator[tuple[int, TsvRow]]:
+        yield from dataset.iter_indexed_shard(num_shards, shard_id)
 
 
 class TsvDataset:
@@ -37,28 +57,104 @@ class TsvDataset:
         root: Path,
         split: str | None = None,
         *,
+        cache_path: Path | None = None,
         encoding: str = "utf-8",
         subdirs: Sequence[str] | None = None,
         root_field: str | None = None,
+        prepare_workers: int | None = None,
     ) -> None:
+        if prepare_workers is not None:
+            tabular.validate_prepare_workers(prepare_workers)
         self.root = root
         self.split = split
+        self.cache_path = cache_path
         self.encoding = encoding
         self.subdirs = None if subdirs is None else tuple(subdirs)
         self.root_field = root_field
+        self.prepare_workers = prepare_workers
+        self._sources_cache: tuple[tuple[Path, Path], ...] | None = None
+        self._reader: tabular.ParquetPartsReader | None = None
+
+    def __getstate__(self) -> dict[str, Any]:
+        state = dict(self.__dict__)
+        reader = self._reader
+        if reader is not None:
+            state["_reader"] = tabular.ParquetPartsReader(reader.parts)
+        return state
+
+    def __setstate__(self, state: dict[str, Any]) -> None:
+        self.__dict__.update(state)
+        if "prepare_workers" not in state:
+            self.prepare_workers = None
+        if "_reader" not in state:
+            self._reader = None
+
+    def close(self) -> None:
+        if self._reader is not None:
+            self._reader.close()
+
+    def __del__(self) -> None:
+        try:
+            self.close()
+        except Exception:
+            pass
+
+    def prepare(self) -> None:
+        self._parts_reader()
 
     def __iter__(self) -> Iterator[TsvRow]:
-        yield from self.shard(num_shards=1, index=0)
+        for _index, row in self.iter_indexed_shard(1, 0):
+            yield row
 
-    def shard(self, *, num_shards: int, index: int) -> Iterator[TsvRow]:
-        if num_shards <= 0:
-            raise ValueError("num_shards must be positive.")
-        if index < 0 or index >= num_shards:
-            raise ValueError("index must satisfy 0 <= index < num_shards.")
+    def __len__(self) -> int:
+        return len(self._parts_reader())
 
-        for row_index, row in enumerate(self._read_rows()):
-            if row_index % num_shards == index:
-                yield row
+    def iter_index_groups(self) -> Iterator[range]:
+        yield from self._parts_reader().iter_index_groups()
+
+    def __getitem__(self, index: int) -> TsvRow:
+        reader = self._parts_reader()
+        length = len(reader)
+        if index < 0:
+            index += length
+        if index < 0 or index >= length:
+            raise IndexError("TsvDataset index out of range.")
+        return self._enrich(reader[index], self._part_root(index))
+
+    def iter_indexed_shard(
+        self,
+        num_shards: int,
+        shard_id: int,
+    ) -> Iterator[tuple[int, TsvRow]]:
+        sources = self._sources()
+        reader = self._parts_reader()
+        stops = tuple(part.stop for part in reader.parts)
+        for index, row in reader.iter_indexed_shard(num_shards, shard_id):
+            part_index = _part_index_for(stops, index)
+            yield index, self._enrich(row, sources[part_index][0])
+
+    def _enrich(self, row: Mapping[str, str], language_root: Path) -> dict[str, str]:
+        if self.root_field is None:
+            return dict(row)
+        if self.root_field in row:
+            raise ValueError(f"TSV row already has root field: {self.root_field}")
+        return {**row, self.root_field: str(language_root)}
+
+    def _part_root(self, index: int) -> Path:
+        reader = self._parts_reader()
+        stops = tuple(part.stop for part in reader.parts)
+        return self._sources()[_part_index_for(stops, index)][0]
+
+    def _sources(self) -> tuple[tuple[Path, Path], ...]:
+        if self._sources_cache is not None:
+            return self._sources_cache
+        sources = []
+        for language_root in self._roots():
+            sources.append((language_root, self._path(language_root)))
+        if not sources:
+            raise FileNotFoundError(f"No TSV sources found under: {self.root}")
+        self._sources_cache = tuple(sources)
+        return self._sources_cache
 
     def _roots(self) -> Iterator[Path]:
         if self.subdirs is None:
@@ -76,19 +172,32 @@ class TsvDataset:
             raise ValueError("TSV source requires split when path is a directory.")
         return root / f"{self.split}.tsv"
 
-    def _read_rows(self) -> Iterator[TsvRow]:
-        for root in self._roots():
-            path = self._path(root)
-            with path.open("r", encoding=self.encoding, newline="") as f:
-                for row in csv.DictReader(f, delimiter="\t"):
-                    if self.root_field is None:
-                        yield row
-                        continue
-                    if self.root_field in row:
-                        raise ValueError(
-                            f"TSV row already has root field: {self.root_field}"
-                        )
-                    yield {**row, self.root_field: str(root)}
+    def _parts_reader(self) -> tabular.ParquetPartsReader:
+        if self._reader is not None:
+            return self._reader
+        if self.cache_path is None:
+            raise ValueError("tsv requires a source cache path.")
+        paths = tuple(path for _root, path in self._sources())
+        parts = tabular.ensure_parts(
+            paths,
+            cache_path=self.cache_path,
+            manifest_name=_CACHE_MANIFEST,
+            cache_dir_name=_CACHE_DIR,
+            delimiter="\t",
+            encoding=self.encoding,
+            prepare_workers=self.prepare_workers,
+            progress_label="prepare TSV",
+            source_label="TSV",
+        )
+        self._reader = tabular.ParquetPartsReader(parts)
+        return self._reader
+
+
+def _part_index_for(stops: Sequence[int], index: int) -> int:
+    part_index = bisect_right(stops, index)
+    if part_index < 0 or part_index >= len(stops):
+        raise IndexError("TSV sample index is outside prepared parts.")
+    return part_index
 
 
 def _optional_str(value: Any, name: str) -> str | None:
@@ -121,7 +230,7 @@ def _optional_str_sequence(value: Any, name: str) -> tuple[str, ...] | None:
         raise ValueError(f"TSV {name} must not be empty.")
     for item in result:
         if not isinstance(item, str):
-            raise TypeError(f"TSV {name} items must be strings.")
+            raise TypeError(f"TSV {name} must contain strings.")
         if not item:
-            raise ValueError(f"TSV {name} items must not be empty.")
+            raise ValueError(f"TSV {name} must not contain empty strings.")
     return result

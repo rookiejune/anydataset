@@ -25,7 +25,6 @@ class HuggingFaceDatasetTest(unittest.TestCase):
                     split="train",
                     load_options={
                         "config_name": "clean",
-                        "streaming": True,
                     },
                 ),
             )
@@ -36,7 +35,23 @@ class HuggingFaceDatasetTest(unittest.TestCase):
         self.assertEqual(calls[0][0], ("org/audio",))
         self.assertEqual(calls[0][1]["split"], "train")
         self.assertEqual(calls[0][1]["name"], "clean")
-        self.assertTrue(calls[0][1]["streaming"])
+        self.assertNotIn("streaming", calls[0][1])
+
+    def test_prepare_rejects_streaming(self):
+        fake_datasets = types.ModuleType("datasets")
+        fake_datasets.load_dataset = lambda *args, **kwargs: []
+        with tempfile.TemporaryDirectory():
+            dataset = AnyDataset(
+                Spec(
+                    source=Source.HF,
+                    path="org/audio",
+                    split="train",
+                    load_options={"streaming": True},
+                ),
+            )
+            with mock.patch.dict(sys.modules, {"datasets": fake_datasets}):
+                with self.assertRaisesRegex(ValueError, "streaming is not supported"):
+                    dataset.prepare()
 
     def test_prepare_loads_dataset_from_disk_split(self):
         fake_datasets = types.ModuleType("datasets")

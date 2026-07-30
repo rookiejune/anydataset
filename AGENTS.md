@@ -21,14 +21,16 @@
 
 ## 开发约定
 
-- 新增内置数据集时，在 `src/anydataset/presets/` 下增加 preset class，并按数据集类型注册到 `AnyDataset.preset()` 或 `IterableAnyDataset.preset()`。
+- 新增内置数据集时，在 `src/anydataset/presets/` 下增加 preset class，并注册到
+  `AnyDataset.preset()`。`IterableAnyDataset` 只留给自定义流式 source。
 - 具体数据集字段映射写在 preset 的 `parse_fn` 或清晰 helper 里，不写进 source 层。
 - 不新增旧式适配器、格式化器、流包装器、规格别名或模态别名。
 - 不做静默兼容旧 manifest 结构；格式变更时通过 schema version 和显式迁移处理。
 - PyTorch `DataLoader` 的 worker/LBA/Lightning 装配由调用方显式配置；形态 collate
-  （`audio_collate` / `speech_collate` / `speech_grid_collate` / `SpeechGridView`）
-  属于可选公开契约，不为缺失 speaker/text 静默补默认值。
-- 大数据集默认用 streaming 时，把选择放到 preset 的 `Spec.load_options` 里。
+ （`audio_collate` / `speech_collate` / `speech_grid_collate` / `SpeechGridView`）
+ 属于可选公开契约，不为缺失 speaker/text 静默补默认值。
+- 大数据集默认不要开 Hugging Face `streaming`；`Source.HF` 在
+  `streaming=True` 时显式拒绝。需要本地可索引数据时用 `Source.HF_DISK`。
 
 ## 多 worker 和多卡
 

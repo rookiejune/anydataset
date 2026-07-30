@@ -40,16 +40,21 @@ def rule_cache_key(
     name: str,
     rule_id: str | None = None,
     version: str | None = None,
+    content_id: str | None = None,
 ) -> str:
     """Return a stable cache key for a rule's declared identity.
 
-    ``rule_id`` and ``version`` are optional so caches created by the
-    original name-only API keep their existing paths.  Explicit identity
-    fields are included in the digest and therefore cannot reuse an older
-    rule with the same display name.
+    ``rule_id``, ``version``, and ``content_id`` are optional so caches created
+    by the original name-only API keep their existing paths. Explicit identity
+    fields are included in the digest and therefore cannot reuse an older rule
+    with the same display name.
     """
 
-    if (rule_id is None or rule_id == name) and version is None:
+    if (
+        (rule_id is None or rule_id == name)
+        and version is None
+        and content_id is None
+    ):
         return hashlib.sha256(name.encode("utf-8")).hexdigest()[:16]
 
     identity = {"name": name}
@@ -57,6 +62,8 @@ def rule_cache_key(
         identity["rule_id"] = rule_id
     if version is not None:
         identity["version"] = version
+    if content_id is not None:
+        identity["content_id"] = content_id
     payload = json.dumps(
         identity,
         ensure_ascii=True,
@@ -70,6 +77,7 @@ def rule_identity(
     name: str,
     rule_id: str | None = None,
     version: str | None = None,
+    content_id: str | None = None,
 ) -> dict[str, str]:
     """Return the serializable identity used by filter metadata."""
 
@@ -79,6 +87,8 @@ def rule_identity(
         identity["rule_id"] = normalized_id
     if version is not None:
         identity["version"] = version
+    if content_id is not None:
+        identity["content_id"] = content_id
     return identity
 
 

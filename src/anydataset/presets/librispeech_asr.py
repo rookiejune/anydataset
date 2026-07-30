@@ -4,14 +4,14 @@ from functools import partial
 from typing import Any
 
 from ..types import AudioView, Lang, TextMeta, TextView
-from ..dataset.abc import IterableAnyDataset
+from ..dataset.abc import AnyDataset
 from ..types import Preset
 from ..types.item import Transforms
 from ..rowmap import sample_from_row
 from .registry import preset_spec
 
 
-class LibriSpeechASR(IterableAnyDataset):
+class LibriSpeechASR(AnyDataset):
     def __init__(
         self,
         split: str | None = None,

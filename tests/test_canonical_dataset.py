@@ -159,7 +159,8 @@ class CanonicalDatasetTest(unittest.TestCase):
         self.assertEqual(spec.source, Source.HF)
         self.assertEqual(spec.path, "google/fleurs")
         self.assertEqual(spec.split, "validation")
-        self.assertEqual(spec.load_options["streaming"], True)
+        self.assertNotIn("streaming", spec.load_options)
+        self.assertEqual(spec.load_options["config_name"], "en_us")
         self.assertFalse(hasattr(spec, "name"))
         self.assertFalse(hasattr(spec, "key"))
 
@@ -322,14 +323,14 @@ class CanonicalDatasetTest(unittest.TestCase):
         self.assertEqual(source.views, frozenset({TextView.TEXT}))
         self.assertEqual(target.views, frozenset({TextView.TEXT}))
 
-    def test_wmt19_preset_resolves_to_streaming_hf_spec(self):
+    def test_wmt19_preset_resolves_to_hf_spec(self):
         spec = resolve_dataset("wmt19:validation")
 
         self.assertEqual(spec.source, Source.HF)
         self.assertEqual(spec.path, "wmt/wmt19")
         self.assertEqual(spec.split, "validation")
         self.assertEqual(spec.load_options["config_name"], "cs-en")
-        self.assertEqual(spec.load_options["streaming"], True)
+        self.assertNotIn("streaming", spec.load_options)
 
     def test_wmt19_preset_maps_translation_roles(self):
         sample = WMT19().parse_fn(
@@ -433,10 +434,16 @@ class CanonicalDatasetTest(unittest.TestCase):
         self.assertNotIn("transforms", dataset.spec.load_options)
 
     def test_preset_requires_matching_dataset_type(self):
-        with self.assertRaisesRegex(ValueError, "IterableAnyDataset.preset"):
-            AnyDataset.preset("wmt19")
+        with self.assertRaisesRegex(ValueError, "AnyDataset.preset"):
+            IterableAnyDataset.preset("wmt19")
         with self.assertRaisesRegex(ValueError, "AnyDataset.preset"):
             IterableAnyDataset.preset("mnist")
+        with self.assertRaisesRegex(ValueError, "AnyDataset.preset"):
+            IterableAnyDataset.preset("common_voice")
+        with self.assertRaisesRegex(ValueError, "AnyDataset.preset"):
+            IterableAnyDataset.preset("fleurs")
+        dataset = AnyDataset.preset("wmt19")
+        self.assertIsInstance(dataset, AnyDataset)
 
     def test_map_dataset_applies_reference_transforms(self):
         ref = (Role.DEFAULT, Modality.IMAGE)
@@ -493,7 +500,7 @@ class CanonicalDatasetTest(unittest.TestCase):
         self.assertTrue(torch.equal(waveform, torch.tensor([6])))
         self.assertEqual(sample_rate, 4)
 
-    def test_iterable_dataset_uses_source_native_shard(self):
+    def test_iterable_dataset_ignores_dataset_native_shard(self):
         dataset = IterableAnyDataset(
             spec=Spec(source=Source.HF, path="/tmp/missing"),
             parse_fn=lambda row: row["value"],
@@ -510,7 +517,7 @@ class CanonicalDatasetTest(unittest.TestCase):
         values = list(dataset.iter_shard(2, 1))
 
         self.assertEqual(values, [1, 3])
-        self.assertEqual(dataset.dataset.shard_calls, [(2, 1)])
+        self.assertEqual(dataset.dataset.shard_calls, [])
 
     def test_iterable_dataset_falls_back_to_modulo_shard(self):
         dataset = IterableAnyDataset(
@@ -613,7 +620,7 @@ class CanonicalDatasetTest(unittest.TestCase):
             values = list(dataset)
 
         self.assertEqual(values, [7, 19])
-        self.assertEqual(dataset.dataset.shard_calls, [(12, 7)])
+        self.assertEqual(dataset.dataset.shard_calls, [])
 
     def test_map_dataset_drops_tail_by_rank_before_worker_shard(self):
         values_by_rank: list[list[int]] = []

@@ -106,13 +106,13 @@ class CacheManagerTest(unittest.TestCase):
                     source=Source.HF,
                     path="google/fleurs",
                     split="train",
-                    load_options={"config_name": "en_us", "streaming": True},
+                    load_options={"config_name": "en_us"},
                 )
                 second = Spec(
                     source=Source.HF,
                     path="google/fleurs",
                     split="train",
-                    load_options={"config_name": "en_us", "streaming": True},
+                    load_options={"config_name": "en_us"},
                 )
 
                 self.assertEqual(manager.prepare(first).cache_path, manager.prepare(second).cache_path)

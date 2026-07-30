@@ -101,12 +101,13 @@ plan window 同步，只裁掉 rank-local 的最终 batch 尾部，保证所有 
 from anydataset import AnyDataset, IterableAnyDataset
 
 mnist = AnyDataset.preset("mnist", split="train")
-fleurs = IterableAnyDataset.preset("fleurs", split="train", config_name="en_us")
+fleurs = AnyDataset.preset("fleurs", split="train", config_name="en_us")
 ```
 
-map-style preset 包括 `MNIST`、`CIFAR10` 和 `FSD50K`；iterable preset 包括
-`FLEURS`、`LIBRISPEECH_ASR`、`COMMON_VOICE`、`ESC50`、`NSYNTH` 和 `WMT19`。
-通过错误的 dataset 类型创建 preset 会显式报错。两个入口都接受
+内置 preset 全部是 map-style：`MNIST`、`CIFAR10`、`FSD50K`、`COMMON_VOICE`、
+`FLEURS`、`LIBRISPEECH_ASR`、`ESC50`、`NSYNTH` 和 `WMT19`。
+`IterableAnyDataset.preset()` 会显式报错；自定义真正只能流式读取的 source 仍可直接
+构造 `IterableAnyDataset`。两个入口都接受
 `transforms=...`，在 parse 后执行 item 级 transform。
 
 只需要得到物理 `Spec` 时，直接调用 preset：
@@ -169,7 +170,6 @@ dataset = IterableAnyDataset(
         split="train",
         load_options={
             "config_name": "en_us",
-            "streaming": True,
         },
     ),
     parse_fn=partial(
@@ -185,7 +185,8 @@ dataset = IterableAnyDataset(
 - `Source.HF_DISK`：通过 `datasets.load_from_disk(...)` 读取。
 - `Source.STORE`：读取 `anydataset` 的 store。
 - 字符串 source `"tsv"`：读取单个 TSV 文件、目录下的 `<split>.tsv`，或按
-  `subdirs` load option 的顺序读取各子目录下的同名 split。
+  `subdirs` load option 的顺序读取各子目录下的同名 split。TSV 与 `sharded_csv`
+  共用 delimited→Parquet prepare，提供 map-style 随机访问；`root_field` 在读取时注入。
 - 字符串 source `"sharded_csv"`：读取 `shard_<index>/<number>.csv` 数字文件名，
   设置 split 时读取 `<path>/<split>/shard_<index>/<number>.csv`；非数字 CSV 文件名
   会被忽略并写 warning。
@@ -197,8 +198,8 @@ dataset = IterableAnyDataset(
 运行时 warning 和 worker 日志写入
 `$ANYDATASET_HOME/logs/<timestamp>-<pid>/`。
 
-内置 `sharded_csv` source 保留 CSV 作为可读的事实来源，并在
-`$ANYDATASET_HOME/cache/sources` 下为每个 CSV prepare 一个 Parquet cache part。
+内置 `tsv` 与 `sharded_csv` source 保留文本表格作为可读的事实来源，并在
+`$ANYDATASET_HOME/cache/sources` 下为每个源文件 prepare 一个 Parquet cache part。
 prepare 使用 spawn process pool 并行转换变化文件，最后原子提交 cache manifest；
 dataset 随后通过 Parquet row group 提供 map-style 随机访问。动态 batch shuffle 会先
 打乱 row group 顺序，并且每次只物化一个 row group 的 index，不再分配全数据集 Python
@@ -249,9 +250,9 @@ dataset = IterableAnyDataset(
 或 `iter_indexed_shard()` 不足以启用该路径，因为原生 shard 内的局部枚举不能保留全局
 索引。
 
-内建 `hf-disk`、`store` 和 `sharded_csv` source 通过随机访问提供 indexed 路径。TSV
-和 Hugging Face streaming 的公开 shard API 不携带原始全局行索引，因此明确保留全流
-modulo fallback。`IterableAnyDataset.iter_shard` 与 `iter_indexed_shard` 共用同一
+内建 `hf-disk`、`store`、`tsv` 和 `sharded_csv` source 通过随机访问提供 indexed 路径。
+Hugging Face `streaming=True` 会被拒绝；请使用非 streaming 的 `Source.HF` 或
+`Source.HF_DISK`。`IterableAnyDataset.iter_shard` 与 `iter_indexed_shard` 共用同一
 dense global modulo 分区，不会机会主义地调用 raw dataset 的 `shard()`。
 
 ## 组合数据集
@@ -260,13 +261,13 @@ dense global modulo 分区，不会机会主义地调用 raw dataset 的 `shard(
 strategy 决定；默认 `SequentialStrategy` 会按顺序耗尽每个 child。
 
 ```python
-from anydataset import IterableAnyDataset, MultipleAnyDataset
+from anydataset import AnyDataset, MultipleAnyDataset
 from anydataset.dataset import RoundRobinStrategy
 
 dataset = MultipleAnyDataset(
     datasets=[
-        IterableAnyDataset.preset("fleurs", split="train", config_name="en_us"),
-        IterableAnyDataset.preset("librispeech_asr", split="train.100"),
+        AnyDataset.preset("fleurs", split="train", config_name="en_us"),
+        AnyDataset.preset("librispeech_asr", split="train.100"),
     ],
     strategy=RoundRobinStrategy(),
 )
@@ -275,13 +276,13 @@ dataset = MultipleAnyDataset(
 按权重决定下一个读取哪个 active child：
 
 ```python
-from anydataset import IterableAnyDataset, MultipleAnyDataset
+from anydataset import AnyDataset, MultipleAnyDataset
 from anydataset.dataset import WeightedRandomStrategy
 
 dataset = MultipleAnyDataset(
     datasets=[
-        IterableAnyDataset.preset("fleurs", split="train", config_name="en_us"),
-        IterableAnyDataset.preset("librispeech_asr", split="train.100"),
+        AnyDataset.preset("fleurs", split="train", config_name="en_us"),
+        AnyDataset.preset("librispeech_asr", split="train.100"),
     ],
     strategy=WeightedRandomStrategy(weights=[1.0, 2.0], seed=13),
 )
@@ -501,33 +502,27 @@ buffer）。它不是缓存分区的替代品；见
 
 文本翻译质量过滤在 `anydataset.quality.translation` 中。内置第一版 profile 面向
 WMT19 `zh-en`，输出 `accept`、`review`、`reject` 三类 label。
-`FilterRule` 只接受 map-style 输入，因此要先把 iterable WMT19 preset 物化成 store：
+`FilterRule` 只接受 map-style 输入；WMT19 已是 map-style，可直接过滤：
 
 ```python
 from anydataset import (
     AnyDataset,
     FilterRule,
-    IterableAnyDataset,
     Lang,
     Preset,
-    Source,
-    Spec,
 )
 from anydataset.quality.rules import QualityChain, Rule
 from anydataset.quality.text import TextQuality
 from anydataset.quality.translation import TranslationQuality
 from anydataset.types import Role
 
-source = IterableAnyDataset.preset(
+source = AnyDataset.preset(
     "wmt19", source_lang="zh", target_lang="en"
 )
-source.write("/data/wmt19-zh-en", dataset_id="wmt19-zh-en", split="train")
 
 
 def dataset_factory():
-    return AnyDataset(
-        Spec(source=Source.STORE, path="/data/wmt19-zh-en", split="train")
-    )
+    return AnyDataset.preset("wmt19", source_lang="zh", target_lang="en")
 
 
 def translation_factory():

@@ -1,9 +1,9 @@
 """Materialize LongCat views and filter FLEURS speech samples.
 
-The workflow writes streaming FLEURS rows to a map-style base store, writes a
-LongCat-only delta store, merges the two stores logically, and builds cached
-speech-quality partitions. It requires anytrain's LongCat and speech extras at
-execution time, but importing this module does not load data or models.
+The workflow writes FLEURS rows to a map-style base store, writes a LongCat-only
+delta store, merges the two stores logically, and builds cached speech-quality
+partitions. It requires anytrain's LongCat and speech extras at execution time,
+but importing this module does not load data or models.
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ from typing import Any
 
 import torch
 
-from anydataset import AnyDataset, IterableAnyDataset
+from anydataset import AnyDataset
 from anydataset.dataset.abc import MergedDataset
 from anydataset.filter import FilterRule
 from anydataset.provider import LongCatProvider
@@ -67,12 +67,11 @@ def delta_store_path(batch_size: int) -> Path:
     return output_root() / f"fleurs-longcat-bs{batch_size}"
 
 
-def fleurs_dataset() -> IterableAnyDataset:
-    return IterableAnyDataset.preset(
+def fleurs_dataset() -> AnyDataset:
+    return AnyDataset.preset(
         Preset.FLEURS,
         split=SPLIT,
         config_name=CONFIG,
-        streaming=True,
     )
 
 

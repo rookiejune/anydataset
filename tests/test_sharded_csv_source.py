@@ -7,12 +7,11 @@ import unittest
 from functools import partial
 from unittest import mock
 
-import anydataset.dataset.source.sharded_csv as sharded_csv_module
+import anydataset.dataset.source._tabular_parquet as tabular_parquet
 import pyarrow.parquet as pyarrow_parquet
 
 from anydataset import (
     AnyDataset,
-    IterableAnyDataset,
     Spec,
     has_source,
     resolve_dataset,
@@ -69,7 +68,7 @@ class ShardedCsvSourceTest(unittest.TestCase):
             )
 
             with mock.patch(
-                "anydataset.dataset.source.sharded_csv.ProcessPoolExecutor",
+                "anydataset.dataset.source._tabular_parquet.ProcessPoolExecutor",
                 side_effect=AssertionError("inline preparation should not spawn"),
             ):
                 self.assertEqual(len(dataset), 1)
@@ -125,7 +124,7 @@ class ShardedCsvSourceTest(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            dataset = IterableAnyDataset(
+            dataset = AnyDataset(
                 Spec(source="sharded_csv", path=tmpdir),
                 parse_fn=lambda row: row["src_text"],
             )
@@ -148,7 +147,7 @@ class ShardedCsvSourceTest(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            dataset = IterableAnyDataset(
+            dataset = AnyDataset(
                 Spec(source="sharded_csv", path=tmpdir),
                 parse_fn=lambda row: row["src_text"],
             )
@@ -228,7 +227,7 @@ class ShardedCsvSourceTest(unittest.TestCase):
             (shard_dir / "0.csv").write_text("src_text\nzero\n", encoding="utf-8")
             (shard_dir / "notes.csv").write_text("src_text\nignored\n", encoding="utf-8")
 
-            dataset = IterableAnyDataset(
+            dataset = AnyDataset(
                 Spec(source="sharded_csv", path=tmpdir),
                 parse_fn=lambda row: row["src_text"],
             )
@@ -279,7 +278,7 @@ class ShardedCsvSourceTest(unittest.TestCase):
                 encoding="utf-8",
             )
             with mock.patch(
-                "anydataset.dataset.source.sharded_csv._PARQUET_ROW_GROUP_SIZE",
+                "anydataset.dataset.source._tabular_parquet.PARQUET_ROW_GROUP_SIZE",
                 2,
             ):
                 dataset = AnyDataset(Spec(source="sharded_csv", path=tmpdir))
@@ -325,7 +324,7 @@ class ShardedCsvSourceTest(unittest.TestCase):
                 encoding="utf-8",
             )
             with mock.patch(
-                "anydataset.dataset.source.sharded_csv._PARQUET_ROW_GROUP_SIZE",
+                "anydataset.dataset.source._tabular_parquet.PARQUET_ROW_GROUP_SIZE",
                 2,
             ):
                 dataset = AnyDataset(Spec(source="sharded_csv", path=tmpdir))
@@ -333,11 +332,11 @@ class ShardedCsvSourceTest(unittest.TestCase):
 
             with (
                 mock.patch(
-                    "anydataset.dataset.source.sharded_csv._stops",
+                    "anydataset.dataset.source._tabular_parquet.stops",
                     side_effect=AssertionError("row-group stops were recomputed"),
                 ),
                 mock.patch(
-                    "anydataset.dataset.source.sharded_csv.pq.ParquetFile",
+                    "anydataset.dataset.source._tabular_parquet.pq.ParquetFile",
                     wraps=pyarrow_parquet.ParquetFile,
                 ) as parquet,
             ):
@@ -356,7 +355,7 @@ class ShardedCsvSourceTest(unittest.TestCase):
                 encoding="utf-8",
             )
             with mock.patch(
-                "anydataset.dataset.source.sharded_csv._PARQUET_ROW_GROUP_SIZE",
+                "anydataset.dataset.source._tabular_parquet.PARQUET_ROW_GROUP_SIZE",
                 2,
             ):
                 dataset = AnyDataset(Spec(source="sharded_csv", path=tmpdir))
@@ -380,16 +379,21 @@ class ShardedCsvSourceTest(unittest.TestCase):
 
     def test_parquet_manifest_records_file_identity(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            shard = Path(tmpdir) / "shard_0"
-            shard.mkdir()
+            root = Path(tmpdir)
+            home = root / "home"
+            data = root / "data"
+            home.mkdir()
+            shard = data / "shard_0"
+            shard.mkdir(parents=True)
             (shard / "0.csv").write_text("value\nzero\n", encoding="utf-8")
 
-            dataset = AnyDataset(Spec(source="sharded_csv", path=tmpdir))
-            self.assertEqual(len(dataset), 1)
-            manifest = next(
-                dataset.cache_manager.root.rglob("sharded_csv_parquet.json")
-            )
-            record = json.loads(manifest.read_text(encoding="utf-8"))["files"][0]
+            with mock.patch.dict(os.environ, {"ANYDATASET_HOME": str(home)}):
+                dataset = AnyDataset(Spec(source="sharded_csv", path=str(data)))
+                self.assertEqual(len(dataset), 1)
+                manifest = next(
+                    dataset.cache_manager.root.rglob("sharded_csv_parquet.json")
+                )
+                record = json.loads(manifest.read_text(encoding="utf-8"))["files"][0]
 
         self.assertIn("device", record)
         self.assertIn("inode", record)
@@ -398,134 +402,156 @@ class ShardedCsvSourceTest(unittest.TestCase):
     def test_reuses_prepared_parquet_cache(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
-            shard_dir = root / "shard_0"
-            shard_dir.mkdir()
+            home = root / "home"
+            data = root / "data"
+            home.mkdir()
+            shard_dir = data / "shard_0"
+            shard_dir.mkdir(parents=True)
             (shard_dir / "0.csv").write_text(
                 "src_text\n"
                 "zero\n"
                 "one\n",
                 encoding="utf-8",
             )
+            spec = Spec(source="sharded_csv", path=str(data))
 
-            dataset = AnyDataset(
-                Spec(source="sharded_csv", path=tmpdir),
-                parse_fn=lambda row: row["src_text"],
-            )
-            self.assertEqual(len(dataset), 2)
-            manifests = list(
-                dataset.cache_manager.root.rglob("sharded_csv_parquet.json")
-            )
-            parts = list(dataset.cache_manager.root.rglob("*.parquet"))
-            self.assertEqual(len(manifests), 1)
-            self.assertEqual(len(parts), 1)
+            with mock.patch.dict(os.environ, {"ANYDATASET_HOME": str(home)}):
+                dataset = AnyDataset(
+                    spec,
+                    parse_fn=lambda row: row["src_text"],
+                )
+                self.assertEqual(len(dataset), 2)
+                manifests = list(
+                    dataset.cache_manager.root.rglob("sharded_csv_parquet.json")
+                )
+                parts = list(dataset.cache_manager.root.rglob("*.parquet"))
+                self.assertEqual(len(manifests), 1)
+                self.assertEqual(len(parts), 1)
 
-            second = AnyDataset(
-                Spec(source="sharded_csv", path=tmpdir),
-                parse_fn=lambda row: row["src_text"],
-            )
-            with mock.patch(
-                "anydataset.dataset.source.sharded_csv._convert_file_job"
-            ) as convert:
-                self.assertEqual(len(second), 2)
+                second = AnyDataset(
+                    spec,
+                    parse_fn=lambda row: row["src_text"],
+                )
+                with mock.patch.object(
+                    tabular_parquet,
+                    "convert_file_job",
+                ) as convert:
+                    self.assertEqual(len(second), 2)
 
-            convert.assert_not_called()
+                convert.assert_not_called()
 
     def test_rebuilds_cache_with_non_integer_schema_version(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
-            shard = root / "shard_0"
-            shard.mkdir()
+            home = root / "home"
+            data = root / "data"
+            home.mkdir()
+            shard = data / "shard_0"
+            shard.mkdir(parents=True)
             (shard / "0.csv").write_text("value\nzero\none\n", encoding="utf-8")
             spec = Spec(
                 source="sharded_csv",
-                path=tmpdir,
+                path=str(data),
                 load_options={"prepare_workers": 0},
             )
-            first = AnyDataset(spec)
-            self.assertEqual(len(first), 2)
-            manifest = next(
-                first.cache_manager.root.rglob("sharded_csv_parquet.json")
-            )
+            with mock.patch.dict(os.environ, {"ANYDATASET_HOME": str(home)}):
+                first = AnyDataset(spec)
+                self.assertEqual(len(first), 2)
+                manifest = next(
+                    first.cache_manager.root.rglob("sharded_csv_parquet.json")
+                )
 
-            for version in (True, 1.0):
-                with self.subTest(version=version):
-                    data = json.loads(manifest.read_text(encoding="utf-8"))
-                    data["schema_version"] = version
-                    manifest.write_text(json.dumps(data), encoding="utf-8")
+                for version in (True, 1.0):
+                    with self.subTest(version=version):
+                        data_json = json.loads(manifest.read_text(encoding="utf-8"))
+                        data_json["schema_version"] = version
+                        manifest.write_text(json.dumps(data_json), encoding="utf-8")
 
-                    with mock.patch.object(
-                        sharded_csv_module,
-                        "_convert_file_job",
-                        wraps=sharded_csv_module._convert_file_job,
-                    ) as convert:
-                        rebuilt = AnyDataset(spec)
-                        self.assertEqual(len(rebuilt), 2)
+                        with mock.patch.object(
+                            tabular_parquet,
+                            "convert_file_job",
+                            wraps=tabular_parquet.convert_file_job,
+                        ) as convert:
+                            rebuilt = AnyDataset(spec)
+                            self.assertEqual(len(rebuilt), 2)
 
-                    convert.assert_called_once()
-                    repaired = json.loads(manifest.read_text(encoding="utf-8"))
-                    self.assertIs(type(repaired["schema_version"]), int)
+                        convert.assert_called_once()
+                        repaired = json.loads(manifest.read_text(encoding="utf-8"))
+                        self.assertIs(type(repaired["schema_version"]), int)
 
     def test_rebuilds_changed_parquet_part(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
-            shard_dir = root / "shard_0"
-            shard_dir.mkdir()
+            home = root / "home"
+            data = root / "data"
+            home.mkdir()
+            shard_dir = data / "shard_0"
+            shard_dir.mkdir(parents=True)
             source = shard_dir / "0.csv"
             source.write_text("src_text\nzero\n", encoding="utf-8")
-            spec = Spec(source="sharded_csv", path=tmpdir)
+            spec = Spec(source="sharded_csv", path=str(data))
 
-            first = AnyDataset(spec, parse_fn=lambda row: row["src_text"])
-            self.assertEqual(list(first), ["zero"])
+            with mock.patch.dict(os.environ, {"ANYDATASET_HOME": str(home)}):
+                first = AnyDataset(spec, parse_fn=lambda row: row["src_text"])
+                self.assertEqual(list(first), ["zero"])
 
-            source.write_text("src_text\nzero\none\n", encoding="utf-8")
-            second = AnyDataset(spec, parse_fn=lambda row: row["src_text"])
+                source.write_text("src_text\nzero\none\n", encoding="utf-8")
+                second = AnyDataset(spec, parse_fn=lambda row: row["src_text"])
 
-            self.assertEqual(list(second), ["zero", "one"])
-            self.assertEqual(
-                len(list(second.cache_manager.root.rglob("*.parquet"))),
-                1,
-            )
+                self.assertEqual(list(second), ["zero", "one"])
+                self.assertEqual(
+                    len(list(second.cache_manager.root.rglob("*.parquet"))),
+                    1,
+                )
 
     def test_rebuilds_cache_with_invalid_part_or_row_group_layout(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
-            shard = root / "shard_0"
-            shard.mkdir()
+            home = root / "home"
+            data = root / "data"
+            home.mkdir()
+            shard = data / "shard_0"
+            shard.mkdir(parents=True)
             (shard / "0.csv").write_text("value\nzero\none\n", encoding="utf-8")
             spec = Spec(
                 source="sharded_csv",
-                path=tmpdir,
+                path=str(data),
                 load_options={"prepare_workers": 0},
             )
-            first = AnyDataset(spec)
-            self.assertEqual(len(first), 2)
-            manifest = next(
-                first.cache_manager.root.rglob("sharded_csv_parquet.json")
-            )
+            with mock.patch.dict(os.environ, {"ANYDATASET_HOME": str(home)}):
+                first = AnyDataset(spec)
+                self.assertEqual(len(first), 2)
+                manifest = next(
+                    first.cache_manager.root.rglob("sharded_csv_parquet.json")
+                )
 
-            for invalid in ("part", "row_groups", "parquet"):
-                with self.subTest(invalid=invalid):
-                    data = json.loads(manifest.read_text(encoding="utf-8"))
-                    record = data["files"][0]
-                    if invalid == "part":
-                        record["part"] = (
-                            f"../sharded_csv_parquet/{Path(record['part']).name}"
-                        )
-                    else:
-                        if invalid == "row_groups":
-                            record["row_groups"] = [1, 1]
+                for invalid in ("part", "row_groups", "parquet"):
+                    with self.subTest(invalid=invalid):
+                        payload = json.loads(manifest.read_text(encoding="utf-8"))
+                        record = payload["files"][0]
+                        if invalid == "part":
+                            record["part"] = (
+                                f"../sharded_csv_parquet/{Path(record['part']).name}"
+                            )
                         else:
-                            part = manifest.parent / "sharded_csv_parquet" / record["part"]
-                            part.write_bytes(b"not parquet")
-                    manifest.write_text(json.dumps(data), encoding="utf-8")
+                            if invalid == "row_groups":
+                                record["row_groups"] = [1, 1]
+                            else:
+                                part = (
+                                    manifest.parent
+                                    / "sharded_csv_parquet"
+                                    / record["part"]
+                                )
+                                part.write_bytes(b"not parquet")
+                        manifest.write_text(json.dumps(payload), encoding="utf-8")
 
-                    rebuilt = AnyDataset(spec)
-                    self.assertEqual(rebuilt[1]["value"], "one")
-                    repaired = json.loads(manifest.read_text(encoding="utf-8"))[
-                        "files"
-                    ][0]
-                    self.assertNotIn("/", repaired["part"])
-                    self.assertEqual(repaired["row_groups"], [2])
+                        rebuilt = AnyDataset(spec)
+                        self.assertEqual(rebuilt[1]["value"], "one")
+                        repaired = json.loads(manifest.read_text(encoding="utf-8"))[
+                            "files"
+                        ][0]
+                        self.assertNotIn("/", repaired["part"])
+                        self.assertEqual(repaired["row_groups"], [2])
 
     def test_rejects_source_change_during_parquet_conversion(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -533,7 +559,7 @@ class ShardedCsvSourceTest(unittest.TestCase):
             source = root / "0.csv"
             target = root / "0.parquet"
             source.write_text("value\nbefore\n", encoding="utf-8")
-            read_csv = sharded_csv_module.read_csv
+            read_csv = tabular_parquet.read_csv
 
             def change_source(*args, **kwargs):
                 table = read_csv(*args, **kwargs)
@@ -541,12 +567,14 @@ class ShardedCsvSourceTest(unittest.TestCase):
                 return table
 
             with mock.patch.object(
-                sharded_csv_module,
+                tabular_parquet,
                 "read_csv",
                 side_effect=change_source,
             ):
                 with self.assertRaisesRegex(ValueError, "changed while preparing"):
-                    sharded_csv_module._convert_file_job((0, source, target))
+                    tabular_parquet.convert_file_job(
+                        (0, source, target, ",", "utf-8", "sharded CSV")
+                    )
 
             self.assertFalse(target.exists())
 
@@ -563,7 +591,7 @@ class ShardedCsvSourceTest(unittest.TestCase):
             )
 
             with mock.patch(
-                "anydataset.dataset.source.sharded_csv.ProcessPoolExecutor"
+                "anydataset.dataset.source._tabular_parquet.ProcessPoolExecutor"
             ) as executor:
                 pool = executor.return_value.__enter__.return_value
                 pool.map.side_effect = lambda function, jobs: map(function, jobs)
@@ -586,10 +614,10 @@ class ShardedCsvSourceTest(unittest.TestCase):
 
             with (
                 mock.patch(
-                    "anydataset.dataset.source.sharded_csv.multiprocessing.current_process"
+                    "anydataset.dataset.source._tabular_parquet.multiprocessing.current_process"
                 ) as current_process,
                 mock.patch(
-                    "anydataset.dataset.source.sharded_csv.ProcessPoolExecutor"
+                    "anydataset.dataset.source._tabular_parquet.ProcessPoolExecutor"
                 ) as executor,
             ):
                 current_process.return_value.daemon = True
@@ -713,7 +741,7 @@ class ShardedCsvSourceTest(unittest.TestCase):
             self.assertEqual(list(dataset.iter_indexed_range(1, 3)), [(1, "one"), (2, "two")])
             self.assertEqual(list(dataset.iter_indexed_shard(2, 1)), [(1, "one")])
 
-    def test_iterable_source_native_shard_keeps_global_indices(self):
+    def test_indexed_shard_keeps_global_indices(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             shard_dir = root / "shard_0"
@@ -726,7 +754,7 @@ class ShardedCsvSourceTest(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            dataset = IterableAnyDataset(
+            dataset = AnyDataset(
                 Spec(source="sharded_csv", path=tmpdir),
                 parse_fn=lambda row: row["src_text"],
             )
@@ -741,7 +769,7 @@ class ShardedCsvSourceTest(unittest.TestCase):
                 list(dataset.iter_shard(2, 1)),
             )
 
-    def test_iterable_and_map_iter_shard_agree_on_dense_modulo(self):
+    def test_iter_shard_uses_dense_global_modulo(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             shard_0 = root / "shard_0"
@@ -760,20 +788,17 @@ class ShardedCsvSourceTest(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            parse_fn = lambda row: row["src_text"]
-            map_dataset = AnyDataset(
-                Spec(source="sharded_csv", path=tmpdir),
-                parse_fn=parse_fn,
-            )
-            iterable_dataset = IterableAnyDataset(
+            def parse_fn(row):
+                return row["src_text"]
+
+            dataset = AnyDataset(
                 Spec(source="sharded_csv", path=tmpdir),
                 parse_fn=parse_fn,
             )
 
-            self.assertEqual(list(map_dataset.iter_shard(2, 1)), ["one"])
-            self.assertEqual(list(iterable_dataset.iter_shard(2, 1)), ["one"])
+            self.assertEqual(list(dataset.iter_shard(2, 1)), ["one"])
             self.assertEqual(
-                list(iterable_dataset.iter_indexed_shard(2, 0)),
+                list(dataset.iter_indexed_shard(2, 0)),
                 [(0, "zero"), (2, "two")],
             )
 
@@ -788,7 +813,7 @@ class ShardedCsvSourceTest(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            dataset = IterableAnyDataset(
+            dataset = AnyDataset(
                 Spec(source="sharded_csv", path=tmpdir, split="train"),
                 parse_fn=lambda row: row["target_text"],
             )
@@ -806,7 +831,7 @@ class ShardedCsvSourceTest(unittest.TestCase):
             (shard_0 / "0.csv").write_text("src_text\nzero\n", encoding="utf-8")
             (shard_2 / "0.csv").write_text("src_text\ntwo\n", encoding="utf-8")
 
-            dataset = IterableAnyDataset(
+            dataset = AnyDataset(
                 Spec(source="sharded_csv", path=tmpdir),
                 parse_fn=lambda row: row["src_text"],
             )
@@ -831,7 +856,7 @@ class ShardedCsvSourceTest(unittest.TestCase):
             (shard_0 / "0.csv").write_text("src_text\nzero\n", encoding="utf-8")
             (shard_2 / "0.csv").write_text("src_text\ntwo\n", encoding="utf-8")
 
-            dataset = IterableAnyDataset(
+            dataset = AnyDataset(
                 Spec(source="sharded_csv", path=tmpdir),
                 parse_fn=lambda row: row["src_text"],
             )

@@ -35,7 +35,7 @@ from .types import (
 
 
 class FilterRule:
-    __slots__ = ("_factory", "_name", "_rule_id", "_version")
+    __slots__ = ("_content_id", "_factory", "_name", "_rule_id", "_version")
 
     def __init__(
         self,
@@ -44,6 +44,7 @@ class FilterRule:
         *,
         rule_id: str | None = None,
         version: str | None = None,
+        content_id: str | None = None,
     ) -> None:
         validate_string("name", name)
         if not callable(factory):
@@ -52,10 +53,13 @@ class FilterRule:
             validate_string("rule_id", rule_id)
         if version is not None:
             validate_string("version", version)
+        if content_id is not None:
+            validate_string("content_id", content_id)
         self._name = name
         self._factory = factory
         self._rule_id = name if rule_id is None else rule_id
         self._version = version
+        self._content_id = content_id
 
     def __repr__(self) -> str:
         fields = [f"name={self.name!r}", f"factory={self.factory!r}"]
@@ -63,6 +67,8 @@ class FilterRule:
             fields.append(f"rule_id={self.rule_id!r}")
         if self.version is not None:
             fields.append(f"version={self.version!r}")
+        if self.content_id is not None:
+            fields.append(f"content_id={self.content_id!r}")
         return f"FilterRule({', '.join(fields)})"
 
     def __eq__(self, other: object) -> bool:
@@ -72,10 +78,11 @@ class FilterRule:
             self.name == other.name
             and self.rule_id == other.rule_id
             and self.version == other.version
+            and self.content_id == other.content_id
         )
 
     def __hash__(self) -> int:
-        return hash((self.name, self.rule_id, self.version))
+        return hash((self.name, self.rule_id, self.version, self.content_id))
 
     def __setstate__(self, state: object) -> None:
         if not isinstance(state, tuple) or len(state) != 2:
@@ -93,6 +100,7 @@ class FilterRule:
             factory,
             rule_id=slots.get("_rule_id"),
             version=slots.get("_version"),
+            content_id=slots.get("_content_id"),
         )
 
     @property
@@ -111,6 +119,10 @@ class FilterRule:
     def version(self) -> str | None:
         return self._version
 
+    @property
+    def content_id(self) -> str | None:
+        return self._content_id
+
     def apply(
         self,
         *,
@@ -123,6 +135,7 @@ class FilterRule:
             self.factory,
             rule_id=self.rule_id,
             version=self.version,
+            content_id=self.content_id,
             dataset_factory=dataset_factory,
             labels=labels,
             **apply_kwargs,
@@ -198,6 +211,7 @@ class _FilterCache:
                 self.input_id,
                 self.rule.rule_id,
                 self.rule.version,
+                self.rule.content_id,
             ),
         )
 
@@ -265,6 +279,7 @@ class FilteredDataset(MapStyleABC):
         *,
         rule_id: str | None = None,
         version: str | None = None,
+        content_id: str | None = None,
         dataset_factory: DatasetFactory,
         labels: FilterLabel | Sequence[FilterLabel] | None = None,
         **apply_kwargs: Unpack[FilterApplyKwargs],
@@ -272,7 +287,13 @@ class FilteredDataset(MapStyleABC):
         normalized = None if labels is None else normalized_labels(labels)
         options = apply_options(apply_kwargs)
         cache = apply_filter(
-            FilterRule(name, factory, rule_id=rule_id, version=version),
+            FilterRule(
+                name,
+                factory,
+                rule_id=rule_id,
+                version=version,
+                content_id=content_id,
+            ),
             input_id=options["input_id"],
             metrics=options["metrics"],
             device=options["device"],
@@ -285,6 +306,7 @@ class FilteredDataset(MapStyleABC):
             write_prefetch=options["write_prefetch"],
             worker_timeout=options["worker_timeout"],
             runtime=options["runtime"],
+            rebuild=options["rebuild"],
             dataset_factory=dataset_factory,
         )
         self._bind_cache(cache, labels=normalized)
@@ -449,6 +471,7 @@ def _restore_filter_cache(
     input_id: str | None,
     rule_id: str | None = None,
     version: str | None = None,
+    content_id: str | None = None,
 ) -> _FilterCache:
     generation = lease_filter_generation(cache_path)
     try:
@@ -460,6 +483,7 @@ def _restore_filter_cache(
                 _unavailable_filter_factory,
                 rule_id=rule_id,
                 version=version,
+                content_id=content_id,
             ),
             generation.path,
             lease=generation.lease,

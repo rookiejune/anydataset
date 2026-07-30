@@ -72,6 +72,7 @@ def filter_identity(
                 dataset.rule.name,
                 dataset.rule.rule_id,
                 dataset.rule.version,
+                dataset.rule.content_id,
             ),
             "labels": list(dataset.labels),
             "cache_key": filter_cache_root(cache_path).name,
@@ -130,7 +131,12 @@ def metadata(
             "identity_id": filter_identity_key(identity),
             "sample_count": base_count,
         },
-        "rule": rule_identity(rule.name, rule.rule_id, rule.version),
+        "rule": rule_identity(
+            rule.name,
+            rule.rule_id,
+            rule.version,
+            rule.content_id,
+        ),
     }
     if identity.get("kind") == "physical":
         output["base"]["spec_id"] = identity["spec_id"]
@@ -148,7 +154,12 @@ def filter_path(
         / "cache"
         / "filters"
         / filter_identity_key(identity)
-        / rule_cache_key(rule.name, rule.rule_id, rule.version)
+        / rule_cache_key(
+            rule.name,
+            rule.rule_id,
+            rule.version,
+            rule.content_id,
+        )
     )
 
 

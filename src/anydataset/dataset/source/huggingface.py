@@ -11,6 +11,16 @@ class HuggingFaceSource:
     def prepare(self, spec: types.Spec, cache_path: Path) -> Any:
         return prepare_hf(spec, cache_path)
 
+    def iter_indexed_shard(
+        self,
+        dataset: Any,
+        *,
+        num_shards: int,
+        shard_id: int,
+    ) -> Iterator[tuple[int, Any]]:
+        for sample_index in range(shard_id, len(dataset), num_shards):
+            yield sample_index, dataset[sample_index]
+
 
 class HuggingFaceDiskSource:
     def prepare(self, spec: types.Spec, cache_path: Path) -> Any:
@@ -37,6 +47,11 @@ def prepare_hf(spec: types.Spec, cache_path: Path) -> Any:
 
     split = spec.split or "train"
     load_kwargs = dict(spec.load_options)
+    if load_kwargs.get("streaming") is True:
+        raise ValueError(
+            "Hugging Face streaming is not supported. Omit `streaming` or set "
+            "`streaming=False`, or use Source.HF_DISK for local map-style data."
+        )
     config_name = load_kwargs.pop("config_name", None)
     if config_name is not None:
         if "name" in load_kwargs:

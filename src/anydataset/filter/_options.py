@@ -22,6 +22,7 @@ _DEFAULTS: ResolvedFilterApplyOptions = {
     "write_prefetch": None,
     "worker_timeout": None,
     "runtime": Runtime(),
+    "rebuild": False,
 }
 
 
@@ -34,4 +35,6 @@ def options(values: FilterApplyKwargs) -> ResolvedFilterApplyOptions:
     input_id = resolved["input_id"]
     if input_id is not None:
         validate_string("input_id", input_id)
+    if not isinstance(resolved["rebuild"], bool):
+        raise TypeError("rebuild must be a bool.")
     return resolved

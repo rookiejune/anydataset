@@ -69,6 +69,7 @@ class FilterApplyKwargs(TypedDict):
     write_prefetch: NotRequired[int | None]
     worker_timeout: NotRequired[float | None]
     runtime: NotRequired[Runtime]
+    rebuild: NotRequired[bool]
 
 
 class ResolvedFilterApplyOptions(TypedDict):
@@ -84,6 +85,7 @@ class ResolvedFilterApplyOptions(TypedDict):
     write_prefetch: int | None
     worker_timeout: float | None
     runtime: Runtime
+    rebuild: bool
 
 
 @dataclass(frozen=True)
