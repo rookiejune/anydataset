@@ -500,6 +500,8 @@ class CanonicalDatasetTest(unittest.TestCase):
         self.assertEqual(sample_rate, 4)
 
     def test_iterable_dataset_ignores_dataset_native_shard(self):
+        # HF is an IndexedShardingSource: rows are taken via source
+        # iter_indexed_shard (len/getitem), not prepared Dataset.shard().
         dataset = IterableAnyDataset(
             spec=Spec(source=Source.HF, path="/tmp/missing"),
             parse_fn=lambda row: row["value"],
@@ -604,6 +606,8 @@ class CanonicalDatasetTest(unittest.TestCase):
         self.assertEqual(list(dataset.iter_shard(2, 1)), [1, 3])
 
     def test_iterable_dataset_merges_rank_and_worker_shards(self):
+        # Same contract as ignores_dataset_native_shard: rank/worker flattening
+        # goes through the source indexed path, not Dataset.shard().
         dataset = IterableAnyDataset(
             spec=Spec(source=Source.HF, path="/tmp/missing"),
             parse_fn=lambda row: row["value"],
@@ -989,6 +993,8 @@ class _PlainSource:
 
 
 class _ShardableRows:
+    """Map-style stand-in for HF rows; ``shard()`` must stay unused."""
+
     def __init__(self, rows):
         self.rows = rows
         self.shard_calls = []

@@ -24,7 +24,13 @@ class DatasetSource(Protocol):
 
 @runtime_checkable
 class IndexedShardingSource(DatasetSource, Protocol):
-    """Source that selects the dense global modulo shard of prepared rows."""
+    """Source that selects the dense global modulo shard of prepared rows.
+
+    Sharding is opted in on the source, not by calling a prepared object's
+    ``.shard()`` (for example Hugging Face ``Dataset.shard``). Prepared rows
+    may expose such a method for other APIs; iterable datasets ignore it and
+    only use ``iter_indexed_shard`` here or a scan-time index modulo fallback.
+    """
 
     def iter_indexed_shard(
         self,
@@ -43,7 +49,11 @@ def native_indexed_shard(
     num_shards: int,
     shard_id: int,
 ) -> Iterator[tuple[int, Any]] | None:
-    """Return a validated native shard, or ``None`` for the scan fallback."""
+    """Return a validated native shard, or ``None`` for the scan fallback.
+
+    Does not call ``dataset.shard(...)`` even when that method exists; only an
+    ``IndexedShardingSource`` may supply indexed rows.
+    """
 
     validate_shard(num_shards, shard_id)
     if not isinstance(source, IndexedShardingSource):
