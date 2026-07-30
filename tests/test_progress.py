@@ -4,13 +4,13 @@ import io
 from contextlib import redirect_stdout
 from unittest.mock import patch
 
-from anydataset._progress import Progress, ProgressDashboard
+from anydataset._runtime.progress import Progress, ProgressDashboard
 
 
 def test_non_interactive_progress_reports_start_updates_and_finish() -> None:
     stdout = io.StringIO()
     with (
-        patch("anydataset._progress._NON_INTERACTIVE_PROGRESS_INTERVAL", 0.0),
+        patch("anydataset._runtime.progress._NON_INTERACTIVE_PROGRESS_INTERVAL", 0.0),
         redirect_stdout(stdout),
         ProgressDashboard(
             desc="materialize views",

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from anydataset._devices import resolve_devices
+from anydataset._runtime.devices import resolve_devices
 from anydataset._validation import optional_positive_float
 
 

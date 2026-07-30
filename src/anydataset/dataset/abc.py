@@ -7,8 +7,8 @@ from typing import TYPE_CHECKING, Any, Protocol, cast, runtime_checkable
 
 from torch.utils.data import Dataset, IterableDataset
 
-from .._parallel import iter_indexed_shard as iter_source_indexed_shard
-from .._sharding import Shard, runtime_shard, validate_shard
+from .._runtime.parallel import iter_indexed_shard as iter_source_indexed_shard
+from .._runtime.sharding import Shard, runtime_shard, validate_shard
 from ..types import Preset, Source, Spec
 from ..types._sample import select as select_sample
 from ..types.item import Modality, Role, View

@@ -24,7 +24,7 @@ from anydataset.types import (
 from anydataset.provider.codec import CodecProvider
 from anydataset.provider.longcat import LongCatProvider
 from anydataset.store import DatasetWriter, ViewMaterializer
-from anydataset.store.manifestio import read_view_manifest
+from anydataset.store.manifest.io import read_view_manifest
 from anydataset.store.paths import view_shard_path
 
 

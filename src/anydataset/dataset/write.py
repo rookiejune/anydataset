@@ -15,9 +15,9 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import TYPE_CHECKING, Any
 
-from .._progress import Progress, iter_with_progress, put_progress, watch_workers
+from .._runtime.progress import Progress, iter_with_progress, put_progress, watch_workers
 from .._io.atomic import validate_empty_target
-from .._parallel import (
+from .._runtime.parallel import (
     DeviceWorker,
     ProcessHandle,
     free_port,
@@ -27,9 +27,9 @@ from .._parallel import (
     set_worker_environment,
     validate_spawn_value,
 )
-from ..store._config import DEFAULT_MAX_SHARD_SAMPLES
-from ..store._part_commit import commit_store_parts
-from ..store._part_writer import DatasetPartWriter
+from ..store.config import DEFAULT_MAX_SHARD_SAMPLES
+from ..store.part.commit import commit_store_parts
+from ..store.part.writer import DatasetPartWriter
 from ..types.item import Modality, Role, Sample, View
 
 if TYPE_CHECKING:

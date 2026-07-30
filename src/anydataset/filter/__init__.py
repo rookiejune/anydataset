@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from .api import FilteredDataset, FilterRule
-from .generations import cleanup_filter_generations
+from .cache.generations import cleanup_filter_generations
 from .online import RejectReplaceDataset
 from .types import (
     DatasetFactory,

@@ -7,13 +7,13 @@ from unittest import mock
 
 from anydataset.types import AudioView, Modality, Role
 from anydataset.store.jsonio import read_json, write_json
-from anydataset.store.manifest import (
+from anydataset.store.manifest.schema import (
     DatasetManifest,
     SampleManifestEntry,
     STORE_SCHEMA_VERSION,
     ViewManifestEntry,
 )
-from anydataset.store.manifestio import (
+from anydataset.store.manifest.io import (
     ManifestParquetCache,
     read_samples_manifest,
     read_sample_manifest_index,
@@ -153,7 +153,7 @@ class StoreTest(unittest.TestCase):
             write_view_manifest(root, view, [payload])
 
             with mock.patch(
-                "anydataset.store.manifestio._read_manifest_rows",
+                "anydataset.store.manifest.io._read_manifest_rows",
                 side_effect=AssertionError("row dicts materialized"),
             ):
                 sample_index = tuple(read_sample_manifest_index(root))

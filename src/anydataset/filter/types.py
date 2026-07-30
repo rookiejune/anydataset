@@ -6,7 +6,7 @@ from enum import Enum
 from typing import TYPE_CHECKING, Protocol, TypedDict, Union, runtime_checkable
 
 from .._compat import NotRequired
-from .._devices import Devices
+from .._runtime.devices import Devices
 from ..dataset.abc import MapStyleABC
 from ..runtime import Runtime
 from ..types.item import Sample

@@ -11,7 +11,7 @@ from urllib.request import Request, urlopen
 
 import torch
 
-from .._sharding import validate_shard
+from .._runtime.sharding import validate_shard
 from ..cache import FileLock
 from ..types import AudioView
 from ..dataset.abc import AnyDataset

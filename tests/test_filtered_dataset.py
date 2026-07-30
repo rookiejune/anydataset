@@ -18,7 +18,7 @@ from enum import auto
 from functools import partial
 from pathlib import Path
 
-import anydataset.filter._factory as filter_factory_module
+import anydataset.filter.runtime.factory as filter_factory_module
 import anydataset.filter.api as filter_api_module
 import torch
 from torch.utils.data import DataLoader
@@ -37,8 +37,8 @@ from anydataset.filter import (
     FilteredDataset,
     cleanup_filter_generations,
 )
-from anydataset.filter.generations import current_filter_generation
-from anydataset.filter.resume import (
+from anydataset.filter.cache.generations import current_filter_generation
+from anydataset.filter.cache.resume import (
     iter_filter_fragment_chunks,
     prepare_filter_resume_dir,
     write_filter_fragment,
@@ -53,9 +53,9 @@ from anydataset.types import (
     Modality,
     Role,
 )
-from anydataset.filter.collect import collect_ranges_parallel
-from anydataset.filter.collect import _read_worker_message as read_worker_message
-from anydataset.filter.storage import metrics_ready, read_index_rows, write_index_rows
+from anydataset.filter.runtime.collect import collect_ranges_parallel
+from anydataset.filter.runtime.collect import _read_worker_message as read_worker_message
+from anydataset.filter.cache.storage import metrics_ready, read_index_rows, write_index_rows
 from anydataset.store import DatasetWriter
 from anydataset.store.jsonio import (
     read_json as read_store_json,
@@ -114,7 +114,7 @@ class FilteredDatasetTest(unittest.TestCase):
         )
 
         with mock.patch(
-            "anydataset.filter.storage.read_index_rows",
+            "anydataset.filter.cache.storage.read_index_rows",
             wraps=read_index_rows,
         ) as read:
             selected = result.select_by("zero", "two")
@@ -141,7 +141,7 @@ class FilteredDatasetTest(unittest.TestCase):
             )
 
             with mock.patch(
-                "anydataset.filter.storage.read_index_rows",
+                "anydataset.filter.cache.storage.read_index_rows",
                 wraps=read_index_rows,
             ) as read:
                 indices = result.iter_indices()
@@ -394,7 +394,7 @@ class FilteredDatasetTest(unittest.TestCase):
             return read_store_json(path)
 
         with mock.patch(
-            "anydataset.filter._cache.read_json",
+            "anydataset.filter.cache.ready.read_json",
             side_effect=disappearing_read_json,
         ):
             restored = rule.apply(dataset_factory=lambda: dataset, device="cpu")
@@ -1775,7 +1775,7 @@ class FilteredDatasetTest(unittest.TestCase):
         stdout = io.StringIO()
 
         with (
-            mock.patch("anydataset._progress._NON_INTERACTIVE_PROGRESS_INTERVAL", 0.0),
+            mock.patch("anydataset._runtime.progress._NON_INTERACTIVE_PROGRESS_INTERVAL", 0.0),
             redirect_stdout(stdout),
         ):
             FilterRule(
@@ -1977,7 +1977,7 @@ class FilteredDatasetTest(unittest.TestCase):
         )
 
         with mock.patch(
-            "anydataset.filter.collect.multiprocessing_context",
+            "anydataset.filter.runtime.collect.multiprocessing_context",
             return_value=context,
         ):
             chunks = collect_ranges_parallel(
@@ -2013,7 +2013,7 @@ class FilteredDatasetTest(unittest.TestCase):
         )
 
         with mock.patch(
-            "anydataset.filter.collect.multiprocessing_context",
+            "anydataset.filter.runtime.collect.multiprocessing_context",
             return_value=context,
         ):
             chunks = collect_ranges_parallel(

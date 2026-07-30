@@ -610,11 +610,11 @@ class CanonicalDatasetTest(unittest.TestCase):
         worker = _WorkerInfo(num_workers=4, id=2)
 
         with (
-            mock.patch("anydataset._sharding.dist.is_available", return_value=True),
-            mock.patch("anydataset._sharding.dist.is_initialized", return_value=True),
-            mock.patch("anydataset._sharding.dist.get_world_size", return_value=3),
-            mock.patch("anydataset._sharding.dist.get_rank", return_value=1),
-            mock.patch("anydataset._sharding.get_worker_info", return_value=worker),
+            mock.patch("anydataset._runtime.sharding.dist.is_available", return_value=True),
+            mock.patch("anydataset._runtime.sharding.dist.is_initialized", return_value=True),
+            mock.patch("anydataset._runtime.sharding.dist.get_world_size", return_value=3),
+            mock.patch("anydataset._runtime.sharding.dist.get_rank", return_value=1),
+            mock.patch("anydataset._runtime.sharding.get_worker_info", return_value=worker),
         ):
             values = list(dataset)
 
@@ -628,11 +628,11 @@ class CanonicalDatasetTest(unittest.TestCase):
             dataset = _map_dataset(range(7))
             worker = _WorkerInfo(num_workers=8, id=0)
             with (
-                mock.patch("anydataset._sharding.dist.is_available", return_value=True),
-                mock.patch("anydataset._sharding.dist.is_initialized", return_value=True),
-                mock.patch("anydataset._sharding.dist.get_world_size", return_value=4),
-                mock.patch("anydataset._sharding.dist.get_rank", return_value=rank),
-                mock.patch("anydataset._sharding.get_worker_info", return_value=worker),
+                mock.patch("anydataset._runtime.sharding.dist.is_available", return_value=True),
+                mock.patch("anydataset._runtime.sharding.dist.is_initialized", return_value=True),
+                mock.patch("anydataset._runtime.sharding.dist.get_world_size", return_value=4),
+                mock.patch("anydataset._runtime.sharding.dist.get_rank", return_value=rank),
+                mock.patch("anydataset._runtime.sharding.get_worker_info", return_value=worker),
             ):
                 values_by_rank.append(list(dataset))
 

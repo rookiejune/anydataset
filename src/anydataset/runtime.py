@@ -9,7 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal, Union
 
-from ._parallel import StartMethod, validate_start_method
+from ._runtime.parallel import StartMethod, validate_start_method
 
 AutoStartMethod = Union[StartMethod, Literal["auto"]]
 

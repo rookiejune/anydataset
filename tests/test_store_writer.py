@@ -20,22 +20,22 @@ from anydataset.types import (
     TextView,
 )
 from anydataset.store import DatasetWriter
-from anydataset.store import _part_commit as store_parts
-from anydataset.store._part_commit import (
+from anydataset.store.part import commit as store_parts
+from anydataset.store.part.commit import (
     commit_fragment_part,
     commit_store_fragments,
     commit_store_parts,
     completed_fragment_indexes,
 )
-from anydataset.store._part_writer import DatasetFragmentWriter, DatasetPartWriter
-from anydataset.store._config import DEFAULT_MAX_SHARD_SAMPLES
+from anydataset.store.part.writer import DatasetFragmentWriter, DatasetPartWriter
+from anydataset.store.config import DEFAULT_MAX_SHARD_SAMPLES
 from anydataset.store.jsonio import read_json, write_json
-from anydataset.store.manifest import (
+from anydataset.store.manifest.schema import (
     DatasetManifest,
     SampleManifestEntry,
     ViewManifestEntry,
 )
-from anydataset.store.manifestio import (
+from anydataset.store.manifest.io import (
     read_samples_manifest,
     read_view_manifest,
     write_samples_manifest,
@@ -1008,7 +1008,7 @@ class DatasetWriterTest(unittest.TestCase):
             )
             dataset = read_store_dataset(output)
             with mock.patch(
-                "anydataset.store._payload_groups.scan_payload_groups",
+                "anydataset.store.payload.groups.scan_payload_groups",
                 side_effect=AssertionError("compressed sidecar was ignored"),
             ):
                 shuffled = list(
@@ -1073,7 +1073,7 @@ class DatasetWriterTest(unittest.TestCase):
             dataset = read_store_dataset(output)
 
             with mock.patch(
-                "anydataset.store._payload_groups.scan_payload_groups",
+                "anydataset.store.payload.groups.scan_payload_groups",
                 side_effect=AssertionError("multi-view sidecar was ignored"),
             ):
                 groups = list(

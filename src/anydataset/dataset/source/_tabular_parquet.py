@@ -26,7 +26,7 @@ from pyarrow.csv import read_csv  # pyright: ignore[reportPrivateImportUsage]
 
 from ..._compat import strict_zip
 from ..._io.files import atomic_write_text, stat_fingerprint
-from ..._parallel import multiprocessing_context
+from ..._runtime.parallel import multiprocessing_context
 from ..._validation import validate_path_segment
 from ...cache import FileLock
 

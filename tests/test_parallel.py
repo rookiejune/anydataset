@@ -6,7 +6,7 @@ import unittest
 from dataclasses import dataclass
 from unittest import mock
 
-from anydataset._parallel import (
+from anydataset._runtime.parallel import (
     GlobalIndexSampler,
     MapIndexedDataset,
     SelectedIndexSampler,
@@ -15,7 +15,7 @@ from anydataset._parallel import (
     set_single_worker_environment,
     validate_process_parent,
 )
-from anydataset._resume import missing_indexes
+from anydataset._runtime.resume import missing_indexes
 
 
 class ParallelRuntimeTest(unittest.TestCase):
@@ -104,7 +104,7 @@ class ParallelRuntimeTest(unittest.TestCase):
     def test_single_worker_environment_does_not_bind_free_port(self):
         with mock.patch.dict(os.environ, {}, clear=True):
             with mock.patch(
-                "anydataset._parallel.free_port",
+                "anydataset._runtime.parallel.free_port",
                 side_effect=AssertionError("free_port must not be called"),
             ):
                 previous = set_single_worker_environment(
@@ -124,7 +124,7 @@ class ParallelRuntimeTest(unittest.TestCase):
         process.name = "daemon-parent"
 
         with mock.patch(
-            "anydataset._parallel.multiprocessing.current_process",
+            "anydataset._runtime.parallel.multiprocessing.current_process",
             return_value=process,
         ):
             with self.assertRaisesRegex(
@@ -138,7 +138,7 @@ class ParallelRuntimeTest(unittest.TestCase):
         process.daemon = False
 
         with mock.patch(
-            "anydataset._parallel.multiprocessing.current_process",
+            "anydataset._runtime.parallel.multiprocessing.current_process",
             return_value=process,
         ):
             validate_process_parent(context="materialization")

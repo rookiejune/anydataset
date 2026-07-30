@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from anydataset._resume import (
+from anydataset._runtime.resume import (
     ComplementIndexes,
     append_completed_index_cache,
     cached_completed_indexes,

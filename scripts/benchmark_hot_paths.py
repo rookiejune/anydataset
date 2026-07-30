@@ -25,14 +25,14 @@ from anydataset.types import (
     TextItem,
     TextView,
 )
-from anydataset._parallel import (
+from anydataset._runtime.parallel import (
     indexed_loader as runtime_indexed_loader,
     map_style_indexed_loader,
 )
-from anydataset._write_pipeline import BackgroundWriteSink
+from anydataset._runtime.write_pipeline import BackgroundWriteSink
 from anydataset.dataset.source.sharded_csv import ShardedCsvSource
-from anydataset.store._part_commit import commit_store_parts
-from anydataset.store._part_writer import DatasetPartWriter
+from anydataset.store.part.commit import commit_store_parts
+from anydataset.store.part.writer import DatasetPartWriter
 from anydataset.store.reader import read_store_dataset
 from anydataset.store.writer import DatasetWriter
 from torch.utils.data import DataLoader, Dataset

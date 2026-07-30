@@ -7,7 +7,7 @@ from pathlib import Path
 import torch
 
 from anydataset.store import ViewMaterializer
-from anydataset.store._materializer_identity import callable_id, metadata_value
+from anydataset.store.materialize.identity import callable_id, metadata_value
 
 
 def _factory(prefix: str):

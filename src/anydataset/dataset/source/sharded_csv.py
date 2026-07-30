@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from ..._logging import write_warning
+from ..._runtime.logging import write_warning
 from ...types import Spec
 from . import _tabular_parquet as tabular
 from .protocol import validate_load_options

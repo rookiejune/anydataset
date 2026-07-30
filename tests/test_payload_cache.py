@@ -11,9 +11,9 @@ from unittest import mock
 import torch
 
 from anydataset.store.reader import read_store_dataset
-from anydataset.store.manifest import ViewManifestEntry
+from anydataset.store.manifest.schema import ViewManifestEntry
 from anydataset.store.paths import view_shard_index_path, view_shard_path
-from anydataset.store.payload import (
+from anydataset.store.payload.archive import (
     Payload,
     PayloadCache,
     add_payload,
@@ -30,7 +30,7 @@ class PayloadCacheTest(unittest.TestCase):
     def test_payload_value_uses_explicit_weights_only_mode(self):
         view = (Role.DEFAULT, Modality.AUDIO, AudioView.WAVEFORM)
         with mock.patch(
-            "anydataset.store.payload.torch.load", return_value="loaded"
+            "anydataset.store.payload.archive.torch.load", return_value="loaded"
         ) as load:
             self.assertEqual(payload_value(view, b"payload"), "loaded")
 

@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 from threading import Event
 
-from anydataset._write_pipeline import BackgroundWriteSink
+from anydataset._runtime.write_pipeline import BackgroundWriteSink
 
 
 class BackgroundWriteSinkTest(unittest.TestCase):

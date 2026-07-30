@@ -16,7 +16,7 @@ from anydataset import (
     has_source,
     resolve_dataset,
 )
-from anydataset._parallel import can_select_indexes, map_style_indexed_loader
+from anydataset._runtime.parallel import can_select_indexes, map_style_indexed_loader
 from anydataset.cache import FileLock
 from anydataset.dataset.source.sharded_csv import (
     CsvShard,

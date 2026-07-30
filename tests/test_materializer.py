@@ -33,11 +33,11 @@ from anydataset.types import (
 )
 from anydataset.store import DatasetWriter, ViewMaterializer
 from anydataset.store.jsonio import read_json
-from anydataset.store.manifestio import read_samples_manifest, read_view_manifest
-from anydataset.store._materializer_identity import callable_id
+from anydataset.store.manifest.io import read_samples_manifest, read_view_manifest
+from anydataset.store.materialize.identity import callable_id
 from anydataset.store.paths import view_dir
 from anydataset.store.reader import read_store_dataset
-from anydataset._parallel import iter_indexed_shard
+from anydataset._runtime.parallel import iter_indexed_shard
 
 
 class ViewMaterializerTest(unittest.TestCase):
@@ -131,11 +131,11 @@ class ViewMaterializerTest(unittest.TestCase):
 
         with (
             mock.patch(
-                "anydataset.store.materializer.multiprocessing_context",
+                "anydataset.store.materialize.materializer.multiprocessing_context",
                 return_value=context,
             ),
             mock.patch(
-                "anydataset.store.materializer.free_port",
+                "anydataset.store.materialize.materializer.free_port",
                 return_value="1234",
             ),
         ):
@@ -174,7 +174,7 @@ class ViewMaterializerTest(unittest.TestCase):
                 ),
             )
             with mock.patch(
-                "anydataset._parallel.multiprocessing.current_process",
+                "anydataset._runtime.parallel.multiprocessing.current_process",
                 return_value=process,
             ):
                 for materializer, devices in cases:
@@ -200,7 +200,7 @@ class ViewMaterializerTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             target = Path(tmpdir) / "target"
             with mock.patch(
-                "anydataset._parallel.multiprocessing.current_process",
+                "anydataset._runtime.parallel.multiprocessing.current_process",
                 return_value=process,
             ):
                 ViewMaterializer(target, num_workers=0).write(
@@ -518,7 +518,7 @@ class ViewMaterializerTest(unittest.TestCase):
                 ],
             )
 
-            with mock.patch("anydataset.store._batch._clear_cuda_cache") as clear:
+            with mock.patch("anydataset.store.materialize.batch._clear_cuda_cache") as clear:
                 ViewMaterializer(target, batch_size=2).write(
                     dataset_factory=_DatasetFactory(dataset),
                     provider_factory=_StaticProviderFactory(provider),
@@ -1365,7 +1365,7 @@ class ViewMaterializerTest(unittest.TestCase):
             )
 
     def test_resolve_devices_auto_falls_back_to_cpu(self):
-        from anydataset.store.materializer import resolve_devices
+        from anydataset.store.materialize.materializer import resolve_devices
 
         self.assertTrue(resolve_devices("auto"))
 

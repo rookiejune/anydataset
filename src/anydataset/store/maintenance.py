@@ -3,8 +3,8 @@ from __future__ import annotations
 import argparse
 from collections.abc import Sequence
 
-from ._files import cleanup_store_files
-from .migration import migrate_store
+from .payload.files import cleanup_store_files
+from .manifest.migration import migrate_store
 
 
 def main(argv: Sequence[str] | None = None) -> int:

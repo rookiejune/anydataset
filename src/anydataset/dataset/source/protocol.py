@@ -11,7 +11,7 @@ from collections.abc import Collection, Iterable, Iterator
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
-from ..._sharding import validate_shard
+from ..._runtime.sharding import validate_shard
 
 if TYPE_CHECKING:
     from ...types import Spec

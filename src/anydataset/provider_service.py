@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Any, Union
 import torch
 
 from ._compat import StrEnum
-from ._parallel import (
+from ._runtime.parallel import (
     StartMethod,
     multiprocessing_context,
     validate_process_value,

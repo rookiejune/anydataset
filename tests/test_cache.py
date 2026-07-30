@@ -8,7 +8,7 @@ from pathlib import Path
 from unittest import mock
 
 from anydataset import Source, Spec, anydataset_home
-from anydataset._logging import run_logs_dir, worker_logger, write_warning
+from anydataset._runtime.logging import run_logs_dir, worker_logger, write_warning
 from anydataset.cache import CacheManager, FileLock, FileLockError
 
 

@@ -15,8 +15,8 @@ from ..dataset.abc import MapStyleABC
 from ..dataset._shuffle import shuffle_index_groups
 from ..types import item
 from ..types.language import remap_lang
-from ._files import StoreFilesLease, lease_store_files, payload_path, store_id
-from ._manifest_index import (
+from .payload.files import StoreFilesLease, lease_store_files, payload_path, store_id
+from .manifest.index import (
     SampleManifestSequence,
     StoreView,
     StoreViews,
@@ -24,7 +24,7 @@ from ._manifest_index import (
     view_path as _view_path,
 )
 from .jsonio import read_json
-from .manifest import (
+from .manifest.schema import (
     LEGACY_STORE_SCHEMA_VERSION,
     DatasetManifest,
     SampleManifestEntry,
@@ -33,14 +33,14 @@ from .manifest import (
     normalize_provenance,
     view_from_dict,
 )
-from .manifestio import (
+from .manifest.io import (
     ManifestParquetCache,
     manifest_parquet_cache,
     read_sample_manifest_index,
     sample_manifest_layout,
     samples_manifest_exists,
 )
-from ._payload_groups import (
+from .payload.groups import (
     PayloadGroupCache,
     ordered_payload_groups,
     payload_groups,
@@ -50,7 +50,7 @@ from .paths import (
     dataset_ready_path,
     samples_parquet_path,
 )
-from .payload import PayloadCache, payload_value, read_payload_bytes
+from .payload.archive import PayloadCache, payload_value, read_payload_bytes
 
 _SAMPLE_INDEX_VALIDATION_VERSION = 2
 _SAMPLE_ID_SET_LIMIT = 1_000_000

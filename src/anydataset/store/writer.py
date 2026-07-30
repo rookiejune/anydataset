@@ -11,11 +11,11 @@ from .._io.atomic import replace_dir
 from .._validation import non_negative_int, optional_positive_int, positive_int
 from ..dataset.write import DatasetFactory, ordered_samples, write_dataset_parts
 from ..types.item import Modality, Role, Sample, View
-from ._config import DEFAULT_MAX_SHARD_SAMPLES
-from ._part_writer import write_indexed_samples
-from ._payload_groups import write_payload_groups
-from ._sample_write import explicit_views
-from .manifest import normalize_provenance
+from .config import DEFAULT_MAX_SHARD_SAMPLES
+from .part.writer import write_indexed_samples
+from .payload.groups import write_payload_groups
+from .part.sample_write import explicit_views
+from .manifest.schema import normalize_provenance
 from .paths import dataset_ready_path
 
 

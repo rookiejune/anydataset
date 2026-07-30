@@ -26,17 +26,17 @@ from anydataset.types import (
 )
 from anydataset.store import DatasetWriter
 from anydataset.store.jsonio import read_json, write_json
-from anydataset.store.manifest import (
+from anydataset.store.manifest.schema import (
     DatasetManifest,
     SampleManifestEntry,
     STORE_SCHEMA_VERSION,
 )
-from anydataset.store.manifestio import (
+from anydataset.store.manifest.io import (
     read_sample_manifest_index,
     read_view_manifest_indexes,
     write_samples_manifest,
 )
-from anydataset.store._payload_groups import PayloadGroupCache, read_payload_groups
+from anydataset.store.payload.groups import PayloadGroupCache, read_payload_groups
 from anydataset.store.paths import (
     dataset_ready_path,
     payload_groups_path,
@@ -378,7 +378,7 @@ class StoreSourceTest(unittest.TestCase):
             dataset = read_store_dataset(output)
 
             with mock.patch(
-                "anydataset.store.payload.tarfile.open",
+                "anydataset.store.payload.archive.tarfile.open",
                 wraps=__import__("tarfile").open,
             ) as open_tar:
                 dataset[1]
@@ -538,7 +538,7 @@ class StoreSourceTest(unittest.TestCase):
             dataset._payloads.max_open_shards = 1
 
             with mock.patch(
-                "anydataset.store.payload.tarfile.open",
+                "anydataset.store.payload.archive.tarfile.open",
                 wraps=__import__("tarfile").open,
             ) as open_tar:
                 dataset[0]
@@ -719,9 +719,9 @@ class StoreSourceTest(unittest.TestCase):
             view = (Role.DEFAULT, Modality.AUDIO, AudioView.WAVEFORM)
 
             with mock.patch(
-                "anydataset.store._payload_groups.scan_payload_groups",
+                "anydataset.store.payload.groups.scan_payload_groups",
                 wraps=__import__(
-                    "anydataset.store._payload_groups",
+                    "anydataset.store.payload.groups",
                     fromlist=["scan_payload_groups"],
                 ).scan_payload_groups,
             ) as scan:
@@ -777,7 +777,7 @@ class StoreSourceTest(unittest.TestCase):
             dataset = read_store_dataset(output)
 
             with mock.patch(
-                "anydataset.store._payload_groups.scan_payload_groups",
+                "anydataset.store.payload.groups.scan_payload_groups",
                 side_effect=AssertionError("payload group sidecar was ignored"),
             ):
                 groups = list(
@@ -828,9 +828,9 @@ class StoreSourceTest(unittest.TestCase):
             dataset = read_store_dataset(output)
 
             with mock.patch(
-                "anydataset.store._payload_groups.scan_payload_groups",
+                "anydataset.store.payload.groups.scan_payload_groups",
                 wraps=__import__(
-                    "anydataset.store._payload_groups",
+                    "anydataset.store.payload.groups",
                     fromlist=["scan_payload_groups"],
                 ).scan_payload_groups,
             ) as scan:
@@ -875,7 +875,7 @@ class StoreSourceTest(unittest.TestCase):
             dataset = read_store_dataset(output, views=(waveform_view,))
 
             with mock.patch(
-                "anydataset.store._payload_groups.scan_payload_groups",
+                "anydataset.store.payload.groups.scan_payload_groups",
                 side_effect=AssertionError("selected-view sidecar was ignored"),
             ):
                 groups = list(
@@ -933,7 +933,7 @@ class StoreSourceTest(unittest.TestCase):
             )
 
             with mock.patch(
-                "anydataset.store._manifest_index.read_view_manifest_indexes",
+                "anydataset.store.manifest.index.read_view_manifest_indexes",
                 side_effect=AssertionError("view index loaded"),
             ):
                 dataset = read_store_dataset(output)
@@ -956,7 +956,7 @@ class StoreSourceTest(unittest.TestCase):
             )
 
             with mock.patch(
-                "anydataset.store._manifest_index.read_samples_manifest_row_group",
+                "anydataset.store.manifest.index.read_samples_manifest_row_group",
                 side_effect=AssertionError("sample rows loaded"),
             ):
                 dataset = read_store_dataset(output)
@@ -977,9 +977,9 @@ class StoreSourceTest(unittest.TestCase):
             dataset = read_store_dataset(output)
 
             with mock.patch(
-                "anydataset.store._manifest_index.read_samples_manifest_row_group",
+                "anydataset.store.manifest.index.read_samples_manifest_row_group",
                 wraps=__import__(
-                    "anydataset.store._manifest_index",
+                    "anydataset.store.manifest.index",
                     fromlist=["read_samples_manifest_row_group"],
                 ).read_samples_manifest_row_group,
             ) as read_group:
@@ -1319,7 +1319,7 @@ class StoreSourceTest(unittest.TestCase):
                 path.write_bytes(path.read_bytes() + b"changed")
 
             with mock.patch(
-                "anydataset.store._manifest_index.read_view_manifest_indexes",
+                "anydataset.store.manifest.index.read_view_manifest_indexes",
                 side_effect=changing_indexes,
             ):
                 with self.assertRaisesRegex(

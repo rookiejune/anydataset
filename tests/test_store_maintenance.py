@@ -25,8 +25,8 @@ from anydataset.store import (
     validate_store_view_payloads,
 )
 from anydataset.store.jsonio import read_json, write_json
-from anydataset.store.manifest import STORE_SCHEMA_VERSION, ViewManifestEntry
-from anydataset.store.manifestio import read_sample_manifest_index
+from anydataset.store.manifest.schema import STORE_SCHEMA_VERSION, ViewManifestEntry
+from anydataset.store.manifest.io import read_sample_manifest_index
 from anydataset.store.paths import view_manifest_parquet_path, view_shard_path
 from anydataset.store.reader import read_store_dataset
 from anydataset.types import (
@@ -183,7 +183,7 @@ class StoreIntegrityTest(unittest.TestCase):
         for key in ("", ".", "..", "nested/payload.txt", "nested\\payload.txt"):
             entry = ViewManifestEntry(*view, 0, "000000.tar", key)
             with self.subTest(key=key), mock.patch(
-                "anydataset.store._integrity.read_view_manifest",
+                "anydataset.store.payload.integrity.read_view_manifest",
                 return_value=iter((entry,)),
             ):
                 with self.assertRaisesRegex(ValueError, "invalid payload key"):
