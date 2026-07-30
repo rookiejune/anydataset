@@ -6,7 +6,7 @@ from pathlib import Path
 from unittest import mock
 
 from anydataset.dataset.write import DatasetStoreWriter
-import anydataset.dataset.write as dataset_write
+import anydataset.store.part.dispatch as dataset_write
 from anydataset.store import DatasetWriter
 
 

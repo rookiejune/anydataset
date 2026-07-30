@@ -1132,10 +1132,13 @@ class StoreSourceTest(unittest.TestCase):
 
             with (
                 mock.patch(
-                    "anydataset.dataset.write.multiprocessing_context",
+                    "anydataset.store.part.dispatch.multiprocessing_context",
                     return_value=context,
                 ),
-                mock.patch("anydataset.dataset.write.free_port", return_value="1234"),
+                mock.patch(
+                    "anydataset.store.part.dispatch.free_port",
+                    return_value="1234",
+                ),
             ):
                 with self.assertRaisesRegex(RuntimeError, "start failed"):
                     writer.write(dataset_factory=_RangeAudioFactory(1))

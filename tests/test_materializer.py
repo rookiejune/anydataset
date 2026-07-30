@@ -518,7 +518,7 @@ class ViewMaterializerTest(unittest.TestCase):
                 ],
             )
 
-            with mock.patch("anydataset.store.materialize.batch._clear_cuda_cache") as clear:
+            with mock.patch("anydataset.store.materialize.batch.clear_cuda_cache") as clear:
                 ViewMaterializer(target, batch_size=2).write(
                     dataset_factory=_DatasetFactory(dataset),
                     provider_factory=_StaticProviderFactory(provider),

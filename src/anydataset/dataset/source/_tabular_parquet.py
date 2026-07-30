@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import csv
 import hashlib
-import json
 import multiprocessing
 import os
 import sys
@@ -25,10 +24,11 @@ from pyarrow.csv import ReadOptions  # pyright: ignore[reportPrivateImportUsage]
 from pyarrow.csv import read_csv  # pyright: ignore[reportPrivateImportUsage]
 
 from ..._compat import strict_zip
-from ..._io.files import atomic_write_text, stat_fingerprint
+from ..._io.files import stat_fingerprint
 from ..._runtime.parallel import multiprocessing_context
 from ..._validation import validate_path_segment
 from ...cache import FileLock
+from ...store.jsonio import read_json, write_json
 
 JsonMapping = Mapping[str, Any]
 TabularRow = Mapping[str, str]
@@ -451,18 +451,6 @@ def column_names(
     if len(set(names)) != len(names):
         raise ValueError(f"Delimited file must have unique column names: {path}")
     return tuple(names)
-
-
-def read_json(path: Path) -> Any:
-    with path.open("r", encoding="utf-8") as f:
-        return json.load(f)
-
-
-def write_json(path: Path, data: Mapping[str, Any]) -> None:
-    atomic_write_text(
-        path,
-        json.dumps(data, ensure_ascii=True, sort_keys=True, indent=2) + "\n",
-    )
 
 
 class ParquetPartsReader:

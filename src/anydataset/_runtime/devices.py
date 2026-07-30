@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gc
 from collections.abc import Iterable
 from typing import Literal, Union
 
@@ -27,6 +28,18 @@ def resolve_devices(devices: Devices) -> tuple[str, ...]:
         if not device:
             raise ValueError("devices must not contain empty strings.")
     return resolved
+
+
+def clear_cuda_cache() -> None:
+    gc.collect()
+    try:
+        import torch
+    except ImportError:
+        return
+    if not torch.cuda.is_available() or not torch.cuda.is_initialized():
+        return
+    torch.cuda.empty_cache()
+    torch.cuda.ipc_collect()
 
 
 def _cuda_device_count() -> int:

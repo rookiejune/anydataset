@@ -6,13 +6,13 @@ CUDA out-of-memory batches by splitting them into smaller calls.
 
 from __future__ import annotations
 
-import gc
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from typing import Any
 
 import torch
 
 from ..._compat import strict_zip
+from ..._runtime.devices import clear_cuda_cache
 from ...dataset.collate import Batch, collate_fn
 from ...types.item import Item, Modality, Requirement, Role, Sample
 from .modality import modality_inputs, role_items, with_modality_view
@@ -49,7 +49,7 @@ def with_resilient_batch_provider(
         if len(samples) <= 1 or not oom:
             raise
         _release_exception(exc)
-        _clear_cuda_cache()
+        clear_cuda_cache()
         midpoint = len(samples) // 2
         if on_oom is not None:
             on_oom(len(samples), midpoint, len(samples) - midpoint)
@@ -360,10 +360,3 @@ def _release_exception(error: BaseException) -> None:
         current.__cause__ = None
         current.__context__ = None
 
-
-def _clear_cuda_cache() -> None:
-    gc.collect()
-    if not torch.cuda.is_available() or not torch.cuda.is_initialized():
-        return
-    torch.cuda.empty_cache()
-    torch.cuda.ipc_collect()

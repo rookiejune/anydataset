@@ -9,7 +9,7 @@ from typing import Any
 
 from .._io.atomic import replace_dir
 from .._validation import non_negative_int, optional_positive_int, positive_int
-from ..dataset.write import DatasetFactory, ordered_samples, write_dataset_parts
+from .part.dispatch import DatasetFactory, ordered_samples, write_dataset_parts
 from ..types.item import Modality, Role, Sample, View
 from .config import DEFAULT_MAX_SHARD_SAMPLES
 from .part.writer import write_indexed_samples

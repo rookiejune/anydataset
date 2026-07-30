@@ -523,6 +523,7 @@ class CanonicalDatasetTest(unittest.TestCase):
             spec=Spec(source=Source.HF, path="/tmp/missing"),
             parse_fn=lambda row: row["value"],
         )
+        dataset._source = _PlainSource()
         dataset._dataset = [
             {"path": "/tmp/a"},
             {"path": "/tmp/b"},
@@ -556,6 +557,7 @@ class CanonicalDatasetTest(unittest.TestCase):
             spec=Spec(source=Source.HF, path="/tmp/missing"),
             parse_fn=lambda row: row["value"],
         )
+        dataset._source = _PlainSource()
         rows = _RawIndexedRows([{"value": index} for index in range(4)])
         dataset._dataset = rows
 
@@ -981,10 +983,21 @@ class CanonicalDatasetTest(unittest.TestCase):
             collate_fn(schema)(samples)
 
 
+class _PlainSource:
+    def prepare(self, spec, cache_path):
+        raise AssertionError("prepared dataset was injected")
+
+
 class _ShardableRows:
     def __init__(self, rows):
         self.rows = rows
         self.shard_calls = []
+
+    def __len__(self):
+        return len(self.rows)
+
+    def __getitem__(self, index):
+        return self.rows[index]
 
     def __iter__(self):
         yield from self.rows
@@ -1003,6 +1016,12 @@ class _RowsWithShardAttribute:
 
     def __init__(self, rows):
         self.rows = rows
+
+    def __len__(self):
+        return len(self.rows)
+
+    def __getitem__(self, index):
+        return self.rows[index]
 
     def __iter__(self):
         yield from self.rows
