@@ -14,11 +14,9 @@ from ..._runtime.logging import run_logs_dir, use_run_logs_dir, worker_logger
 from ..._runtime.parallel import (
     DeviceWorker,
     ProcessHandle,
-    can_select_indexes,
-    indexed_loader,
-    map_style_indexed_loader,
     multiprocessing_context,
     restore_environment,
+    selected_index_loader,
     set_single_worker_environment,
     set_worker_environment,
     validate_process_value,
@@ -420,23 +418,12 @@ def _filter_loader(
     runtime: Runtime,
     sample_indexes: Sequence[int] | None = None,
 ):
-    if use_map_style_loader is None:
-        use_map_style_loader = can_select_indexes(dataset)
-    if use_map_style_loader:
-        if sample_count is None:
-            sample_count = len(dataset)
-        return map_style_indexed_loader(
-            dataset_factory,
-            sample_count=sample_count,
-            sample_indexes=sample_indexes,
-            batch_size=batch_size,
-            num_workers=num_workers,
-            prefetch_factor=prefetch_factor,
-            start_method=runtime.reader_worker_start_method,
-            dataset=dataset,
-        )
-    return indexed_loader(
+    return selected_index_loader(
         dataset_factory,
+        dataset=dataset,
+        sample_count=sample_count,
+        sample_indexes=sample_indexes,
+        use_map_style_loader=use_map_style_loader,
         batch_size=batch_size,
         num_workers=num_workers,
         prefetch_factor=prefetch_factor,

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from bisect import bisect_right
 from collections.abc import Iterator, Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -128,10 +127,8 @@ class _TsvDataset:
     ) -> Iterator[tuple[int, TsvRow]]:
         sources = self._sources()
         reader = self._parts_reader()
-        stops = tuple(part.stop for part in reader.parts)
         for index, row in reader.iter_shard(num_shards, shard_id):
-            part_index = _part_index_for(stops, index)
-            yield index, self._enrich(row, sources[part_index][0])
+            yield index, self._enrich(row, sources[reader.part_index(index)][0])
 
     def _enrich(self, row: Mapping[str, str], language_root: Path) -> dict[str, str]:
         if self.root_field is None:
@@ -141,9 +138,7 @@ class _TsvDataset:
         return {**row, self.root_field: str(language_root)}
 
     def _part_root(self, index: int) -> Path:
-        reader = self._parts_reader()
-        stops = tuple(part.stop for part in reader.parts)
-        return self._sources()[_part_index_for(stops, index)][0]
+        return self._sources()[self._parts_reader().part_index(index)][0]
 
     def _sources(self) -> tuple[tuple[Path, Path], ...]:
         if self._sources_cache is not None:
@@ -191,13 +186,6 @@ class _TsvDataset:
         )
         self._reader = tabular.ParquetPartsReader(parts)
         return self._reader
-
-
-def _part_index_for(stops: Sequence[int], index: int) -> int:
-    part_index = bisect_right(stops, index)
-    if part_index < 0 or part_index >= len(stops):
-        raise IndexError("TSV sample index is outside prepared parts.")
-    return part_index
 
 
 def _optional_str(value: Any, name: str) -> str | None:

@@ -251,6 +251,47 @@ def map_style_indexed_loader(
     )
 
 
+def selected_index_loader(
+    dataset_factory: DatasetFactory,
+    *,
+    dataset: Any | None = None,
+    sample_count: int | None = None,
+    sample_indexes: Sequence[int] | None = None,
+    use_map_style_loader: bool | None = None,
+    batch_size: int,
+    num_workers: int,
+    prefetch_factor: int | None = None,
+    start_method: StartMethod = "spawn",
+) -> DataLoader:
+    if dataset is None:
+        if use_map_style_loader is None or sample_count is None:
+            dataset = dataset_factory()
+    if use_map_style_loader is None:
+        use_map_style_loader = can_select_indexes(dataset)
+    if not use_map_style_loader:
+        return indexed_loader(
+            dataset_factory,
+            batch_size=batch_size,
+            num_workers=num_workers,
+            prefetch_factor=prefetch_factor,
+            start_method=start_method,
+        )
+    if sample_count is None:
+        if dataset is None:
+            raise RuntimeError("map-style loader dataset was not initialized.")
+        sample_count = len(dataset)
+    return map_style_indexed_loader(
+        dataset_factory,
+        sample_count=sample_count,
+        sample_indexes=sample_indexes,
+        batch_size=batch_size,
+        num_workers=num_workers,
+        prefetch_factor=prefetch_factor,
+        start_method=start_method,
+        dataset=dataset,
+    )
+
+
 def indexed_collate(batch: Sequence[tuple[int, Any]]) -> tuple[tuple[int, Any], ...]:
     return tuple(batch)
 

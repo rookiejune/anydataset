@@ -10,7 +10,7 @@ import sys
 import tempfile
 from bisect import bisect_right
 from collections import OrderedDict
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
@@ -26,6 +26,7 @@ from pyarrow.csv import read_csv  # pyright: ignore[reportPrivateImportUsage]
 from ..._compat import strict_zip
 from ..._io.files import stat_fingerprint
 from ..._runtime.parallel import multiprocessing_context
+from ..._runtime.sharding import validate_shard
 from ..._validation import validate_path_segment
 from ...cache import FileLock
 from ...store.jsonio import read_json, write_json
@@ -453,6 +454,29 @@ def column_names(
     return tuple(names)
 
 
+def iter_part_shard(
+    parts: Sequence[ParquetPart],
+    *,
+    num_shards: int,
+    shard_id: int,
+    read_group: Callable[[Path, int], Sequence[Any]],
+) -> Iterator[tuple[int, Any]]:
+    validate_shard(num_shards, shard_id)
+    for part in parts:
+        for row_group, row_count in enumerate(part.row_groups):
+            if row_count == 0:
+                continue
+            group_start = part.start + (
+                0 if row_group == 0 else part.row_group_stops[row_group - 1]
+            )
+            first_offset = (shard_id - group_start) % num_shards
+            if first_offset >= row_count:
+                continue
+            rows = read_group(part.path, row_group)
+            for offset in range(first_offset, row_count, num_shards):
+                yield group_start + offset, rows[offset]
+
+
 class ParquetPartsReader:
     def __init__(self, parts: Sequence[ParquetPart]) -> None:
         self._parts = tuple(parts)
@@ -493,14 +517,18 @@ class ParquetPartsReader:
     def __len__(self) -> int:
         return self._parts[-1].stop if self._parts else 0
 
-    def __getitem__(self, index: int) -> dict[str, str]:
+    def part_index(self, index: int) -> int:
         length = len(self)
         if index < 0:
             index += length
         if index < 0 or index >= length:
             raise IndexError("ParquetPartsReader index out of range.")
-        part_index = bisect_right(self._part_stops, index)
-        part = self._parts[part_index]
+        return bisect_right(self._part_stops, index)
+
+    def __getitem__(self, index: int) -> dict[str, str]:
+        if index < 0:
+            index += len(self)
+        part = self._parts[self.part_index(index)]
         return self.read_row(part, index - part.start)
 
     def __iter__(self) -> Iterator[dict[str, str]]:
@@ -523,25 +551,13 @@ class ParquetPartsReader:
         num_shards: int,
         shard_id: int,
     ) -> Iterator[tuple[int, dict[str, str]]]:
-        if num_shards <= 0:
-            raise ValueError("num_shards must be positive.")
-        if shard_id < 0 or shard_id >= num_shards:
-            raise ValueError("shard_id must satisfy 0 <= shard_id < num_shards.")
-        for part in self._parts:
-            for row_group, row_count in enumerate(part.row_groups):
-                if row_count == 0:
-                    continue
-                group_start = part.start + (
-                    0
-                    if row_group == 0
-                    else part.row_group_stops[row_group - 1]
-                )
-                first_offset = (shard_id - group_start) % num_shards
-                if first_offset >= row_count:
-                    continue
-                rows = self.read_group(part.path, row_group)
-                for offset in range(first_offset, row_count, num_shards):
-                    yield group_start + offset, rows[offset]
+        for index, row in iter_part_shard(
+            self._parts,
+            num_shards=num_shards,
+            shard_id=shard_id,
+            read_group=self.read_group,
+        ):
+            yield index, row
 
     def read_row(self, part: ParquetPart, index: int) -> dict[str, str]:
         row_stops = part.row_group_stops

@@ -15,11 +15,10 @@ from ..._runtime.parallel import (
     ProcessHandle,
     can_select_indexes,
     free_port,
-    indexed_loader,
     iter_shard,
-    map_style_indexed_loader,
     multiprocessing_context,
     restore_environment,
+    selected_index_loader,
     set_single_worker_environment,
     set_torch_device,
     validate_process_parent,
@@ -642,28 +641,12 @@ class ViewMaterializer:
         use_map_style_loader: bool | None = None,
         sample_indexes: Sequence[int] | None = None,
     ) -> DataLoader:
-        if dataset is None:
-            if use_map_style_loader is None or sample_count is None:
-                dataset = dataset_factory()
-        if use_map_style_loader is None:
-            use_map_style_loader = can_select_indexes(dataset)
-        if use_map_style_loader:
-            if sample_count is None:
-                if dataset is None:
-                    raise RuntimeError("map-style loader dataset was not initialized.")
-                sample_count = len(dataset)
-            return map_style_indexed_loader(
-                dataset_factory,
-                sample_count=sample_count,
-                sample_indexes=sample_indexes,
-                batch_size=self.batch_size,
-                num_workers=self.num_workers,
-                prefetch_factor=self.prefetch_factor,
-                start_method=self.runtime.reader_worker_start_method,
-                dataset=dataset,
-            )
-        return indexed_loader(
+        return selected_index_loader(
             dataset_factory,
+            dataset=dataset,
+            sample_count=sample_count,
+            sample_indexes=sample_indexes,
+            use_map_style_loader=use_map_style_loader,
             batch_size=self.batch_size,
             num_workers=self.num_workers,
             prefetch_factor=self.prefetch_factor,

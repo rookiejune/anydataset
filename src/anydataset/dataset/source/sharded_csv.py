@@ -146,23 +146,13 @@ class _ShardedCsvDataset:
         num_shards: int,
         shard_id: int,
     ) -> Iterator[tuple[int, CsvRow]]:
-        validate_shard(num_shards, shard_id)
         # Prefer ``_read_parquet_group`` so callers can observe/wrap row-group IO.
-        for file in self._files():
-            for row_group, row_count in enumerate(file.row_groups):
-                if row_count == 0:
-                    continue
-                group_start = file.start + (
-                    0
-                    if row_group == 0
-                    else file.row_group_stops[row_group - 1]
-                )
-                first_offset = (shard_id - group_start) % num_shards
-                if first_offset >= row_count:
-                    continue
-                rows = self._read_parquet_group(file.path, row_group)
-                for offset in range(first_offset, row_count, num_shards):
-                    yield group_start + offset, rows[offset]
+        yield from tabular.iter_part_shard(
+            self._files(),
+            num_shards=num_shards,
+            shard_id=shard_id,
+            read_group=self._read_parquet_group,
+        )
 
     def _base_dir(self) -> Path:
         return self.root / self.split if self.split is not None else self.root
