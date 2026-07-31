@@ -1,0 +1,151 @@
+from __future__ import annotations
+
+import anydataset
+import anydataset.dataset.source as source
+import anydataset.provider_service as provider_service
+import anydataset.store as store
+
+
+def _assert_public_all(module, expected: list[str], *, private_allowed: set[str] | None = None) -> None:
+    private_allowed = private_allowed or set()
+    assert module.__all__ == expected
+    for name in module.__all__:
+        assert hasattr(module, name), name
+        if name not in private_allowed:
+            assert not name.startswith("_"), name
+
+
+def _assert_not_exported(module, names: list[str]) -> None:
+    for name in names:
+        assert name not in module.__all__
+        assert not hasattr(module, name), name
+
+
+def test_top_level_public_api_boundary() -> None:
+    _assert_public_all(
+        anydataset,
+        [
+            "AnyDataset",
+            "FilterRule",
+            "IterableAnyDataset",
+            "Lang",
+            "Preset",
+            "Source",
+            "Spec",
+            "__version__",
+            "anydataset_home",
+            "register_source",
+            "remap_lang",
+            "resolve_dataset",
+        ],
+        private_allowed={"__version__"},
+    )
+    _assert_not_exported(
+        anydataset,
+        [
+            "has_source",
+            "create_source",
+            "source_exists",
+            "DatasetWriter",
+            "read_store_dataset",
+        ],
+    )
+
+
+def test_source_public_api_boundary() -> None:
+    _assert_public_all(
+        source,
+        [
+            "DatasetSource",
+            "HuggingFaceDiskSource",
+            "HuggingFaceFilesSource",
+            "HuggingFaceSource",
+            "ShardedCsvSource",
+            "ShardingSource",
+            "StoreSource",
+            "TsvSource",
+            "register_source",
+        ],
+    )
+    _assert_not_exported(
+        source,
+        [
+            "FSD50KSource",
+            "FSD50KDataset",
+            "ShardedCsvDataset",
+            "TsvDataset",
+            "SourceFactory",
+            "prepare_hf",
+            "prepare_hf_disk",
+            "for_source",
+            "has_source",
+            "create_source",
+            "source_exists",
+        ],
+    )
+
+
+def test_store_public_api_boundary() -> None:
+    _assert_public_all(
+        store,
+        [
+            "DatasetWriter",
+            "BatchModalityProvider",
+            "BatchViewProvider",
+            "FunctionModalityProvider",
+            "FunctionViewProvider",
+            "ModalityMaterializer",
+            "MaterializationStatus",
+            "StoreFilesInUseError",
+            "cleanup_store_files",
+            "lease_store_files",
+            "migrate_store",
+            "ModalityProvider",
+            "ModalityTransform",
+            "Provider",
+            "validate_store_payloads",
+            "validate_store_view_payloads",
+            "ViewMaterializer",
+            "ViewProvider",
+            "ViewTransform",
+        ],
+    )
+    _assert_not_exported(
+        store,
+        [
+            "read_store_dataset",
+            "read_store_manifest",
+            "DatasetPartWriter",
+            "DatasetFragmentWriter",
+            "commit_store_parts",
+            "commit_store_fragments",
+            "sample_manifest_writer",
+            "read_view_manifest",
+            "payload_groups",
+        ],
+    )
+
+
+def test_provider_service_public_api_boundary() -> None:
+    _assert_public_all(
+        provider_service,
+        [
+            "ProviderServer",
+            "RemoteFilterFactory",
+            "RemoteFilterPredicate",
+            "RemoteProvider",
+            "RemoteProviderError",
+            "RemoteProviderFactory",
+        ],
+    )
+    _assert_not_exported(
+        provider_service,
+        [
+            "_ProviderCommand",
+            "_ProviderRequest",
+            "_ProviderResponse",
+            "_ProviderServerConfig",
+            "_serve_connection",
+            "_accept_connection",
+        ],
+    )
