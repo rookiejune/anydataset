@@ -1,8 +1,7 @@
-"""Compatibility export for the provider process server."""
+"""Public facade for provider process servers and remote client factories."""
 
 from __future__ import annotations
 
-from .provider import service as _service
 from .provider.service import (
     ProviderServer,
     RemoteFilterFactory,
@@ -11,10 +10,6 @@ from .provider.service import (
     RemoteProviderError,
     RemoteProviderFactory,
 )
-
-_ProviderCommand = _service._ProviderCommand
-_ProviderRequest = _service._ProviderRequest
-_serve_connection = _service._serve_connection
 
 __all__ = [
     "ProviderServer",

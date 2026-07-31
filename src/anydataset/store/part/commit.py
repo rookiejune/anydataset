@@ -806,7 +806,7 @@ def _validate_parts(
     shard_ids: set[int] = set()
     for part in parts:
         data = _read_metadata(_part_json_path(part), "Part")
-        manifest = read_store_manifest(part)
+        manifest = read_store_manifest(part, legacy_policy="reject")
         if data.get("dataset_id") != dataset_id:
             raise ValueError(f"Part {part} dataset_id does not match {dataset_id!r}.")
         if data.get("split") != split:
@@ -855,7 +855,7 @@ def _read_fragment_info(
     if data.get("fragment_id") != path.name:
         raise ValueError(f"Fragment {path} id does not match its directory name.")
     indexes = _fragment_sample_indexes(data)
-    manifest = read_store_manifest(path)
+    manifest = read_store_manifest(path, legacy_policy="reject")
     if manifest.dataset_id != data.get("dataset_id"):
         raise ValueError(
             f"Fragment {path} store manifest dataset_id does not match metadata."

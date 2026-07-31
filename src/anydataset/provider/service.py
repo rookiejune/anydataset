@@ -2,17 +2,13 @@ from __future__ import annotations
 
 import os
 import time
-import traceback
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
-from enum import auto
 from multiprocessing import AuthenticationError
 from multiprocessing.connection import Client, Listener
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Union
+from typing import TYPE_CHECKING, Any
 
-from .._compat import StrEnum
-from .._runtime.devices import clear_cuda_cache
 from .._runtime.parallel import (
     StartMethod,
     multiprocessing_context,
@@ -22,13 +18,22 @@ from .._runtime.parallel import (
 from .._validation import optional_positive_float, positive_float
 from ..types.item import View
 from ..view import BatchOutput, ViewMap
+from ._service_protocol import (
+    ProviderAddress,
+    _ProviderCommand,
+    _ProviderError,
+    _ProviderRequest,
+    _ProviderResponse,
+    _ProviderServerConfig,
+    _accept_connection,
+    _serve_connection,
+)
 
 if TYPE_CHECKING:
     from multiprocessing.process import BaseProcess
 
     from ..dataset.collate import Batch
 
-ProviderAddress = Union[str, Path, tuple[str, int]]
 ProviderFactory = Callable[[str], Any]
 
 
@@ -217,39 +222,6 @@ class RemoteProviderError(RuntimeError):
         )
 
 
-class _ProviderCommand(StrEnum):
-    PING = auto()
-    CALL = auto()
-    CALL_BATCH = auto()
-    CLOSE = auto()
-
-
-@dataclass(frozen=True)
-class _ProviderServerConfig:
-    address: ProviderAddress
-    device: str
-    authkey: bytes | None
-
-
-@dataclass(frozen=True)
-class _ProviderRequest:
-    command: _ProviderCommand
-    payload: Any
-
-
-@dataclass(frozen=True)
-class _ProviderError:
-    type_name: str
-    message: str
-    traceback: str
-
-
-@dataclass(frozen=True)
-class _ProviderResponse:
-    value: Any = None
-    error: _ProviderError | None = None
-
-
 def _serve_provider(
     config: _ProviderServerConfig,
     provider_factory: ProviderFactory,
@@ -272,72 +244,6 @@ def _serve_provider(
     finally:
         listener.close()
         _unlink_address(address)
-
-
-def _accept_connection(listener: Listener):
-    try:
-        return listener.accept()
-    except (AuthenticationError, ConnectionError, EOFError):
-        return None
-
-
-def _serve_connection(provider: Any, conn: Any) -> bool:
-    try:
-        request = conn.recv()
-    except Exception:
-        return False
-    response = _handle_request(provider, request)
-    try:
-        conn.send(response)
-    except Exception as exc:
-        try:
-            conn.send(_ProviderResponse(error=_provider_error(exc)))
-        except Exception:
-            pass
-        return False
-    return (
-        isinstance(request, _ProviderRequest)
-        and request.command is _ProviderCommand.CLOSE
-    )
-
-
-def _handle_request(provider: Any, request: object) -> _ProviderResponse:
-    try:
-        if not isinstance(request, _ProviderRequest):
-            raise TypeError("Provider server received an invalid request.")
-        if request.command is _ProviderCommand.PING:
-            return _ProviderResponse()
-        if request.command is _ProviderCommand.CALL:
-            return _ProviderResponse(value=provider(request.payload))
-        if request.command is _ProviderCommand.CALL_BATCH:
-            return _ProviderResponse(value=provider.call_batch(request.payload))
-        if request.command is _ProviderCommand.CLOSE:
-            return _ProviderResponse()
-        raise TypeError(f"Unsupported provider command: {request.command!r}.")
-    except Exception as exc:
-        error = _provider_error(exc)
-        try:
-            clear_cuda_cache()
-        except Exception as cleanup_exc:
-            cleanup = _provider_error(cleanup_exc)
-            error = _ProviderError(
-                type_name=error.type_name,
-                message=error.message,
-                traceback=(
-                    f"{error.traceback}\n"
-                    f"Provider cleanup raised {cleanup.type_name}: {cleanup.message}\n"
-                    f"{cleanup.traceback}"
-                ),
-            )
-        return _ProviderResponse(error=error)
-
-
-def _provider_error(exc: Exception) -> _ProviderError:
-    return _ProviderError(
-        type_name=type(exc).__name__,
-        message=str(exc),
-        traceback=traceback.format_exc(),
-    )
 
 
 def _request(

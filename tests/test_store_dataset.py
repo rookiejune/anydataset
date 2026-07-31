@@ -120,7 +120,7 @@ class StoreSourceTest(unittest.TestCase):
             self.assertEqual(manifest.dataset_id, "toy-audio")
             self.assertEqual(manifest.sample_count, 1)
 
-    def test_reader_reads_schema_v2_store_without_provenance(self):
+    def test_reader_warns_for_schema_v2_store_by_default(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             output = Path(tmpdir) / "dataset"
             DatasetWriter(output, dataset_id="toy-audio").write(
@@ -136,6 +136,52 @@ class StoreSourceTest(unittest.TestCase):
 
             self.assertEqual(dataset.manifest.schema_version, 2)
             self.assertEqual(dataset.manifest.provenance, {})
+
+    def test_reader_allows_schema_v2_store_with_explicit_policy(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output = Path(tmpdir) / "dataset"
+            DatasetWriter(output, dataset_id="toy-audio").write(
+                [_audio_sample(waveform=torch.tensor([[1.0]]))]
+            )
+            manifest = read_json(output / "dataset.json")
+            manifest["schema_version"] = 2
+            del manifest["provenance"]
+            write_json(output / "dataset.json", manifest)
+
+            with mock.patch("warnings.warn") as warn:
+                dataset = read_store_dataset(output, legacy_policy="allow")
+
+            warn.assert_not_called()
+            self.assertEqual(dataset.manifest.schema_version, 2)
+            self.assertEqual(dataset.manifest.provenance, {})
+
+    def test_reader_rejects_schema_v2_store_with_explicit_policy(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output = Path(tmpdir) / "dataset"
+            DatasetWriter(output, dataset_id="toy-audio").write(
+                [_audio_sample(waveform=torch.tensor([[1.0]]))]
+            )
+            manifest = read_json(output / "dataset.json")
+            manifest["schema_version"] = 2
+            del manifest["provenance"]
+            write_json(output / "dataset.json", manifest)
+
+            with self.assertRaisesRegex(ValueError, "schema_version 2 is legacy"):
+                read_store_dataset(output, legacy_policy="reject")
+
+    def test_reader_rejects_invalid_legacy_policy(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output = Path(tmpdir) / "dataset"
+            DatasetWriter(output, dataset_id="toy-audio").write(
+                [_audio_sample(waveform=torch.tensor([[1.0]]))]
+            )
+            manifest = read_json(output / "dataset.json")
+            manifest["schema_version"] = 2
+            del manifest["provenance"]
+            write_json(output / "dataset.json", manifest)
+
+            with self.assertRaisesRegex(ValueError, "legacy_policy"):
+                read_store_manifest(output, legacy_policy="silent")
 
     def test_read_store_manifest_rejects_missing_schema_version(self):
         with tempfile.TemporaryDirectory() as tmpdir:

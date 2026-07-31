@@ -3,12 +3,12 @@ from __future__ import annotations
 import hashlib
 import sqlite3
 import tempfile
-import warnings
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, cast
 
+from .._legacy import legacy
 from .._io.files import StatFingerprint as _StatFingerprint
 from .._io.files import atomic_write_bytes, stat_fingerprint
 from ..cache import FileLock, anydataset_home
@@ -213,10 +213,11 @@ def read_store_dataset(
     views: Iterable[tuple[item.Role, item.Modality, item.View]] | None = None,
     *,
     preload: bool = False,
+    legacy_policy: str = "warn",
 ) -> StoreDataset:
     root = Path(root).expanduser().resolve()
     _validate_dataset_root(root)
-    manifest = read_store_manifest(root)
+    manifest = read_store_manifest(root, legacy_policy=legacy_policy)
     manifest_cache = ManifestParquetCache()
     try:
         samples_path = samples_parquet_path(root)
@@ -274,7 +275,11 @@ def read_store_dataset(
         raise
 
 
-def read_store_manifest(root: str | Path) -> DatasetManifest:
+def read_store_manifest(
+    root: str | Path,
+    *,
+    legacy_policy: str = "warn",
+) -> DatasetManifest:
     root = Path(root).expanduser()
     _validate_dataset_root(root)
     data = read_json(dataset_json_path(root))
@@ -296,12 +301,20 @@ def read_store_manifest(root: str | Path) -> DatasetManifest:
             f"{STORE_SCHEMA_VERSION}.{migration}"
         )
     if version == LEGACY_STORE_SCHEMA_VERSION:
-        warnings.warn(
-            "Reading store schema_version 2 without provenance. "
-            "Compatibility is for legacy reads only; rematerialize or migrate "
-            "to schema_version 3 before publishing the store or using it as "
-            "the basis for cache-sensitive derived data.",
-            RuntimeWarning,
+        legacy(
+            "store schema_version 2",
+            legacy_policy=legacy_policy,
+            warning=(
+                "Reading store schema_version 2 without provenance. "
+                "Compatibility is for legacy reads only; rematerialize or migrate "
+                "to schema_version 3 before publishing the store or using it as "
+                "the basis for cache-sensitive derived data."
+            ),
+            error=(
+                "Store schema_version 2 is legacy and lacks provenance. "
+                "Use anydataset.store.migrate_store(source, output), or pass "
+                "legacy_policy='allow' for an intentional legacy read."
+            ),
             stacklevel=2,
         )
     return _dataset_manifest(data, schema_version=version)

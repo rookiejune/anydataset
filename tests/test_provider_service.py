@@ -7,13 +7,15 @@ from multiprocessing.connection import Client
 from pathlib import Path
 
 import anydataset.provider_service as provider_service
+from anydataset.provider._service_protocol import (
+    _ProviderCommand,
+    _ProviderRequest,
+    _serve_connection,
+)
 from anydataset.provider_service import (
     ProviderServer,
     RemoteFilterPredicate,
     RemoteProviderError,
-    _ProviderCommand,
-    _ProviderRequest,
-    _serve_connection,
 )
 
 
@@ -59,6 +61,9 @@ class ProviderServerTest(unittest.TestCase):
         self.assertNotIn("_ProviderCommand", provider_service.__all__)
         self.assertNotIn("_ProviderRequest", provider_service.__all__)
         self.assertNotIn("_serve_connection", provider_service.__all__)
+        self.assertFalse(hasattr(provider_service, "_ProviderCommand"))
+        self.assertFalse(hasattr(provider_service, "_ProviderRequest"))
+        self.assertFalse(hasattr(provider_service, "_serve_connection"))
 
     def test_rejects_invalid_runtime_options(self):
         cases = (

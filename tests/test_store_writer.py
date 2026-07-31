@@ -588,6 +588,40 @@ class DatasetWriterTest(unittest.TestCase):
                 [1],
             )
 
+    def test_commit_fragments_rejects_legacy_schema_v2_fragment(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            fragments = root / "fragments"
+            fragment = fragments / "batch-000000000000-000000000000-a"
+            sample = audio_sample(waveform=torch.tensor([[1.0]]), sample_rate=4)
+            DatasetFragmentWriter(
+                fragment,
+                dataset_id="toy-audio",
+                fragment_id=fragment.name,
+            ).write([(0, sample)])
+            manifest = read_json(dataset_json_path(fragment))
+            manifest["schema_version"] = 2
+            del manifest["provenance"]
+            write_json(dataset_json_path(fragment), manifest)
+
+            with self.subTest(entrypoint="commit_store_fragments"):
+                with self.assertRaisesRegex(ValueError, "schema_version 2 is legacy"):
+                    commit_store_fragments(
+                        root / "dataset",
+                        fragments,
+                        dataset_id="toy-audio",
+                        expected_sample_count=1,
+                    )
+            with self.subTest(entrypoint="commit_fragment_part"):
+                with self.assertRaisesRegex(ValueError, "schema_version 2 is legacy"):
+                    commit_fragment_part(
+                        root / "part",
+                        (fragment,),
+                        dataset_id="toy-audio",
+                        shard_id=0,
+                        num_shards=1,
+                    )
+
     def test_commit_parts_allows_views_for_partial_item_coverage(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -817,6 +851,22 @@ class DatasetWriterTest(unittest.TestCase):
                 ValueError,
                 "Unsupported store schema_version: None; expected 2 or 3",
             ):
+                commit_store_parts(
+                    root / "output",
+                    parts,
+                    dataset_id="toy-audio",
+                )
+
+    def test_commit_parts_rejects_legacy_store_schema_version(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            parts, part, _view, _entry = _single_audio_part(root)
+            manifest = read_json(dataset_json_path(part))
+            manifest["schema_version"] = 2
+            del manifest["provenance"]
+            write_json(dataset_json_path(part), manifest)
+
+            with self.assertRaisesRegex(ValueError, "schema_version 2 is legacy"):
                 commit_store_parts(
                     root / "output",
                     parts,

@@ -36,6 +36,14 @@ Use these paths for application code:
 - `anydataset.provider_service`: provider process server and remote provider /
   filter client factories.
 
+`anydataset.provider` and `anydataset.provider_service` are intentionally
+separate public surfaces. Provider modules define model/data transformation
+objects; provider service defines process isolation, server lifecycle, and
+remote client factories for executing those objects out of process. Wire
+commands, request/response envelopes, connection loops, and serialization
+helpers live under private implementation modules such as
+`anydataset.provider._service_protocol` and are not public API.
+
 ## Extension API
 
 These paths are intended for users extending anydataset:
@@ -81,11 +89,16 @@ Do not depend on these paths from user code:
   `anydataset.store.manifest.*`, `anydataset.store.materialize.*`,
   `anydataset.store.part.*`, and `anydataset.store.payload.*`.
 - `anydataset.presets.registry` and preset-private parser/helper functions.
+- `anydataset.provider._service_protocol` and provider service wire protocol /
+  connection-loop helpers.
 - Names or modules that start with `_`.
 
 ## Store migration policy
 
-Legacy store formats are not read through silent compatibility layers. Use
+Legacy store formats are not read through silent compatibility layers. Store
+readers use an explicit `legacy_policy` when a legacy format is still readable:
+the transition default may warn, strict publishing or cache-sensitive paths
+should reject, and deliberate audits may allow. Use
 `anydataset.store.migrate_store(source, output)` or
 `anydataset-store migrate source output` to create an explicit schema-current
 store. Store internals such as manifest readers, payload index writers, part

@@ -103,7 +103,10 @@ def _store_provenance(
     if isinstance(dataset, StoreDataset):
         return dataset.manifest.provenance
     if isinstance(dataset, AnyDataset) and spec.source == Source.STORE:
-        return read_store_manifest(spec.path).provenance
+        return read_store_manifest(
+            spec.path,
+            legacy_policy="reject",
+        ).provenance
     return {}
 
 
