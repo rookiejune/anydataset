@@ -42,7 +42,7 @@ objects; provider service defines process isolation, server lifecycle, and
 remote client factories for executing those objects out of process. Wire
 commands, request/response envelopes, connection loops, and serialization
 helpers live under private implementation modules such as
-`anydataset.provider._service_protocol` and are not public API.
+`anydataset.provider._protocol` and are not public API.
 
 ## Extension API
 
@@ -89,7 +89,7 @@ Do not depend on these paths from user code:
   `anydataset.store.manifest.*`, `anydataset.store.materialize.*`,
   `anydataset.store.part.*`, and `anydataset.store.payload.*`.
 - `anydataset.presets.registry` and preset-private parser/helper functions.
-- `anydataset.provider._service_protocol` and provider service wire protocol /
+- `anydataset.provider._protocol` and provider service wire protocol /
   connection-loop helpers.
 - Names or modules that start with `_`.
 

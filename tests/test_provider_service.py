@@ -7,7 +7,7 @@ from multiprocessing.connection import Client
 from pathlib import Path
 
 import anydataset.provider_service as provider_service
-from anydataset.provider._service_protocol import (
+from anydataset.provider._protocol import (
     _ProviderCommand,
     _ProviderRequest,
     _serve_connection,

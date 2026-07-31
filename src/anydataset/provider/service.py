@@ -4,9 +4,6 @@ import os
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
-from multiprocessing import AuthenticationError
-from multiprocessing.connection import Client, Listener
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from .._runtime.parallel import (
@@ -18,16 +15,15 @@ from .._runtime.parallel import (
 from .._validation import optional_positive_float, positive_float
 from ..types.item import View
 from ..view import BatchOutput, ViewMap
-from ._service_protocol import (
+from ._protocol import (
     ProviderAddress,
     _ProviderCommand,
     _ProviderError,
-    _ProviderRequest,
     _ProviderResponse,
     _ProviderServerConfig,
-    _accept_connection,
-    _serve_connection,
 )
+from ._server import serve_provider, unlink_address
+from ._transport import request
 
 if TYPE_CHECKING:
     from multiprocessing.process import BaseProcess
@@ -44,13 +40,15 @@ class RemoteProvider:
     authkey: bytes | None = None
 
     def __call__(self, views: ViewMap) -> Any:
-        return _request(self.address, self.authkey, _ProviderCommand.CALL, views)
+        return _value(request(self.address, self.authkey, _ProviderCommand.CALL, views))
 
     def call_batch(self, batch: Batch) -> BatchOutput:
-        return _request(self.address, self.authkey, _ProviderCommand.CALL_BATCH, batch)
+        return _value(
+            request(self.address, self.authkey, _ProviderCommand.CALL_BATCH, batch)
+        )
 
     def close(self) -> None:
-        _request(self.address, self.authkey, _ProviderCommand.CLOSE, None)
+        _value(request(self.address, self.authkey, _ProviderCommand.CLOSE, None))
 
 
 @dataclass(frozen=True)
@@ -79,10 +77,10 @@ class RemoteFilterPredicate:
     authkey: bytes | None = None
 
     def __call__(self, sample: Any) -> Any:
-        return _request(self.address, self.authkey, _ProviderCommand.CALL, sample)
+        return _value(request(self.address, self.authkey, _ProviderCommand.CALL, sample))
 
     def close(self) -> None:
-        _request(self.address, self.authkey, _ProviderCommand.CLOSE, None)
+        _value(request(self.address, self.authkey, _ProviderCommand.CLOSE, None))
 
 
 @dataclass(frozen=True)
@@ -138,8 +136,7 @@ class ProviderServer:
             context="provider server",
             start_method=self.start_method,
         )
-        address = _address(self.address)
-        _unlink_address(address)
+        unlink_address(self.address)
         context = multiprocessing_context(self.start_method)
         config = _ProviderServerConfig(
             address=self.address,
@@ -147,7 +144,7 @@ class ProviderServer:
             authkey=self.authkey,
         )
         process = context.Process(
-            target=_serve_provider,
+            target=serve_provider,
             args=(config, self.provider_factory),
             name=f"anydataset-provider-{self.device}",
         )
@@ -165,7 +162,7 @@ class ProviderServer:
         if process is None:
             return
         try:
-            _request(self.address, self.authkey, _ProviderCommand.CLOSE, None)
+            _value(request(self.address, self.authkey, _ProviderCommand.CLOSE, None))
         except (ConnectionError, EOFError, FileNotFoundError, OSError):
             pass
         process.join(self.shutdown_timeout)
@@ -194,7 +191,7 @@ class ProviderServer:
                     f"Provider server exited during startup: {self._process.exitcode}."
                 )
             try:
-                _request(self.address, self.authkey, _ProviderCommand.PING, None)
+                _value(request(self.address, self.authkey, _ProviderCommand.PING, None))
                 return
             except (ConnectionError, EOFError, FileNotFoundError, OSError):
                 if deadline is not None and time.monotonic() > deadline:
@@ -210,7 +207,7 @@ class ProviderServer:
         if process.is_alive():
             process.terminate()
         process.join()
-        _unlink_address(_address(self.address))
+        unlink_address(self.address)
         self._process = None
 
 
@@ -222,78 +219,7 @@ class RemoteProviderError(RuntimeError):
         )
 
 
-def _serve_provider(
-    config: _ProviderServerConfig,
-    provider_factory: ProviderFactory,
-) -> None:
-    address = _address(config.address)
-    _unlink_address(address)
-    provider = provider_factory(config.device)
-    listener = Listener(address, authkey=config.authkey)
-    try:
-        while True:
-            conn = _accept_connection(listener)
-            if conn is None:
-                continue
-            try:
-                should_close = _serve_connection(provider, conn)
-            finally:
-                conn.close()
-            if should_close:
-                return
-    finally:
-        listener.close()
-        _unlink_address(address)
-
-
-def _request(
-    address: ProviderAddress,
-    authkey: bytes | None,
-    command: _ProviderCommand,
-    payload: Any,
-) -> Any:
-    conn = Client(_address(address), authkey=authkey)
-    try:
-        conn.send(_ProviderRequest(command=command, payload=payload))
-        response = conn.recv()
-    finally:
-        conn.close()
-    if not isinstance(response, _ProviderResponse):
-        raise TypeError("Provider server returned an invalid response.")
+def _value(response: _ProviderResponse) -> Any:
     if response.error is not None:
         raise RemoteProviderError(response.error)
     return response.value
-
-
-def _address(address: ProviderAddress) -> str | tuple[str, int]:
-    if isinstance(address, Path):
-        return str(address)
-    return address
-
-
-def _unlink_address(address: str | tuple[str, int]) -> None:
-    if not isinstance(address, str):
-        return
-    path = Path(address)
-    if not path.exists():
-        return
-    if _socket_in_use(path):
-        raise RuntimeError(f"Provider socket is already in use: {path}")
-    try:
-        os.unlink(address)
-    except FileNotFoundError:
-        pass
-
-
-def _socket_in_use(path: Path) -> bool:
-    try:
-        conn = Client(str(path), authkey=b"anydataset-probe")
-    except AuthenticationError:
-        return True
-    except (ConnectionRefusedError, FileNotFoundError, PermissionError, OSError):
-        return False
-    try:
-        conn.close()
-    except Exception:
-        pass
-    return True

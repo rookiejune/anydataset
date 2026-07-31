@@ -142,9 +142,11 @@ def test_provider_service_public_api_boundary() -> None:
         provider_service,
         [
             "_ProviderCommand",
+            "_ProviderError",
             "_ProviderRequest",
             "_ProviderResponse",
             "_ProviderServerConfig",
+            "_provider_error",
             "_serve_connection",
             "_accept_connection",
         ],
