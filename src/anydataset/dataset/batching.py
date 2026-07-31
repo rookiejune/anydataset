@@ -6,7 +6,7 @@ import operator
 import warnings
 from bisect import bisect_left, bisect_right, insort
 from collections import OrderedDict
-from collections.abc import Iterable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from itertools import islice
 from typing import Any
@@ -20,6 +20,31 @@ from .abc import MapStyleABC
 
 
 _DISTRIBUTED_PLAN_WINDOW = 128
+_CostFn = Callable[[Any], int]
+_Costs = None | Sequence[int]
+
+
+class _CallableCosts(Sequence[int]):
+    def __init__(self, dataset: MapStyleABC, cost_fn: _CostFn) -> None:
+        self.dataset = dataset
+        self.cost_fn = cost_fn
+        self._cache: dict[int, int] = {}
+
+    def __len__(self) -> int:
+        return len(self.dataset)
+
+    def __getitem__(self, index: int) -> int:
+        resolved = operator.index(index)
+        if resolved < 0:
+            resolved += len(self)
+        if resolved < 0 or resolved >= len(self):
+            raise IndexError("cost index out of range.")
+        cached = self._cache.get(resolved)
+        if cached is None:
+            row = self.dataset.cost_row(resolved)
+            cached = operator.index(self.cost_fn(row))
+            self._cache[resolved] = cached
+        return cached
 
 
 @dataclass(frozen=True)
@@ -93,7 +118,7 @@ class _BatchSampler(Sampler[list[int]]):
         self,
         dataset: MapStyleABC,
         *,
-        costs: int | Sequence[int],
+        costs: None | Iterable[int] | _CostFn,
         max_batch_memory: int,
         sampler: Sampler[int] | None,
         shuffle: bool,
@@ -106,7 +131,7 @@ class _BatchSampler(Sampler[list[int]]):
         if not isinstance(dataset, MapStyleABC):
             raise TypeError("dataset must be a MapStyleABC.")
         self.dataset = dataset
-        self.costs = _costs(costs, sample_count=len(dataset))
+        self.costs = _costs(costs, dataset=dataset, sample_count=len(dataset))
         self.max_batch_memory = _positive_int("max_batch_memory", max_batch_memory)
         self._source_sampler = sampler
         if not isinstance(shuffle, bool):
@@ -178,7 +203,7 @@ class _DataLoader(TorchDataLoader):
         self,
         dataset: MapStyleABC,
         *,
-        costs: int | Sequence[int],
+        costs: None | Iterable[int] | _CostFn,
         max_batch_memory: int,
         shuffle: bool = False,
         sampler: Sampler[int] | None = None,
@@ -319,30 +344,37 @@ def _positive_int(name: str, value: int) -> int:
 
 
 def _costs(
-    costs: int | Sequence[int],
+    costs: None | Iterable[int] | _CostFn,
     *,
+    dataset: MapStyleABC,
     sample_count: int,
-) -> int | Sequence[int]:
-    if isinstance(costs, bool):
-        raise TypeError("costs must be a positive integer or integer sequence.")
-    if isinstance(costs, int):
-        if costs <= 0:
-            raise ValueError("constant sample cost must be positive.")
-        return costs
-    if isinstance(costs, (str, bytes, bytearray)) or not isinstance(costs, Sequence):
-        raise TypeError("costs must be a positive integer or integer sequence.")
+) -> _Costs:
+    if isinstance(costs, bool) or isinstance(costs, int):
+        raise TypeError(
+            "costs must be None, an iterable of integers, or a callable."
+        )
+    if costs is None:
+        return None
+    if callable(costs):
+        return _CallableCosts(dataset, costs)
+    if isinstance(costs, (str, bytes, bytearray)) or not isinstance(costs, Iterable):
+        raise TypeError(
+            "costs must be None, an iterable of integers, or a callable."
+        )
+    if not isinstance(costs, Sequence):
+        costs = tuple(costs)
     if len(costs) != sample_count:
         raise ValueError("costs and dataset must have equal length.")
     return costs
 
 
-def _record(costs: int | Sequence[int], index: int) -> _Record:
+def _record(costs: _Costs, index: int) -> _Record:
     resolved = operator.index(index)
     return _Record(index=resolved, cost=_sample_cost(costs, resolved))
 
 
-def _sample_cost(costs: int | Sequence[int], index: int) -> int:
-    cost = costs if isinstance(costs, int) else operator.index(costs[index])
+def _sample_cost(costs: _Costs, index: int) -> int:
+    cost = 1 if costs is None else operator.index(costs[index])
     if cost <= 0:
         raise ValueError(f"sample cost must be a positive integer: index={index}.")
     return cost

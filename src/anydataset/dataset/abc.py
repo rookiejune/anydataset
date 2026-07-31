@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, cast, runtime_checkable
 
@@ -227,7 +227,7 @@ class MapStyleABC(Dataset, ABC):
     def dataloader(
         self,
         *,
-        costs: int | Sequence[int],
+        costs: None | Iterable[int] | Callable[[Any], int],
         max_batch_memory: int,
         shuffle: bool = False,
         sampler: Sampler[int] | None = None,
@@ -253,6 +253,11 @@ class MapStyleABC(Dataset, ABC):
             drop_distributed_tail=drop_distributed_tail,
             **loader_kwargs,
         )
+
+    def cost_row(self, index: int) -> Any:
+        """Return the lightweight row passed to callable dataloader costs."""
+
+        return self[index]
 
     def _shuffle(
         self,
@@ -401,6 +406,13 @@ class AnyDataset(_Base, MapStyleABC):
 
     def __getitem__(self, index: int) -> Sample:
         return self.transform_sample(self.parse_fn(self.dataset[index]))
+
+    def cost_row(self, index: int) -> Any:
+        dataset = self.dataset
+        cost_row = getattr(dataset, "cost_row", None)
+        if callable(cost_row):
+            return cost_row(index)
+        return dataset[index]
 
     def _shuffle(
         self,

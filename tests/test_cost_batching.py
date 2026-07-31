@@ -38,10 +38,9 @@ def test_cost_does_not_parse_sample() -> None:
         return row * 10
 
     dataset = _dataset(rows, parse_fn=parse)
-    costs = _MeasuredCosts(rows, measured)
 
     loader = dataset.dataloader(
-        costs=costs,
+        costs=lambda row: measured.append(row) or row,
         max_batch_memory=8,
         planning_window=4,
         collate_fn=list,
@@ -51,17 +50,28 @@ def test_cost_does_not_parse_sample() -> None:
     assert parsed == []
     batches = list(iterator)
 
-    assert measured == [0, 1, 2, 3]
+    assert measured == [4, 1, 3, 2]
     assert parsed == [4, 3, 1, 2]
     assert batches == [[40, 30, 10], [20]]
 
 
-def test_requires_indexable_costs() -> None:
+def test_accepts_plain_iterable_costs() -> None:
+    loader = _dataset([4, 1, 3, 2]).dataloader(
+        costs=(cost for cost in [4, 1, 3, 2]),
+        max_batch_memory=8,
+        planning_window=4,
+        collate_fn=list,
+    )
+
+    assert list(loader) == [[4, 3, 1], [2]]
+
+
+def test_requires_supported_costs() -> None:
     dataset = _dataset([1])
 
-    with pytest.raises(TypeError, match="costs must be a positive integer"):
+    with pytest.raises(TypeError, match="costs must be None"):
         dataset.dataloader(
-            costs=lambda _index: 1,
+            costs=object(),
             max_batch_memory=1,
         )
 
@@ -74,14 +84,22 @@ def test_requires_costs_to_match_dataset_length() -> None:
         )
 
 
-def test_constant_sample_cost() -> None:
+def test_none_costs_use_unit_cost() -> None:
     loader = _dataset([1, 2, 3]).dataloader(
-        costs=1,
+        costs=None,
         max_batch_memory=2,
         collate_fn=list,
     )
 
     assert list(loader) == [[1, 2], [3]]
+
+
+def test_rejects_integer_costs() -> None:
+    with pytest.raises(TypeError, match="costs must be None"):
+        _dataset([1]).dataloader(
+            costs=99,  # type: ignore[arg-type]
+            max_batch_memory=1,
+        )
 
 
 def test_rejects_oversized_sample() -> None:
@@ -139,7 +157,7 @@ def test_set_epoch_forwards_to_custom_sampler() -> None:
 def test_dataloader_uses_dataset_shuffle_groups() -> None:
     dataset = _GroupedDataset()
     loader = dataset.dataloader(
-        costs=1,
+        costs=None,
         max_batch_memory=2,
         max_batch_samples=2,
         shuffle=True,
@@ -160,7 +178,7 @@ def test_dataloader_uses_dataset_shuffle_groups() -> None:
 def test_pytorch_sampler_epoch_contract_advances_dataset_shuffle() -> None:
     dataset = _GroupedDataset()
     loader = dataset.dataloader(
-        costs=1,
+        costs=None,
         max_batch_memory=2,
         max_batch_samples=2,
         shuffle=True,
@@ -186,6 +204,20 @@ def test_map_style_abc_can_use_dataloader() -> None:
     )
 
     assert list(loader) == [[40, 30, 10], [20]]
+
+
+def test_callable_costs_use_map_style_cost_row() -> None:
+    dataset = _CostRowDataset([4, 1, 3, 2])
+
+    loader = dataset.dataloader(
+        costs=lambda row: row["cost"],
+        max_batch_memory=8,
+        planning_window=4,
+        collate_fn=list,
+    )
+
+    assert list(loader) == [[40, 30, 10], [20]]
+    assert dataset.cost_rows == [0, 1, 2, 3]
 
 
 def test_map_style_shuffle_strides_flattened_groups_across_ranks() -> None:
@@ -326,6 +358,16 @@ class _IndexDataset(MapStyleABC):
 
     def __getitem__(self, index: int) -> int:
         return self.rows[index] * 10
+
+
+class _CostRowDataset(_IndexDataset):
+    def __init__(self, rows: list[int]) -> None:
+        super().__init__(rows)
+        self.cost_rows: list[int] = []
+
+    def cost_row(self, index: int):
+        self.cost_rows.append(index)
+        return {"cost": self.rows[index]}
 
 
 class _MeasuredCosts(Sequence[int]):

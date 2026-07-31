@@ -123,11 +123,14 @@ dataset = AnyDataset(
 ## Cost-aware batches
 
 Map-style `AnyDataset` can plan dynamic batches from lightweight index-level
-costs without parsing the full training sample. Pass either a positive integer
-for a constant sample cost or a stable `Sequence[int]` aligned with global
-dataset indexes. A sequence must have the same length as the dataset; values
-are read lazily before the corresponding samples are materialized through
-`parse_fn`.
+costs without parsing the full training sample. Pass `None` for unit-cost
+fixed-size batches, a stable integer iterable aligned with global dataset
+indexes, or a callable that maps the lightweight row used by `parse_fn` to an
+integer cost. A scalar integer is not accepted because constant sample cost
+carries no extra information; use `None` for unit-cost batches. Iterable costs
+must have the same length as the dataset;
+values are read lazily before the corresponding samples are materialized
+through `parse_fn`.
 
 ```python
 from anydataset import AnyDataset
@@ -144,6 +147,10 @@ loader = dataset.dataloader(
 )
 ```
 
+For store-backed datasets, callable costs receive a manifest row rather than a
+materialized payload sample, so length metadata can be read without loading
+audio tensors.
+
 The planner treats batch memory and distributed compute as the sum of selected
 sample costs. Each sample cost must be a positive integer. Within each planning
 window, it greedily adds the fitting sample that makes the batch as full as
@@ -151,7 +158,7 @@ possible without exceeding `max_batch_memory`; `max_batch_samples` can cap the
 number of samples per planned batch. Planning keeps only a bounded lookahead;
 stopping an epoch early does not read costs for the unseen tail. A complete
 epoch necessarily reads every selected sample cost once, so expensive lengths
-should be precomputed and persisted instead of derived by materializing samples.
+should be persisted in row metadata instead of derived by materializing samples.
 With no custom sampler, the dataset builds the rank-local read plan behind the
 single `shuffle` flag, and distributed planning never reassigns a planned batch
 to a different rank. `StoreDataset` overrides that private plan to shuffle

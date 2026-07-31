@@ -114,6 +114,14 @@ class StoreDataset(MapStyleABC):
         sample = self.samples[index]
         return _sample_for_entry(self, sample.sample_index, sample)
 
+    def cost_row(self, index: int) -> SampleManifestEntry:
+        self._ensure_open()
+        if index < 0:
+            index += len(self)
+        if index < 0 or index >= len(self):
+            raise IndexError("store dataset index out of range.")
+        return self.samples[index]
+
     def _shuffle(
         self,
         *,

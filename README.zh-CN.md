@@ -77,9 +77,10 @@ parse 阶段完成。
 ## Cost-aware 动态 batch
 
 map-style `AnyDataset` 可以用 `dataset.dataloader(...)` 做动态 batch。
-`costs` 接受表示所有样本 cost 相同的正整数，或与 dataset 等长、按全局样本 index
-对齐的稳定 `Sequence[int]`。loader 在执行完整 `parse_fn` 前按需读取这些 cost；单条样本
-cost 必须是正整数，batch 的 memory 和分布式 compute 都直接使用所选样本 cost 之和。
+`costs` 接受 `None`、与 dataset 等长且按全局样本 index 对齐的稳定整数 iterable，
+或把 `parse_fn` 同层轻量 row 映射为整数 cost 的 callable。标量整数不接受，
+因为常量样本 cost 不携带额外信息；unit-cost batch 请用 `None`。loader 在执行完整 `parse_fn` 前按需读取这些 cost；单条样本 cost
+必须是正整数，batch 的 memory 和分布式 compute 都直接使用所选样本 cost 之和。
 每个 planning window 内，planner 会贪心选择仍不超过 `max_batch_memory`、且能让当前
 batch 尽量填满的样本；`max_batch_samples` 可以额外限制单个 batch 的样本数。
 

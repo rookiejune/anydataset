@@ -88,6 +88,20 @@ class StoreSourceTest(unittest.TestCase):
         self.assertEqual(audio.meta[AudioMeta.LABEL], "speech")
         self.assertEqual(text.views[TextView.TEXT], "hello")
 
+    def test_store_dataset_cost_row_is_manifest_entry(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output = Path(tmpdir) / "dataset"
+            DatasetWriter(output, dataset_id="toy-audio").write(
+                [_audio_sample(waveform=torch.tensor([[1.0]]), text="hello")]
+            )
+            dataset = read_store_dataset(output)
+
+            row = dataset.cost_row(0)
+
+        self.assertIsInstance(row, SampleManifestEntry)
+        self.assertEqual(row.sample_index, 0)
+        self.assertTrue(row.sample_id)
+
     def test_read_store_manifest_reads_dataset_json_only(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -564,7 +578,7 @@ class StoreSourceTest(unittest.TestCase):
             dataset = AnyDataset(Spec(source=Source.STORE, path=str(output)))
 
             loader = dataset.dataloader(
-                costs=1,
+                costs=None,
                 max_batch_memory=3,
                 max_batch_samples=3,
                 collate_fn=_sample_indexes,
@@ -587,7 +601,7 @@ class StoreSourceTest(unittest.TestCase):
             )
             dataset = AnyDataset(Spec(source=Source.STORE, path=str(output)))
             loader = dataset.dataloader(
-                costs=1,
+                costs=None,
                 max_batch_memory=2,
                 max_batch_samples=2,
                 shuffle=True,
@@ -912,7 +926,7 @@ class StoreSourceTest(unittest.TestCase):
 
             with self.assertRaisesRegex(ValueError, "owns loader kwargs"):
                 dataset.dataloader(
-                    costs=1,
+                    costs=None,
                     max_batch_memory=1,
                     batch_size=1,
                 )
