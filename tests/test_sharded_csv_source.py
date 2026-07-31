@@ -395,8 +395,10 @@ class ShardedCsvSourceTest(unittest.TestCase):
                 )
                 record = json.loads(manifest.read_text(encoding="utf-8"))["files"][0]
 
-        self.assertIn("device", record)
-        self.assertIn("inode", record)
+        self.assertNotIn("device", record)
+        self.assertNotIn("inode", record)
+        self.assertIn("size", record)
+        self.assertIn("mtime_ns", record)
         self.assertIn("ctime_ns", record)
 
     def test_reuses_prepared_parquet_cache(self):

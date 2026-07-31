@@ -1,4 +1,5 @@
 from pathlib import Path
+import json
 import os
 import tempfile
 import unittest
@@ -46,6 +47,22 @@ class TsvSourceTest(unittest.TestCase):
             self.assertEqual(dataset[0], "hello")
             self.assertEqual(dataset[1], "tea")
             self.assertEqual(list(dataset), ["hello", "tea"])
+
+    def test_reads_quoted_newlines_in_tsv_values(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            (root / "train.tsv").write_text(
+                'path\tsentence\n'
+                'a.mp3\t"hello\nworld"\n',
+                encoding="utf-8",
+            )
+
+            dataset = AnyDataset(
+                Spec(source="tsv", path=tmpdir, split="train"),
+                parse_fn=lambda row: row["sentence"],
+            )
+
+            self.assertEqual(list(dataset), ["hello\nworld"])
 
     def test_rejects_unknown_load_options(self):
         dataset = AnyDataset(
@@ -151,6 +168,12 @@ class TsvSourceTest(unittest.TestCase):
                 self.assertEqual(list(first), ["hello", "tea"])
                 manifests = list(first.cache_manager.root.rglob("tsv_parquet.json"))
                 self.assertEqual(len(manifests), 1)
+                manifest = manifests[0]
+                data = json.loads(manifest.read_text(encoding="utf-8"))
+                for record in data["files"]:
+                    record["device"] = -1
+                    record["inode"] = -1
+                manifest.write_text(json.dumps(data), encoding="utf-8")
 
                 second = AnyDataset(spec, parse_fn=lambda row: row["sentence"])
                 with mock.patch.object(

@@ -24,7 +24,6 @@ from pyarrow.csv import ReadOptions  # pyright: ignore[reportPrivateImportUsage]
 from pyarrow.csv import read_csv  # pyright: ignore[reportPrivateImportUsage]
 
 from ..._compat import strict_zip
-from ..._io.files import stat_fingerprint
 from ..._runtime.parallel import multiprocessing_context
 from ..._runtime.sharding import validate_shard
 from ..._validation import validate_path_segment
@@ -261,28 +260,22 @@ def valid_cache_schema(data: Mapping[str, object]) -> bool:
 
 
 def source_record(path: Path) -> dict[str, Any]:
-    device, inode, size, mtime_ns, ctime_ns = stat_fingerprint(path.stat())
+    stat = path.stat()
     return {
         "path": str(path),
-        "device": device,
-        "inode": inode,
-        "size": size,
-        "mtime_ns": mtime_ns,
-        "ctime_ns": ctime_ns,
+        "size": stat.st_size,
+        "mtime_ns": stat.st_mtime_ns,
+        "ctime_ns": stat.st_ctime_ns,
     }
 
 
 def same_file_record(path: Path, record: JsonMapping) -> bool:
+    stat = path.stat()
     return (
         record.get("path") == str(path)
-        and (
-            record.get("device"),
-            record.get("inode"),
-            record.get("size"),
-            record.get("mtime_ns"),
-            record.get("ctime_ns"),
-        )
-        == stat_fingerprint(path.stat())
+        and record.get("size") == stat.st_size
+        and record.get("mtime_ns") == stat.st_mtime_ns
+        and record.get("ctime_ns") == stat.st_ctime_ns
     )
 
 
@@ -387,7 +380,7 @@ def convert_file_job(
     table = read_csv(
         source,
         read_options=ReadOptions(use_threads=False, encoding=encoding),
-        parse_options=ParseOptions(delimiter=delimiter),
+        parse_options=ParseOptions(delimiter=delimiter, newlines_in_values=True),
         convert_options=ConvertOptions(
             column_types={name: pa.string() for name in names},
             strings_can_be_null=False,
