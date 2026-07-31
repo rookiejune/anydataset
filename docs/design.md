@@ -102,9 +102,8 @@ pool，默认值保留自动并行策略。`prepare_workers` 只影响转换并�
 因此实现该契约且不扫描其他 shard。Hugging Face `streaming=True` 在 `Source.HF`
 入口显式拒绝；需要可索引本地数据时使用 `Source.HF_DISK`。
 dataset 层的 `iter_shard()` 是唯一的全局 modulo shard 语义，产出
-`(sample_index, sample)`。`iter_indexed_shard()` 只作为兼容别名转发到
-`iter_shard()`。`IterableAnyDataset` 不会机会主义地调用 raw dataset 的
-`shard()`。
+`(sample_index, sample)`。`IterableAnyDataset` 不会机会主义地调用 raw dataset
+的 `shard()`。
 
 Map-style `iter_runtime_shard` 在多卡时会丢弃不能被 `rank_count` 整除的尾部样本；
 iterable 路径不做该截断。

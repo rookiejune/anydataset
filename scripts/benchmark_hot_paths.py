@@ -117,8 +117,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--indexed-num-workers", type=int, default=0)
     parser.add_argument("--indexed-prefetch-factor", type=int, default=None)
     parser.add_argument("--indexed-payload-bytes", type=int, default=32)
-    parser.add_argument("--indexed-num-shards", type=int, default=1)
-    parser.add_argument("--indexed-shard-id", type=int, default=0)
+    parser.add_argument("--loader-num-shards", type=int, default=1)
+    parser.add_argument("--loader-shard-id", type=int, default=0)
     parser.add_argument(
         "--indexed-variants",
         default="runtime,map_default,map_spawn,map_fork",
@@ -294,7 +294,7 @@ def bench_sharded_csv(
     expected_rows = csv_shards * files_per_shard * rows_per_file
 
     start = time.perf_counter()
-    rows = sum(1 for _index, _row in dataset.iter_indexed_shard(num_shards, shard_id))
+    rows = sum(1 for _index, _row in dataset.iter_shard(num_shards, shard_id))
     seconds = time.perf_counter() - start
     return Measurement(
         seconds=seconds,
@@ -542,8 +542,8 @@ def bench_indexed_loader_variants(args: argparse.Namespace) -> dict[str, Any]:
                 num_workers=args.indexed_num_workers,
                 prefetch_factor=args.indexed_prefetch_factor,
                 payload_bytes=args.indexed_payload_bytes,
-                num_shards=args.indexed_num_shards,
-                shard_id=args.indexed_shard_id,
+                num_shards=args.loader_num_shards,
+                shard_id=args.loader_shard_id,
             ),
             repeats=args.repeats,
         )
@@ -835,7 +835,7 @@ def make_indexed_loader(
 ) -> DataLoader:
     if variant == "runtime":
         if num_shards != 1 or shard_id != 0:
-            raise ValueError("runtime variant only supports indexed_num_shards=1.")
+            raise ValueError("runtime variant only supports loader_num_shards=1.")
         return runtime_indexed_loader(
             factory,
             batch_size=batch_size,

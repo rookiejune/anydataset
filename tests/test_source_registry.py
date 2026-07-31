@@ -76,7 +76,6 @@ class SourceRegistryTest(unittest.TestCase):
         )
         self.assertIn("HuggingFaceFilesSource", source_module.__all__)
         self.assertIn("ShardingSource", source_module.__all__)
-        self.assertNotIn("IndexedShardingSource", source_module.__all__)
         self.assertNotIn("FSD50KSource", source_module.__all__)
         self.assertNotIn("FSD50KDataset", source_module.__all__)
         self.assertNotIn("ShardedCsvDataset", source_module.__all__)

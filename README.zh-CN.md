@@ -261,8 +261,7 @@ dataset = IterableAnyDataset(
 内建 `hf-disk`、`hf-files`、`store`、`tsv` 和 `sharded_csv` source 通过随机访问提供 indexed 路径。
 Hugging Face `streaming=True` 会被拒绝；请使用非 streaming 的 `Source.HF`、
 `Source.HF_DISK` 或 `Source.HF_FILES`。dataset 层的 `iter_shard` 保留 index，
-产出 `(sample_index, sample)`；`iter_indexed_shard` 只作为兼容别名保留，不会
-机会主义地调用 raw dataset 的 `shard()`。
+产出 `(sample_index, sample)`，不会机会主义地调用 raw dataset 的 `shard()`。
 
 ## 用 Schema 构造 DataLoader
 

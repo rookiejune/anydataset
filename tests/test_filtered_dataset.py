@@ -1089,10 +1089,10 @@ class FilteredDatasetTest(unittest.TestCase):
 
         self.assertEqual(shard, [(1, 1), (3, 3)])
 
-    def test_filtered_dataset_indexed_shards_keep_physical_indices(self):
-        _register_rows_source("unit_test_filter_indexed_shards")
+    def test_filtered_dataset_iter_shard_keeps_physical_indices(self):
+        _register_rows_source("unit_test_filter_iter_shard_indices")
         with tempfile.TemporaryDirectory():
-            dataset = _dataset("unit_test_filter_indexed_shards", [0, 1, 2, 3, 4])
+            dataset = _dataset("unit_test_filter_iter_shard_indices", [0, 1, 2, 3, 4])
             filtered = (
                 FilterRule(
                     name="even",

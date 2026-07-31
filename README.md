@@ -231,8 +231,8 @@ The built-in `hf-disk`, `hf-files`, `store`, `tsv`, and `sharded_csv`
 sources provide this indexed path through random access. Hugging Face
 `streaming=True` is rejected; use non-streaming `Source.HF`, `Source.HF_DISK`,
 or `Source.HF_FILES`. Dataset-level `iter_shard` is index-preserving and
-yields `(sample_index, sample)`; `iter_indexed_shard` remains a compatibility
-alias. Raw dataset `shard()` methods are never called opportunistically.
+yields `(sample_index, sample)`. Raw dataset `shard()` methods are never
+called opportunistically.
 
 Caches are rooted at `ANYDATASET_HOME`, or `~/.cache/anydataset` when the
 environment variable is unset. Source prepare caches live under

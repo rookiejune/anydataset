@@ -15,6 +15,7 @@ from anydataset import (
     Spec,
     resolve_dataset,
 )
+from anydataset._runtime.sharding import runtime_shard
 from anydataset.dataset.collate import FieldGroup, FieldRef, collate_fn
 from anydataset.types import (
     AudioItem,
@@ -729,11 +730,12 @@ class CanonicalDatasetTest(unittest.TestCase):
 
         self.assertEqual(values_by_rank, [[0], [1], [2], [3]])
 
-    def test_map_dataset_runtime_indexed_shard_uses_rank_environment(self):
+    def test_map_dataset_iter_shard_uses_rank_environment(self):
         dataset = _map_dataset(range(8))
 
         with mock.patch.dict("os.environ", {"WORLD_SIZE": "2", "RANK": "1"}):
-            values = list(dataset.iter_indexed_runtime_shard())
+            shard = runtime_shard()
+            values = list(dataset.iter_shard(shard.flat_count, shard.flat_index))
 
         self.assertEqual(values, [(1, 1), (3, 3), (5, 5), (7, 7)])
 

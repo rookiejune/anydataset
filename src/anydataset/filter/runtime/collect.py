@@ -297,7 +297,7 @@ def _filter_worker(
         processed = 0
         try:
             predicate = factory()
-            for chunk in collect_indexed_shard(
+            for chunk in collect_shard(
                 dataset_factory,
                 predicate,
                 metrics,
@@ -323,7 +323,7 @@ def _filter_worker(
             restore_environment(env)
 
 
-def collect_indexed_shard(
+def collect_shard(
     dataset_factory: DatasetFactory,
     predicate: FilterPredicate,
     write_metrics: bool,

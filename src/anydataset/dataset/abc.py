@@ -183,17 +183,6 @@ class IterableAnyDataset(_Base, IterableDataset):
             if index % num_shards == shard_id:
                 yield index, self.transform_sample(self.parse_fn(row))
 
-    def iter_indexed_shard(
-        self,
-        num_shards: int,
-        shard_id: int,
-    ) -> Iterator[tuple[int, Sample]]:
-        yield from self.iter_shard(num_shards, shard_id)
-
-    def iter_indexed_runtime_shard(self) -> Iterator[tuple[int, Sample]]:
-        shard = runtime_shard()
-        yield from self.iter_shard(shard.flat_count, shard.flat_index)
-
 
 class MapStyleABC(Dataset, ABC):
     @abstractmethod
@@ -281,17 +270,6 @@ class MapStyleABC(Dataset, ABC):
             raise ValueError("range must satisfy 0 <= start <= stop <= len(dataset).")
         for index in range(start, stop):
             yield index, self[index]
-
-    def iter_indexed_shard(
-        self,
-        num_shards: int,
-        shard_id: int,
-    ) -> Iterator[tuple[int, Sample]]:
-        yield from self.iter_shard(num_shards, shard_id)
-
-    def iter_indexed_runtime_shard(self) -> Iterator[tuple[int, Sample]]:
-        shard = runtime_shard()
-        yield from self.iter_shard(shard.flat_count, shard.flat_index)
 
     def iter_runtime_shard(self, shard: Shard) -> Iterator[Sample]:
         usable = len(self) // shard.rank_count * shard.rank_count
@@ -459,13 +437,6 @@ class AnyDataset(_Base, MapStyleABC):
 
         for index in range(start, stop):
             yield index, self[index]
-
-    def iter_indexed_shard(
-        self,
-        num_shards: int,
-        shard_id: int,
-    ) -> Iterator[tuple[int, Sample]]:
-        yield from self.iter_shard(num_shards, shard_id)
 
     def iter_shard(
         self,

@@ -15,10 +15,10 @@
   使用 process writer backend 时才读取 `writer_start_method`。
 - 默认用户数据集以 map-style 为主。`StoreDataset`、`FilteredDataset` 这类默认
   map-style shard 语义的 materializer/filter 热路径会使用 map-style indexed
-  loader；`AnyDataset` 仍优先保留 source-aware indexed shard 路径，避免把顺序
+  loader；`AnyDataset` 仍优先保留 source-aware `iter_shard` 路径，避免把顺序
   source 退化成随机访问。`tsv` 和 `sharded_csv` prepare 后使用按源文件生成的
   Parquet cache，因此也走 map-style indexed loader。
-- iterable source 只有显式实现全局 indexed-sharding 契约时才会走 source-native
+- iterable source 只有显式实现全局 `iter_shard` 契约时才会走 source-native
   路径；契约要求返回原始全局 `sample_index`，并由入口校验已产出值的稠密 modulo
   序列。Hugging Face `streaming=True` 已拒绝；不要依赖 streaming 做训练吞吐。
 - store 格式保持稳定；reader 侧可以只读 parquet metadata 和轻量 index 列，按 row group
@@ -47,12 +47,10 @@
 - wrapper 可以在当前进程复用已构造 dataset；spawn 序列化时丢弃该缓存，让 worker 通过
   `dataset_factory` 懒加载重建。
 - `ViewMaterializer` 和多设备 `FilterRule` 对默认 map-style shard 语义的数据集使用该
-  loader；source 显式提供全局 indexed shard 的 iterable dataset 继续走 runtime indexed
-  loader。
-- dataset 层 `iter_shard` 是 index-preserving 的 dense global modulo 分区；
-  `iter_indexed_shard` 只作为兼容别名。原生加速只通过 source 的
-  `ShardingSource` opt-in，不调用 raw dataset 的 `shard()` 或局部 indexed
-  方法。内建 `hf-disk`、`hf-files`、`store`、`tsv` 和 `sharded_csv` 通过随机访问
+  loader；source 显式提供全局 `iter_shard` 的 iterable dataset 继续走 runtime loader。
+- dataset 层 `iter_shard` 是 index-preserving 的 dense global modulo 分区。原生加速
+  只通过 source 的 `ShardingSource` opt-in，不调用 raw dataset 的 `shard()` 或局部
+  分片方法。内建 `hf-disk`、`hf-files`、`store`、`tsv` 和 `sharded_csv` 通过随机访问
   实现该路径。`Source.HF` 拒绝 `streaming=True`；Hub 文件树使用
   `Source.HF_FILES`。
 - server 模式下 reader/writer worker 默认用 fork；无 server 的本地路径保持 spawn，避免
@@ -105,7 +103,7 @@
   分组；多 part 的 modulo 索引不会退化为每样本一条 JSON 记录。shuffle 优先读取该
   sidecar，缺失、损坏或 fingerprint 失效时回退逐样本扫描并生成同样的压缩分组，因此旧
   store 无需迁移即可读取；非 shuffle 读取始终保持全局 sample-index 顺序。
-- `sharded_csv` 的 indexed shard 按 Parquet file/row group 顺序读取，只对当前 shard
+- `sharded_csv` 的 `iter_shard` 按 Parquet file/row group 顺序读取，只对当前 shard
   过滤全局 sample index；CSV cache fingerprint 额外包含 device、inode 和 ctime，旧记录
   缺少这些字段时自动失效重建。
 - materializer 的 pending output 使用 deque，commit 阶段一次构建 `ref -> sample indexes`
@@ -129,7 +127,7 @@ PYTHONPATH=src python scripts/benchmark_hot_paths.py
 `scripts/benchmark_hot_paths.py` 覆盖九组热路径：
 
 - `store_commit`: 多 part store 提交成本。
-- `sharded_csv`: 物理 CSV 分片的 indexed shard 读取成本。
+- `sharded_csv`: 物理 CSV 分片的 `iter_shard` 读取成本。
 - `sharded_csv_lookup`: 同一 Parquet 文件跨多个 row group 随机读取，并报告打开句柄和
   row-group cache 数量。
 - `store_reader`: lazy/preload manifest 的 store 打开成本。

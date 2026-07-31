@@ -346,7 +346,7 @@ class ShardedCsvSourceTest(unittest.TestCase):
             self.assertEqual(parquet.call_count, 1)
             prepared.close()
 
-    def test_indexed_shard_reads_each_row_group_in_order(self):
+    def test_iter_shard_reads_each_row_group_in_order(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             shard = Path(tmpdir) / "shard_0"
             shard.mkdir()
@@ -741,7 +741,7 @@ class ShardedCsvSourceTest(unittest.TestCase):
             self.assertEqual(list(dataset.iter_indexed_range(1, 3)), [(1, "one"), (2, "two")])
             self.assertEqual(list(dataset.iter_shard(2, 1)), [(1, "one")])
 
-    def test_indexed_shard_keeps_global_indices(self):
+    def test_iter_shard_keeps_global_indices(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             shard_dir = root / "shard_0"

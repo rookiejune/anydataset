@@ -111,7 +111,7 @@ class TsvSourceTest(unittest.TestCase):
             )
             self.assertEqual(dataset[1], ("ni hao", str(zh)))
 
-    def test_indexed_shard_uses_native_path(self):
+    def test_iter_shard_uses_native_path(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             (root / "train.tsv").write_text(
