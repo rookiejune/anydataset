@@ -55,12 +55,22 @@ class ViewMaterializerTest(unittest.TestCase):
         dataset = dataset_factory()
         first = ViewMaterializer(
             target,
+            batch_size=2,
             commit_samples=2,
+            num_workers=0,
+            prefetch_factor=None,
+            write_workers=1,
+            write_prefetch=None,
             runtime=Runtime(process_start_method="spawn"),
         )
         second = ViewMaterializer(
             target,
+            batch_size=8,
             commit_samples=8,
+            num_workers=4,
+            prefetch_factor=2,
+            write_workers=3,
+            write_prefetch=6,
             runtime=Runtime(process_start_method="fork"),
         )
 

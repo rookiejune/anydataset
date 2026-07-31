@@ -792,7 +792,6 @@ class ViewMaterializer:
                 "dataset_id": self._dataset_id,
                 "split": self.split,
                 "max_shard_samples": self.max_shard_samples,
-                "batch_size": self.batch_size,
                 "keep_schema": metadata_value(self.keep_schema),
                 "roles": metadata_value(self._materializer_roles),
             },
