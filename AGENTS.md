@@ -1,5 +1,9 @@
 # anydataset Agents
 
+## 默认约定
+
+- 开始前先阅读父级默认约定：优先读取 `../AGENTS.md`；如果不存在，再读取 `../../AGENTS.md`。本文件只记录本仓库的补充约定。
+
 ## 架构边界
 
 - `Spec` 只描述物理数据源：source、path、split、version 和 load options。
