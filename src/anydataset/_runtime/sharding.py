@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Iterator
 from dataclasses import dataclass
+from typing import Any
 
 from torch import distributed as dist
 from torch.utils.data import get_worker_info
@@ -12,6 +14,31 @@ def validate_shard(num_shards: int, shard_id: int) -> None:
         raise ValueError("num_shards must be positive.")
     if shard_id < 0 or shard_id >= num_shards:
         raise ValueError("shard_id must satisfy 0 <= shard_id < num_shards.")
+
+
+def validate_range(sample_count: int, start: int, stop: int) -> None:
+    if start < 0 or stop < start or stop > sample_count:
+        raise ValueError("range must satisfy 0 <= start <= stop <= len(dataset).")
+
+
+def iter_map_style_range(
+    dataset: Any,
+    start: int,
+    stop: int,
+) -> Iterator[tuple[int, Any]]:
+    validate_range(len(dataset), start, stop)
+    for index in range(start, stop):
+        yield index, dataset[index]
+
+
+def iter_map_style_shard(
+    dataset: Any,
+    num_shards: int,
+    shard_id: int,
+) -> Iterator[tuple[int, Any]]:
+    validate_shard(num_shards, shard_id)
+    for index in range(shard_id, len(dataset), num_shards):
+        yield index, dataset[index]
 
 
 @dataclass(frozen=True)

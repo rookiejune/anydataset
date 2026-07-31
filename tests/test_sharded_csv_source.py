@@ -17,7 +17,7 @@ from anydataset import (
 )
 from anydataset._runtime.parallel import can_select_indexes, map_style_indexed_loader
 from anydataset.cache import FileLock
-from anydataset.dataset.source.registry import _SourceFactory
+from anydataset.dataset.source._registry import source_exists
 from anydataset.dataset.source.sharded_csv import (
     _CsvShard,
     _ShardedCsvDataset,
@@ -37,7 +37,7 @@ class ShardedCsvSourceTest(unittest.TestCase):
         self.assertIsNone(restored.prepare_workers)
 
     def test_registered_as_builtin_source(self):
-        self.assertTrue(_SourceFactory.exist("sharded_csv"))
+        self.assertTrue(source_exists("sharded_csv"))
 
     def test_rejects_unknown_load_options(self):
         dataset = AnyDataset(

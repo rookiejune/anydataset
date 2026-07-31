@@ -1,56 +1,11 @@
 from __future__ import annotations
 
-from collections.abc import Callable
-from typing import ClassVar
+from ...types import SourceKey
+from ._registry import DatasetSourceFactory
+from ._registry import register_source as _register_source
 
-from ...types import Source, SourceKey, source_key
-from .protocol import DatasetSource
-
-_DatasetSourceFactory = Callable[[], DatasetSource]
+__all__ = ["register_source"]
 
 
-class _SourceFactory:
-    _factories: ClassVar[dict[str, _DatasetSourceFactory]] = {}
-
-    @classmethod
-    def register(cls, source: SourceKey, factory: _DatasetSourceFactory) -> None:
-        key = source_key(source)
-        if key in cls._factories:
-            raise ValueError(f"Dataset source {key!r} is already registered.")
-        if not callable(factory):
-            raise TypeError("Dataset source factory must be callable.")
-        cls._factories[key] = factory
-
-    @classmethod
-    def create(cls, source: SourceKey) -> DatasetSource:
-        key = source_key(source)
-        factory = cls._factories.get(key)
-        if factory is None:
-            raise KeyError(f"Unknown dataset source: {key!r}.")
-        return factory()
-
-    @classmethod
-    def exist(cls, source: SourceKey) -> bool:
-        return source_key(source) in cls._factories
-
-
-def register_source(source: SourceKey, factory: _DatasetSourceFactory) -> None:
-    _SourceFactory.register(source, factory)
-
-
-def _register_builtin_sources() -> None:
-    from .hf_files import HuggingFaceFilesSource
-    from .huggingface import HuggingFaceDiskSource, HuggingFaceSource
-    from .sharded_csv import ShardedCsvSource
-    from .store import StoreSource
-    from .tsv import TsvSource
-
-    _SourceFactory.register(Source.HF, HuggingFaceSource)
-    _SourceFactory.register(Source.HF_DISK, HuggingFaceDiskSource)
-    _SourceFactory.register(Source.HF_FILES, HuggingFaceFilesSource)
-    _SourceFactory.register(Source.STORE, StoreSource)
-    _SourceFactory.register("sharded_csv", ShardedCsvSource)
-    _SourceFactory.register("tsv", TsvSource)
-
-
-_register_builtin_sources()
+def register_source(source: SourceKey, factory: DatasetSourceFactory) -> None:
+    _register_source(source, factory)

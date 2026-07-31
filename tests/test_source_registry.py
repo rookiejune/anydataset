@@ -11,7 +11,7 @@ from anydataset import (
     resolve_dataset,
 )
 import anydataset.dataset.source as source_module
-from anydataset.dataset.source.registry import _SourceFactory
+from anydataset.dataset.source._registry import create_source, source_exists
 from anydataset.dataset.source.store import StoreSource
 
 
@@ -43,7 +43,7 @@ class SourceRegistryTest(unittest.TestCase):
             "/tmp/custom",
             "train",
         ))
-        self.assertTrue(_SourceFactory.exist(spec.source))
+        self.assertTrue(source_exists(spec.source))
 
     def test_rejects_duplicate_source_registration(self):
         register_source("unit_test_duplicate", ListSource)
@@ -57,7 +57,7 @@ class SourceRegistryTest(unittest.TestCase):
 
     def test_unknown_source_fails_when_resolved(self):
         with self.assertRaises(KeyError):
-            _SourceFactory.create("unit_test_missing")
+            create_source("unit_test_missing")
 
     def test_source_exports_physical_categories_not_concrete_datasets(self):
         self.assertEqual(

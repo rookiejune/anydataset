@@ -7,7 +7,14 @@ from typing import TYPE_CHECKING, Any, Protocol, cast, runtime_checkable
 
 from torch.utils.data import Dataset, IterableDataset
 
-from .._runtime.sharding import Shard, runtime_shard, validate_shard
+from .._runtime.sharding import (
+    Shard,
+    iter_map_style_range,
+    iter_map_style_shard,
+    runtime_shard,
+    validate_range,
+    validate_shard,
+)
 from ..types import Preset, Source, Spec
 from ..types._sample import select as select_sample
 from ..types.item import Modality, Role, View
@@ -73,9 +80,9 @@ class _Base(ABC):
     @property
     def source(self) -> DatasetSource:
         if self._source is None:
-            from .source.registry import _SourceFactory
+            from .source._registry import create_source
 
-            self._source = _SourceFactory.create(self.spec.source)
+            self._source = create_source(self.spec.source)
         return self._source
 
     def __getstate__(self) -> dict[str, Any]:
@@ -133,6 +140,32 @@ class _Base(ABC):
     def resolve_sample(sample: Sample, schema: Schema) -> Sample:
         return select_sample(sample, schema)
 
+    def _iter_native_source_shard(
+        self,
+        dataset: object,
+        *,
+        num_shards: int,
+        shard_id: int,
+    ) -> Iterator[tuple[int, Sample]] | None:
+        from .source.protocol import _native_shard
+
+        rows = _native_shard(
+            self.source,
+            dataset,
+            num_shards=num_shards,
+            shard_id=shard_id,
+        )
+        if rows is None:
+            return None
+        return self._iter_sample_rows(rows)
+
+    def _iter_sample_rows(
+        self,
+        rows: Iterator[tuple[int, Any]],
+    ) -> Iterator[tuple[int, Sample]]:
+        for index, row in rows:
+            yield index, self.transform_sample(self.parse_fn(row))
+
 
 class IterableAnyDataset(_Base, IterableDataset):
     @classmethod
@@ -165,18 +198,14 @@ class IterableAnyDataset(_Base, IterableDataset):
         num_shards: int,
         shard_id: int,
     ) -> Iterator[tuple[int, Sample]]:
-        from .source.protocol import _native_shard
-
         validate_shard(num_shards, shard_id)
-        indexed = _native_shard(
-            self.source,
+        native = self._iter_native_source_shard(
             self.dataset,
             num_shards=num_shards,
             shard_id=shard_id,
         )
-        if indexed is not None:
-            for index, row in indexed:
-                yield index, self.transform_sample(self.parse_fn(row))
+        if native is not None:
+            yield from native
             return
 
         for index, row in enumerate(self.iter_rows()):
@@ -257,19 +286,14 @@ class MapStyleABC(Dataset, ABC):
         num_shards: int,
         shard_id: int,
     ) -> Iterator[tuple[int, Sample]]:
-        validate_shard(num_shards, shard_id)
-        for index in range(shard_id, len(self), num_shards):
-            yield index, self[index]
+        yield from iter_map_style_shard(self, num_shards, shard_id)
 
     def iter_indexed_range(
         self,
         start: int,
         stop: int,
     ) -> Iterator[tuple[int, Sample]]:
-        if start < 0 or stop < start or stop > len(self):
-            raise ValueError("range must satisfy 0 <= start <= stop <= len(dataset).")
-        for index in range(start, stop):
-            yield index, self[index]
+        yield from iter_map_style_range(self, start, stop)
 
     def iter_runtime_shard(self, shard: Shard) -> Iterator[Sample]:
         usable = len(self) // shard.rank_count * shard.rank_count
@@ -421,9 +445,7 @@ class AnyDataset(_Base, MapStyleABC):
         start: int,
         stop: int,
     ) -> Iterator[tuple[int, Sample]]:
-        if start < 0 or stop < start or stop > len(self):
-            raise ValueError("range must satisfy 0 <= start <= stop <= len(dataset).")
-
+        validate_range(len(self), start, stop)
         dataset = self.dataset
         iter_indexed = getattr(dataset, "iter_indexed_range", None)
         if callable(iter_indexed):
@@ -435,31 +457,27 @@ class AnyDataset(_Base, MapStyleABC):
                 yield index, self.transform_sample(self.parse_fn(row))
             return
 
-        for index in range(start, stop):
-            yield index, self[index]
+        for index, row in iter_map_style_range(dataset, start, stop):
+            yield index, self.transform_sample(self.parse_fn(row))
 
     def iter_shard(
         self,
         num_shards: int,
         shard_id: int,
     ) -> Iterator[tuple[int, Sample]]:
-        from .source.protocol import _native_shard
-
         validate_shard(num_shards, shard_id)
         dataset = self.dataset
-        indexed = _native_shard(
-            self.source,
+        native = self._iter_native_source_shard(
             dataset,
             num_shards=num_shards,
             shard_id=shard_id,
         )
-        if indexed is not None:
-            for index, row in indexed:
-                yield index, self.transform_sample(self.parse_fn(row))
+        if native is not None:
+            yield from native
             return
 
-        for index in range(shard_id, len(dataset), num_shards):
-            yield index, self.transform_sample(self.parse_fn(dataset[index]))
+        for index, row in iter_map_style_shard(dataset, num_shards, shard_id):
+            yield index, self.transform_sample(self.parse_fn(row))
 
 
 def _identity_sample(row: Any) -> Sample:

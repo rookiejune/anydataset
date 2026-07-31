@@ -69,14 +69,14 @@ def _native_shard(
         iterator = iter(rows)
     except TypeError as exc:
         raise TypeError("Source shard must return an iterable.") from exc
-    return _validated_indexed_rows(
+    return _validated_shard_rows(
         iterator,
         num_shards=num_shards,
         shard_id=shard_id,
     )
 
 
-def _validated_indexed_rows(
+def _validated_shard_rows(
     rows: Iterator[Any],
     *,
     num_shards: int,

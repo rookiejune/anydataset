@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from ..._runtime.logging import write_warning
+from ..._runtime.sharding import validate_range, validate_shard
 from ...types import Spec
 from . import _tabular_parquet as tabular
 from .protocol import _validate_load_options
@@ -129,20 +130,14 @@ class _ShardedCsvDataset:
         training, write, and filter paths use ``iter_shard`` (dense
         global sample-index modulo) instead of this method.
         """
-        if num_shards <= 0:
-            raise ValueError("num_shards must be positive.")
-        if index < 0 or index >= num_shards:
-            raise ValueError("index must satisfy 0 <= index < num_shards.")
+        validate_shard(num_shards, index)
 
         for shard in self._shards():
             if shard.index % num_shards == index:
                 yield from self._read_shard(shard)
 
     def iter_indexed_range(self, start: int, stop: int) -> Iterator[tuple[int, CsvRow]]:
-        length = len(self)
-        if start < 0 or stop < start or stop > length:
-            raise ValueError("range must satisfy 0 <= start <= stop <= len(dataset).")
-
+        validate_range(len(self), start, stop)
         for index in range(start, stop):
             yield index, self[index]
 
@@ -151,10 +146,7 @@ class _ShardedCsvDataset:
         num_shards: int,
         shard_id: int,
     ) -> Iterator[tuple[int, CsvRow]]:
-        if num_shards <= 0:
-            raise ValueError("num_shards must be positive.")
-        if shard_id < 0 or shard_id >= num_shards:
-            raise ValueError("shard_id must satisfy 0 <= shard_id < num_shards.")
+        validate_shard(num_shards, shard_id)
         # Prefer ``_read_parquet_group`` so callers can observe/wrap row-group IO.
         for file in self._files():
             for row_group, row_count in enumerate(file.row_groups):

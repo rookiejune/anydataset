@@ -18,6 +18,7 @@ from ..._runtime.parallel import (
     ProcessHandle,
     free_port,
     indexed_loader,
+    iter_ordered_samples,
     multiprocessing_context,
     restore_environment,
     set_worker_environment,
@@ -248,8 +249,4 @@ def _indexed_samples(
 
 
 def ordered_samples(dataset: Any) -> Iterator[Sample]:
-    if hasattr(dataset, "__len__") and hasattr(dataset, "__getitem__"):
-        for index in range(len(dataset)):
-            yield dataset[index]
-        return
-    yield from dataset
+    yield from iter_ordered_samples(dataset)

@@ -43,7 +43,7 @@ from anydataset.filter.cache.resume import (
     write_filter_fragment,
 )
 from anydataset.filter.types import _FilterChunk, _FilterMetricsRow
-from anydataset.dataset.source.registry import _SourceFactory
+from anydataset.dataset.source._registry import source_exists
 from anydataset.provider_service import ProviderServer, RemoteFilterFactory
 from anydataset.runtime import Runtime
 from anydataset.types import (
@@ -2435,7 +2435,7 @@ class _RowsSource:
 
 
 def _register_rows_source(name: str) -> None:
-    if not _SourceFactory.exist(name):
+    if not source_exists(name):
         register_source(name, _RowsSource)
 
 

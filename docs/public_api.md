@@ -13,9 +13,8 @@ module, but only the public paths below are covered by compatibility promises.
   tests may import it to exercise implementation details.
 
 As a rule, stable public names are exported from a package `__all__` and are
-documented in README/docs examples. Some older implementation names may remain
-importable for compatibility; new application code should use the stable paths
-listed here instead of relying on incidental module attributes.
+documented in README/docs examples. Incidental module attributes are not public
+API unless they are listed here.
 
 ## Stable public API
 
@@ -52,10 +51,10 @@ These paths are intended for users extending anydataset:
   physical source categories, not concrete datasets. New concrete built-in
   datasets should live under `anydataset.presets` and map onto these generic
   sources with a preset-local parser.
-- Older source implementation names may remain importable for compatibility;
-  prefer `Spec`, presets, category source shorthands such as `hf://`,
+- Prefer `Spec`, presets, category source shorthands such as `hf://`,
   `hf-files://`, `hf-disk://`, and `store://`, and registration helpers in
-  ordinary application code.
+  ordinary application code; source implementation modules remain outside the
+  stable application API unless exported here.
 - `anydataset.rowmap` contains helpers for mapping raw rows to canonical
   samples in presets and user-defined parsers.
 - Provider protocols and wrapper classes exported from `anydataset.store`
@@ -72,9 +71,8 @@ Do not depend on these paths from user code:
   `anydataset._runtime.*`, and `anydataset._validation`.
 - `anydataset.dataset._shuffle` and source-specific prepare helpers or
   prepared-row implementation details.
-- `anydataset.dataset.source.registry._SourceFactory.create(...)` and
-  `_SourceFactory.exist(...)`; these are registry plumbing used by
-  resolver/dataset internals, not application extension points.
+- `anydataset.dataset.source._registry`; this is source registry plumbing used by
+  resolver/dataset internals, not an application extension point.
 - Concrete dataset helpers embedded in presets, such as FSD50K parser/load
   helpers, unless they are explicitly exported from `anydataset.presets`.
 - `anydataset.filter.cache.*` and `anydataset.filter.runtime.*`.
@@ -83,7 +81,7 @@ Do not depend on these paths from user code:
   `anydataset.store.manifest.*`, `anydataset.store.materialize.*`,
   `anydataset.store.part.*`, and `anydataset.store.payload.*`.
 - `anydataset.presets.registry` and preset-private parser/helper functions.
-- Names that start with `_`, even if a compatibility module can import them.
+- Names or modules that start with `_`.
 
 ## Store migration policy
 

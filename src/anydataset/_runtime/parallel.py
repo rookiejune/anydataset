@@ -32,7 +32,7 @@ from torch.utils.data import DataLoader, Dataset, IterableDataset, Sampler
 
 from .logging import run_logs_dir, set_run_logs_dir
 from .resume import ComplementIndexes
-from .sharding import runtime_shard, validate_shard
+from .sharding import iter_map_style_shard, runtime_shard, validate_shard
 
 DatasetFactory = Callable[[], Any]
 StartMethod = Literal["fork", "spawn", "forkserver"]
@@ -176,8 +176,7 @@ def iter_shard(
         return
 
     if hasattr(dataset, "__len__") and hasattr(dataset, "__getitem__"):
-        for index in range(shard_id, len(dataset), num_shards):
-            yield index, dataset[index]
+        yield from iter_map_style_shard(dataset, num_shards, shard_id)
         return
 
     raise TypeError("dataset must provide iter_shard() or be map-style.")
@@ -185,6 +184,14 @@ def iter_shard(
 
 def can_select_indexes(dataset: object) -> bool:
     return hasattr(dataset, "__len__") and hasattr(dataset, "__getitem__")
+
+
+def iter_ordered_samples(dataset: Any) -> Iterator[Any]:
+    if can_select_indexes(dataset):
+        for index in range(len(dataset)):
+            yield dataset[index]
+        return
+    yield from dataset
 
 
 def indexed_loader(

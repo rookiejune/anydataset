@@ -8,7 +8,7 @@ from typing import Any
 from urllib.parse import quote, urlsplit, urlunsplit
 from urllib.request import Request, urlopen
 
-from ..._runtime.sharding import validate_shard
+from ..._runtime.sharding import iter_map_style_shard
 from ...cache import FileLock
 from ...types import Spec
 from .protocol import _validate_load_options
@@ -146,9 +146,7 @@ class _HuggingFaceFilesDataset:
         num_shards: int,
         shard_id: int,
     ) -> Iterator[tuple[int, Mapping[str, Any]]]:
-        validate_shard(num_shards, shard_id)
-        for index in range(shard_id, len(self), num_shards):
-            yield index, self[index]
+        yield from iter_map_style_shard(self, num_shards, shard_id)
 
 
 def _path_prefix(spec: Spec) -> str:

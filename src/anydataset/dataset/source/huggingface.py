@@ -4,6 +4,7 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
+from ..._runtime.sharding import iter_map_style_shard
 from ... import types
 
 
@@ -18,8 +19,7 @@ class HuggingFaceSource:
         num_shards: int,
         shard_id: int,
     ) -> Iterator[tuple[int, Any]]:
-        for sample_index in range(shard_id, len(dataset), num_shards):
-            yield sample_index, dataset[sample_index]
+        yield from iter_map_style_shard(dataset, num_shards, shard_id)
 
 
 class HuggingFaceDiskSource:
@@ -33,8 +33,7 @@ class HuggingFaceDiskSource:
         num_shards: int,
         shard_id: int,
     ) -> Iterator[tuple[int, Any]]:
-        for sample_index in range(shard_id, len(dataset), num_shards):
-            yield sample_index, dataset[sample_index]
+        yield from iter_map_style_shard(dataset, num_shards, shard_id)
 
 
 def _prepare_hf(spec: types.Spec, cache_path: Path) -> Any:
