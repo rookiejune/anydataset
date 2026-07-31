@@ -56,14 +56,14 @@ class HuggingFaceFilesSource:
         dataset.prepare()
         return dataset
 
-    def iter_indexed_shard(
+    def iter_shard(
         self,
         dataset: _HuggingFaceFilesDataset,
         *,
         num_shards: int,
         shard_id: int,
     ) -> Iterator[tuple[int, Mapping[str, Any]]]:
-        yield from dataset.iter_indexed_shard(num_shards, shard_id)
+        yield from dataset.iter_shard(num_shards, shard_id)
 
 
 class _HuggingFaceFilesDataset:
@@ -141,7 +141,7 @@ class _HuggingFaceFilesDataset:
             "local_path": str(local_path),
         }
 
-    def iter_indexed_shard(
+    def iter_shard(
         self,
         num_shards: int,
         shard_id: int,

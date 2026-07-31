@@ -16,7 +16,7 @@ from ..._runtime.parallel import (
     can_select_indexes,
     free_port,
     indexed_loader,
-    iter_indexed_shard,
+    iter_shard,
     map_style_indexed_loader,
     multiprocessing_context,
     restore_environment,
@@ -826,7 +826,7 @@ class ViewMaterializer:
         num_shards: int,
         shard_id: int,
     ) -> Iterator[tuple[int, Sample]]:
-        indexed = iter_indexed_shard(dataset, num_shards, shard_id)
+        indexed = iter_shard(dataset, num_shards, shard_id)
         if not self._uses_batch_provider(provider):
             for index, sample in indexed:
                 yield index, self._sample_with_provider(sample, provider)
@@ -991,7 +991,7 @@ def _missing_indexed_samples(
         for index in indexes:
             yield index, dataset[index]
         return
-    yield from iter_indexed_shard(dataset, 1, 0)
+    yield from iter_shard(dataset, 1, 0)
 
 
 def _select_sample(sample: Sample, schema: Schema) -> Sample:

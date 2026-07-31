@@ -278,7 +278,8 @@ without `metrics/metrics.json`, the rule is rebuilt so
 `FilteredDataset` exposes `labels` and `counts` for the current selection, and
 `available_labels` and `available_counts` for every label in the cache. It also
 exposes `cache_path`, preserves map-style indexing, and provides
-`iter_shard(num_shards, shard_id)` over the selected global-index order.
+`iter_shard(num_shards, shard_id)` as `(local_index, sample)` pairs over the
+selected global-index order.
 
 ## Online safety net
 

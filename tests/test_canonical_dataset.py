@@ -530,8 +530,8 @@ class CanonicalDatasetTest(unittest.TestCase):
         self.assertEqual(sample_rate, 4)
 
     def test_iterable_dataset_ignores_dataset_native_shard(self):
-        # HF is an IndexedShardingSource: rows are taken via source
-        # iter_indexed_shard (len/getitem), not prepared Dataset.shard().
+        # HF is a ShardingSource: rows are taken via source iter_shard
+        # (len/getitem), not prepared Dataset.shard().
         dataset = IterableAnyDataset(
             spec=Spec(source=Source.HF, path="/tmp/missing"),
             parse_fn=lambda row: row["value"],
@@ -547,7 +547,7 @@ class CanonicalDatasetTest(unittest.TestCase):
 
         values = list(dataset.iter_shard(2, 1))
 
-        self.assertEqual(values, [1, 3])
+        self.assertEqual(values, [(1, 1), (3, 3)])
         self.assertEqual(dataset.dataset.shard_calls, [])
 
     def test_iterable_dataset_falls_back_to_modulo_shard(self):
@@ -566,70 +566,70 @@ class CanonicalDatasetTest(unittest.TestCase):
             {"value": index} for index, _ in enumerate(dataset.dataset)
         )
 
-        self.assertEqual(list(dataset.iter_shard(2, 1)), [1, 3])
+        self.assertEqual(list(dataset.iter_shard(2, 1)), [(1, 1), (3, 3)])
 
-    def test_iterable_dataset_uses_source_native_indexed_shard(self):
+    def test_iterable_dataset_uses_source_native_shard(self):
         dataset = IterableAnyDataset(
             spec=Spec(source=Source.HF, path="/tmp/missing"),
             parse_fn=lambda row: row["value"],
         )
-        source = _IndexedSource()
+        source = _ShardedSource()
         dataset._source = source
         dataset._dataset = _NoScanRows(
             [{"value": index} for index in range(5)]
         )
 
-        values = list(dataset.iter_indexed_shard(2, 1))
+        values = list(dataset.iter_shard(2, 1))
 
         self.assertEqual(values, [(1, 1), (3, 3)])
         self.assertEqual(source.calls, [(2, 1)])
 
-    def test_map_dataset_uses_source_native_indexed_shard(self):
+    def test_map_dataset_uses_source_native_shard(self):
         dataset = AnyDataset(
             spec=Spec(source=Source.HF, path="/tmp/missing"),
             parse_fn=lambda row: row["value"],
         )
-        source = _IndexedSource()
+        source = _ShardedSource()
         dataset._source = source
         dataset._dataset = _NoScanRows(
             [{"value": index} for index in range(5)]
         )
 
-        values = list(dataset.iter_indexed_shard(2, 1))
+        values = list(dataset.iter_shard(2, 1))
 
         self.assertEqual(values, [(1, 1), (3, 3)])
         self.assertEqual(source.calls, [(2, 1)])
 
-    def test_iterable_indexed_shard_requires_source_opt_in(self):
+    def test_iterable_shard_requires_source_opt_in(self):
         dataset = IterableAnyDataset(
             spec=Spec(source=Source.HF, path="/tmp/missing"),
             parse_fn=lambda row: row["value"],
         )
         dataset._source = _PlainSource()
-        rows = _RawIndexedRows([{"value": index} for index in range(4)])
+        rows = _RawShardedRows([{"value": index} for index in range(4)])
         dataset._dataset = rows
 
-        values = list(dataset.iter_indexed_shard(2, 1))
+        values = list(dataset.iter_shard(2, 1))
 
         self.assertEqual(values, [(1, 1), (3, 3)])
-        self.assertEqual(rows.indexed_calls, [])
+        self.assertEqual(rows.shard_calls, [])
         self.assertEqual(rows.iterations, 1)
 
-    def test_map_indexed_shard_requires_source_opt_in(self):
+    def test_map_shard_requires_source_opt_in(self):
         dataset = AnyDataset(
             spec=Spec(source=Source.HF, path="/tmp/missing"),
             parse_fn=lambda row: row["value"],
         )
         dataset._source = _PlainSource()
-        rows = _RawIndexedRows([{"value": index} for index in range(4)])
+        rows = _RawShardedRows([{"value": index} for index in range(4)])
         dataset._dataset = rows
 
-        values = list(dataset.iter_indexed_shard(2, 1))
+        values = list(dataset.iter_shard(2, 1))
 
         self.assertEqual(values, [(1, 1), (3, 3)])
-        self.assertEqual(rows.indexed_calls, [])
+        self.assertEqual(rows.shard_calls, [])
 
-    def test_iterable_native_indexed_shard_validates_global_indexes(self):
+    def test_iterable_native_shard_validates_global_indexes(self):
         cases = (
             (None, TypeError, "return an iterable"),
             ([([1, {"value": 1}])], TypeError, "tuples"),
@@ -648,13 +648,13 @@ class CanonicalDatasetTest(unittest.TestCase):
                     spec=Spec(source=Source.HF, path="/tmp/missing"),
                     parse_fn=lambda row: row["value"],
                 )
-                dataset._source = _FixedIndexedSource(entries)
+                dataset._source = _FixedShardedSource(entries)
                 dataset._dataset = object()
 
                 with self.assertRaisesRegex(error, message):
-                    list(dataset.iter_indexed_shard(2, 1))
+                    list(dataset.iter_shard(2, 1))
 
-    def test_map_native_indexed_shard_validates_global_indexes(self):
+    def test_map_native_shard_validates_global_indexes(self):
         cases = (
             (None, TypeError, "return an iterable"),
             ([([1, {"value": 1}])], TypeError, "tuples"),
@@ -673,11 +673,11 @@ class CanonicalDatasetTest(unittest.TestCase):
                     spec=Spec(source=Source.HF, path="/tmp/missing"),
                     parse_fn=lambda row: row["value"],
                 )
-                dataset._source = _FixedIndexedSource(entries)
+                dataset._source = _FixedShardedSource(entries)
                 dataset._dataset = object()
 
                 with self.assertRaisesRegex(error, message):
-                    list(dataset.iter_indexed_shard(2, 1))
+                    list(dataset.iter_shard(2, 1))
 
     def test_iterable_dataset_ignores_non_callable_shard_attribute(self):
         dataset = IterableAnyDataset(
@@ -688,7 +688,7 @@ class CanonicalDatasetTest(unittest.TestCase):
             [{"value": index} for index in range(4)]
         )
 
-        self.assertEqual(list(dataset.iter_shard(2, 1)), [1, 3])
+        self.assertEqual(list(dataset.iter_shard(2, 1)), [(1, 1), (3, 3)])
 
     def test_iterable_dataset_merges_rank_and_worker_shards(self):
         # Same contract as ignores_dataset_native_shard: rank/worker flattening
@@ -1118,14 +1118,14 @@ class _RowsWithShardAttribute:
         yield from self.rows
 
 
-class _IndexedSource:
+class _ShardedSource:
     def __init__(self):
         self.calls = []
 
     def prepare(self, spec, cache_path):
         raise AssertionError("prepared dataset was injected")
 
-    def iter_indexed_shard(self, dataset, *, num_shards: int, shard_id: int):
+    def iter_shard(self, dataset, *, num_shards: int, shard_id: int):
         self.calls.append((num_shards, shard_id))
         return (
             (index, dataset.rows[index])
@@ -1133,14 +1133,14 @@ class _IndexedSource:
         )
 
 
-class _FixedIndexedSource:
+class _FixedShardedSource:
     def __init__(self, entries):
         self.entries = entries
 
     def prepare(self, spec, cache_path):
         raise AssertionError("prepared dataset was injected")
 
-    def iter_indexed_shard(self, dataset, *, num_shards: int, shard_id: int):
+    def iter_shard(self, dataset, *, num_shards: int, shard_id: int):
         return self.entries
 
 
@@ -1149,13 +1149,13 @@ class _NoScanRows:
         self.rows = rows
 
     def __iter__(self):
-        raise AssertionError("native indexed sharding must not scan all rows")
+        raise AssertionError("native sharding must not scan all rows")
 
 
-class _RawIndexedRows:
+class _RawShardedRows:
     def __init__(self, rows):
         self.rows = rows
-        self.indexed_calls = []
+        self.shard_calls = []
         self.iterations = 0
 
     def __len__(self):
@@ -1168,9 +1168,9 @@ class _RawIndexedRows:
         self.iterations += 1
         yield from self.rows
 
-    def iter_indexed_shard(self, num_shards: int, shard_id: int):
-        self.indexed_calls.append((num_shards, shard_id))
-        raise AssertionError("raw indexed sharding requires source opt-in")
+    def iter_shard(self, num_shards: int, shard_id: int):
+        self.shard_calls.append((num_shards, shard_id))
+        raise AssertionError("raw sharding requires source opt-in")
 
 
 class _FalseyParser:

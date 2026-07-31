@@ -251,18 +251,18 @@ dataset = IterableAnyDataset(
 ```
 
 能够跳过全流扫描的 iterable source 可以额外实现
-`iter_indexed_shard(dataset, *, num_shards, shard_id)`。该 source 方法必须为精确的
+`iter_shard(dataset, *, num_shards, shard_id)`。该 source 方法必须为精确的
 全局 modulo shard 产出 `(sample_index, row)`：索引从 `shard_id` 开始，每次增加
 `num_shards`。anydataset 会在 filter 或 materializer 使用前校验 tuple 结构和索引步进；
 完整覆盖以及 row 与 index 的对应关系仍由 source 负责。只有 raw dataset 的 `shard()`
-或 `iter_indexed_shard()` 不足以启用该路径，因为原生 shard 内的局部枚举不能保留全局
+或 `iter_shard()` 不足以启用该路径，因为原生 shard 内的局部枚举不能保留全局
 索引。
 
 内建 `hf-disk`、`hf-files`、`store`、`tsv` 和 `sharded_csv` source 通过随机访问提供 indexed 路径。
 Hugging Face `streaming=True` 会被拒绝；请使用非 streaming 的 `Source.HF`、
-`Source.HF_DISK` 或 `Source.HF_FILES`。`IterableAnyDataset.iter_shard` 与
-`iter_indexed_shard` 共用同一 dense global modulo 分区，不会机会主义地调用 raw dataset
-的 `shard()`。
+`Source.HF_DISK` 或 `Source.HF_FILES`。dataset 层的 `iter_shard` 保留 index，
+产出 `(sample_index, sample)`；`iter_indexed_shard` 只作为兼容别名保留，不会
+机会主义地调用 raw dataset 的 `shard()`。
 
 ## 用 Schema 构造 DataLoader
 
@@ -279,6 +279,7 @@ Hugging Face `streaming=True` 会被拒绝；请使用非 streaming 的 `Source.
 
 ```python
 rank_iter = dataset.iter_shard(num_shards=8, shard_id=0)
+# 产出 (sample_index, sample)
 ```
 
 ```python
@@ -661,7 +662,7 @@ if __name__ == "__main__":
 `num_shards * num_workers` 个 loader workers。`prefetch_factor` 表示每个 loader
 worker 预取的一条样本 batch 数，只在 `num_workers > 0` 时生效，省略时默认为 `2`。
 并行 factory 必须可 pickle；默认 `spawn` 启动方式下通常应定义为模块顶层 callable，
-返回的 dataset 必须是 map-style，或实现 `iter_indexed_shard()`。应从应用主进程调用
+返回的 dataset 必须是 map-style，或实现 `iter_shard()`。应从应用主进程调用
 writer。当启用 loader workers 且 dataset 暴露 `prepare()` 时，writer 会在 spawn 前
 先在父进程调用一次，以便安全准备共享的 source 元数据。
 

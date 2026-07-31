@@ -129,10 +129,10 @@ class TsvSourceTest(unittest.TestCase):
             prepared = dataset.dataset
 
             self.assertEqual(
-                [(index, row["sentence"]) for index, row in prepared.iter_indexed_shard(2, 1)],
+                [(index, row["sentence"]) for index, row in prepared.iter_shard(2, 1)],
                 [(1, "one")],
             )
-            self.assertEqual(list(dataset.iter_shard(2, 1)), ["one"])
+            self.assertEqual(list(dataset.iter_shard(2, 1)), [(1, "one")])
 
     def test_reuses_prepared_parquet_cache(self):
         with tempfile.TemporaryDirectory() as tmpdir:

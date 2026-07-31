@@ -1082,9 +1082,12 @@ class FilteredDatasetTest(unittest.TestCase):
                 .select_by("accept")
             )
 
-            shard = [_value(sample) for sample in filtered.iter_shard(2, 1)]
+            shard = [
+                (index, _value(sample))
+                for index, sample in filtered.iter_shard(2, 1)
+            ]
 
-        self.assertEqual(shard, [1, 3])
+        self.assertEqual(shard, [(1, 1), (3, 3)])
 
     def test_filtered_dataset_indexed_shards_keep_physical_indices(self):
         _register_rows_source("unit_test_filter_indexed_shards")
@@ -1101,7 +1104,7 @@ class FilteredDatasetTest(unittest.TestCase):
 
             shard = [
                 (index, filtered.global_index(index), _value(sample))
-                for index, sample in filtered.iter_indexed_shard(2, 1)
+                for index, sample in filtered.iter_shard(2, 1)
             ]
 
         self.assertEqual(shard, [(1, 2, 2)])

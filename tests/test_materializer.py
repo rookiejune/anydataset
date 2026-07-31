@@ -37,7 +37,7 @@ from anydataset.store.manifest.io import read_samples_manifest, read_view_manife
 from anydataset.store.materialize.identity import callable_id
 from anydataset.store.paths import view_dir
 from anydataset.store.reader import read_store_dataset
-from anydataset._runtime.parallel import iter_indexed_shard
+from anydataset._runtime.parallel import iter_shard
 
 
 class ViewMaterializerTest(unittest.TestCase):
@@ -1216,11 +1216,11 @@ class ViewMaterializerTest(unittest.TestCase):
         self.assertEqual(text.views[TextView.TEXT], "hello")
         self.assertEqual(text.meta[TextMeta.LANG], Lang.EN)
 
-    def test_iter_indexed_shard_uses_map_style_indexes(self):
+    def test_iter_shard_uses_map_style_indexes(self):
         dataset = [_audio_sample(torch.tensor([[float(index)]])) for index in range(5)]
 
         self.assertEqual(
-            [index for index, _ in iter_indexed_shard(dataset, 2, 1)],
+            [index for index, _ in iter_shard(dataset, 2, 1)],
             [1, 3],
         )
 

@@ -67,7 +67,7 @@ canonical `Sample` 的映射放进 preset；过滤、模型编码、训练采样
   `<path>/<split>.tsv`，或按 `subdirs` load option 的顺序读取各子目录下的同名
   split。TSV 保持为可读的事实来源；source prepare 与 `sharded_csv` 共用
   delimited→Parquet 缓存逻辑，在物理 `Spec` cache 下按文件生成 Parquet part，
-  读取侧通过 row group 提供 map-style 随机访问，并声明 `IndexedShardingSource`。
+  读取侧通过 row group 提供 map-style 随机访问，并声明 `ShardingSource`。
   `root_field` 在读取时注入，不写入 Parquet 列。`prepare_workers` 语义与
   `sharded_csv` 相同，且不进入 `Spec.id`。Common Voice 默认只选择最新
   `cv-corpus-*`，语言目录来自该 corpus；如果旧 corpus 有最新 corpus 缺失的语言，
@@ -89,20 +89,22 @@ pool，默认值保留自动并行策略。`prepare_workers` 只影响转换并�
 解析。新 source 只应负责 prepare 和 raw row iteration，不把字段语义塞进 source。
 
 需要为 iterable scan 提供高效全局分片时，source 可以实现
-`IndexedShardingSource.iter_indexed_shard(dataset, *, num_shards, shard_id)`。输出必须是
+`ShardingSource.iter_shard(dataset, *, num_shards, shard_id)`。输出必须是
 精确的全局 modulo shard：每项是 `(sample_index, raw_row)`，`sample_index` 从
 `shard_id` 开始并按 `num_shards` 稠密递增。入口会拒绝非二元 tuple、bool/非整数索引和
 已产出序列中的缺口、重复或错 shard 索引。单个未知长度 iterable shard 无法独立证明
 末尾完整覆盖或 row/index 对应关系，这两项仍由 source 契约负责，并在已知 sample count
 的下游 commit 中继续校验。这个契约由 source 显式声明；raw dataset 上恰好存在
-`shard()` 或 `iter_indexed_shard()` 不构成 opt-in，避免把 native shard 内从零开始的
+`shard()` 或 `iter_shard()` 不构成 opt-in，避免把 native shard 内从零开始的
 局部编号误当成全局 cache 对齐键。
 
 `hf-disk`、`store`、`tsv` 和 `sharded_csv` 的 prepared dataset 支持按全局下标随机读取，
 因此实现该契约且不扫描其他 shard。Hugging Face `streaming=True` 在 `Source.HF`
 入口显式拒绝；需要可索引本地数据时使用 `Source.HF_DISK`。
-`IterableAnyDataset.iter_shard()` / `iter_indexed_shard()` 共用同一 dense global
-modulo 分区。`IterableAnyDataset` 不会机会主义地调用 raw dataset 的 `shard()`。
+dataset 层的 `iter_shard()` 是唯一的全局 modulo shard 语义，产出
+`(sample_index, sample)`。`iter_indexed_shard()` 只作为兼容别名转发到
+`iter_shard()`。`IterableAnyDataset` 不会机会主义地调用 raw dataset 的
+`shard()`。
 
 Map-style `iter_runtime_shard` 在多卡时会丢弃不能被 `rank_count` 整除的尾部样本；
 iterable 路径不做该截断。
@@ -146,7 +148,7 @@ shuffle，再在 group 内 shuffle 样本；batch planner 只在同一个 group 
 `sharded_csv` 和 `tsv` 使用 Parquet row group 作为同类 index group，避免全量样本
 index list 和跨 row group 随机读取；其他 map-style dataset 使用有界连续 index group。planner
 只维护 `planning_window` 个候选，DDP 按固定 plan window 同步并只裁剪 rank-local 最终
-batch 尾部，不修改通用 `iter_indexed_shard()` 的 modulo 契约。
+batch 尾部，不修改通用 `iter_shard()` 的 modulo 契约。
 reader 显式支持字段和 Parquet manifest 结构完整的 `schema_version: 2` 和 `3` store；
 v2 store 没有 provenance，仍可读取，但读取时必须发出明确的 `RuntimeWarning`。
 v2 缺失的 provenance 只能按空值参与 identity，不能静默猜测 input/provider 语义；

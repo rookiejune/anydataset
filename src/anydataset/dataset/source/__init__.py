@@ -1,4 +1,4 @@
-from .protocol import DatasetSource, IndexedShardingSource
+from .protocol import DatasetSource, ShardingSource
 from .hf_files import HuggingFaceFilesSource
 from .huggingface import (
     HuggingFaceDiskSource,
@@ -14,8 +14,8 @@ __all__ = [
     "HuggingFaceDiskSource",
     "HuggingFaceFilesSource",
     "HuggingFaceSource",
-    "IndexedShardingSource",
     "ShardedCsvSource",
+    "ShardingSource",
     "StoreSource",
     "TsvSource",
     "register_source",

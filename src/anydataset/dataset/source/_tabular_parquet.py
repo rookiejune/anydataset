@@ -504,7 +504,7 @@ class ParquetPartsReader:
         return self.read_row(part, index - part.start)
 
     def __iter__(self) -> Iterator[dict[str, str]]:
-        for _index, row in self.iter_indexed_shard(1, 0):
+        for _index, row in self.iter_shard(1, 0):
             yield row
 
     def iter_index_groups(self) -> Iterator[range]:
@@ -518,7 +518,7 @@ class ParquetPartsReader:
             if start != part.stop:
                 raise RuntimeError("Parquet row group index is inconsistent.")
 
-    def iter_indexed_shard(
+    def iter_shard(
         self,
         num_shards: int,
         shard_id: int,

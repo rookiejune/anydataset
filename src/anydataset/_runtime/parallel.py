@@ -167,15 +167,24 @@ def iter_runtime_indexed(dataset: Any) -> Iterator[tuple[int, Any]]:
         return
 
     shard = runtime_shard()
-    yield from iter_indexed_shard(dataset, shard.flat_count, shard.flat_index)
+    yield from iter_shard(dataset, shard.flat_count, shard.flat_index)
 
 
-def iter_indexed_shard(
+def iter_shard(
     dataset: Any,
     num_shards: int,
     shard_id: int,
 ) -> Iterator[tuple[int, Any]]:
     validate_shard(num_shards, shard_id)
+    iter_shard = getattr(dataset, "iter_shard", None)
+    if callable(iter_shard):
+        method = cast(
+            Callable[[int, int], Iterator[tuple[int, Any]]],
+            iter_shard,
+        )
+        yield from method(num_shards, shard_id)
+        return
+
     iter_indexed = getattr(dataset, "iter_indexed_shard", None)
     if callable(iter_indexed):
         method = cast(
@@ -190,7 +199,15 @@ def iter_indexed_shard(
             yield index, dataset[index]
         return
 
-    raise TypeError("dataset must provide iter_indexed_shard() or be map-style.")
+    raise TypeError("dataset must provide iter_shard() or be map-style.")
+
+
+def iter_indexed_shard(
+    dataset: Any,
+    num_shards: int,
+    shard_id: int,
+) -> Iterator[tuple[int, Any]]:
+    yield from iter_shard(dataset, num_shards, shard_id)
 
 
 def can_select_indexes(dataset: object) -> bool:

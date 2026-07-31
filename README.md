@@ -218,21 +218,21 @@ dataset = IterableAnyDataset(
 ```
 
 Iterable sources that can select rows without scanning the full stream may also
-implement `iter_indexed_shard(dataset, *, num_shards, shard_id)`. This source
+implement `iter_shard(dataset, *, num_shards, shard_id)`. This source
 method must yield `(sample_index, row)` tuples for the exact dense global modulo
 shard: indexes start at `shard_id` and advance by `num_shards`. Anydataset
 validates tuple shape and index progression before filter or materializer code
 sees the rows; the source remains responsible for complete coverage and the
-row-to-index association. A raw dataset `shard()` or `iter_indexed_shard()`
+row-to-index association. A raw dataset `shard()` or `iter_shard()`
 method alone is not sufficient, because a locally enumerated native shard does
 not preserve global indexes.
 
 The built-in `hf-disk`, `hf-files`, `store`, `tsv`, and `sharded_csv`
 sources provide this indexed path through random access. Hugging Face
 `streaming=True` is rejected; use non-streaming `Source.HF`, `Source.HF_DISK`,
-or `Source.HF_FILES`. `IterableAnyDataset.iter_shard` and
-`iter_indexed_shard` share that same dense global modulo partition; raw dataset
-`shard()` methods are never called opportunistically.
+or `Source.HF_FILES`. Dataset-level `iter_shard` is index-preserving and
+yields `(sample_index, sample)`; `iter_indexed_shard` remains a compatibility
+alias. Raw dataset `shard()` methods are never called opportunistically.
 
 Caches are rooted at `ANYDATASET_HOME`, or `~/.cache/anydataset` when the
 environment variable is unset. Source prepare caches live under
@@ -265,7 +265,8 @@ parallelism.
 a training batch needs. `collate_fn(schema)` selects those fields and returns a
 `Batch`; it does not fill in missing fields implicitly.
 
-Every dataset exposes `iter_shard(num_shards, shard_id)` for distributed reads.
+Every dataset exposes `iter_shard(num_shards, shard_id)` for distributed reads;
+it yields `(sample_index, sample)` pairs.
 
 ```python
 from torch.utils.data import DataLoader
@@ -628,7 +629,7 @@ to the writers. `prefetch_factor` is the number of one-sample loader batches
 prefetched by each loader worker; it is used only when `num_workers > 0` and
 defaults to `2` when omitted. Parallel factories must be picklable (normally a
 module-level callable under the default `spawn` start method), and the returned
-dataset must be map-style or implement `iter_indexed_shard()`. Run the writer
+dataset must be map-style or implement `iter_shard()`. Run the writer
 from the application main process. When loader workers are enabled and the
 dataset exposes `prepare()`, the writer calls it once in the parent before
 spawning so shared source metadata can be prepared safely.

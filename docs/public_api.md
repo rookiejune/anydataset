@@ -42,7 +42,7 @@ Use these paths for application code:
 These paths are intended for users extending anydataset:
 
 - `anydataset.dataset.source.DatasetSource` and
-  `anydataset.dataset.source.IndexedShardingSource` define source contracts.
+  `anydataset.dataset.source.ShardingSource` define source contracts.
 - `anydataset.register_source(...)` / `anydataset.dataset.source.register_source(...)`
   register custom physical sources.
 - Source keys identify physical access categories such as Hugging Face datasets,

@@ -129,7 +129,7 @@ class ShardedCsvSourceTest(unittest.TestCase):
                 parse_fn=lambda row: row["src_text"],
             )
 
-            self.assertEqual(list(dataset.iter_shard(2, 1)), ["tea"])
+            self.assertEqual(list(dataset.iter_shard(2, 1)), [(1, "tea")])
 
     def test_reads_multiple_csv_files_per_physical_shard(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -267,7 +267,7 @@ class ShardedCsvSourceTest(unittest.TestCase):
             self.assertEqual(dataset[0], "zero")
             self.assertEqual(dataset[2], "two")
             self.assertEqual(dataset[-1], "two")
-            self.assertEqual(list(dataset.iter_shard(2, 1)), ["one"])
+            self.assertEqual(list(dataset.iter_shard(2, 1)), [(1, "one")])
 
     def test_shuffle_uses_parquet_row_groups(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -365,7 +365,7 @@ class ShardedCsvSourceTest(unittest.TestCase):
                     "_read_parquet_group",
                     wraps=prepared._read_parquet_group,
                 ) as read_group:
-                    rows = list(prepared.iter_indexed_shard(3, 1))
+                    rows = list(prepared.iter_shard(3, 1))
 
             self.assertEqual(
                 [(index, row["value"]) for index, row in rows],
@@ -739,7 +739,7 @@ class ShardedCsvSourceTest(unittest.TestCase):
             )
 
             self.assertEqual(list(dataset.iter_indexed_range(1, 3)), [(1, "one"), (2, "two")])
-            self.assertEqual(list(dataset.iter_indexed_shard(2, 1)), [(1, "one")])
+            self.assertEqual(list(dataset.iter_shard(2, 1)), [(1, "one")])
 
     def test_indexed_shard_keeps_global_indices(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -760,12 +760,12 @@ class ShardedCsvSourceTest(unittest.TestCase):
             )
 
             self.assertEqual(
-                list(dataset.iter_indexed_shard(2, 1)),
+                list(dataset.iter_shard(2, 1)),
                 [(1, "one")],
             )
-            self.assertEqual(list(dataset.iter_shard(2, 1)), ["one"])
+            self.assertEqual(list(dataset.iter_shard(2, 1)), [(1, "one")])
             self.assertEqual(
-                [sample for _index, sample in dataset.iter_indexed_shard(2, 1)],
+                list(dataset.iter_shard(2, 1)),
                 list(dataset.iter_shard(2, 1)),
             )
 
@@ -796,9 +796,9 @@ class ShardedCsvSourceTest(unittest.TestCase):
                 parse_fn=parse_fn,
             )
 
-            self.assertEqual(list(dataset.iter_shard(2, 1)), ["one"])
+            self.assertEqual(list(dataset.iter_shard(2, 1)), [(1, "one")])
             self.assertEqual(
-                list(dataset.iter_indexed_shard(2, 0)),
+                list(dataset.iter_shard(2, 0)),
                 [(0, "zero"), (2, "two")],
             )
 

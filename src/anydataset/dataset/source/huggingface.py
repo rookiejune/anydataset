@@ -11,7 +11,7 @@ class HuggingFaceSource:
     def prepare(self, spec: types.Spec, cache_path: Path) -> Any:
         return _prepare_hf(spec, cache_path)
 
-    def iter_indexed_shard(
+    def iter_shard(
         self,
         dataset: Any,
         *,
@@ -26,7 +26,7 @@ class HuggingFaceDiskSource:
     def prepare(self, spec: types.Spec, cache_path: Path) -> Any:
         return _prepare_hf_disk(spec)
 
-    def iter_indexed_shard(
+    def iter_shard(
         self,
         dataset: Any,
         *,

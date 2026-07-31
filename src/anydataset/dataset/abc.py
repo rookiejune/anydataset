@@ -157,42 +157,20 @@ class IterableAnyDataset(_Base, IterableDataset):
         yield from self.dataset
 
     def iter_runtime_shard(self, shard: Shard) -> Iterator[Sample]:
-        yield from self.iter_shard(shard.count, shard.index)
+        for _index, sample in self.iter_shard(shard.count, shard.index):
+            yield sample
 
-    def iter_shard(self, num_shards: int, shard_id: int) -> Iterator[Sample]:
-        validate_shard(num_shards, shard_id)
-        for row in self.iter_shard_rows(num_shards, shard_id):
-            yield self.transform_sample(self.parse_fn(row))
-
-    def iter_shard_rows(self, num_shards: int, shard_id: int) -> Iterator[Any]:
-        from .source.protocol import _native_indexed_shard
-
-        validate_shard(num_shards, shard_id)
-        indexed = _native_indexed_shard(
-            self.source,
-            self.dataset,
-            num_shards=num_shards,
-            shard_id=shard_id,
-        )
-        if indexed is not None:
-            for _index, row in indexed:
-                yield row
-            return
-
-        yield from _iter_modulo(self.iter_rows(), num_shards, shard_id)
-
-    def iter_indexed_shard(
+    def iter_shard(
         self,
         num_shards: int,
         shard_id: int,
     ) -> Iterator[tuple[int, Sample]]:
-        from .source.protocol import _native_indexed_shard
+        from .source.protocol import _native_shard
 
         validate_shard(num_shards, shard_id)
-        dataset = self.dataset
-        indexed = _native_indexed_shard(
+        indexed = _native_shard(
             self.source,
-            dataset,
+            self.dataset,
             num_shards=num_shards,
             shard_id=shard_id,
         )
@@ -205,9 +183,16 @@ class IterableAnyDataset(_Base, IterableDataset):
             if index % num_shards == shard_id:
                 yield index, self.transform_sample(self.parse_fn(row))
 
+    def iter_indexed_shard(
+        self,
+        num_shards: int,
+        shard_id: int,
+    ) -> Iterator[tuple[int, Sample]]:
+        yield from self.iter_shard(num_shards, shard_id)
+
     def iter_indexed_runtime_shard(self) -> Iterator[tuple[int, Sample]]:
         shard = runtime_shard()
-        yield from self.iter_indexed_shard(shard.flat_count, shard.flat_index)
+        yield from self.iter_shard(shard.flat_count, shard.flat_index)
 
 
 class MapStyleABC(Dataset, ABC):
@@ -278,9 +263,14 @@ class MapStyleABC(Dataset, ABC):
             rank=rank,
         )
 
-    def iter_shard(self, num_shards: int, shard_id: int) -> Iterator[Sample]:
-        for _index, sample in self.iter_indexed_shard(num_shards, shard_id):
-            yield sample
+    def iter_shard(
+        self,
+        num_shards: int,
+        shard_id: int,
+    ) -> Iterator[tuple[int, Sample]]:
+        validate_shard(num_shards, shard_id)
+        for index in range(shard_id, len(self), num_shards):
+            yield index, self[index]
 
     def iter_indexed_range(
         self,
@@ -297,18 +287,16 @@ class MapStyleABC(Dataset, ABC):
         num_shards: int,
         shard_id: int,
     ) -> Iterator[tuple[int, Sample]]:
-        validate_shard(num_shards, shard_id)
-        for index in range(shard_id, len(self), num_shards):
-            yield index, self[index]
+        yield from self.iter_shard(num_shards, shard_id)
 
     def iter_indexed_runtime_shard(self) -> Iterator[tuple[int, Sample]]:
         shard = runtime_shard()
-        yield from self.iter_indexed_shard(shard.flat_count, shard.flat_index)
+        yield from self.iter_shard(shard.flat_count, shard.flat_index)
 
     def iter_runtime_shard(self, shard: Shard) -> Iterator[Sample]:
         usable = len(self) // shard.rank_count * shard.rank_count
         if shard.flat_count > 1:
-            for index, sample in self.iter_indexed_shard(
+            for index, sample in self.iter_shard(
                 shard.flat_count,
                 shard.flat_index,
             ):
@@ -477,11 +465,18 @@ class AnyDataset(_Base, MapStyleABC):
         num_shards: int,
         shard_id: int,
     ) -> Iterator[tuple[int, Sample]]:
-        from .source.protocol import _native_indexed_shard
+        yield from self.iter_shard(num_shards, shard_id)
+
+    def iter_shard(
+        self,
+        num_shards: int,
+        shard_id: int,
+    ) -> Iterator[tuple[int, Sample]]:
+        from .source.protocol import _native_shard
 
         validate_shard(num_shards, shard_id)
         dataset = self.dataset
-        indexed = _native_indexed_shard(
+        indexed = _native_shard(
             self.source,
             dataset,
             num_shards=num_shards,
@@ -500,14 +495,6 @@ def _identity_sample(row: Any) -> Sample:
     return row
 
 
-def _iter_modulo(
-    rows: Iterator[Any],
-    num_shards: int,
-    shard_id: int,
-) -> Iterator[Any]:
-    for index, row in enumerate(rows):
-        if index % num_shards == shard_id:
-            yield row
 
 
 def _write_dataset(

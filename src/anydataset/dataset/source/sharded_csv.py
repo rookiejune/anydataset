@@ -42,14 +42,14 @@ class ShardedCsvSource:
         dataset.prepare()
         return dataset
 
-    def iter_indexed_shard(
+    def iter_shard(
         self,
         dataset: _ShardedCsvDataset,
         *,
         num_shards: int,
         shard_id: int,
     ) -> Iterator[tuple[int, CsvRow]]:
-        yield from dataset.iter_indexed_shard(num_shards, shard_id)
+        yield from dataset.iter_shard(num_shards, shard_id)
 
 
 class _ShardedCsvDataset:
@@ -107,7 +107,8 @@ class _ShardedCsvDataset:
         self._files()
 
     def __iter__(self) -> Iterator[CsvRow]:
-        yield from self.shard(num_shards=1, index=0)
+        for _index, row in self.iter_shard(num_shards=1, shard_id=0):
+            yield row
 
     def __len__(self) -> int:
         return len(self._parts_reader())
@@ -121,11 +122,11 @@ class _ShardedCsvDataset:
         except IndexError as exc:
             raise IndexError("Sharded CSV dataset index out of range.") from exc
 
-    def shard(self, *, num_shards: int, index: int) -> Iterator[CsvRow]:
+    def _iter_physical_shard(self, *, num_shards: int, index: int) -> Iterator[CsvRow]:
         """Iterate rows from physical CSV shard directories selected by directory index.
 
         This is a low-level helper for directory-oriented scans. Anydataset
-        training, write, and filter paths use ``iter_indexed_shard`` (dense
+        training, write, and filter paths use ``iter_shard`` (dense
         global sample-index modulo) instead of this method.
         """
         if num_shards <= 0:
@@ -145,7 +146,7 @@ class _ShardedCsvDataset:
         for index in range(start, stop):
             yield index, self[index]
 
-    def iter_indexed_shard(
+    def iter_shard(
         self,
         num_shards: int,
         shard_id: int,

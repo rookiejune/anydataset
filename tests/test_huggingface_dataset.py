@@ -94,7 +94,7 @@ class HuggingFaceDatasetTest(unittest.TestCase):
                 parse_fn=lambda row: row["value"],
             )
             with mock.patch.dict(sys.modules, {"datasets": fake_datasets}):
-                rows = list(dataset.iter_indexed_shard(2, 1))
+                rows = list(dataset.iter_shard(2, 1))
 
         self.assertEqual(rows, [(1, 1), (3, 3)])
 

@@ -2,7 +2,7 @@
 
 Sources prepare raw rows. Sources that can select rows without scanning the
 whole stream may additionally expose original global sample indexes through
-``IndexedShardingSource``.
+``ShardingSource``.
 """
 
 from __future__ import annotations
@@ -23,16 +23,17 @@ class DatasetSource(Protocol):
 
 
 @runtime_checkable
-class IndexedShardingSource(DatasetSource, Protocol):
+class ShardingSource(DatasetSource, Protocol):
     """Source that selects the dense global modulo shard of prepared rows.
 
     Sharding is opted in on the source, not by calling a prepared object's
     ``.shard()`` (for example Hugging Face ``Dataset.shard``). Prepared rows
     may expose such a method for other APIs; iterable datasets ignore it and
-    only use ``iter_indexed_shard`` here or a scan-time index modulo fallback.
+    only use ``iter_shard`` here or a scan-time index modulo fallback. The
+    yielded index is always the dense global row index.
     """
 
-    def iter_indexed_shard(
+    def iter_shard(
         self,
         dataset: object,
         *,
@@ -42,7 +43,7 @@ class IndexedShardingSource(DatasetSource, Protocol):
         raise NotImplementedError
 
 
-def _native_indexed_shard(
+def _native_shard(
     source: DatasetSource,
     dataset: object,
     *,
@@ -52,14 +53,14 @@ def _native_indexed_shard(
     """Return a validated native shard, or ``None`` for the scan fallback.
 
     Does not call ``dataset.shard(...)`` even when that method exists; only an
-    ``IndexedShardingSource`` may supply indexed rows.
+    ``ShardingSource`` may supply indexed rows.
     """
 
     validate_shard(num_shards, shard_id)
-    if not isinstance(source, IndexedShardingSource):
+    if not isinstance(source, ShardingSource):
         return None
 
-    rows = source.iter_indexed_shard(
+    rows = source.iter_shard(
         dataset,
         num_shards=num_shards,
         shard_id=shard_id,
@@ -67,7 +68,7 @@ def _native_indexed_shard(
     try:
         iterator = iter(rows)
     except TypeError as exc:
-        raise TypeError("Source indexed shard must return an iterable.") from exc
+        raise TypeError("Source shard must return an iterable.") from exc
     return _validated_indexed_rows(
         iterator,
         num_shards=num_shards,
@@ -85,14 +86,14 @@ def _validated_indexed_rows(
     for entry in rows:
         if not isinstance(entry, tuple) or len(entry) != 2:
             raise TypeError(
-                "Source indexed shard must yield (sample_index, row) tuples."
+                "Source shard must yield (sample_index, row) tuples."
             )
         sample_index, row = entry
         if isinstance(sample_index, bool) or not isinstance(sample_index, int):
             raise TypeError("Source sample_index values must be integers.")
         if sample_index != expected:
             raise ValueError(
-                "Source indexed shard must yield dense global sample indexes: "
+                "Source shard must yield dense global sample indexes: "
                 f"expected {expected}, got {sample_index}."
             )
         yield sample_index, row

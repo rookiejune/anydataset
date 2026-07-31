@@ -29,11 +29,11 @@ class StoreSource:
             )
         return dataset
 
-    def iter_indexed_shard(
+    def iter_shard(
         self,
         dataset: StoreDataset,
         *,
         num_shards: int,
         shard_id: int,
     ) -> Iterator[tuple[int, Sample]]:
-        yield from dataset.iter_indexed_shard(num_shards, shard_id)
+        yield from dataset.iter_shard(num_shards, shard_id)

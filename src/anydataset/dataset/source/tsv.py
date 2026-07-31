@@ -41,14 +41,14 @@ class TsvSource:
         dataset.prepare()
         return dataset
 
-    def iter_indexed_shard(
+    def iter_shard(
         self,
         dataset: _TsvDataset,
         *,
         num_shards: int,
         shard_id: int,
     ) -> Iterator[tuple[int, TsvRow]]:
-        yield from dataset.iter_indexed_shard(num_shards, shard_id)
+        yield from dataset.iter_shard(num_shards, shard_id)
 
 
 class _TsvDataset:
@@ -103,7 +103,7 @@ class _TsvDataset:
         self._parts_reader()
 
     def __iter__(self) -> Iterator[TsvRow]:
-        for _index, row in self.iter_indexed_shard(1, 0):
+        for _index, row in self.iter_shard(1, 0):
             yield row
 
     def __len__(self) -> int:
@@ -121,7 +121,7 @@ class _TsvDataset:
             raise IndexError("TSV dataset index out of range.")
         return self._enrich(reader[index], self._part_root(index))
 
-    def iter_indexed_shard(
+    def iter_shard(
         self,
         num_shards: int,
         shard_id: int,
@@ -129,7 +129,7 @@ class _TsvDataset:
         sources = self._sources()
         reader = self._parts_reader()
         stops = tuple(part.stop for part in reader.parts)
-        for index, row in reader.iter_indexed_shard(num_shards, shard_id):
+        for index, row in reader.iter_shard(num_shards, shard_id):
             part_index = _part_index_for(stops, index)
             yield index, self._enrich(row, sources[part_index][0])
 
