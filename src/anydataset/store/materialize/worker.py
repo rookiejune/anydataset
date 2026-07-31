@@ -132,8 +132,22 @@ def materialize_worker(
 def worker_materializer(config: WorkerConfig):
     from .materializer import ModalityMaterializer, ViewMaterializer
 
-    cls = ModalityMaterializer if config.mode == "modality" else ViewMaterializer
-    kwargs = dict(
+    if config.mode == "modality":
+        return ModalityMaterializer(
+            output_dir=config.output_dir,
+            split=config.split,
+            max_shard_samples=config.max_shard_samples,
+            batch_size=config.batch_size,
+            commit_samples=config.commit_samples,
+            num_workers=config.num_workers,
+            prefetch_factor=config.prefetch_factor,
+            write_workers=config.write_workers,
+            write_prefetch=config.write_prefetch,
+            keep_schema=config.keep_schema,
+            runtime=config.runtime,
+            roles=config.roles,
+        )
+    return ViewMaterializer(
         output_dir=config.output_dir,
         split=config.split,
         max_shard_samples=config.max_shard_samples,
@@ -146,9 +160,6 @@ def worker_materializer(config: WorkerConfig):
         keep_schema=config.keep_schema,
         runtime=config.runtime,
     )
-    if config.mode == "modality":
-        kwargs["roles"] = config.roles
-    return cls(**kwargs)
 
 
 def shard_missing_count(indexes: Sequence[int], num_shards: int, shard_id: int) -> int:

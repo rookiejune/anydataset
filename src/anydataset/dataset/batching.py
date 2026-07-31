@@ -9,7 +9,7 @@ from collections import OrderedDict
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from itertools import islice
-from typing import Any, Optional
+from typing import Any, Optional, overload
 
 import torch
 import torch.distributed as dist
@@ -33,7 +33,15 @@ class _CallableCosts(Sequence[int]):
     def __len__(self) -> int:
         return len(self.dataset)
 
-    def __getitem__(self, index: int) -> int:
+    @overload
+    def __getitem__(self, index: int) -> int: ...
+
+    @overload
+    def __getitem__(self, index: slice) -> Sequence[int]: ...
+
+    def __getitem__(self, index: int | slice) -> int | Sequence[int]:
+        if isinstance(index, slice):
+            return tuple(self[offset] for offset in range(*index.indices(len(self))))
         resolved = operator.index(index)
         if resolved < 0:
             resolved += len(self)

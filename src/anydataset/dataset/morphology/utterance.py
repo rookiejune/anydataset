@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TypeVar, Union
@@ -177,7 +177,7 @@ def _optional_speaker_id(audio: AudioItem) -> str | None:
 
 
 def _sample_item(
-    sample: Mapping[object, object],
+    sample: Sample,
     ref: tuple[Role, Modality],
     item_type: type[ItemT],
 ) -> ItemT:
