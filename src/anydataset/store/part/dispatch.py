@@ -17,7 +17,7 @@ from ..._runtime.parallel import (
     DeviceWorker,
     ProcessHandle,
     free_port,
-    indexed_loader,
+    runtime_sample_index_loader,
     iter_ordered_samples,
     multiprocessing_context,
     restore_environment,
@@ -213,7 +213,7 @@ def _write_worker(
         )
         writer.write(
             iter_with_progress(
-                _indexed_samples(
+                _sample_records(
                     dataset_factory,
                     num_workers=config.num_workers,
                     prefetch_factor=config.prefetch_factor,
@@ -233,13 +233,13 @@ def _write_worker(
     put_progress(progress, Progress(config.shard_id, 0, True, None))
 
 
-def _indexed_samples(
+def _sample_records(
     dataset_factory: DatasetFactory,
     *,
     num_workers: int,
     prefetch_factor: int | None,
 ) -> Iterator[tuple[int, Sample]]:
-    for batch in indexed_loader(
+    for batch in runtime_sample_index_loader(
         dataset_factory,
         batch_size=1,
         num_workers=num_workers,

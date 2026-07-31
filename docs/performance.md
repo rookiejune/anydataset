@@ -42,8 +42,8 @@
 
 ## 已落地
 
-- `anydataset._parallel.map_style_indexed_loader` 使用 rank sampler 分发全局 sample index，
-  并由 `MapIndexedDataset` 返回 `(sample_index, sample)`。
+- `anydataset._runtime.parallel.map_style_sample_index_loader` 使用 rank sampler 分发全局 sample index，
+  并由 `MapStyleSampleIndexDataset` 返回 `(sample_index, sample)`。
 - wrapper 可以在当前进程复用已构造 dataset；spawn 序列化时丢弃该缓存，让 worker 通过
   `dataset_factory` 懒加载重建。
 - `ViewMaterializer` 和多设备 `FilterRule` 对默认 map-style shard 语义的数据集使用该
@@ -134,13 +134,13 @@ PYTHONPATH=src python scripts/benchmark_hot_paths.py
 - `store_shuffle`: 首次 payload group 扫描与 fingerprint cache 命中的读取计划成本。
 - `store_payload_read`: `all_views` 和 `selected_view` 两种模式下逐样本执行 tar 定位、
   payload 读取和 UTF-8 解码的成本，并报告被跳过的未选择 view payload 数量。
-- `indexed_loader`: 当前 runtime iterable loader 和正式 map-style indexed loader 实现。
+- `sample_index_loader`: 当前 runtime iterable loader 和正式 map-style sample-index loader 实现。
 - `filter_parallel`: 多 device filter 扫描、partition cache 写入和提交成本。
 - `writer_pipeline`: inline、thread、spawn process 和 fork process 后台写入对比。
 
-`indexed_loader` 默认候选：
+`sample_index_loader` 默认候选：
 
-- `runtime`: 当前 `anydataset._parallel.indexed_loader` 路径。
+- `runtime`: 当前 `anydataset._runtime.parallel.runtime_sample_index_loader` 路径。
 - `map_default`: map-style wrapper + global index sampler；当前等价于显式 spawn。
 - `map_spawn`: map-style wrapper + global index sampler，DataLoader 显式使用 spawn。
 - `map_fork`: map-style wrapper + global index sampler，DataLoader 显式使用 fork；仅在当前
@@ -154,19 +154,19 @@ PYTHONPATH=src python scripts/benchmark_hot_paths.py \
   --store-samples 32 \
   --store-payload-bytes 256 \
   --csv-rows-per-file 32 \
-  --indexed-samples 128 \
-  --indexed-num-workers 0
+  --sample-index-samples 128 \
+  --sample-index-num-workers 0
 ```
 
-对 DataLoader worker 进程模型做对比时，把 `--indexed-num-workers` 设为正数：
+对 DataLoader worker 进程模型做对比时，把 `--sample-index-num-workers` 设为正数：
 
 ```bash
 PYTHONPATH=src python scripts/benchmark_hot_paths.py \
   --repeats 3 \
-  --indexed-samples 20000 \
-  --indexed-batch-size 32 \
-  --indexed-num-workers 2 \
-  --indexed-variants runtime,map_default,map_spawn,map_fork
+  --sample-index-samples 20000 \
+  --sample-index-batch-size 32 \
+  --sample-index-num-workers 2 \
+  --sample-index-variants runtime,map_default,map_spawn,map_fork
 ```
 
 ## 判断标准

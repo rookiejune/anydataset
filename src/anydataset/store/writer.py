@@ -12,7 +12,7 @@ from .._validation import non_negative_int, optional_positive_int, positive_int
 from .part.dispatch import DatasetFactory, ordered_samples, write_dataset_parts
 from ..types.item import Modality, Role, Sample, View
 from .config import DEFAULT_MAX_SHARD_SAMPLES
-from .part.writer import write_indexed_samples
+from .part.writer import write_sample_records
 from .payload.groups import write_payload_groups
 from .part.sample_write import explicit_views
 from .manifest.schema import normalize_provenance
@@ -104,7 +104,7 @@ class DatasetWriter:
 
     def _write_to_tmp(self, root: Path, samples: Iterable[Sample]) -> Path:
         dataset_id, provenance = self._metadata()
-        sample_count, written_views = write_indexed_samples(
+        sample_count, written_views = write_sample_records(
             root,
             enumerate(samples),
             dataset_id=dataset_id,

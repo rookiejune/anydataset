@@ -1,7 +1,7 @@
 """Shared spawn/DataLoader runtime for dataset-wide parallel scans.
 
 The module exposes device worker setup, runtime index sharding, map-style
-indexed loaders, and picklability checks used by higher-level filter and
+sample-index loaders, and picklability checks used by higher-level filter and
 materialization flows. It does not own filter labels, view generation, cache
 layout, or store writing rules.
 """
@@ -56,7 +56,7 @@ class DeviceWorker:
     master_port: str
 
 
-class RuntimeIndexedDataset(IterableDataset):
+class RuntimeSampleIndexDataset(IterableDataset):
     def __init__(
         self,
         dataset_factory: DatasetFactory,
@@ -69,7 +69,7 @@ class RuntimeIndexedDataset(IterableDataset):
         yield from iter_shard(dataset, shard.flat_count, shard.flat_index)
 
 
-class MapIndexedDataset(Dataset):
+class MapStyleSampleIndexDataset(Dataset):
     def __init__(
         self,
         dataset_factory: DatasetFactory,
@@ -194,7 +194,7 @@ def iter_ordered_samples(dataset: Any) -> Iterator[Any]:
     yield from dataset
 
 
-def indexed_loader(
+def runtime_sample_index_loader(
     dataset_factory: DatasetFactory,
     *,
     batch_size: int,
@@ -203,8 +203,8 @@ def indexed_loader(
     start_method: StartMethod = "spawn",
 ) -> DataLoader:
     return DataLoader(
-        RuntimeIndexedDataset(dataset_factory),
-        **_indexed_loader_kwargs(
+        RuntimeSampleIndexDataset(dataset_factory),
+        **_sample_index_loader_kwargs(
             dataset_factory,
             batch_size=batch_size,
             num_workers=num_workers,
@@ -214,7 +214,7 @@ def indexed_loader(
     )
 
 
-def map_style_indexed_loader(
+def map_style_sample_index_loader(
     dataset_factory: DatasetFactory,
     *,
     sample_count: int,
@@ -239,9 +239,9 @@ def map_style_indexed_loader(
             shard_id=shard.rank_index,
         )
     return DataLoader(
-        MapIndexedDataset(dataset_factory, dataset=dataset),
+        MapStyleSampleIndexDataset(dataset_factory, dataset=dataset),
         sampler=sampler,
-        **_indexed_loader_kwargs(
+        **_sample_index_loader_kwargs(
             dataset_factory,
             batch_size=batch_size,
             num_workers=num_workers,
@@ -251,7 +251,7 @@ def map_style_indexed_loader(
     )
 
 
-def selected_index_loader(
+def sample_index_loader(
     dataset_factory: DatasetFactory,
     *,
     dataset: Any | None = None,
@@ -269,7 +269,7 @@ def selected_index_loader(
     if use_map_style_loader is None:
         use_map_style_loader = can_select_indexes(dataset)
     if not use_map_style_loader:
-        return indexed_loader(
+        return runtime_sample_index_loader(
             dataset_factory,
             batch_size=batch_size,
             num_workers=num_workers,
@@ -280,7 +280,7 @@ def selected_index_loader(
         if dataset is None:
             raise RuntimeError("map-style loader dataset was not initialized.")
         sample_count = len(dataset)
-    return map_style_indexed_loader(
+    return map_style_sample_index_loader(
         dataset_factory,
         sample_count=sample_count,
         sample_indexes=sample_indexes,
@@ -292,11 +292,13 @@ def selected_index_loader(
     )
 
 
-def indexed_collate(batch: Sequence[tuple[int, Any]]) -> tuple[tuple[int, Any], ...]:
+def _sample_index_collate(
+    batch: Sequence[tuple[int, Any]],
+) -> tuple[tuple[int, Any], ...]:
     return tuple(batch)
 
 
-def _indexed_loader_kwargs(
+def _sample_index_loader_kwargs(
     dataset_factory: DatasetFactory,
     *,
     batch_size: int,
@@ -306,7 +308,7 @@ def _indexed_loader_kwargs(
 ) -> dict[str, Any]:
     kwargs: dict[str, Any] = {
         "batch_size": batch_size,
-        "collate_fn": indexed_collate,
+        "collate_fn": _sample_index_collate,
         "num_workers": num_workers,
     }
     if num_workers > 0:

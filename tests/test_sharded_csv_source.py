@@ -15,7 +15,7 @@ from anydataset import (
     Spec,
     resolve_dataset,
 )
-from anydataset._runtime.parallel import can_select_indexes, map_style_indexed_loader
+from anydataset._runtime.parallel import can_select_indexes, map_style_sample_index_loader
 from anydataset.cache import FileLock
 from anydataset.dataset.source._registry import source_exists
 from anydataset.dataset.source.sharded_csv import (
@@ -652,7 +652,7 @@ class ShardedCsvSourceTest(unittest.TestCase):
             dataset = factory()
             dataset.prepare()
 
-            batches = map_style_indexed_loader(
+            batches = map_style_sample_index_loader(
                 factory,
                 sample_count=len(dataset),
                 batch_size=1,
@@ -720,7 +720,7 @@ class ShardedCsvSourceTest(unittest.TestCase):
                 timer.cancel()
                 holder.join()
 
-    def test_map_style_indexed_iteration_keeps_global_indices(self):
+    def test_map_style_sample_index_iteration_keeps_global_indices(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             shard_dir = root / "shard_0"

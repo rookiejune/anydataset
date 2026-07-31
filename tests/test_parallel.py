@@ -8,9 +8,9 @@ from unittest import mock
 
 from anydataset._runtime.parallel import (
     GlobalIndexSampler,
-    MapIndexedDataset,
+    MapStyleSampleIndexDataset,
     SelectedIndexSampler,
-    map_style_indexed_loader,
+    map_style_sample_index_loader,
     restore_environment,
     set_single_worker_environment,
     validate_process_parent,
@@ -63,9 +63,9 @@ class ParallelRuntimeTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "must be integers"):
             SelectedIndexSampler((1, "2"), num_shards=1, shard_id=0)
 
-    def test_map_indexed_dataset_drops_cached_dataset_when_pickled(self):
+    def test_sample_index_dataset_drops_cached_dataset_when_pickled(self):
         dataset = _UnpicklableDataset(3)
-        wrapper = MapIndexedDataset(_DatasetFactory(3), dataset=dataset)
+        wrapper = MapStyleSampleIndexDataset(_DatasetFactory(3), dataset=dataset)
 
         restored = pickle.loads(pickle.dumps(wrapper))
 
@@ -73,7 +73,7 @@ class ParallelRuntimeTest(unittest.TestCase):
 
     def test_map_style_loader_uses_rank_sampler_not_worker_shard(self):
         with mock.patch.dict("os.environ", {"WORLD_SIZE": "2", "RANK": "1"}):
-            loader = map_style_indexed_loader(
+            loader = map_style_sample_index_loader(
                 _DatasetFactory(6),
                 sample_count=6,
                 batch_size=2,
@@ -87,7 +87,7 @@ class ParallelRuntimeTest(unittest.TestCase):
     def test_map_style_loader_reads_selected_indexes_only(self):
         dataset = _TrackedDataset(6)
 
-        loader = map_style_indexed_loader(
+        loader = map_style_sample_index_loader(
             _DatasetFactory(6),
             sample_count=6,
             sample_indexes=(2, 5),

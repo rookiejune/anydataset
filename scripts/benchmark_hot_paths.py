@@ -26,8 +26,8 @@ from anydataset.types import (
     TextView,
 )
 from anydataset._runtime.parallel import (
-    indexed_loader as runtime_indexed_loader,
-    map_style_indexed_loader,
+    map_style_sample_index_loader,
+    runtime_sample_index_loader,
 )
 from anydataset._runtime.write_pipeline import BackgroundWriteSink
 from anydataset.dataset.source.sharded_csv import ShardedCsvSource
@@ -79,7 +79,7 @@ def main() -> None:
         "store_reader": bench_store_reader_variants(args),
         "store_shuffle": bench_store_shuffle_variants(args),
         "store_payload_read": bench_store_payload_read_variants(args),
-        "indexed_loader": bench_indexed_loader_variants(args),
+        "sample_index_loader": bench_sample_index_loader_variants(args),
         "filter_parallel": run_repeated(
             lambda root: bench_filter_parallel(
                 root,
@@ -112,15 +112,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--csv-rows-per-file", type=int, default=2_000)
     parser.add_argument("--csv-num-shards", type=int, default=8)
     parser.add_argument("--csv-shard-id", type=int, default=3)
-    parser.add_argument("--indexed-samples", type=int, default=10_000)
-    parser.add_argument("--indexed-batch-size", type=int, default=32)
-    parser.add_argument("--indexed-num-workers", type=int, default=0)
-    parser.add_argument("--indexed-prefetch-factor", type=int, default=None)
-    parser.add_argument("--indexed-payload-bytes", type=int, default=32)
+    parser.add_argument("--sample-index-samples", type=int, default=10_000)
+    parser.add_argument("--sample-index-batch-size", type=int, default=32)
+    parser.add_argument("--sample-index-num-workers", type=int, default=0)
+    parser.add_argument("--sample-index-prefetch-factor", type=int, default=None)
+    parser.add_argument("--sample-index-payload-bytes", type=int, default=32)
     parser.add_argument("--loader-num-shards", type=int, default=1)
     parser.add_argument("--loader-shard-id", type=int, default=0)
     parser.add_argument(
-        "--indexed-variants",
+        "--sample-index-variants",
         default="runtime,map_default,map_spawn,map_fork",
         help="Comma-separated variants: runtime,map_default,map_spawn,map_fork.",
     )
@@ -208,7 +208,7 @@ def bench_store_commit(
             num_shards=parts,
             max_shard_samples=max_shard_samples,
         ).write(
-            indexed_samples(
+            sample_index_samples(
                 samples=samples,
                 parts=parts,
                 part_id=part_id,
@@ -231,7 +231,7 @@ def bench_store_commit(
     )
 
 
-def indexed_samples(
+def sample_index_samples(
     *,
     samples: int,
     parts: int,
@@ -531,17 +531,17 @@ def bench_store_payload_read(
     )
 
 
-def bench_indexed_loader_variants(args: argparse.Namespace) -> dict[str, Any]:
-    variants = indexed_variants(args.indexed_variants)
+def bench_sample_index_loader_variants(args: argparse.Namespace) -> dict[str, Any]:
+    variants = sample_index_variants(args.sample_index_variants)
     return {
         variant: run_repeated(
-            lambda _root, variant=variant: bench_indexed_loader(
+            lambda _root, variant=variant: bench_sample_index_loader(
                 variant,
-                samples=args.indexed_samples,
-                batch_size=args.indexed_batch_size,
-                num_workers=args.indexed_num_workers,
-                prefetch_factor=args.indexed_prefetch_factor,
-                payload_bytes=args.indexed_payload_bytes,
+                samples=args.sample_index_samples,
+                batch_size=args.sample_index_batch_size,
+                num_workers=args.sample_index_num_workers,
+                prefetch_factor=args.sample_index_prefetch_factor,
+                payload_bytes=args.sample_index_payload_bytes,
                 num_shards=args.loader_num_shards,
                 shard_id=args.loader_shard_id,
             ),
@@ -551,20 +551,20 @@ def bench_indexed_loader_variants(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
-def indexed_variants(value: str) -> tuple[str, ...]:
+def sample_index_variants(value: str) -> tuple[str, ...]:
     allowed = {"runtime", "map_default", "map_spawn", "map_fork"}
     output = tuple(item.strip() for item in value.split(",") if item.strip())
     unknown = sorted(set(output) - allowed)
     if unknown:
-        raise ValueError(f"Unknown indexed loader variants: {unknown}.")
+        raise ValueError(f"Unknown sample-index loader variants: {unknown}.")
     if len(output) == 0:
-        raise ValueError("indexed_variants must contain at least one variant.")
+        raise ValueError("sample_index_variants must contain at least one variant.")
     if "map_fork" in output and "fork" not in multiprocessing.get_all_start_methods():
         return tuple(variant for variant in output if variant != "map_fork")
     return output
 
 
-def bench_indexed_loader(
+def bench_sample_index_loader(
     variant: str,
     *,
     samples: int,
@@ -576,7 +576,7 @@ def bench_indexed_loader(
     shard_id: int,
 ) -> Measurement:
     factory = SyntheticDatasetFactory(samples=samples, payload_bytes=payload_bytes)
-    loader = make_indexed_loader(
+    loader = make_sample_index_loader(
         variant,
         factory=factory,
         samples=samples,
@@ -822,7 +822,7 @@ def write_payload_job(job: WriteJob) -> None:
     job.path.write_bytes(job.payload)
 
 
-def make_indexed_loader(
+def make_sample_index_loader(
     variant: str,
     *,
     factory: "SyntheticDatasetFactory",
@@ -836,7 +836,7 @@ def make_indexed_loader(
     if variant == "runtime":
         if num_shards != 1 or shard_id != 0:
             raise ValueError("runtime variant only supports loader_num_shards=1.")
-        return runtime_indexed_loader(
+        return runtime_sample_index_loader(
             factory,
             batch_size=batch_size,
             num_workers=num_workers,
@@ -844,28 +844,24 @@ def make_indexed_loader(
         )
 
     with rank_environment(num_shards=num_shards, shard_id=shard_id):
-        return map_style_indexed_loader(
+        return map_style_sample_index_loader(
             factory,
             sample_count=samples,
             batch_size=batch_size,
             num_workers=num_workers,
             prefetch_factor=prefetch_factor,
-            start_method=indexed_variant_start_method(variant),
+            start_method=sample_index_variant_start_method(variant),
         )
 
 
-def indexed_variant_start_method(variant: str) -> str:
+def sample_index_variant_start_method(variant: str) -> str:
     if variant == "map_default":
         return "spawn"
     if variant == "map_spawn":
         return "spawn"
     if variant == "map_fork":
         return "fork"
-    raise ValueError(f"Unsupported indexed loader variant: {variant}.")
-
-
-def indexed_collate(batch: list[tuple[int, Sample]]) -> tuple[tuple[int, Sample], ...]:
-    return tuple(batch)
+    raise ValueError(f"Unsupported sample-index loader variant: {variant}.")
 
 
 @dataclass(frozen=True)

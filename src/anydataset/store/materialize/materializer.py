@@ -18,7 +18,7 @@ from ..._runtime.parallel import (
     iter_shard,
     multiprocessing_context,
     restore_environment,
-    selected_index_loader,
+    sample_index_loader,
     set_single_worker_environment,
     set_torch_device,
     validate_process_parent,
@@ -51,7 +51,7 @@ from ...types._sample import select as select_sample
 from ...types.item import Role, Sample, Schema
 from ...view import Provider
 from .batch import (
-    indexed_sample_batches,
+    sample_index_batches,
     validate_batch_outputs,
     with_batch_modality_provider,
     with_batch_view_provider,
@@ -465,8 +465,8 @@ class ViewMaterializer:
                     restore_environment(env)
             else:
                 self._write_resumable_indexed_batches(
-                    indexed_sample_batches(
-                        _missing_indexed_samples(
+                    sample_index_batches(
+                        _missing_sample_records(
                             dataset,
                             missing,
                             use_map_style_loader=use_map_style_loader,
@@ -641,7 +641,7 @@ class ViewMaterializer:
         use_map_style_loader: bool | None = None,
         sample_indexes: Sequence[int] | None = None,
     ) -> DataLoader:
-        return selected_index_loader(
+        return sample_index_loader(
             dataset_factory,
             dataset=dataset,
             sample_count=sample_count,
@@ -801,7 +801,7 @@ class ViewMaterializer:
             with_view_provider(sample, cast(Provider, provider)),
         )
 
-    def _indexed_samples(
+    def _sample_records_with_provider(
         self,
         dataset: Any,
         provider: MaterializerProvider,
@@ -809,13 +809,13 @@ class ViewMaterializer:
         num_shards: int,
         shard_id: int,
     ) -> Iterator[tuple[int, Sample]]:
-        indexed = iter_shard(dataset, num_shards, shard_id)
+        records = iter_shard(dataset, num_shards, shard_id)
         if not self._uses_batch_provider(provider):
-            for index, sample in indexed:
+            for index, sample in records:
                 yield index, self._sample_with_provider(sample, provider)
             return
 
-        for batch in indexed_sample_batches(indexed, self.batch_size):
+        for batch in sample_index_batches(records, self.batch_size):
             indexes = tuple(index for index, _sample in batch)
             samples = tuple(sample for _index, sample in batch)
             outputs = tuple(
@@ -964,7 +964,7 @@ class ModalityMaterializer(ViewMaterializer):
         )
 
 
-def _missing_indexed_samples(
+def _missing_sample_records(
     dataset: Any,
     indexes: Sequence[int],
     *,

@@ -22,7 +22,7 @@ from .view import with_view
 OomCallback = Callable[[int, int, int], None]
 
 
-def indexed_sample_batches(
+def sample_index_batches(
     samples: Iterable[tuple[int, Sample]],
     batch_size: int,
 ) -> Iterator[tuple[tuple[int, Sample], ...]]:

@@ -31,12 +31,12 @@ from ..manifest.io import sample_manifest_writer
 from ..paths import dataset_json_path, dataset_ready_path
 from .viewwriter import ViewWriter
 
-IndexedSample = tuple[int, Sample]
+SampleRecord = tuple[int, Sample]
 
 
-def write_indexed_samples(
+def write_sample_records(
     root: Path,
-    samples: Iterable[IndexedSample],
+    samples: Iterable[SampleRecord],
     *,
     dataset_id: str,
     split: str | None,
@@ -110,7 +110,7 @@ def write_indexed_samples(
 
 def write_dataset_part(
     root: Path,
-    samples: Iterable[IndexedSample],
+    samples: Iterable[SampleRecord],
     *,
     dataset_id: str,
     split: str | None,
@@ -121,7 +121,7 @@ def write_dataset_part(
     num_shards: int,
     shard_prefix: str,
 ) -> tuple[int, tuple[tuple[Role, Modality, View], ...]]:
-    result = write_indexed_samples(
+    result = write_sample_records(
         root,
         samples,
         dataset_id=dataset_id,
@@ -167,12 +167,12 @@ class DatasetPartWriter:
         )
         self.provenance = normalize_provenance(self.provenance)
 
-    def write(self, samples: Iterable[IndexedSample]) -> Path:
+    def write(self, samples: Iterable[SampleRecord]) -> Path:
         return replace_dir(
             self.output_dir, lambda tmp: self._write_to_tmp(tmp, samples)
         )
 
-    def _write_to_tmp(self, root: Path, samples: Iterable[IndexedSample]) -> Path:
+    def _write_to_tmp(self, root: Path, samples: Iterable[SampleRecord]) -> Path:
         provenance = self.provenance
         if provenance is None:
             raise RuntimeError("part writer provenance was not initialized.")
@@ -215,7 +215,7 @@ class DatasetFragmentWriter:
         )
         self.provenance = normalize_provenance(self.provenance)
 
-    def write(self, samples: Sequence[IndexedSample]) -> Path:
+    def write(self, samples: Sequence[SampleRecord]) -> Path:
         if not samples:
             raise ValueError("DatasetFragmentWriter.write requires samples.")
         ordered = tuple(sorted(samples, key=lambda item: item[0]))
@@ -230,7 +230,7 @@ class DatasetFragmentWriter:
     def _write_to_tmp(
         self,
         root: Path,
-        samples: tuple[IndexedSample, ...],
+        samples: tuple[SampleRecord, ...],
         indexes: tuple[int, ...],
     ) -> Path:
         provenance = self.provenance

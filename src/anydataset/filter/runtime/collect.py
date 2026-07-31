@@ -16,7 +16,7 @@ from ..._runtime.parallel import (
     ProcessHandle,
     multiprocessing_context,
     restore_environment,
-    selected_index_loader,
+    sample_index_loader,
     set_single_worker_environment,
     set_worker_environment,
     validate_process_value,
@@ -418,7 +418,7 @@ def _filter_loader(
     runtime: Runtime,
     sample_indexes: Sequence[int] | None = None,
 ):
-    return selected_index_loader(
+    return sample_index_loader(
         dataset_factory,
         dataset=dataset,
         sample_count=sample_count,
