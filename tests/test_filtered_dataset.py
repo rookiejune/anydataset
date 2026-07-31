@@ -28,7 +28,6 @@ from anydataset import (
     anydataset_home,
     FilterRule,
     Spec,
-    has_source,
     register_source,
 )
 from anydataset._compat import StrEnum
@@ -44,6 +43,7 @@ from anydataset.filter.cache.resume import (
     write_filter_fragment,
 )
 from anydataset.filter.types import _FilterChunk, _FilterMetricsRow
+from anydataset.dataset.source.registry import SourceFactory
 from anydataset.provider_service import ProviderServer, RemoteFilterFactory
 from anydataset.runtime import Runtime
 from anydataset.types import (
@@ -2432,7 +2432,7 @@ class _RowsSource:
 
 
 def _register_rows_source(name: str) -> None:
-    if not has_source(name):
+    if not SourceFactory.exist(name):
         register_source(name, _RowsSource)
 
 

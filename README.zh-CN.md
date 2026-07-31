@@ -184,7 +184,13 @@ dataset = IterableAnyDataset(
 
 - `Source.HF`：通过 `datasets.load_dataset(...)` 读取。
 - `Source.HF_DISK`：通过 `datasets.load_from_disk(...)` 读取。
+- `Source.HF_FILES`：读取 Hugging Face Hub 上的原始文件树，按需下载文件，
+  产出物理文件 row；具体数据集如何映射成 canonical `Sample` 留给 preset 或
+  `parse_fn`。
 - `Source.STORE`：读取 `anydataset` 的 store。
+- 字符串 source `"hf-files"`：对应 `Source.HF_FILES`，可用 `path_prefix`
+  或按 split 展开的 `path_template` 限定目录、用 `suffixes` 过滤文件，并返回
+  `repo_id`、`repo_type`、`revision`、`path`、`local_path` 等物理字段。
 - 字符串 source `"tsv"`：读取单个 TSV 文件、目录下的 `<split>.tsv`，或按
   `subdirs` load option 的顺序读取各子目录下的同名 split。TSV 与 `sharded_csv`
   共用 delimited→Parquet prepare，提供 map-style 随机访问；`root_field` 在读取时注入。
@@ -215,6 +221,7 @@ from anydataset import resolve_dataset
 mnist_spec = resolve_dataset("mnist:train")
 spec = resolve_dataset("hf://ylecun/mnist:train")
 disk_spec = resolve_dataset("hf-disk:///data/mnist_saved:train")
+files_spec = resolve_dataset("hf-files://org/files:train")
 store_spec = resolve_dataset("store:///data/my_anydataset:train")
 tsv_spec = resolve_dataset("tsv:///data/common_voice/en:train")
 csv_spec = resolve_dataset("sharded_csv:///data/bitext:train")
@@ -251,10 +258,11 @@ dataset = IterableAnyDataset(
 或 `iter_indexed_shard()` 不足以启用该路径，因为原生 shard 内的局部枚举不能保留全局
 索引。
 
-内建 `hf-disk`、`store`、`tsv` 和 `sharded_csv` source 通过随机访问提供 indexed 路径。
-Hugging Face `streaming=True` 会被拒绝；请使用非 streaming 的 `Source.HF` 或
-`Source.HF_DISK`。`IterableAnyDataset.iter_shard` 与 `iter_indexed_shard` 共用同一
-dense global modulo 分区，不会机会主义地调用 raw dataset 的 `shard()`。
+内建 `hf-disk`、`hf-files`、`store`、`tsv` 和 `sharded_csv` source 通过随机访问提供 indexed 路径。
+Hugging Face `streaming=True` 会被拒绝；请使用非 streaming 的 `Source.HF`、
+`Source.HF_DISK` 或 `Source.HF_FILES`。`IterableAnyDataset.iter_shard` 与
+`iter_indexed_shard` 共用同一 dense global modulo 分区，不会机会主义地调用 raw dataset
+的 `shard()`。
 
 ## 用 Schema 构造 DataLoader
 

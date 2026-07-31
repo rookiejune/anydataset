@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from .provider import service as _service
 from .provider.service import (
     ProviderServer,
     RemoteFilterFactory,
@@ -9,10 +10,11 @@ from .provider.service import (
     RemoteProvider,
     RemoteProviderError,
     RemoteProviderFactory,
-    _ProviderCommand,
-    _ProviderRequest,
-    _serve_connection,
 )
+
+_ProviderCommand = _service._ProviderCommand
+_ProviderRequest = _service._ProviderRequest
+_serve_connection = _service._serve_connection
 
 __all__ = [
     "ProviderServer",
@@ -21,7 +23,4 @@ __all__ = [
     "RemoteProvider",
     "RemoteProviderError",
     "RemoteProviderFactory",
-    "_ProviderCommand",
-    "_ProviderRequest",
-    "_serve_connection",
 ]

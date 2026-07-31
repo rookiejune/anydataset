@@ -269,7 +269,7 @@ class GroupedSpeakerAudioDataset:
                 )
             audio_items.append(audio_item)
 
-        resolved_view = _resolve_audio_view(audio_items, view)
+        resolved_view = _selected_audio_view(audio_items, view)
         value, lengths, sample_rate = _collate_audio_view(audio_items, resolved_view)
         views: dict[AudioView, object] = {
             resolved_view: _audio_value(value, sample_rate),
@@ -513,7 +513,7 @@ class SpeakerAudioGrid:
             if source_text is None:
                 raise ValueError("speaker audio selection must include a speaker.")
             texts.append(_text(source_text))
-        resolved_view = _resolve_audio_view(audio_items, view)
+        resolved_view = _selected_audio_view(audio_items, view)
         value, lengths, sample_rate = _collate_audio_view(audio_items, resolved_view)
         grid_shape = (len(text_indices), len(speaker_indices))
         selected_speakers = tuple(
@@ -745,7 +745,7 @@ def _audio_view(value: object) -> AudioView:
     raise ValueError("speaker audio grids require a waveform or codec audio view.")
 
 
-def _resolve_audio_view(
+def _selected_audio_view(
     items: Sequence[AudioItem],
     requested: AudioView | None,
 ) -> AudioView:

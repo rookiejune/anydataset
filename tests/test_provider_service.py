@@ -6,6 +6,7 @@ from multiprocessing import AuthenticationError
 from multiprocessing.connection import Client
 from pathlib import Path
 
+import anydataset.provider_service as provider_service
 from anydataset.provider_service import (
     ProviderServer,
     RemoteFilterPredicate,
@@ -54,6 +55,11 @@ class _BrokenPipeConnection:
 
 
 class ProviderServerTest(unittest.TestCase):
+    def test_private_protocol_helpers_are_not_public_api(self):
+        self.assertNotIn("_ProviderCommand", provider_service.__all__)
+        self.assertNotIn("_ProviderRequest", provider_service.__all__)
+        self.assertNotIn("_serve_connection", provider_service.__all__)
+
     def test_rejects_invalid_runtime_options(self):
         cases = (
             ({"start_method": "invalid"}, ValueError, "start_method"),

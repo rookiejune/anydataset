@@ -4,7 +4,7 @@ import argparse
 from collections.abc import Sequence
 
 from .payload.files import cleanup_store_files
-from .manifest.migration import migrate_store
+from .migration import migrate_store
 
 
 def main(argv: Sequence[str] | None = None) -> int:

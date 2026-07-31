@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterator, Sequence
-from typing import Callable, cast
+from typing import Any, Callable, cast
 
 from ..types.item import Sample
 from .abc import MapStyleABC
@@ -31,6 +31,9 @@ class IndexSelection(MapStyleABC):
 
     def __getitem__(self, index: int) -> Sample:
         return self.dataset[self._indices[index]]
+
+    def cost_row(self, index: int) -> Any:
+        return self.dataset.cost_row(self._indices[index])
 
     def global_index(self, index: int) -> int:
         position = self._indices[index]

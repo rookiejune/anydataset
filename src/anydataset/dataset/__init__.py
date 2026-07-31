@@ -3,6 +3,7 @@ from .abc import (
     IterableAnyDataset,
     MapStyleABC,
 )
+from .collate import Batch, FieldGroup, FieldRef, collate_fn, field_lengths
 from .morphology import (
     AudioBatch,
     Morphology,
@@ -24,6 +25,9 @@ from .selection import IndexSelection
 __all__ = [
     "AnyDataset",
     "AudioBatch",
+    "Batch",
+    "FieldGroup",
+    "FieldRef",
     "IterableAnyDataset",
     "IndexSelection",
     "MapStyleABC",
@@ -35,6 +39,8 @@ __all__ = [
     "build_toy_audio_dataset",
     "build_toy_speech_dataset",
     "build_toy_speech_grid",
+    "collate_fn",
+    "field_lengths",
     "load_audio_file",
     "prepare_audio",
     "speech_collate",

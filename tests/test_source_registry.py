@@ -7,11 +7,11 @@ from anydataset import (
     AnyDataset,
     Source,
     Spec,
-    has_source,
     register_source,
     resolve_dataset,
 )
-from anydataset.dataset.source import for_source
+import anydataset.dataset.source as source_module
+from anydataset.dataset.source.registry import SourceFactory
 from anydataset.dataset.source.store import StoreSource
 
 
@@ -43,7 +43,7 @@ class SourceRegistryTest(unittest.TestCase):
             "/tmp/custom",
             "train",
         ))
-        self.assertTrue(has_source(spec.source))
+        self.assertTrue(SourceFactory.exist(spec.source))
 
     def test_rejects_duplicate_source_registration(self):
         register_source("unit_test_duplicate", ListSource)
@@ -57,7 +57,40 @@ class SourceRegistryTest(unittest.TestCase):
 
     def test_unknown_source_fails_when_resolved(self):
         with self.assertRaises(KeyError):
-            for_source("unit_test_missing")
+            SourceFactory.create("unit_test_missing")
+
+    def test_source_exports_physical_categories_not_concrete_datasets(self):
+        self.assertEqual(
+            source_module.__all__,
+            [
+                "DatasetSource",
+                "HuggingFaceDiskSource",
+                "HuggingFaceFilesSource",
+                "HuggingFaceSource",
+                "IndexedShardingSource",
+                "ShardedCsvSource",
+                "StoreSource",
+                "TsvSource",
+                "register_source",
+            ],
+        )
+        self.assertIn("HuggingFaceFilesSource", source_module.__all__)
+        self.assertNotIn("FSD50KSource", source_module.__all__)
+        self.assertNotIn("FSD50KDataset", source_module.__all__)
+        self.assertNotIn("ShardedCsvDataset", source_module.__all__)
+        self.assertNotIn("TsvDataset", source_module.__all__)
+        self.assertNotIn("prepare_hf", source_module.__all__)
+        self.assertNotIn("prepare_hf_disk", source_module.__all__)
+        self.assertNotIn("for_source", source_module.__all__)
+        self.assertNotIn("has_source", source_module.__all__)
+        self.assertFalse(hasattr(source_module, "FSD50KSource"))
+        self.assertFalse(hasattr(source_module, "FSD50KDataset"))
+        self.assertFalse(hasattr(source_module, "ShardedCsvDataset"))
+        self.assertFalse(hasattr(source_module, "TsvDataset"))
+        self.assertFalse(hasattr(source_module, "prepare_hf"))
+        self.assertFalse(hasattr(source_module, "prepare_hf_disk"))
+        self.assertFalse(hasattr(source_module, "for_source"))
+        self.assertFalse(hasattr(source_module, "has_source"))
 
     def test_store_source_rejects_unknown_load_options_before_io(self):
         spec = Spec(

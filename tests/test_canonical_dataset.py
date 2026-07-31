@@ -181,12 +181,27 @@ class CanonicalDatasetTest(unittest.TestCase):
     def test_spec_id_is_stable_physical_identity(self):
         spec = Preset.FSD50K.spec(split="dev")
         same = Spec(
-            source="fsd50k",
+            source=Source.HF_FILES,
             path="Fhrozen/FSD50k",
             split="dev",
-            load_options={"revision": "main"},
+            version="main",
+            load_options={
+                "repo_type": "dataset",
+                "path_template": "clips/{split}",
+                "suffixes": (".wav",),
+            },
         )
-        different = Spec(source="fsd50k", path="Fhrozen/FSD50k", split="train")
+        different = Spec(
+            source=Source.HF_FILES,
+            path="Fhrozen/FSD50k",
+            split="eval",
+            version="main",
+            load_options={
+                "repo_type": "dataset",
+                "path_template": "clips/{split}",
+                "suffixes": (".wav",),
+            },
+        )
         different_revision = Preset.FSD50K.spec(split="dev", revision="v1")
 
         self.assertEqual(spec.id, same.id)
@@ -569,6 +584,22 @@ class CanonicalDatasetTest(unittest.TestCase):
         self.assertEqual(values, [(1, 1), (3, 3)])
         self.assertEqual(source.calls, [(2, 1)])
 
+    def test_map_dataset_uses_source_native_indexed_shard(self):
+        dataset = AnyDataset(
+            spec=Spec(source=Source.HF, path="/tmp/missing"),
+            parse_fn=lambda row: row["value"],
+        )
+        source = _IndexedSource()
+        dataset._source = source
+        dataset._dataset = _NoScanRows(
+            [{"value": index} for index in range(5)]
+        )
+
+        values = list(dataset.iter_indexed_shard(2, 1))
+
+        self.assertEqual(values, [(1, 1), (3, 3)])
+        self.assertEqual(source.calls, [(2, 1)])
+
     def test_iterable_indexed_shard_requires_source_opt_in(self):
         dataset = IterableAnyDataset(
             spec=Spec(source=Source.HF, path="/tmp/missing"),
@@ -583,6 +614,20 @@ class CanonicalDatasetTest(unittest.TestCase):
         self.assertEqual(values, [(1, 1), (3, 3)])
         self.assertEqual(rows.indexed_calls, [])
         self.assertEqual(rows.iterations, 1)
+
+    def test_map_indexed_shard_requires_source_opt_in(self):
+        dataset = AnyDataset(
+            spec=Spec(source=Source.HF, path="/tmp/missing"),
+            parse_fn=lambda row: row["value"],
+        )
+        dataset._source = _PlainSource()
+        rows = _RawIndexedRows([{"value": index} for index in range(4)])
+        dataset._dataset = rows
+
+        values = list(dataset.iter_indexed_shard(2, 1))
+
+        self.assertEqual(values, [(1, 1), (3, 3)])
+        self.assertEqual(rows.indexed_calls, [])
 
     def test_iterable_native_indexed_shard_validates_global_indexes(self):
         cases = (
@@ -600,6 +645,31 @@ class CanonicalDatasetTest(unittest.TestCase):
         for entries, error, message in cases:
             with self.subTest(entries=entries):
                 dataset = IterableAnyDataset(
+                    spec=Spec(source=Source.HF, path="/tmp/missing"),
+                    parse_fn=lambda row: row["value"],
+                )
+                dataset._source = _FixedIndexedSource(entries)
+                dataset._dataset = object()
+
+                with self.assertRaisesRegex(error, message):
+                    list(dataset.iter_indexed_shard(2, 1))
+
+    def test_map_native_indexed_shard_validates_global_indexes(self):
+        cases = (
+            (None, TypeError, "return an iterable"),
+            ([([1, {"value": 1}])], TypeError, "tuples"),
+            ([(True, {"value": 1})], TypeError, "integers"),
+            ([(3, {"value": 3})], ValueError, "expected 1, got 3"),
+            (
+                [(1, {"value": 1}), (5, {"value": 5})],
+                ValueError,
+                "expected 3, got 5",
+            ),
+        )
+
+        for entries, error, message in cases:
+            with self.subTest(entries=entries):
+                dataset = AnyDataset(
                     spec=Spec(source=Source.HF, path="/tmp/missing"),
                     parse_fn=lambda row: row["value"],
                 )
@@ -1087,6 +1157,12 @@ class _RawIndexedRows:
         self.rows = rows
         self.indexed_calls = []
         self.iterations = 0
+
+    def __len__(self):
+        return len(self.rows)
+
+    def __getitem__(self, index):
+        return self.rows[index]
 
     def __iter__(self):
         self.iterations += 1

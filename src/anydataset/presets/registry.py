@@ -57,12 +57,13 @@ def preset_spec(
             },
         )
     elif preset is Preset.FSD50K:
-        spec = Spec(
-            source="fsd50k",
-            path="Fhrozen/FSD50k",
-            split="dev",
-            load_options={"revision": "main"},
-        )
+        from .fsd50k import fsd50k_spec
+
+        revision = load_options.pop("revision", "main")
+        if load_options:
+            name = min(load_options)
+            raise TypeError(f"Unexpected FSD50K load option: {name}.")
+        return fsd50k_spec(split=split, revision=revision)
     elif preset is Preset.WMT19:
         spec = Spec(
             source=Source.HF,

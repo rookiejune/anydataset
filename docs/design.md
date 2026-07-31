@@ -49,9 +49,20 @@ canonical `Sample` 的映射放进 preset；过滤、模型编码、训练采样
 
 ## Source 注册
 
-`Source` 枚举只表达核心内置物理来源：`HF`、`HF_DISK` 和 `STORE`。source 注册器还
-可以挂载字符串 key；当前内置字符串 key 有 `tsv` 和 `sharded_csv`。
+`Source` 枚举和 source 注册器只表达物理来源类别，不表达具体数据集。具体内置数据集
+（例如 `FSD50K`）应放在 preset 附近：preset 负责选择通用物理 source、填充
+`Spec`，并把 raw row 解析成 canonical `Sample`。source 层不能为了某个具体数据集
+猜测任务、字段名或模态语义。
 
+`Source` 枚举表达核心内置物理来源类别：`HF`、`HF_DISK`、`HF_FILES` 和
+`STORE`。source 注册器还可以挂载字符串 key；当前内置字符串 key 有 `tsv` 和
+`sharded_csv`。
+
+- `hf-files` 面向 Hugging Face Hub 上的文件树，列举并下载 repo 文件，raw row 只包含
+  repo、revision、相对路径和本地缓存路径等物理信息。它不解码音频、不生成 canonical
+  字段，也不内置具体数据集规则；例如 `FSD50K` preset 通过
+  `path_template="clips/{split}"` 和 `suffixes=(".wav",)` 使用它，再在 preset parser
+  中加载 waveform。
 - `tsv` 面向本地表格调试和 Common Voice 本地包，读取文件路径、
   `<path>/<split>.tsv`，或按 `subdirs` load option 的顺序读取各子目录下的同名
   split。TSV 保持为可读的事实来源；source prepare 与 `sharded_csv` 共用

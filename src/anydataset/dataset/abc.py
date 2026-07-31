@@ -7,7 +7,6 @@ from typing import TYPE_CHECKING, Any, Protocol, cast, runtime_checkable
 
 from torch.utils.data import Dataset, IterableDataset
 
-from .._runtime.parallel import iter_indexed_shard as iter_source_indexed_shard
 from .._runtime.sharding import Shard, runtime_shard, validate_shard
 from ..types import Preset, Source, Spec
 from ..types._sample import select as select_sample
@@ -74,9 +73,9 @@ class _Base(ABC):
     @property
     def source(self) -> DatasetSource:
         if self._source is None:
-            from .source import for_source
+            from .source.registry import SourceFactory
 
-            self._source = for_source(self.spec.source)
+            self._source = SourceFactory.create(self.spec.source)
         return self._source
 
     def __getstate__(self) -> dict[str, Any]:
@@ -478,12 +477,23 @@ class AnyDataset(_Base, MapStyleABC):
         num_shards: int,
         shard_id: int,
     ) -> Iterator[tuple[int, Sample]]:
-        for index, row in iter_source_indexed_shard(
-            self.dataset,
-            num_shards,
-            shard_id,
-        ):
-            yield index, self.transform_sample(self.parse_fn(row))
+        from .source.protocol import native_indexed_shard
+
+        validate_shard(num_shards, shard_id)
+        dataset = self.dataset
+        indexed = native_indexed_shard(
+            self.source,
+            dataset,
+            num_shards=num_shards,
+            shard_id=shard_id,
+        )
+        if indexed is not None:
+            for index, row in indexed:
+                yield index, self.transform_sample(self.parse_fn(row))
+            return
+
+        for index in range(shard_id, len(dataset), num_shards):
+            yield index, self.transform_sample(self.parse_fn(dataset[index]))
 
 
 def _identity_sample(row: Any) -> Sample:

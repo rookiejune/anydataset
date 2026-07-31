@@ -166,7 +166,7 @@ def _corpus_root_and_languages(
 ) -> tuple[Path, tuple[str, ...]]:
     base = _base_root(root)
     if base.name.startswith("cv-corpus-"):
-        return base, _resolve_languages(base, languages)
+        return base, _selected_languages(base, languages)
 
     if base.parent.name.startswith("cv-corpus-"):
         if languages is not None and languages != (base.name,):
@@ -179,7 +179,7 @@ def _corpus_root_and_languages(
     corpus = _versioned_corpus_root(base, version)
     if languages is None and version is None:
         _ensure_latest_has_all_languages(base, corpus)
-    return corpus, _resolve_languages(corpus, languages)
+    return corpus, _selected_languages(corpus, languages)
 
 
 def _versioned_corpus_root(root: Path, version: str | None) -> Path:
@@ -216,7 +216,7 @@ def _corpus_sort_key(path: Path) -> tuple[int | str, ...]:
     )
 
 
-def _resolve_languages(
+def _selected_languages(
     corpus_root: Path,
     languages: tuple[str, ...] | None,
 ) -> tuple[str, ...]:

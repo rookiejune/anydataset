@@ -9,14 +9,14 @@ import anydataset.dataset.source._tabular_parquet as tabular_parquet
 from anydataset import (
     AnyDataset,
     Spec,
-    has_source,
     resolve_dataset,
 )
+from anydataset.dataset.source.registry import SourceFactory
 
 
 class TsvSourceTest(unittest.TestCase):
     def test_registered_as_builtin_source(self):
-        self.assertTrue(has_source("tsv"))
+        self.assertTrue(SourceFactory.exist("tsv"))
 
     def test_resolves_registered_source_shorthand(self):
         spec = resolve_dataset("tsv:///tmp/data:train")

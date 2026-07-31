@@ -341,7 +341,11 @@ def test_streaming_planner_matches_reference_greedy_order(
 def test_loader_class_is_not_public_api() -> None:
     assert callable(MapStyleABC.dataloader)
     assert "AnyDataset" in anydataset.__all__
+    assert "has_source" not in anydataset.__all__
     assert "MapStyleABC" in anydataset.dataset.__all__
+    assert "collate_fn" in anydataset.dataset.__all__
+    assert "FieldGroup" in anydataset.dataset.__all__
+    assert "FieldRef" in anydataset.dataset.__all__
     assert all(not name.endswith(("Loader", "Sampler")) for name in anydataset.__all__)
     assert all(
         not name.endswith(("Loader", "Sampler"))

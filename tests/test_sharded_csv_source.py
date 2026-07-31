@@ -13,11 +13,11 @@ import pyarrow.parquet as pyarrow_parquet
 from anydataset import (
     AnyDataset,
     Spec,
-    has_source,
     resolve_dataset,
 )
 from anydataset._runtime.parallel import can_select_indexes, map_style_indexed_loader
 from anydataset.cache import FileLock
+from anydataset.dataset.source.registry import SourceFactory
 from anydataset.dataset.source.sharded_csv import (
     CsvShard,
     ShardedCsvDataset,
@@ -37,7 +37,7 @@ class ShardedCsvSourceTest(unittest.TestCase):
         self.assertIsNone(restored.prepare_workers)
 
     def test_registered_as_builtin_source(self):
-        self.assertTrue(has_source("sharded_csv"))
+        self.assertTrue(SourceFactory.exist("sharded_csv"))
 
     def test_rejects_unknown_load_options(self):
         dataset = AnyDataset(

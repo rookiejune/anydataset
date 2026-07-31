@@ -29,7 +29,8 @@ def resolve_shorthand(shorthand: str) -> Spec:
     except ValueError as exc:
         raise KeyError(
             f"Unknown dataset preset {name!r}. Use a registered source shorthand "
-            "such as `hf://`, `hf-disk://` or `store://` for raw specs."
+            "such as `hf://`, `hf-disk://`, `hf-files://`, or `store://` "
+            "for raw specs."
         ) from exc
     return preset.spec(split=split)
 
@@ -40,10 +41,10 @@ def split_source_prefix(shorthand: str) -> tuple[SourceKey | None, str]:
     if shorthand.startswith("store://"):
         return Source.STORE, shorthand[len("store://") :]
     if "://" in shorthand:
-        from .dataset.source import has_source
+        from .dataset.source.registry import SourceFactory
 
         source, body = shorthand.split("://", 1)
-        if not has_source(source):
+        if not SourceFactory.exist(source):
             raise KeyError(f"Unknown dataset source: {source!r}.")
         return source, body
     return None, shorthand

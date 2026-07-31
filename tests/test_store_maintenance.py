@@ -17,8 +17,8 @@ import torch
 
 from anydataset.store import (
     DatasetWriter,
+    migrate_store,
 )
-from anydataset.store.manifest.migration import migrate_store
 from anydataset.store.jsonio import read_json, write_json
 from anydataset.store.manifest.schema import STORE_SCHEMA_VERSION, ViewManifestEntry
 from anydataset.store.manifest.io import read_sample_manifest_index
@@ -50,9 +50,6 @@ class StoreMigrationTest(unittest.TestCase):
             source = root / "v1"
             output = root / "v3"
             _write_v1_store(source)
-
-            with self.assertRaisesRegex(ValueError, "expected 2 or 3"):
-                read_store_dataset(source)
 
             migrated = migrate_store(source, output)
             dataset = read_store_dataset(migrated, preload=True)
@@ -86,6 +83,22 @@ class StoreMigrationTest(unittest.TestCase):
                     torch.tensor([[1.0]]),
                 )
             )
+
+    def test_reader_rejects_v1_store_without_explicit_migration(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            source = root / "v1"
+            _write_v1_store(source)
+
+            with self.assertRaisesRegex(ValueError, "migrate_store"):
+                read_store_dataset(source, preload=True)
+            self.assertNotIn("schema_version", read_json(source / "dataset.json"))
+
+            manifest = read_json(source / "dataset.json")
+            manifest["schema_version"] = 1
+            write_json(source / "dataset.json", manifest)
+            with self.assertRaisesRegex(ValueError, "migrate_store"):
+                read_store_dataset(source, preload=True)
 
     def test_migrate_store_accepts_explicit_v1_version(self):
         with tempfile.TemporaryDirectory() as tmpdir:

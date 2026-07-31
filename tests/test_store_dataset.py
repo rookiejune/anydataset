@@ -915,6 +915,9 @@ class StoreSourceTest(unittest.TestCase):
                 for name in anydataset.store.__all__
             )
         )
+        self.assertIn("validate_store_payloads", anydataset.store.__all__)
+        self.assertIn("cleanup_store_files", anydataset.store.__all__)
+        self.assertIn("migrate_store", anydataset.store.__all__)
 
     def test_store_dataloader_owns_loader_kwargs(self):
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -17,6 +17,7 @@ class ResolverTest(unittest.TestCase):
     def test_source_uses_auto_str_value(self):
         self.assertEqual(Source.HF.value, "hf")
         self.assertEqual(Source.HF_DISK.value, "hf-disk")
+        self.assertEqual(Source.HF_FILES.value, "hf-files")
         self.assertEqual(Source.STORE.value, "store")
 
     def test_preset_spec_resolves_builtin(self):
@@ -37,10 +38,12 @@ class ResolverTest(unittest.TestCase):
 
         preset = resolve_dataset(Preset.FSD50K)
 
-        self.assertEqual(preset.source, "fsd50k")
+        self.assertEqual(preset.source, Source.HF_FILES)
         self.assertEqual(preset.path, "Fhrozen/FSD50k")
         self.assertEqual(preset.split, "dev")
-        self.assertEqual(preset.load_options["revision"], "main")
+        self.assertEqual(preset.version, "main")
+        self.assertEqual(preset.load_options["path_template"], "clips/{split}")
+        self.assertEqual(preset.load_options["suffixes"], (".wav",))
 
         explicit = Spec(source=Source.STORE, path="/tmp/data")
 
@@ -53,6 +56,11 @@ class ResolverTest(unittest.TestCase):
                 Source.HF_DISK,
                 "/tmp/saved_dataset",
                 "validation",
+            ),
+            "hf-files://org/files:train": (
+                Source.HF_FILES,
+                "org/files",
+                "train",
             ),
             "store:///tmp/store_audio:train": (
                 Source.STORE,

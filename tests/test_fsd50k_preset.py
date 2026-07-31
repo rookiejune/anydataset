@@ -17,18 +17,19 @@ class FSD50KPresetTest(unittest.TestCase):
             with (
                 mock.patch.dict("os.environ", {"ANYDATASET_HOME": tmpdir}),
                 mock.patch(
-                    "anydataset.dataset.source.fsd50k._list_files",
+                    "anydataset.dataset.source.hf_files._list_files",
                     return_value=["clips/dev/example.wav"],
                 ) as list_files,
             ):
                 state = dataset.prepare()
 
-        self.assertEqual(dataset.spec.load_options["revision"], "refs/convert/parquet")
+        self.assertEqual(dataset.spec.version, "refs/convert/parquet")
         self.assertEqual(state.revision, "refs/convert/parquet")
         list_files.assert_called_once_with(
             "Fhrozen/FSD50k",
-            "dev",
+            "clips/dev",
             "refs/convert/parquet",
+            "dataset",
         )
 
     def test_rejects_unknown_load_options(self):
@@ -48,8 +49,12 @@ class FSD50KPresetTest(unittest.TestCase):
             dataset = FSD50K()
             with mock.patch.dict("os.environ", {"ANYDATASET_HOME": tmpdir}):
                 cache = dataset.cache_manager.prepare(dataset.spec)
-                (cache.cache_path / "dev_files.json").write_text(
-                    '{"schema_version": 1, "listed_complete": true, "files": []}\n',
+                (cache.cache_path / "files.json").write_text(
+                    (
+                        '{"schema_version": 1, "listed_complete": true, '
+                        '"path_prefix": "clips/dev", "suffixes": [".wav"], '
+                        '"files": []}\n'
+                    ),
                     encoding="utf-8",
                 )
 
@@ -62,12 +67,12 @@ class FSD50KPresetTest(unittest.TestCase):
             with (
                 mock.patch.dict("os.environ", {"ANYDATASET_HOME": tmpdir}),
                 mock.patch(
-                    "anydataset.dataset.source.fsd50k._list_files",
+                    "anydataset.dataset.source.hf_files._list_files",
                     return_value=["clips/dev/example.wav"],
                 ) as list_files,
             ):
                 cache = dataset.cache_manager.prepare(dataset.spec)
-                (cache.cache_path / "dev_files.json").write_text(
+                (cache.cache_path / "files.json").write_text(
                     '["clips/dev/example.wav"]\n',
                     encoding="utf-8",
                 )
@@ -77,7 +82,7 @@ class FSD50KPresetTest(unittest.TestCase):
             list_files.assert_called_once()
 
     def test_rejects_full_hub_page_without_next_link(self):
-        from anydataset.dataset.source import fsd50k as module
+        from anydataset.dataset.source import hf_files as module
 
         rows = [
             {"type": "file", "path": f"clips/dev/{index:04d}.wav"}
@@ -88,12 +93,12 @@ class FSD50KPresetTest(unittest.TestCase):
         response.read.return_value = json.dumps(rows).encode("utf-8")
         response.headers = {}
 
-        with mock.patch("anydataset.dataset.source.fsd50k.urlopen", return_value=response):
+        with mock.patch("anydataset.dataset.source.hf_files.urlopen", return_value=response):
             with self.assertRaisesRegex(RuntimeError, "full page without next Link"):
-                module._list_files("Fhrozen/FSD50k", "dev", "main")
+                module._list_files("Fhrozen/FSD50k", "clips/dev", "main", "dataset")
 
     def test_rejects_malformed_hub_next_link(self):
-        from anydataset.dataset.source import fsd50k as module
+        from anydataset.dataset.source import hf_files as module
 
         with self.assertRaisesRegex(ValueError, "Link header next URL is malformed"):
             module._next_link_url('rel="next"', "https://huggingface.co")
@@ -109,7 +114,7 @@ class FSD50KPresetTest(unittest.TestCase):
             with (
                 mock.patch.dict("os.environ", {"ANYDATASET_HOME": tmpdir}),
                 mock.patch(
-                    "anydataset.dataset.source.fsd50k.urlopen",
+                    "anydataset.dataset.source.hf_files.urlopen",
                     return_value=response,
                 ),
             ):
@@ -127,7 +132,7 @@ class FSD50KPresetTest(unittest.TestCase):
             calls_lock = threading.Lock()
             errors = []
 
-            def list_files(_repo_id, _split, _revision):
+            def list_files(_repo_id, _prefix, _revision, _repo_type):
                 nonlocal calls
                 with calls_lock:
                     calls += 1
@@ -148,7 +153,7 @@ class FSD50KPresetTest(unittest.TestCase):
             with (
                 mock.patch.dict("os.environ", {"ANYDATASET_HOME": tmpdir}),
                 mock.patch(
-                    "anydataset.dataset.source.fsd50k._list_files",
+                    "anydataset.dataset.source.hf_files._list_files",
                     side_effect=list_files,
                 ),
             ):
@@ -166,6 +171,14 @@ class FSD50KPresetTest(unittest.TestCase):
             self.assertFalse(second_thread.is_alive())
             self.assertEqual(errors, [])
             self.assertEqual(calls, 1)
+
+    def test_fsd50k_is_not_public_source_export(self):
+        import anydataset.dataset.source as source
+
+        self.assertFalse(hasattr(source, "FSD50KSource"))
+        self.assertFalse(hasattr(source, "FSD50KDataset"))
+        self.assertNotIn("FSD50KSource", source.__all__)
+        self.assertNotIn("FSD50KDataset", source.__all__)
 
 
 if __name__ == "__main__":

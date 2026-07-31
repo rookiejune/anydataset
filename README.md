@@ -12,6 +12,9 @@ Sample = Mapping[tuple[Role, Modality], AudioItem | ImageItem | TextItem]
 The source layer only prepares and iterates raw rows. Presets decide how those
 rows are parsed into canonical samples.
 
+Public import paths and private implementation boundaries are documented in
+[Public API Boundaries](docs/public_api.md).
+
 ## Install
 
 ```bash
@@ -66,7 +69,8 @@ spec = Preset.MNIST.spec(split="train")
 
 `FSD50K` is map-style and accepts only an optional Hugging Face `revision`.
 The revision defaults to `main` and is used for file discovery, payload
-downloads, and the source cache identity.
+downloads, and the source cache identity. Internally it uses the generic
+`hf-files` physical source; the FSD50K-specific mapping lives in the preset.
 
 ```python
 from anydataset import AnyDataset
@@ -86,6 +90,7 @@ from anydataset import resolve_dataset
 spec = resolve_dataset("mnist:train")
 hf = resolve_dataset("hf://ylecun/mnist:train")
 disk = resolve_dataset("hf-disk:///data/mnist_saved:validation")
+files = resolve_dataset("hf-files://org/files:train")
 store = resolve_dataset("store:///data/my_anydataset:train")
 tsv = resolve_dataset("tsv:///data/common_voice/en:train")
 csv = resolve_dataset("sharded_csv:///data/bitext:train")
@@ -173,16 +178,23 @@ PyTorch's `batch_sampler.sampler.set_epoch(epoch)` contract so trainer framework
 can advance dataset-owned ordering automatically.
 
 For local JSON, image, or audio files, use `Source.HF` with Hugging Face
-`load_dataset(...)` options such as `data_files` or `data_dir`. For structured
-local datasets with canonical samples, use `Source.STORE`.
+`load_dataset(...)` options such as `data_files` or `data_dir`. For raw file
+trees hosted on the Hugging Face Hub, use `Source.HF_FILES`; it yields physical
+file rows and leaves task-specific parsing to presets or `parse_fn`. For
+structured local datasets with canonical samples, use `Source.STORE`.
 
-Built-in enum sources are `Source.HF`, `Source.HF_DISK`, and `Source.STORE`.
+Built-in enum sources are `Source.HF`, `Source.HF_DISK`,
+`Source.HF_FILES`, and `Source.STORE`.
 The registry also includes string source keys `tsv` and `sharded_csv`; because
 they are registered, they can be used in `Spec(source=...)` and in
-`resolve_dataset("<source>://...")` shorthands. `tsv` reads a file path,
-`<path>/<split>.tsv`, or the same split under ordered `subdirs` load options,
-and prepares Parquet parts for map-style random access (shared with
-`sharded_csv`); `root_field` is injected at read time.
+`resolve_dataset("<source>://...")` shorthands. `hf-files` lists files under
+an optional `path_prefix` or split-aware `path_template`, filters by optional
+`suffixes`, downloads individual files on demand, and returns rows with
+`repo_id`, `repo_type`, `revision`, `path`, and `local_path`. `tsv` reads a
+file path, `<path>/<split>.tsv`, or the same
+split under ordered `subdirs` load options, and prepares Parquet parts for
+map-style random access (shared with `sharded_csv`); `root_field` is injected
+at read time.
 `sharded_csv` reads numeric CSV files under
 `shard_<index>/<number>.csv`, optionally under `<path>/<split>/`. Non-numeric
 CSV file names are ignored and logged as warnings.
@@ -215,11 +227,12 @@ row-to-index association. A raw dataset `shard()` or `iter_indexed_shard()`
 method alone is not sufficient, because a locally enumerated native shard does
 not preserve global indexes.
 
-The built-in `hf-disk`, `store`, `tsv`, and `sharded_csv` sources provide this
-indexed path through random access. Hugging Face `streaming=True` is rejected;
-use non-streaming `Source.HF` or `Source.HF_DISK`. `IterableAnyDataset.iter_shard`
-and `iter_indexed_shard` share that same dense global modulo partition; raw
-dataset `shard()` methods are never called opportunistically.
+The built-in `hf-disk`, `hf-files`, `store`, `tsv`, and `sharded_csv`
+sources provide this indexed path through random access. Hugging Face
+`streaming=True` is rejected; use non-streaming `Source.HF`, `Source.HF_DISK`,
+or `Source.HF_FILES`. `IterableAnyDataset.iter_shard` and
+`iter_indexed_shard` share that same dense global modulo partition; raw dataset
+`shard()` methods are never called opportunistically.
 
 Caches are rooted at `ANYDATASET_HOME`, or `~/.cache/anydataset` when the
 environment variable is unset. Source prepare caches live under
@@ -257,7 +270,7 @@ Every dataset exposes `iter_shard(num_shards, shard_id)` for distributed reads.
 ```python
 from torch.utils.data import DataLoader
 
-from anydataset.dataset.collate import collate_fn
+from anydataset.dataset import collate_fn
 from anydataset.types import AudioReq, AudioView, Modality, Role
 
 schema = {
@@ -292,7 +305,7 @@ Keep reusable training inputs as explicit schemas. A project can define a small
 helper for common layouts, then pass it to the generic collator:
 
 ```python
-from anydataset.dataset.collate import collate_fn
+from anydataset.dataset import collate_fn
 from anydataset.types import AudioReq, AudioView, Modality, Role
 
 audio_codec_schema = {
@@ -655,7 +668,7 @@ anydataset-store migrate /data/my_anydataset_v1 /data/my_anydataset_v3
 
 The equivalent Python API is
 `migrate_store("/data/my_anydataset_v1", "/data/my_anydataset_v3")` from
-`anydataset.store.manifest.migration`.
+`anydataset.store`.
 
 Older layouts or v1 manifests that do not exactly match that canonical schema
 must be re-materialized with `DatasetWriter`; migration does not guess missing
@@ -668,7 +681,7 @@ tar archive and rejects invalid or duplicate file members, and the default
 
 ```python
 from pathlib import Path
-from anydataset.store.payload.integrity import validate_store_payloads
+from anydataset.store import validate_store_payloads
 
 validate_store_payloads((Path("/data/my_anydataset"),), level="full")
 ```
@@ -685,7 +698,7 @@ outlive the reader, then clean that physical store when no reader or explicit
 lease is active:
 
 ```python
-from anydataset.store.payload.files import cleanup_store_files, lease_store_files
+from anydataset.store import cleanup_store_files, lease_store_files
 
 with lease_store_files("/data/my_anydataset"):
     retained_path = dataset[0][Role.DEFAULT, Modality.AUDIO].views[AudioView.FILE]

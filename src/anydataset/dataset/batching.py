@@ -9,7 +9,7 @@ from collections import OrderedDict
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from itertools import islice
-from typing import Any
+from typing import Any, Optional
 
 import torch
 import torch.distributed as dist
@@ -21,7 +21,7 @@ from .abc import MapStyleABC
 
 _DISTRIBUTED_PLAN_WINDOW = 128
 _CostFn = Callable[[Any], int]
-_Costs = None | Sequence[int]
+_Costs = Optional[Sequence[int]]
 
 
 class _CallableCosts(Sequence[int]):

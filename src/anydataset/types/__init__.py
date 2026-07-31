@@ -43,6 +43,7 @@ from .preset import Preset
 class Source(StrEnum):
     HF = "hf"
     HF_DISK = "hf-disk"
+    HF_FILES = "hf-files"
     STORE = "store"
 
 
