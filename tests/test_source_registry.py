@@ -11,7 +11,7 @@ from anydataset import (
     resolve_dataset,
 )
 import anydataset.dataset.source as source_module
-from anydataset.dataset.source.registry import SourceFactory
+from anydataset.dataset.source.registry import _SourceFactory
 from anydataset.dataset.source.store import StoreSource
 
 
@@ -43,7 +43,7 @@ class SourceRegistryTest(unittest.TestCase):
             "/tmp/custom",
             "train",
         ))
-        self.assertTrue(SourceFactory.exist(spec.source))
+        self.assertTrue(_SourceFactory.exist(spec.source))
 
     def test_rejects_duplicate_source_registration(self):
         register_source("unit_test_duplicate", ListSource)
@@ -57,7 +57,7 @@ class SourceRegistryTest(unittest.TestCase):
 
     def test_unknown_source_fails_when_resolved(self):
         with self.assertRaises(KeyError):
-            SourceFactory.create("unit_test_missing")
+            _SourceFactory.create("unit_test_missing")
 
     def test_source_exports_physical_categories_not_concrete_datasets(self):
         self.assertEqual(
@@ -79,6 +79,7 @@ class SourceRegistryTest(unittest.TestCase):
         self.assertNotIn("FSD50KDataset", source_module.__all__)
         self.assertNotIn("ShardedCsvDataset", source_module.__all__)
         self.assertNotIn("TsvDataset", source_module.__all__)
+        self.assertNotIn("SourceFactory", source_module.__all__)
         self.assertNotIn("prepare_hf", source_module.__all__)
         self.assertNotIn("prepare_hf_disk", source_module.__all__)
         self.assertNotIn("for_source", source_module.__all__)
@@ -87,6 +88,7 @@ class SourceRegistryTest(unittest.TestCase):
         self.assertFalse(hasattr(source_module, "FSD50KDataset"))
         self.assertFalse(hasattr(source_module, "ShardedCsvDataset"))
         self.assertFalse(hasattr(source_module, "TsvDataset"))
+        self.assertFalse(hasattr(source_module, "SourceFactory"))
         self.assertFalse(hasattr(source_module, "prepare_hf"))
         self.assertFalse(hasattr(source_module, "prepare_hf_disk"))
         self.assertFalse(hasattr(source_module, "for_source"))

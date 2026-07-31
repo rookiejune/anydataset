@@ -6,7 +6,7 @@ from pathlib import Path
 from ...store.reader import StoreDataset, read_store_dataset
 from ...types import Spec
 from ...types.item import Modality, Role, Sample, View
-from .protocol import validate_load_options
+from .protocol import _validate_load_options
 
 
 class StoreSource:
@@ -20,7 +20,7 @@ class StoreSource:
 
     def prepare(self, spec: Spec, cache_path: Path) -> StoreDataset:
         _ = cache_path
-        validate_load_options(spec, (), source="store")
+        _validate_load_options(spec, (), source="store")
         dataset = read_store_dataset(spec.path, views=self.views)
         if spec.split is not None and dataset.manifest.split != spec.split:
             raise ValueError(

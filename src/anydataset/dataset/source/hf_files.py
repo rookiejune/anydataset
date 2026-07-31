@@ -11,7 +11,7 @@ from urllib.request import Request, urlopen
 from ..._runtime.sharding import validate_shard
 from ...cache import FileLock
 from ...types import Spec
-from .protocol import validate_load_options
+from .protocol import _validate_load_options
 
 
 _VALID_REPO_TYPES = frozenset({"dataset", "model", "space"})
@@ -27,8 +27,8 @@ class HuggingFaceFilesSource:
     path; dataset-specific field names and decoding belong in presets/parsers.
     """
 
-    def prepare(self, spec: Spec, cache_path: Path) -> HuggingFaceFilesDataset:
-        validate_load_options(
+    def prepare(self, spec: Spec, cache_path: Path) -> _HuggingFaceFilesDataset:
+        _validate_load_options(
             spec,
             {"revision", "repo_type", "path_prefix", "path_template", "suffixes"},
             source="Hugging Face files",
@@ -45,7 +45,7 @@ class HuggingFaceFilesSource:
 
         path_prefix = _path_prefix(spec)
         suffixes = _suffixes(spec.load_options.get("suffixes", ()))
-        dataset = HuggingFaceFilesDataset(
+        dataset = _HuggingFaceFilesDataset(
             repo_id=spec.path,
             revision=revision,
             repo_type=repo_type,
@@ -58,7 +58,7 @@ class HuggingFaceFilesSource:
 
     def iter_indexed_shard(
         self,
-        dataset: HuggingFaceFilesDataset,
+        dataset: _HuggingFaceFilesDataset,
         *,
         num_shards: int,
         shard_id: int,
@@ -66,7 +66,7 @@ class HuggingFaceFilesSource:
         yield from dataset.iter_indexed_shard(num_shards, shard_id)
 
 
-class HuggingFaceFilesDataset:
+class _HuggingFaceFilesDataset:
     def __init__(
         self,
         *,
@@ -130,7 +130,7 @@ class HuggingFaceFilesDataset:
         if index < 0:
             index += length
         if index < 0 or index >= length:
-            raise IndexError("HuggingFaceFilesDataset index out of range.")
+            raise IndexError("Hugging Face files dataset index out of range.")
         file_name = self.files[index]
         local_path = _download_file(self, file_name)
         return {
@@ -364,7 +364,7 @@ def _rewrite_endpoint(url: str, endpoint: str) -> str:
     )
 
 
-def _download_file(dataset: HuggingFaceFilesDataset, file_name: str) -> str:
+def _download_file(dataset: _HuggingFaceFilesDataset, file_name: str) -> str:
     try:
         from huggingface_hub import hf_hub_download
     except ImportError as exc:

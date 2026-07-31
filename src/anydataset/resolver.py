@@ -41,10 +41,10 @@ def split_source_prefix(shorthand: str) -> tuple[SourceKey | None, str]:
     if shorthand.startswith("store://"):
         return Source.STORE, shorthand[len("store://") :]
     if "://" in shorthand:
-        from .dataset.source.registry import SourceFactory
+        from .dataset.source.registry import _SourceFactory
 
         source, body = shorthand.split("://", 1)
-        if not SourceFactory.exist(source):
+        if not _SourceFactory.exist(source):
             raise KeyError(f"Unknown dataset source: {source!r}.")
         return source, body
     return None, shorthand

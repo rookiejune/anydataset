@@ -6,14 +6,14 @@ from typing import ClassVar
 from ...types import Source, SourceKey, source_key
 from .protocol import DatasetSource
 
-DatasetSourceFactory = Callable[[], DatasetSource]
+_DatasetSourceFactory = Callable[[], DatasetSource]
 
 
-class SourceFactory:
-    _factories: ClassVar[dict[str, DatasetSourceFactory]] = {}
+class _SourceFactory:
+    _factories: ClassVar[dict[str, _DatasetSourceFactory]] = {}
 
     @classmethod
-    def register(cls, source: SourceKey, factory: DatasetSourceFactory) -> None:
+    def register(cls, source: SourceKey, factory: _DatasetSourceFactory) -> None:
         key = source_key(source)
         if key in cls._factories:
             raise ValueError(f"Dataset source {key!r} is already registered.")
@@ -34,8 +34,8 @@ class SourceFactory:
         return source_key(source) in cls._factories
 
 
-def register_source(source: SourceKey, factory: DatasetSourceFactory) -> None:
-    SourceFactory.register(source, factory)
+def register_source(source: SourceKey, factory: _DatasetSourceFactory) -> None:
+    _SourceFactory.register(source, factory)
 
 
 def _register_builtin_sources() -> None:
@@ -45,12 +45,12 @@ def _register_builtin_sources() -> None:
     from .store import StoreSource
     from .tsv import TsvSource
 
-    SourceFactory.register(Source.HF, HuggingFaceSource)
-    SourceFactory.register(Source.HF_DISK, HuggingFaceDiskSource)
-    SourceFactory.register(Source.HF_FILES, HuggingFaceFilesSource)
-    SourceFactory.register(Source.STORE, StoreSource)
-    SourceFactory.register("sharded_csv", ShardedCsvSource)
-    SourceFactory.register("tsv", TsvSource)
+    _SourceFactory.register(Source.HF, HuggingFaceSource)
+    _SourceFactory.register(Source.HF_DISK, HuggingFaceDiskSource)
+    _SourceFactory.register(Source.HF_FILES, HuggingFaceFilesSource)
+    _SourceFactory.register(Source.STORE, StoreSource)
+    _SourceFactory.register("sharded_csv", ShardedCsvSource)
+    _SourceFactory.register("tsv", TsvSource)
 
 
 _register_builtin_sources()

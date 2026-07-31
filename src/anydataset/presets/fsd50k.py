@@ -29,13 +29,13 @@ class FSD50K(AnyDataset):
         if not isinstance(revision, str) or not revision:
             raise ValueError("FSD50K revision must be a non-empty string.")
         super().__init__(
-            spec=fsd50k_spec(split=split, revision=revision),
-            parse_fn=parse_fsd50k_row,
+            spec=_fsd50k_spec(split=split, revision=revision),
+            parse_fn=_parse_fsd50k_row,
             transforms=transforms,
         )
 
 
-def fsd50k_spec(split: str | None = None, *, revision: str = "main") -> Spec:
+def _fsd50k_spec(split: str | None = None, *, revision: str = "main") -> Spec:
     resolved_split = "dev" if split is None else split
     if resolved_split not in _VALID_SPLITS:
         raise ValueError("FSD50K split must be 'dev' or 'eval'.")
@@ -54,7 +54,7 @@ def fsd50k_spec(split: str | None = None, *, revision: str = "main") -> Spec:
     )
 
 
-def parse_fsd50k_row(row: Any):
+def _parse_fsd50k_row(row: Any):
     if not isinstance(row, Mapping):
         raise TypeError("FSD50K rows must be mappings.")
     local_path = row.get("local_path")

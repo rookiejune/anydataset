@@ -72,8 +72,8 @@ Do not depend on these paths from user code:
   `anydataset._runtime.*`, and `anydataset._validation`.
 - `anydataset.dataset._shuffle` and source-specific prepare helpers or
   prepared-row implementation details.
-- `anydataset.dataset.source.registry.SourceFactory.create(...)` and
-  `SourceFactory.exist(...)`; these are registry plumbing used by
+- `anydataset.dataset.source.registry._SourceFactory.create(...)` and
+  `_SourceFactory.exist(...)`; these are registry plumbing used by
   resolver/dataset internals, not application extension points.
 - Concrete dataset helpers embedded in presets, such as FSD50K parser/load
   helpers, unless they are explicitly exported from `anydataset.presets`.

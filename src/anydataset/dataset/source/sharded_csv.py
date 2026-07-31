@@ -9,7 +9,7 @@ from typing import Any
 from ..._runtime.logging import write_warning
 from ...types import Spec
 from . import _tabular_parquet as tabular
-from .protocol import validate_load_options
+from .protocol import _validate_load_options
 
 
 CsvRow = Mapping[str, str]
@@ -19,21 +19,21 @@ _CACHE_DIR = "sharded_csv_parquet"
 
 
 @dataclass(frozen=True)
-class CsvShard:
+class _CsvShard:
     index: int
     path: Path
 
 
-CsvFile = tabular.ParquetPart
+_CsvFile = tabular.ParquetPart
 
 
 class ShardedCsvSource:
-    def prepare(self, spec: Spec, cache_path: Path) -> ShardedCsvDataset:
-        validate_load_options(spec, ("prepare_workers",), source="sharded_csv")
+    def prepare(self, spec: Spec, cache_path: Path) -> _ShardedCsvDataset:
+        _validate_load_options(spec, ("prepare_workers",), source="sharded_csv")
         prepare_workers = spec.load_options.get("prepare_workers")
         if prepare_workers is not None:
             tabular.validate_prepare_workers(prepare_workers)
-        dataset = ShardedCsvDataset(
+        dataset = _ShardedCsvDataset(
             Path(spec.path),
             split=spec.split,
             cache_path=cache_path,
@@ -44,7 +44,7 @@ class ShardedCsvSource:
 
     def iter_indexed_shard(
         self,
-        dataset: ShardedCsvDataset,
+        dataset: _ShardedCsvDataset,
         *,
         num_shards: int,
         shard_id: int,
@@ -52,7 +52,7 @@ class ShardedCsvSource:
         yield from dataset.iter_indexed_shard(num_shards, shard_id)
 
 
-class ShardedCsvDataset:
+class _ShardedCsvDataset:
     def __init__(
         self,
         root: Path,
@@ -67,7 +67,7 @@ class ShardedCsvDataset:
         self.split = split
         self.cache_path = cache_path
         self.prepare_workers = prepare_workers
-        self._shards_cache: tuple[CsvShard, ...] | None = None
+        self._shards_cache: tuple[_CsvShard, ...] | None = None
         self._reader: tabular.ParquetPartsReader | None = None
         self._ignored_csv_warning_paths: set[Path] = set()
 
@@ -119,7 +119,7 @@ class ShardedCsvDataset:
         try:
             return self._parts_reader()[index]
         except IndexError as exc:
-            raise IndexError("ShardedCsvDataset index out of range.") from exc
+            raise IndexError("Sharded CSV dataset index out of range.") from exc
 
     def shard(self, *, num_shards: int, index: int) -> Iterator[CsvRow]:
         """Iterate rows from physical CSV shard directories selected by directory index.
@@ -174,7 +174,7 @@ class ShardedCsvDataset:
     def _base_dir(self) -> Path:
         return self.root / self.split if self.split is not None else self.root
 
-    def _shards(self) -> tuple[CsvShard, ...]:
+    def _shards(self) -> tuple[_CsvShard, ...]:
         if self._shards_cache is not None:
             return self._shards_cache
 
@@ -194,7 +194,7 @@ class ShardedCsvDataset:
                     f"{previous.name} and {path.name} both resolve to {index}."
                 )
             by_index[index] = path
-            shards.append(CsvShard(index=index, path=path))
+            shards.append(_CsvShard(index=index, path=path))
         if not shards:
             raise FileNotFoundError(f"No shard_* directories found under: {base}")
         ordered = tuple(sorted(shards, key=lambda shard: shard.index))
@@ -202,7 +202,7 @@ class ShardedCsvDataset:
         self._shards_cache = ordered
         return ordered
 
-    def _read_shard(self, shard: CsvShard) -> Iterator[CsvRow]:
+    def _read_shard(self, shard: _CsvShard) -> Iterator[CsvRow]:
         paths = self._csv_files(shard.path)
         if not paths:
             raise FileNotFoundError(f"No CSV files found under: {shard.path}")
@@ -213,7 +213,7 @@ class ShardedCsvDataset:
         with path.open("r", encoding="utf-8", newline="") as f:
             yield from csv.DictReader(f, **self._csv_options())
 
-    def _files(self) -> tuple[CsvFile, ...]:
+    def _files(self) -> tuple[_CsvFile, ...]:
         return self._parts_reader().parts
 
     def _csv_paths(self) -> tuple[Path, ...]:
@@ -302,7 +302,7 @@ def _csv_path_key(path: Path) -> int:
     return int(path.stem)
 
 
-def _warn_missing_shards(base: Path, shards: Sequence[CsvShard]) -> None:
+def _warn_missing_shards(base: Path, shards: Sequence[_CsvShard]) -> None:
     missing = _missing_shard_ranges(shards)
     if not missing:
         return
@@ -315,7 +315,7 @@ def _warn_missing_shards(base: Path, shards: Sequence[CsvShard]) -> None:
 
 
 def _missing_shard_ranges(
-    shards: Sequence[CsvShard],
+    shards: Sequence[_CsvShard],
 ) -> tuple[tuple[int, int], ...]:
     missing = []
     previous = -1

@@ -11,12 +11,12 @@ from anydataset import (
     Spec,
     resolve_dataset,
 )
-from anydataset.dataset.source.registry import SourceFactory
+from anydataset.dataset.source.registry import _SourceFactory
 
 
 class TsvSourceTest(unittest.TestCase):
     def test_registered_as_builtin_source(self):
-        self.assertTrue(SourceFactory.exist("tsv"))
+        self.assertTrue(_SourceFactory.exist("tsv"))
 
     def test_resolves_registered_source_shorthand(self):
         spec = resolve_dataset("tsv:///tmp/data:train")

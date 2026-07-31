@@ -42,7 +42,7 @@ class IndexedShardingSource(DatasetSource, Protocol):
         raise NotImplementedError
 
 
-def native_indexed_shard(
+def _native_indexed_shard(
     source: DatasetSource,
     dataset: object,
     *,
@@ -99,7 +99,7 @@ def _validated_indexed_rows(
         expected += num_shards
 
 
-def validate_load_options(
+def _validate_load_options(
     spec: Spec,
     allowed: Collection[str],
     *,

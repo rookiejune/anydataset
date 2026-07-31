@@ -7,7 +7,7 @@ from typing import Any
 
 from ...types import Spec
 from . import _tabular_parquet as tabular
-from .protocol import validate_load_options
+from .protocol import _validate_load_options
 
 
 TsvRow = Mapping[str, str]
@@ -17,8 +17,8 @@ _CACHE_DIR = "tsv_parquet"
 
 
 class TsvSource:
-    def prepare(self, spec: Spec, cache_path: Path) -> TsvDataset:
-        validate_load_options(
+    def prepare(self, spec: Spec, cache_path: Path) -> _TsvDataset:
+        _validate_load_options(
             spec,
             {"encoding", "root_field", "subdirs", "prepare_workers"},
             source="TSV",
@@ -26,7 +26,7 @@ class TsvSource:
         prepare_workers = spec.load_options.get("prepare_workers")
         if prepare_workers is not None:
             tabular.validate_prepare_workers(prepare_workers)
-        dataset = TsvDataset(
+        dataset = _TsvDataset(
             Path(spec.path),
             split=spec.split,
             cache_path=cache_path,
@@ -43,7 +43,7 @@ class TsvSource:
 
     def iter_indexed_shard(
         self,
-        dataset: TsvDataset,
+        dataset: _TsvDataset,
         *,
         num_shards: int,
         shard_id: int,
@@ -51,7 +51,7 @@ class TsvSource:
         yield from dataset.iter_indexed_shard(num_shards, shard_id)
 
 
-class TsvDataset:
+class _TsvDataset:
     def __init__(
         self,
         root: Path,
@@ -118,7 +118,7 @@ class TsvDataset:
         if index < 0:
             index += length
         if index < 0 or index >= length:
-            raise IndexError("TsvDataset index out of range.")
+            raise IndexError("TSV dataset index out of range.")
         return self._enrich(reader[index], self._part_root(index))
 
     def iter_indexed_shard(

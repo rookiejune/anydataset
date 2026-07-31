@@ -73,9 +73,9 @@ class _Base(ABC):
     @property
     def source(self) -> DatasetSource:
         if self._source is None:
-            from .source.registry import SourceFactory
+            from .source.registry import _SourceFactory
 
-            self._source = SourceFactory.create(self.spec.source)
+            self._source = _SourceFactory.create(self.spec.source)
         return self._source
 
     def __getstate__(self) -> dict[str, Any]:
@@ -165,10 +165,10 @@ class IterableAnyDataset(_Base, IterableDataset):
             yield self.transform_sample(self.parse_fn(row))
 
     def iter_shard_rows(self, num_shards: int, shard_id: int) -> Iterator[Any]:
-        from .source.protocol import native_indexed_shard
+        from .source.protocol import _native_indexed_shard
 
         validate_shard(num_shards, shard_id)
-        indexed = native_indexed_shard(
+        indexed = _native_indexed_shard(
             self.source,
             self.dataset,
             num_shards=num_shards,
@@ -186,11 +186,11 @@ class IterableAnyDataset(_Base, IterableDataset):
         num_shards: int,
         shard_id: int,
     ) -> Iterator[tuple[int, Sample]]:
-        from .source.protocol import native_indexed_shard
+        from .source.protocol import _native_indexed_shard
 
         validate_shard(num_shards, shard_id)
         dataset = self.dataset
-        indexed = native_indexed_shard(
+        indexed = _native_indexed_shard(
             self.source,
             dataset,
             num_shards=num_shards,
@@ -477,11 +477,11 @@ class AnyDataset(_Base, MapStyleABC):
         num_shards: int,
         shard_id: int,
     ) -> Iterator[tuple[int, Sample]]:
-        from .source.protocol import native_indexed_shard
+        from .source.protocol import _native_indexed_shard
 
         validate_shard(num_shards, shard_id)
         dataset = self.dataset
-        indexed = native_indexed_shard(
+        indexed = _native_indexed_shard(
             self.source,
             dataset,
             num_shards=num_shards,

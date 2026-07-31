@@ -9,7 +9,7 @@ from ... import types
 
 class HuggingFaceSource:
     def prepare(self, spec: types.Spec, cache_path: Path) -> Any:
-        return prepare_hf(spec, cache_path)
+        return _prepare_hf(spec, cache_path)
 
     def iter_indexed_shard(
         self,
@@ -24,7 +24,7 @@ class HuggingFaceSource:
 
 class HuggingFaceDiskSource:
     def prepare(self, spec: types.Spec, cache_path: Path) -> Any:
-        return prepare_hf_disk(spec)
+        return _prepare_hf_disk(spec)
 
     def iter_indexed_shard(
         self,
@@ -37,7 +37,7 @@ class HuggingFaceDiskSource:
             yield sample_index, dataset[sample_index]
 
 
-def prepare_hf(spec: types.Spec, cache_path: Path) -> Any:
+def _prepare_hf(spec: types.Spec, cache_path: Path) -> Any:
     try:
         from datasets import load_dataset
     except ImportError as exc:
@@ -65,7 +65,7 @@ def prepare_hf(spec: types.Spec, cache_path: Path) -> Any:
     )
 
 
-def prepare_hf_disk(spec: types.Spec) -> Any:
+def _prepare_hf_disk(spec: types.Spec) -> Any:
     try:
         from datasets import DatasetDict, load_from_disk
     except ImportError as exc:

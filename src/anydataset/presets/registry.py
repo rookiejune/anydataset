@@ -38,9 +38,9 @@ def preset_spec(
             },
         )
     elif preset is Preset.COMMON_VOICE:
-        from .common_voice import common_voice_spec
+        from .common_voice import _common_voice_spec
 
-        return common_voice_spec(split=split, **load_options)
+        return _common_voice_spec(split=split, **load_options)
     elif preset is Preset.ESC50:
         spec = Spec(
             source=Source.HF,
@@ -57,13 +57,13 @@ def preset_spec(
             },
         )
     elif preset is Preset.FSD50K:
-        from .fsd50k import fsd50k_spec
+        from .fsd50k import _fsd50k_spec
 
         revision = load_options.pop("revision", "main")
         if load_options:
             name = min(load_options)
             raise TypeError(f"Unexpected FSD50K load option: {name}.")
-        return fsd50k_spec(split=split, revision=revision)
+        return _fsd50k_spec(split=split, revision=revision)
     elif preset is Preset.WMT19:
         spec = Spec(
             source=Source.HF,
@@ -102,9 +102,9 @@ def create_map_preset(
 
         return FSD50K(split=split, transforms=transforms, **load_options)
     if preset is Preset.COMMON_VOICE:
-        from .common_voice import create_common_voice
+        from .common_voice import _create_common_voice
 
-        return create_common_voice(split=split, transforms=transforms, **load_options)
+        return _create_common_voice(split=split, transforms=transforms, **load_options)
     if preset is Preset.FLEURS:
         from .fleurs import Fleurs
 

@@ -17,27 +17,27 @@ from anydataset import (
 )
 from anydataset._runtime.parallel import can_select_indexes, map_style_indexed_loader
 from anydataset.cache import FileLock
-from anydataset.dataset.source.registry import SourceFactory
+from anydataset.dataset.source.registry import _SourceFactory
 from anydataset.dataset.source.sharded_csv import (
-    CsvShard,
-    ShardedCsvDataset,
+    _CsvShard,
+    _ShardedCsvDataset,
     _missing_shard_ranges,
 )
 
 
 class ShardedCsvSourceTest(unittest.TestCase):
     def test_restores_pickle_state_without_prepare_workers(self):
-        dataset = ShardedCsvDataset(Path("unused"))
+        dataset = _ShardedCsvDataset(Path("unused"))
         state = dataset.__getstate__()
         state.pop("prepare_workers")
 
-        restored = ShardedCsvDataset.__new__(ShardedCsvDataset)
+        restored = _ShardedCsvDataset.__new__(_ShardedCsvDataset)
         restored.__setstate__(state)
 
         self.assertIsNone(restored.prepare_workers)
 
     def test_registered_as_builtin_source(self):
-        self.assertTrue(SourceFactory.exist("sharded_csv"))
+        self.assertTrue(_SourceFactory.exist("sharded_csv"))
 
     def test_rejects_unknown_load_options(self):
         dataset = AnyDataset(
@@ -177,8 +177,8 @@ class ShardedCsvSourceTest(unittest.TestCase):
 
     def test_large_missing_shard_gap_is_represented_compactly(self):
         shards = (
-            CsvShard(0, Path("shard_0")),
-            CsvShard(1_000_000_000, Path("shard_1000000000")),
+            _CsvShard(0, Path("shard_0")),
+            _CsvShard(1_000_000_000, Path("shard_1000000000")),
         )
 
         self.assertEqual(

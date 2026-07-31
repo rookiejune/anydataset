@@ -54,7 +54,7 @@ class CommonVoice(AnyDataset):
         transforms: Transforms | None = None,
         **load_options: Any,
     ) -> None:
-        spec = common_voice_spec(
+        spec = _common_voice_spec(
             split=split,
             root=root,
             language=language,
@@ -65,12 +65,12 @@ class CommonVoice(AnyDataset):
         )
         super().__init__(
             spec=spec,
-            parse_fn=CommonVoiceParser(Path(spec.path)),
+            parse_fn=_CommonVoiceParser(Path(spec.path)),
             transforms=transforms,
         )
 
 
-class CommonVoiceParser:
+class _CommonVoiceParser:
     def __init__(self, language_root: Path) -> None:
         self.language_root = language_root
 
@@ -97,7 +97,7 @@ class CommonVoiceParser:
         )
 
 
-def common_voice_spec(
+def _common_voice_spec(
     split: str | None = None,
     *,
     root: str | Path | None = None,
@@ -135,7 +135,7 @@ def common_voice_spec(
     )
 
 
-def create_common_voice(
+def _create_common_voice(
     split: str | None = None,
     *,
     root: str | Path | None = None,
