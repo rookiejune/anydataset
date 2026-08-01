@@ -13,10 +13,9 @@ from anydataset.dataset import MapStyleABC
 from anydataset.dataset.batching import (
     _Plan,
     _Record,
-    _plan_counts,
     _plans,
-    _synchronized_plans,
 )
+from anydataset.dataset._ddp import plan_counts, synchronized_plans
 
 
 def _dataset(rows, *, parse_fn=lambda row: row):
@@ -278,19 +277,37 @@ def test_distributed_planning_sync_is_bounded() -> None:
             yield _Plan(records=(_Record(index=index, cost=1),), cost=1)
 
     with (
-        mock.patch("anydataset.dataset.batching.dist.is_available", return_value=True),
-        mock.patch("anydataset.dataset.batching.dist.is_initialized", return_value=True),
-        mock.patch("anydataset.dataset.batching.dist.get_world_size", return_value=2),
+        mock.patch("anydataset.dataset._ddp.dist.is_available", return_value=True),
+        mock.patch("anydataset.dataset._ddp.dist.is_initialized", return_value=True),
+        mock.patch("anydataset.dataset._ddp.dist.get_world_size", return_value=2),
         mock.patch(
-            "anydataset.dataset.batching._plan_counts",
+            "anydataset.dataset._ddp.plan_counts",
             side_effect=lambda local, _world_size: (local, 127),
         ),
         pytest.warns(RuntimeWarning, match="dropped rank-local final batches"),
     ):
-        synchronized = list(_synchronized_plans(plans(), drop_tail=True))
+        synchronized = list(synchronized_plans(plans(), drop_tail=True))
 
     assert len(synchronized) == 127
     assert consumed == list(range(128))
+
+
+def test_distributed_planning_requires_equal_counts_without_tail_drop() -> None:
+    def plans():
+        for index in range(128):
+            yield _Plan(records=(_Record(index=index, cost=1),), cost=1)
+
+    with (
+        mock.patch("anydataset.dataset._ddp.dist.is_available", return_value=True),
+        mock.patch("anydataset.dataset._ddp.dist.is_initialized", return_value=True),
+        mock.patch("anydataset.dataset._ddp.dist.get_world_size", return_value=2),
+        mock.patch(
+            "anydataset.dataset._ddp.plan_counts",
+            return_value=(128, 127),
+        ),
+        pytest.raises(RuntimeError, match="equal rank-local batch counts"),
+    ):
+        list(synchronized_plans(plans(), drop_tail=False))
 
 
 def test_distributed_plan_counts_use_tensor_collective() -> None:
@@ -298,16 +315,71 @@ def test_distributed_plan_counts_use_tensor_collective() -> None:
         output.copy_(torch.tensor([int(local.item()), 127], dtype=torch.int64))
 
     with (
-        mock.patch("anydataset.dataset.batching.dist.get_backend", return_value="gloo"),
+        mock.patch("anydataset.dataset._ddp.dist.get_backend", return_value="gloo"),
         mock.patch(
-            "anydataset.dataset.batching.dist.all_gather_into_tensor",
+            "anydataset.dataset._ddp.dist.all_gather_into_tensor",
             side_effect=gather,
         ) as collective,
     ):
-        counts = _plan_counts(128, 2)
+        counts = plan_counts(128, 2)
 
     assert counts == (128, 127)
     collective.assert_called_once()
+
+
+def test_distributed_plan_counts_use_cuda_device_for_nccl() -> None:
+    class FakeTensor:
+        def __init__(self, values: list[int]) -> None:
+            self.values = values
+
+        def cpu(self) -> FakeTensor:
+            return self
+
+        def tolist(self) -> list[int]:
+            return self.values
+
+    devices: list[object] = []
+
+    def fake_tensor(
+        values: list[int],
+        *,
+        dtype: object,
+        device: object,
+    ) -> FakeTensor:
+        assert dtype is torch.int64
+        devices.append(device)
+        return FakeTensor(values)
+
+    def fake_empty(
+        size: int,
+        *,
+        dtype: object,
+        device: object,
+    ) -> FakeTensor:
+        assert dtype is torch.int64
+        devices.append(device)
+        return FakeTensor([0] * size)
+
+    def gather(output: FakeTensor, local: FakeTensor) -> None:
+        output.values[:] = [local.values[0], 127]
+
+    with (
+        mock.patch("anydataset.dataset._ddp.dist.get_backend", return_value="nccl"),
+        mock.patch("anydataset.dataset._ddp.torch.cuda.current_device", return_value=3),
+        mock.patch("anydataset.dataset._ddp.torch.device") as device,
+        mock.patch("anydataset.dataset._ddp.torch.tensor", side_effect=fake_tensor),
+        mock.patch("anydataset.dataset._ddp.torch.empty", side_effect=fake_empty),
+        mock.patch(
+            "anydataset.dataset._ddp.dist.all_gather_into_tensor",
+            side_effect=gather,
+        ),
+    ):
+        device.side_effect = lambda kind, index=None: (kind, index)
+
+        counts = plan_counts(128, 2)
+
+    assert counts == (128, 127)
+    assert devices == [("cuda", 3), ("cuda", 3)]
 
 
 @pytest.mark.parametrize(

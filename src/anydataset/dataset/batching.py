@@ -3,23 +3,19 @@
 from __future__ import annotations
 
 import operator
-import warnings
 from bisect import bisect_left, bisect_right, insort
 from collections import OrderedDict
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass
-from itertools import islice
 from typing import Any, Optional, overload
 
-import torch
-import torch.distributed as dist
 from torch.utils.data import Sampler
 from torch.utils.data import DataLoader as TorchDataLoader
 
+from ._ddp import rank, synchronized_plans
 from .abc import MapStyleABC
 
 
-_DISTRIBUTED_PLAN_WINDOW = 128
 _CostFn = Callable[[Any], int]
 _Costs = Optional[Sequence[int]]
 
@@ -162,7 +158,7 @@ class _BatchSampler(Sampler[list[int]]):
 
     def __iter__(self) -> Iterator[list[int]]:
         plans = self._iter_plans()
-        for plan in _synchronized_plans(
+        for plan in synchronized_plans(
             plans,
             drop_tail=self.drop_distributed_tail,
         ):
@@ -194,13 +190,13 @@ class _BatchSampler(Sampler[list[int]]):
         yield from self._dataset_index_groups()
 
     def _dataset_index_groups(self) -> Iterator[Sequence[int]]:
-        num_replicas, rank = _rank()
+        num_replicas, rank_id = rank()
         yield from self.dataset._shuffle(
             shuffle=self.shuffle,
             seed=self.seed,
             epoch=self.epoch,
             num_replicas=num_replicas,
-            rank=rank,
+            rank=rank_id,
         )
 
 
@@ -279,56 +275,6 @@ def _plans(
             selected.append(candidate)
             cost += candidate.cost
         yield _Plan(records=tuple(selected), cost=cost)
-
-
-def _synchronized_plans(
-    plans: Iterable[_Plan],
-    *,
-    drop_tail: bool,
-) -> Iterator[_Plan]:
-    if not dist.is_available() or not dist.is_initialized():
-        yield from plans
-        return
-
-    source = iter(plans)
-    world_size = dist.get_world_size()
-    while True:
-        local = list(islice(source, _DISTRIBUTED_PLAN_WINDOW))
-        counts = _plan_counts(len(local), world_size)
-        kept = min(counts)
-        if any(count != kept for count in counts):
-            if not drop_tail:
-                raise RuntimeError(
-                    "dataloader cannot keep equal rank-local batch counts."
-                )
-            if len(local) > kept:
-                warnings.warn(
-                    "dataloader dropped rank-local final batches for equal DDP steps.",
-                    RuntimeWarning,
-                    stacklevel=2,
-                )
-        yield from local[:kept]
-        if kept < _DISTRIBUTED_PLAN_WINDOW:
-            return
-
-
-def _plan_counts(local_count: int, world_size: int) -> tuple[int, ...]:
-    backend = str(dist.get_backend()).lower()
-    device = (
-        torch.device("cuda", torch.cuda.current_device())
-        if backend == "nccl"
-        else torch.device("cpu")
-    )
-    local = torch.tensor([local_count], dtype=torch.int64, device=device)
-    gathered = torch.empty(world_size, dtype=torch.int64, device=device)
-    dist.all_gather_into_tensor(gathered, local)
-    return tuple(int(value) for value in gathered.cpu().tolist())
-
-
-def _rank() -> tuple[int, int]:
-    if not dist.is_available() or not dist.is_initialized():
-        return 1, 0
-    return dist.get_world_size(), dist.get_rank()
 
 
 def _int(name: str, value: int) -> int:
