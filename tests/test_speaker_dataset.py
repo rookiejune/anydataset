@@ -336,19 +336,19 @@ class SpeakerAudioGridTest(unittest.TestCase):
 
         grid = SpeakerAudioGrid(cells, ("Vivian", "Ryan"))
 
-        self.assertEqual(grid.shape, (2, 2))
+        self.assertEqual(grid.shape, (2, 1, 2))
         self.assertEqual(len(grid), 2)
         self.assertIs(grid.cells, cells)
         self.assertIs(grid.dataset, cells)
         self.assertIsInstance(grid.rows, GroupedSpeakerAudioDataset)
-        first_text = grid[0][Role.DEFAULT, Modality.TEXT]
-        assert isinstance(first_text, TextItem)
-        self.assertEqual(first_text.views[TextView.TEXT], "hello")
+        first_block = grid[0]
+        self.assertEqual(first_block.shape, (1, 2))
+        self.assertEqual(first_block.texts, ("hello",))
 
     def test_selects_and_loads_one_text_row(self):
         grid = SpeakerAudioGrid(_speaker_grid_cells(), ("Vivian", "Ryan"))
 
-        selection = grid.select(text=0)
+        selection = grid.select(source=0, text=0)
         block = selection.load()
 
         self.assertIsInstance(selection, SpeakerAudioSelection)
@@ -532,7 +532,7 @@ class SpeakerAudioGridTest(unittest.TestCase):
     def test_selects_and_loads_one_cell_without_squeezing_axes(self):
         grid = SpeakerAudioGrid(_speaker_grid_cells(), ("Vivian", "Ryan"))
 
-        block = grid.select(text=1, speaker="Ryan").load()
+        block = grid.select(source=1, text=0, speaker="Ryan").load()
 
         self.assertEqual(block.shape, (1, 1))
         self.assertEqual(block.text_indices, (1,))
@@ -572,21 +572,22 @@ class SpeakerAudioGridTest(unittest.TestCase):
         )
 
         block = grid.select(speaker="Vivian").load()
-        grouped_target = grid[1][Role.DEFAULT, Modality.TEXT]
+        source_block = grid[0]
 
-        self.assertEqual(grid.source_indices, (0, 0))
-        self.assertEqual(grid.roles, (Role.SOURCE, Role.TARGET))
+        self.assertEqual(grid.shape, (1, 2, 2))
+        self.assertEqual(grid.source_indices, (0,))
+        self.assertEqual(grid.text_roles, (Role.SOURCE, Role.TARGET))
         self.assertEqual(block.text_indices, (0, 1))
         self.assertEqual(block.source_indices, (0, 0))
         self.assertEqual(block.roles, (Role.SOURCE, Role.TARGET))
         self.assertEqual(block.texts, ("hello", "你好"))
-        assert isinstance(grouped_target, TextItem)
-        self.assertEqual(grouped_target.meta[TextMeta.SOURCE_INDEX], 0)
+        self.assertEqual(source_block.shape, (2, 2))
+        self.assertEqual(source_block.roles, (Role.SOURCE, Role.TARGET))
 
     def test_rejects_invalid_grid_selection(self):
         grid = SpeakerAudioGrid(_speaker_grid_cells(), ("Vivian", "Ryan"))
 
-        with self.assertRaisesRegex(IndexError, "text index out of range"):
+        with self.assertRaisesRegex(IndexError, "text position is out of range"):
             grid.select(text=2)
         with self.assertRaisesRegex(ValueError, "not present in the grid"):
             grid.select(speaker="Aiden")

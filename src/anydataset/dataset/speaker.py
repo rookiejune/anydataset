@@ -374,7 +374,7 @@ class SpeakerAudioBlock:
 
 
 class SpeakerAudioGrid:
-    """Expose a flat speaker store as a logical two-axis multi-view grid."""
+    """Expose a flat speaker store as a logical source × text × speaker grid."""
 
     def __init__(
         self,
@@ -393,6 +393,9 @@ class SpeakerAudioGrid:
             text_ref=text_ref,
             audio_ref=audio_ref,
             row_specs=row_specs,
+        )
+        self._source_indices, self._text_roles, self._row_indices = _speaker_audio_axes(
+            self.row_specs
         )
 
     @property
@@ -419,11 +422,11 @@ class SpeakerAudioGrid:
 
     @property
     def source_indices(self) -> tuple[int, ...]:
-        return tuple(row.source_index for row in self.row_specs)
+        return self._source_indices
 
     @property
-    def roles(self) -> tuple[Role, ...]:
-        return tuple(row.role for row in self.row_specs)
+    def text_roles(self) -> tuple[Role, ...]:
+        return self._text_roles
 
     @property
     def text_ref(self) -> TextRef:
@@ -434,27 +437,37 @@ class SpeakerAudioGrid:
         return self.rows.audio_ref
 
     @property
-    def shape(self) -> tuple[int, int]:
-        return len(self.rows), len(self.speaker_ids)
+    def shape(self) -> tuple[int, int, int]:
+        return len(self.source_indices), len(self.text_roles), len(self.speaker_ids)
 
     def __len__(self) -> int:
-        return len(self.rows)
+        return len(self.source_indices)
 
-    def __getitem__(self, index: int) -> Sample:
-        return self.rows[index]
+    def __getitem__(self, index: int) -> SpeakerAudioBlock:
+        source_index = self.source_indices[
+            _axis_index(index, len(self), name="source position")
+        ]
+        return self.select(source=source_index).load()
 
     def select(
         self,
         *,
-        text: int | None = None,
+        source: int | None = None,
+        text: int | Role | str | None = None,
         speaker: str | None = None,
     ) -> SpeakerAudioSelection:
-        """Select one text row, one speaker column, one cell, or the full grid."""
+        """Select one source sample, text slot, speaker, or their rectangular subset."""
 
-        text_indices = (
-            tuple(range(len(self)))
-            if text is None
-            else (_selection_index(text, len(self)),)
+        source_indices = (
+            self.source_indices
+            if source is None
+            else (_source_index(source, self.source_indices),)
+        )
+        text_roles = self.text_roles if text is None else (self._selected_text(text),)
+        text_indices = tuple(
+            self._row_indices[(source_index, text_role)]
+            for source_index in source_indices
+            for text_role in text_roles
         )
         if speaker is None:
             speaker_indices = tuple(range(len(self.speaker_ids)))
@@ -467,6 +480,20 @@ class SpeakerAudioGrid:
                     f"speaker id {speaker_id!r} is not present in the grid."
                 ) from error
         return SpeakerAudioSelection(self, text_indices, speaker_indices)
+
+    def _selected_text(self, text: int | Role | str) -> Role:
+        if isinstance(text, bool):
+            raise TypeError("text must be a text slot index or role label.")
+        if isinstance(text, int):
+            return self.text_roles[
+                _axis_index(text, len(self.text_roles), name="text position")
+            ]
+        role = _text_role(text)
+        if role not in self.text_roles:
+            raise ValueError(
+                f"text role metadata {role.value!r} is not present in the grid."
+            )
+        return role
 
     def _load(
         self,
@@ -563,7 +590,7 @@ class SpeakerAudioSelection:
         if not isinstance(speaker_indices, tuple):
             raise TypeError("speaker_indices must be a tuple of integers.")
         for text_index in text_indices:
-            _selection_index(text_index, len(grid))
+            _axis_index(text_index, len(grid.row_specs), name="text row index")
         for speaker_index in speaker_indices:
             if _integer(speaker_index, "speaker index") >= len(grid.speaker_ids):
                 raise IndexError("speaker index out of range.")
@@ -703,6 +730,49 @@ def _speaker_audio_rows(
     return cast(tuple[SpeakerAudioRow, ...], rows)
 
 
+def _speaker_audio_axes(
+    rows: tuple[SpeakerAudioRow, ...]
+) -> tuple[tuple[int, ...], tuple[Role, ...], dict[tuple[int, Role], int]]:
+    if not rows:
+        return (), (), {}
+    first_source = rows[0].source_index
+    text_roles: list[Role] = []
+    for row in rows:
+        if row.source_index != first_source:
+            break
+        if row.role in text_roles:
+            raise ValueError(
+                f"speaker audio rows repeat text role {row.role.value!r} for source {first_source}."
+            )
+        text_roles.append(row.role)
+    text_axis = tuple(text_roles)
+    if len(rows) % len(text_axis) != 0:
+        raise ValueError("speaker audio row count must be divisible by text count.")
+
+    source_indices: list[int] = []
+    seen_sources: set[int] = set()
+    row_indices: dict[tuple[int, Role], int] = {}
+    for start in range(0, len(rows), len(text_axis)):
+        group = rows[start : start + len(text_axis)]
+        source_index = group[0].source_index
+        if source_index in seen_sources:
+            raise ValueError(f"speaker audio rows repeat source index {source_index}.")
+        seen_sources.add(source_index)
+        if any(row.source_index != source_index for row in group):
+            raise ValueError(
+                f"speaker audio source block at row {start} mixes source indices."
+            )
+        actual_roles = tuple(row.role for row in group)
+        if actual_roles != text_axis:
+            raise ValueError(
+                f"speaker audio source {source_index} has text role order {actual_roles!r}; expected {text_axis!r}."
+            )
+        source_indices.append(source_index)
+        for offset, role in enumerate(actual_roles):
+            row_indices[(source_index, role)] = start + offset
+    return tuple(source_indices), text_axis, row_indices
+
+
 def _speaker_id(value: object) -> str:
     if not isinstance(value, str) or not value:
         raise ValueError("speaker ids must be non-empty strings.")
@@ -776,11 +846,28 @@ def _index(value: object, length: int) -> None:
         raise IndexError("grouped sample index out of range.")
 
 
-def _selection_index(value: object, length: int) -> int:
-    index = _integer(value, "text")
+def _axis_index(value: object, length: int, *, name: str) -> int:
+    index = _integer(value, name)
     if index >= length:
-        raise IndexError("text index out of range.")
+        raise IndexError(f"{name} is out of range.")
     return index
+
+
+def _source_index(value: object, source_indices: tuple[int, ...]) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError("source must be an integer source index.")
+    if value not in source_indices:
+        raise ValueError(f"source index {value} is not present in the grid.")
+    return value
+
+
+def _text_role(value: Role | str) -> Role:
+    try:
+        return Role(value)
+    except ValueError as error:
+        raise ValueError(
+            f"text role metadata {value!r} is not present in the grid."
+        ) from error
 
 
 def _integer(value: object, name: str) -> int:
