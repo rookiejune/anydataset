@@ -10,6 +10,7 @@ from typing_extensions import TypeGuard
 
 from ...cache import anydataset_home
 from ...dataset.abc import AnyDataset, MapStyleABC
+from ...store.manifest.schema import STORE_SCHEMA_VERSION
 from ...store.reader import StoreDataset, read_store_manifest
 from ...types import Source, Spec
 from .generations import (
@@ -101,6 +102,12 @@ def _store_provenance(
     spec: Spec,
 ) -> Mapping[str, str]:
     if isinstance(dataset, StoreDataset):
+        if dataset.manifest.schema_version != STORE_SCHEMA_VERSION:
+            raise ValueError(
+                f"Store schema_version {dataset.manifest.schema_version} is legacy "
+                "and lacks provenance. Rematerialize the store to schema_version 3 "
+                "before using it as the basis for cache-sensitive derived data."
+            )
         return dataset.manifest.provenance
     if isinstance(dataset, AnyDataset) and spec.source == Source.STORE:
         return read_store_manifest(

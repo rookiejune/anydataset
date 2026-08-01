@@ -137,7 +137,7 @@ class ProviderServer:
             context="provider server",
             start_method=self.start_method,
         )
-        unlink_address(self.address)
+        unlink_address(self.address, self.authkey)
         context = multiprocessing_context(self.start_method)
         config = _ProviderServerConfig(
             address=self.address,
@@ -214,7 +214,19 @@ class ProviderServer:
                 fields=self._log_fields(process=process),
             )
             process.terminate()
-            process.join()
+            process.join(self.shutdown_timeout)
+        if process.is_alive():
+            write_warning(
+                "provider",
+                "killing provider server after terminate timeout: "
+                f"device={self.device!r} address={self.address!r} "
+                f"pid={process.pid!r}",
+                event="provider_server_killed",
+                fields=self._log_fields(process=process),
+            )
+            process.kill()
+            process.join(self.shutdown_timeout)
+        unlink_address(self.address, self.authkey)
         write_info(
             "provider",
             "provider server stopped: "
@@ -263,8 +275,11 @@ class ProviderServer:
             return
         if process.is_alive():
             process.terminate()
-        process.join()
-        unlink_address(self.address)
+            process.join(self.shutdown_timeout)
+        if process.is_alive():
+            process.kill()
+            process.join(self.shutdown_timeout)
+        unlink_address(self.address, self.authkey)
         self._process = None
 
     def _log_fields(self, *, process: BaseProcess | None = None) -> dict[str, object]:

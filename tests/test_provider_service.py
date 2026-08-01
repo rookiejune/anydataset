@@ -13,8 +13,10 @@ import anydataset.provider_service as provider_service
 from anydataset.provider._protocol import (
     _ProviderCommand,
     _ProviderRequest,
+    _handle_request,
     _serve_connection,
 )
+from anydataset.provider._server import socket_in_use, unlink_address
 from anydataset.provider_service import (
     ProviderServer,
     RemoteFilterPredicate,
@@ -113,6 +115,57 @@ class ProviderServerTest(unittest.TestCase):
 
             self.assertIsNone(server._process)
             self.assertFalse(address.exists())
+
+    def test_socket_probe_matches_default_authkey(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            address = Path(tmpdir) / "provider.sock"
+            server = ProviderServer(
+                address=address,
+                provider_factory=_echo_provider,
+                device="cpu",
+            )
+
+            with server:
+                self.assertTrue(socket_in_use(address, None))
+                with self.assertRaisesRegex(RuntimeError, "already in use"):
+                    unlink_address(address, None)
+                other = ProviderServer(
+                    address=address,
+                    provider_factory=_echo_provider,
+                    device="cpu",
+                    startup_timeout=2.0,
+                )
+                with self.assertRaisesRegex(RuntimeError, "already in use"):
+                    other.start()
+                predicate = RemoteFilterPredicate(address)
+                self.assertEqual(predicate("still-running"), "still-running")
+
+    def test_request_releases_exception_before_cuda_cleanup(self):
+        class _FailingProvider:
+            def __call__(self, _value):
+                raise RuntimeError("provider boom")
+
+        order: list[str] = []
+
+        with (
+            mock.patch(
+                "anydataset.provider._protocol.release_exception",
+                side_effect=lambda _error: order.append("release"),
+            ),
+            mock.patch(
+                "anydataset.provider._protocol.clear_cuda_cache",
+                side_effect=lambda: order.append("clear"),
+            ),
+        ):
+            response = _handle_request(
+                _FailingProvider(),
+                _ProviderRequest(_ProviderCommand.CALL, "value"),
+            )
+
+        self.assertEqual(order, ["release", "clear"])
+        error = response.error
+        self.assertIsNotNone(error)
+        self.assertEqual(getattr(error, "type_name", None), "RuntimeError")
 
     def test_client_receive_failures_do_not_stop_server(self):
         with tempfile.TemporaryDirectory() as tmpdir:

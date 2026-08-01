@@ -306,13 +306,13 @@ def read_store_manifest(
             legacy_policy=legacy_policy,
             warning=(
                 "Reading store schema_version 2 without provenance. "
-                "Compatibility is for legacy reads only; rematerialize or migrate "
+                "Compatibility is for legacy reads only; rematerialize "
                 "to schema_version 3 before publishing the store or using it as "
                 "the basis for cache-sensitive derived data."
             ),
             error=(
                 "Store schema_version 2 is legacy and lacks provenance. "
-                "Use anydataset.store.migrate_store(source, output), or pass "
+                "Rematerialize the store to schema_version 3, or pass "
                 "legacy_policy='allow' for an intentional legacy read."
             ),
             stacklevel=2,

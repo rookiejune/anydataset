@@ -1429,6 +1429,39 @@ class FilteredDatasetTest(unittest.TestCase):
                     device="cpu",
                 )
 
+    def test_legacy_store_dataset_rejected_for_filter_cache_identity(self):
+        from anydataset.store.reader import read_store_dataset
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "store"
+            DatasetWriter(path, dataset_id="toy").write(
+                [
+                    {
+                        (Role.DEFAULT, Modality.AUDIO): AudioItem(
+                            views={AudioView.LONGCAT: torch.tensor([[1]])}
+                        )
+                    }
+                ]
+            )
+            manifest = read_store_json(path / "dataset.json")
+            manifest["schema_version"] = 2
+            del manifest["provenance"]
+            write_store_json(path / "dataset.json", manifest)
+            rule = FilterRule(name="all", factory=lambda: lambda _sample: True)
+
+            def prepared_store_dataset():
+                dataset = AnyDataset(Spec(source="store", path=str(path)))
+                with self.assertWarns(RuntimeWarning):
+                    dataset.prepare()
+                return dataset.dataset
+
+            with self.assertRaisesRegex(ValueError, "schema_version 2 is legacy"):
+                rule.apply(dataset_factory=prepared_store_dataset, device="cpu")
+
+            allowed = read_store_dataset(path, legacy_policy="allow")
+            with self.assertRaisesRegex(ValueError, "schema_version 2 is legacy"):
+                rule.apply(dataset_factory=lambda: allowed, device="cpu")
+
     def test_store_view_selection_versions_filter_cache_identity(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "store"

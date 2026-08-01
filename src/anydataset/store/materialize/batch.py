@@ -12,7 +12,7 @@ from typing import Any
 import torch
 
 from ..._compat import strict_zip
-from ..._runtime.devices import clear_cuda_cache
+from ..._runtime.devices import clear_cuda_cache, release_exception
 from ...dataset.collate import Batch, collate_fn
 from ...types.item import Item, Modality, Requirement, Role, Sample
 from .modality import modality_inputs, role_items, with_modality_view
@@ -48,7 +48,7 @@ def with_resilient_batch_provider(
         oom = _is_oom_error(exc)
         if len(samples) <= 1 or not oom:
             raise
-        _release_exception(exc)
+        release_exception(exc)
         clear_cuda_cache()
         midpoint = len(samples) // 2
         if on_oom is not None:
@@ -353,20 +353,3 @@ def _is_oom_error(error: BaseException) -> bool:
         return False
     message = str(error).lower()
     return "out of memory" in message or "cuda error: out of memory" in message
-
-
-def _release_exception(error: BaseException) -> None:
-    pending: list[BaseException] = [error]
-    seen: set[int] = set()
-    while pending:
-        current = pending.pop()
-        if id(current) in seen:
-            continue
-        seen.add(id(current))
-        if current.__cause__ is not None:
-            pending.append(current.__cause__)
-        if current.__context__ is not None:
-            pending.append(current.__context__)
-        current.__traceback__ = None
-        current.__cause__ = None
-        current.__context__ = None

@@ -105,6 +105,21 @@ class TsvSourceTest(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "TSV split"):
                     dataset.prepare()
 
+    def test_rejects_unsafe_subdirs(self):
+        for subdir in ("../en", "nested/en", ".."):
+            with self.subTest(subdir=subdir), tempfile.TemporaryDirectory() as tmpdir:
+                dataset = AnyDataset(
+                    Spec(
+                        source="tsv",
+                        path=tmpdir,
+                        split="train",
+                        load_options={"subdirs": (subdir,)},
+                    )
+                )
+
+                with self.assertRaisesRegex(ValueError, "TSV subdir"):
+                    dataset.prepare()
+
     def test_reads_split_tsv_subdirs_in_order(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

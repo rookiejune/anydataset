@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, Union
 
 from .._compat import StrEnum
-from .._runtime.devices import clear_cuda_cache
+from .._runtime.devices import clear_cuda_cache, release_exception
 
 ProviderAddress = Union[str, Path, tuple[str, int]]
 
@@ -89,6 +89,7 @@ def _handle_request(provider: Any, request: object) -> _ProviderResponse:
         raise TypeError(f"Unsupported provider command: {request.command!r}.")
     except Exception as exc:
         error = _provider_error(exc)
+        release_exception(exc)
         try:
             clear_cuda_cache()
         except Exception as cleanup_exc:

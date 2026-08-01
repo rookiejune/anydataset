@@ -159,6 +159,7 @@ class _TsvDataset:
         if self.root.is_file():
             raise ValueError("TSV source subdirs require path to be a directory.")
         for subdir in self.subdirs:
+            validate_path_segment("TSV subdir", subdir)
             yield self.root / subdir
 
     def _path(self, root: Path) -> Path:

@@ -10,6 +10,8 @@ from typing import TypeVar
 import torch
 import torch.distributed as dist
 
+from .._runtime.sharding import runtime_rank
+
 
 _PLAN_WINDOW = 128
 _T = TypeVar("_T")
@@ -60,6 +62,4 @@ def plan_counts(local_count: int, world_size: int) -> tuple[int, ...]:
 
 
 def rank() -> tuple[int, int]:
-    if not dist.is_available() or not dist.is_initialized():
-        return 1, 0
-    return dist.get_world_size(), dist.get_rank()
+    return runtime_rank()

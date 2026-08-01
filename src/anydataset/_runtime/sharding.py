@@ -76,7 +76,7 @@ class Shard:
 
 
 def runtime_shard() -> Shard:
-    rank_count, rank_index = _runtime_rank()
+    rank_count, rank_index = runtime_rank()
 
     worker_count = 1
     worker_index = 0
@@ -96,7 +96,7 @@ def runtime_shard() -> Shard:
     )
 
 
-def _runtime_rank() -> tuple[int, int]:
+def runtime_rank() -> tuple[int, int]:
     if dist.is_available() and dist.is_initialized():
         return dist.get_world_size(), dist.get_rank()
 

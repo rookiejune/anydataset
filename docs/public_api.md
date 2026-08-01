@@ -98,10 +98,11 @@ Do not depend on these paths from user code:
 Legacy store formats are not read through silent compatibility layers. Store
 readers use an explicit `legacy_policy` when a legacy format is still readable:
 the transition default may warn, strict publishing or cache-sensitive paths
-should reject, and deliberate audits may allow. Use
+should reject, and deliberate audits may allow. Upgrade a schema-v1 store with
 `anydataset.store.migrate_store(source, output)` or
-`anydataset-store migrate source output` to create an explicit schema-current
-store. Store internals such as manifest readers, payload index writers, part
+`anydataset-store migrate source output`. Schema-v2 stores lack provenance and
+must be rematerialized to schema-v3; `migrate_store` does not upgrade them.
+Store internals such as manifest readers, payload index writers, part
 commit helpers, and JSON path helpers remain private implementation details.
 
 ## Adding public names

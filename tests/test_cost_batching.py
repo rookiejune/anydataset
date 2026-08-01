@@ -251,6 +251,25 @@ def test_map_style_shuffle_strides_flattened_groups_across_ranks() -> None:
     assert rank_indexes == [shuffled[rank::3] for rank in range(3)]
 
 
+def test_cost_dataloader_uses_rank_environment() -> None:
+    from anydataset.dataset.batching import _BatchSampler
+
+    dataset = _GroupedDataset()
+    sampler = _BatchSampler(
+        dataset,
+        costs=None,
+        max_batch_memory=1,
+        sampler=None,
+        shuffle=False,
+        seed=0,
+        epoch=0,
+    )
+    with mock.patch.dict("os.environ", {"WORLD_SIZE": "2", "RANK": "1"}):
+        list(sampler._dataset_index_groups())
+
+    assert dataset.calls == [(False, 0, 0, 2, 1)]
+
+
 def test_cost_planning_is_lazy() -> None:
     measured: list[int] = []
     costs = _MeasuredCosts([1] * 100, measured)

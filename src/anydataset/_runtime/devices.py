@@ -42,6 +42,23 @@ def clear_cuda_cache() -> None:
     torch.cuda.ipc_collect()
 
 
+def release_exception(error: BaseException) -> None:
+    pending: list[BaseException] = [error]
+    seen: set[int] = set()
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        if current.__cause__ is not None:
+            pending.append(current.__cause__)
+        if current.__context__ is not None:
+            pending.append(current.__context__)
+        current.__traceback__ = None
+        current.__cause__ = None
+        current.__context__ = None
+
+
 def _cuda_device_count() -> int:
     try:
         import torch

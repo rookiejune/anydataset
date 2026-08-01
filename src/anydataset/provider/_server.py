@@ -23,7 +23,7 @@ def serve_provider(
     provider_factory: ProviderFactory,
 ) -> None:
     address = connection_address(config.address)
-    unlink_address(config.address)
+    unlink_address(config.address, config.authkey)
     provider = provider_factory(config.device)
     listener = Listener(address, authkey=config.authkey)
     try:
@@ -39,17 +39,20 @@ def serve_provider(
                 return
     finally:
         listener.close()
-        unlink_address(config.address)
+        unlink_address(config.address, config.authkey)
 
 
-def unlink_address(address: ProviderAddress) -> None:
+def unlink_address(
+    address: ProviderAddress,
+    authkey: bytes | None = None,
+) -> None:
     connection = connection_address(address)
     if not isinstance(connection, str):
         return
     path = Path(connection)
     if not path.exists():
         return
-    if socket_in_use(path):
+    if socket_in_use(path, authkey):
         raise RuntimeError(f"Provider socket is already in use: {path}")
     try:
         os.unlink(connection)
@@ -57,9 +60,9 @@ def unlink_address(address: ProviderAddress) -> None:
         pass
 
 
-def socket_in_use(path: Path) -> bool:
+def socket_in_use(path: Path, authkey: bytes | None = None) -> bool:
     try:
-        conn = Client(str(path), authkey=b"anydataset-probe")
+        conn = Client(str(path), authkey=authkey)
     except AuthenticationError:
         return True
     except (ConnectionRefusedError, FileNotFoundError, PermissionError, OSError):
