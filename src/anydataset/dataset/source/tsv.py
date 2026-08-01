@@ -4,6 +4,7 @@ from collections.abc import Iterator, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+from ..._validation import validate_path_segment
 from ...types import Spec
 from . import _tabular_parquet as tabular
 from .protocol import _validate_load_options
@@ -162,9 +163,14 @@ class _TsvDataset:
 
     def _path(self, root: Path) -> Path:
         if root.is_file():
+            if self.split is not None:
+                raise ValueError(
+                    "TSV source split is only supported for directory paths."
+                )
             return root
         if self.split is None:
             raise ValueError("TSV source requires split when path is a directory.")
+        validate_path_segment("TSV split", self.split)
         return root / f"{self.split}.tsv"
 
     def _parts_reader(self) -> tabular.ParquetPartsReader:

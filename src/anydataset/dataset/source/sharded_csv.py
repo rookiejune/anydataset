@@ -8,6 +8,7 @@ from typing import Any
 
 from ..._runtime.logging import write_warning
 from ..._runtime.sharding import validate_range, validate_shard
+from ..._validation import validate_path_segment
 from ...types import Spec
 from . import _tabular_parquet as tabular
 from .protocol import _validate_load_options
@@ -155,6 +156,8 @@ class _ShardedCsvDataset:
         )
 
     def _base_dir(self) -> Path:
+        if self.split is not None:
+            validate_path_segment("sharded_csv split", self.split)
         return self.root / self.split if self.split is not None else self.root
 
     def _shards(self) -> tuple[_CsvShard, ...]:

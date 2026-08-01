@@ -88,6 +88,23 @@ class TsvSourceTest(unittest.TestCase):
         with self.assertRaisesRegex(TypeError, "TSV encoding must be a string"):
             dataset.prepare()
 
+    def test_rejects_split_for_file_path(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "train.tsv"
+            path.write_text("sentence\nhello\n", encoding="utf-8")
+            dataset = AnyDataset(Spec(source="tsv", path=str(path), split="train"))
+
+            with self.assertRaisesRegex(ValueError, "only supported for directory"):
+                dataset.prepare()
+
+    def test_rejects_unsafe_split(self):
+        for split in ("../train", "nested/train", ".."):
+            with self.subTest(split=split), tempfile.TemporaryDirectory() as tmpdir:
+                dataset = AnyDataset(Spec(source="tsv", path=tmpdir, split=split))
+
+                with self.assertRaisesRegex(ValueError, "TSV split"):
+                    dataset.prepare()
+
     def test_reads_split_tsv_subdirs_in_order(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

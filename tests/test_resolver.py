@@ -29,6 +29,10 @@ class ResolverTest(unittest.TestCase):
         self.assertEqual(spec.load_options["config_name"], "en_us")
         self.assertNotIn("streaming", spec.load_options)
 
+    def test_builtin_image_preset_specs_default_to_train_split(self):
+        self.assertEqual(Preset.MNIST.spec().split, "train")
+        self.assertEqual(Preset.CIFAR10.spec().split, "train")
+
     def test_resolve_dataset_accepts_string_preset_and_spec(self):
         spec = resolve_dataset("mnist:train")
 

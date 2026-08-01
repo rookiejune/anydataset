@@ -53,6 +53,15 @@ class HuggingFaceDatasetTest(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "streaming is not supported"):
                     dataset.prepare()
 
+    def test_prepare_requires_split(self):
+        fake_datasets = types.ModuleType("datasets")
+        fake_datasets.load_dataset = lambda *args, **kwargs: []
+        with tempfile.TemporaryDirectory():
+            dataset = AnyDataset(Spec(source=Source.HF, path="org/audio"))
+            with mock.patch.dict(sys.modules, {"datasets": fake_datasets}):
+                with self.assertRaisesRegex(ValueError, "requires Spec.split"):
+                    dataset.prepare()
+
     def test_prepare_loads_dataset_from_disk_split(self):
         fake_datasets = types.ModuleType("datasets")
 

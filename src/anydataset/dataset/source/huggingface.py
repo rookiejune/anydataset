@@ -44,7 +44,8 @@ def _prepare_hf(spec: types.Spec, cache_path: Path) -> Any:
             "HuggingFace datasets support requires `pip install anydataset[huggingface]`."
         ) from exc
 
-    split = spec.split or "train"
+    if spec.split is None:
+        raise ValueError("huggingface source requires Spec.split.")
     load_kwargs = dict(spec.load_options)
     if load_kwargs.get("streaming") is True:
         raise ValueError(
@@ -58,7 +59,7 @@ def _prepare_hf(spec: types.Spec, cache_path: Path) -> Any:
         load_kwargs["name"] = config_name
     return load_dataset(
         spec.path,
-        split=split,
+        split=spec.split,
         cache_dir=str(cache_path),
         **load_kwargs,
     )

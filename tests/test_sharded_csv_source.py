@@ -106,6 +106,16 @@ class ShardedCsvSourceTest(unittest.TestCase):
             "train",
         ))
 
+    def test_rejects_unsafe_split(self):
+        for split in ("../train", "nested/train", ".."):
+            with self.subTest(split=split), tempfile.TemporaryDirectory() as tmpdir:
+                dataset = AnyDataset(
+                    Spec(source="sharded_csv", path=tmpdir, split=split)
+                )
+
+                with self.assertRaisesRegex(ValueError, "sharded_csv split"):
+                    dataset.prepare()
+
     def test_reads_physical_shard_csv(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
