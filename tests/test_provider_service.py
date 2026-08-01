@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import json
+import os
 import tempfile
 import unittest
 from multiprocessing import AuthenticationError
 from multiprocessing.connection import Client
 from pathlib import Path
+from unittest import mock
 
 import anydataset.provider_service as provider_service
 from anydataset.provider._protocol import (
@@ -57,6 +60,17 @@ class _BrokenPipeConnection:
 
 
 class ProviderServerTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self._home_tmp = tempfile.TemporaryDirectory()
+        self.home = Path(self._home_tmp.name) / "home"
+        self._home_patch = mock.patch.dict(
+            os.environ,
+            {"ANYDATASET_HOME": str(self.home)},
+        )
+        self._home_patch.start()
+        self.addCleanup(self._home_patch.stop)
+        self.addCleanup(self._home_tmp.cleanup)
+
     def test_private_protocol_helpers_are_not_public_api(self):
         self.assertNotIn("_ProviderCommand", provider_service.__all__)
         self.assertNotIn("_ProviderRequest", provider_service.__all__)
@@ -174,6 +188,41 @@ class ProviderServerTest(unittest.TestCase):
                 with self.assertRaisesRegex(RemoteProviderError, "cannot be pickled"):
                     predicate("unpicklable")
                 self.assertEqual(predicate("still-running"), "still-running")
+
+    def test_provider_server_writes_lifecycle_events(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            address = Path(tmpdir) / "provider.sock"
+            server = ProviderServer(
+                address=address,
+                provider_factory=_echo_provider,
+                device="cpu",
+            )
+
+            with server:
+                pass
+
+        events = _events(self.home)
+        names = [entry["event"] for entry in events]
+        self.assertIn("provider_server_starting", names)
+        self.assertIn("provider_server_ready", names)
+        self.assertIn("provider_server_stopped", names)
+        ready = [
+            entry for entry in events if entry["event"] == "provider_server_ready"
+        ][0]
+        self.assertEqual(ready["fields"]["device"], "cpu")
+        self.assertEqual(ready["fields"]["address"], str(address))
+        self.assertIsNotNone(ready["fields"]["pid"])
+
+
+def _events(home: Path) -> list[dict[str, object]]:
+    logs = sorted((home / "logs").glob("*/events.jsonl"))
+    rows: list[dict[str, object]] = []
+    for path in logs:
+        rows.extend(
+            json.loads(line)
+            for line in path.read_text(encoding="utf-8").splitlines()
+        )
+    return rows
 
 
 if __name__ == "__main__":

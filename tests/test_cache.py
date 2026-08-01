@@ -8,7 +8,12 @@ from pathlib import Path
 from unittest import mock
 
 from anydataset import Source, Spec, anydataset_home
-from anydataset._runtime.logging import run_logs_dir, worker_logger, write_warning
+from anydataset._runtime.logging import (
+    run_logs_dir,
+    worker_logger,
+    write_event,
+    write_warning,
+)
 from anydataset.cache import CacheManager, FileLock, FileLockError
 
 
@@ -135,6 +140,31 @@ class CacheManagerTest(unittest.TestCase):
             self.assertEqual(first, second)
             self.assertEqual(first.parent, home / "logs")
             self.assertRegex(first.name, r"^\d{8}-\d{6}-\d+$")
+            metadata = json.loads((first / "run.json").read_text(encoding="utf-8"))
+            self.assertEqual(metadata["run_id"], first.name)
+            self.assertEqual(metadata["anydataset_home"], str(home))
+            self.assertEqual(metadata["pid"], os.getpid())
+            self.assertIn("version", metadata)
+
+    def test_write_event_writes_structured_jsonl_in_run_dir(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home = Path(tmpdir)
+            with mock.patch.dict(os.environ, {"ANYDATASET_HOME": str(home)}):
+                write_event(
+                    "source",
+                    "cache_miss",
+                    {"path": Path("cache"), "items": {2, 1}},
+                )
+
+            events = list((home / "logs").glob("*/events.jsonl"))
+            self.assertEqual(len(events), 1)
+            entry = json.loads(events[0].read_text(encoding="utf-8"))
+
+        self.assertEqual(entry["source"], "source")
+        self.assertEqual(entry["event"], "cache_miss")
+        self.assertEqual(entry["level"], "INFO")
+        self.assertEqual(entry["fields"]["path"], "cache")
+        self.assertEqual(entry["fields"]["items"], [1, 2])
 
     def test_write_warning_writes_source_log_in_run_dir(self):
         with tempfile.TemporaryDirectory() as tmpdir:

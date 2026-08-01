@@ -10,7 +10,7 @@ from torch.utils.data import DataLoader
 
 from ..._compat import strict_zip
 from ..._runtime.devices import Devices, resolve_devices
-from ..._runtime.logging import run_logs_dir
+from ..._runtime.logging import run_logs_dir, write_info, write_warning
 from ..._runtime.parallel import (
     ProcessHandle,
     can_select_indexes,
@@ -378,7 +378,9 @@ class ViewMaterializer:
                 ),
                 expected,
             )
-            return self._status(expected, completed)
+            status = self._status(expected, completed)
+            self._log_status(status)
+            return status
         return self._finish_resumable(
             fragments_dir,
             expected,
@@ -535,13 +537,18 @@ class ViewMaterializer:
                     "for staged work or provide the remaining samples. "
                     f"{expected - len(completed)} samples remain."
                 )
-            return self._status(expected, completed)
+            status = self._status(expected, completed)
+            self._log_status(status)
+            return status
         if not finalize:
-            return self._status(expected, completed)
+            status = self._status(expected, completed)
+            self._log_status(status)
+            return status
         if parts:
             path = self._commit_parts(fragments_dir / ".parts")
         else:
             path = self._commit_fragments(fragments_dir, expected)
+        self._log_published(path, expected=expected, parts=parts)
         return path
 
     def _status(
@@ -553,6 +560,50 @@ class ViewMaterializer:
             output_dir=Path(self.output_dir).expanduser(),
             expected=expected,
             completed=len(completed),
+        )
+
+    def _log_status(self, status: MaterializationStatus) -> None:
+        write_info(
+            "materializer",
+            "materialization staged: "
+            f"output_dir={status.output_dir!s} expected={status.expected} "
+            f"completed={status.completed} pending={status.pending}",
+            event="materializer_staged",
+            fields={
+                "materializer": type(self).__name__,
+                "output_dir": status.output_dir,
+                "split": self.split,
+                "dataset_id": self._dataset_id,
+                "expected": status.expected,
+                "completed": status.completed,
+                "pending": status.pending,
+                "finalized": status.finalized,
+                "batch_size": self.batch_size,
+                "commit_samples": self.commit_samples,
+                "num_workers": self.num_workers,
+                "write_workers": self.write_workers,
+            },
+        )
+
+    def _log_published(self, path: Path, *, expected: int, parts: bool) -> None:
+        write_info(
+            "materializer",
+            "published materialized store: "
+            f"path={path!s} expected={expected} parts={parts}",
+            event="materializer_published",
+            fields={
+                "materializer": type(self).__name__,
+                "path": path,
+                "output_dir": Path(self.output_dir).expanduser(),
+                "split": self.split,
+                "dataset_id": self._dataset_id,
+                "expected": expected,
+                "parts": parts,
+                "batch_size": self.batch_size,
+                "commit_samples": self.commit_samples,
+                "num_workers": self.num_workers,
+                "write_workers": self.write_workers,
+            },
         )
 
     def _commit_fragments(
@@ -903,6 +954,20 @@ class ViewMaterializer:
                 f"worker={worker_id} provider={type(provider).__name__} "
                 f"batch_size={batch_size}; retrying as {left_size}+{right_size} "
                 "after cache cleanup",
+            )
+            write_warning(
+                "materializer",
+                "provider OOM split: "
+                f"worker={worker_id} provider={type(provider).__name__} "
+                f"batch_size={batch_size} retry={left_size}+{right_size}",
+                event="materializer_provider_oom_split",
+                fields={
+                    "worker": worker_id,
+                    "provider": type(provider).__name__,
+                    "batch_size": batch_size,
+                    "left_size": left_size,
+                    "right_size": right_size,
+                },
             )
 
         yield from with_resilient_batch_provider(

@@ -20,6 +20,12 @@ def prepare_materializer_resume_dir(
             "materializer",
             "Quarantined incompatible resume directory "
             f"at {stale}; remove it after confirming it is no longer needed.",
+            event="materializer_resume_quarantined",
+            fields={
+                "output_dir": Path(output_dir).expanduser(),
+                "resume_dir": path,
+                "quarantine_dir": stale,
+            },
         )
     path = prepare_resume_dir(output_dir, "fragments")
     write_json(path / "resume.json", expected)

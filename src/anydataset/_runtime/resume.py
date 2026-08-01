@@ -227,12 +227,21 @@ def log_resume_summary(
     missing: Sequence[int],
     use_map_style_loader: bool,
 ) -> None:
+    ranges = format_index_ranges(missing)
     write_info(
         source,
         "resume "
         f"expected={expected} completed={completed_count} "
         f"missing={len(missing)} map_style={use_map_style_loader} "
-        f"ranges={format_index_ranges(missing)}",
+        f"ranges={ranges}",
+        event=f"{source}_resume",
+        fields={
+            "expected": expected,
+            "completed": completed_count,
+            "missing": len(missing),
+            "map_style": use_map_style_loader,
+            "ranges": ranges,
+        },
     )
 
 

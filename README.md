@@ -959,11 +959,11 @@ python -m basedpyright --pythonpath "$(python -c 'import sys; print(sys.executab
 python -m pytest -q
 ```
 
-Additional design notes live in `docs/design.md`, filter cache details in
-`docs/filter_cache.md`, online reject-replace notes in `docs/online_filter.md`,
-and quality-filter notes in `docs/translation_quality.md` and
-`docs/speech_quality.md`. Advanced process ownership and remote model serving
-are covered in `docs/provider_service.md`.
+Additional design notes live in `docs/design.md`, production logging notes in
+`docs/logging.md`, filter cache details in `docs/filter_cache.md`, online
+reject-replace notes in `docs/online_filter.md`, and quality-filter notes in
+`docs/translation_quality.md` and `docs/speech_quality.md`. Advanced process
+ownership and remote model serving are covered in `docs/provider_service.md`.
 
 ## Release
 

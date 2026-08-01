@@ -6,6 +6,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from .._runtime.logging import write_info, write_warning
 from .._runtime.parallel import (
     StartMethod,
     multiprocessing_context,
@@ -143,6 +144,14 @@ class ProviderServer:
             device=self.device,
             authkey=self.authkey,
         )
+        write_info(
+            "provider",
+            "starting provider server: "
+            f"device={self.device!r} address={self.address!r} "
+            f"start_method={self.start_method!r}",
+            event="provider_server_starting",
+            fields=self._log_fields(),
+        )
         process = context.Process(
             target=serve_provider,
             args=(config, self.provider_factory),
@@ -152,23 +161,71 @@ class ProviderServer:
         process.start()
         try:
             self._wait_ready()
-        except Exception:
+        except Exception as exc:
+            write_warning(
+                "provider",
+                "provider server failed during startup: "
+                f"device={self.device!r} address={self.address!r} "
+                f"exitcode={process.exitcode!r}",
+                event="provider_server_failed",
+                fields={
+                    **self._log_fields(process=process),
+                    "exitcode": process.exitcode,
+                    "error_type": type(exc).__name__,
+                    "error": str(exc),
+                },
+            )
             self._cleanup_failed_start()
             raise
+        write_info(
+            "provider",
+            "provider server ready: "
+            f"device={self.device!r} address={self.address!r} "
+            f"pid={process.pid!r}",
+            event="provider_server_ready",
+            fields=self._log_fields(process=process),
+        )
         return self
 
     def stop(self) -> None:
         process = self._process
         if process is None:
             return
+        write_info(
+            "provider",
+            "stopping provider server: "
+            f"device={self.device!r} address={self.address!r} "
+            f"pid={process.pid!r}",
+            event="provider_server_stopping",
+            fields=self._log_fields(process=process),
+        )
         try:
             _value(request(self.address, self.authkey, _ProviderCommand.CLOSE, None))
         except (ConnectionError, EOFError, FileNotFoundError, OSError):
             pass
         process.join(self.shutdown_timeout)
         if process.is_alive():
+            write_warning(
+                "provider",
+                "terminating provider server after shutdown timeout: "
+                f"device={self.device!r} address={self.address!r} "
+                f"pid={process.pid!r}",
+                event="provider_server_terminated",
+                fields=self._log_fields(process=process),
+            )
             process.terminate()
             process.join()
+        write_info(
+            "provider",
+            "provider server stopped: "
+            f"device={self.device!r} address={self.address!r} "
+            f"exitcode={process.exitcode!r}",
+            event="provider_server_stopped",
+            fields={
+                **self._log_fields(process=process),
+                "exitcode": process.exitcode,
+            },
+        )
         self._process = None
 
     def __enter__(self) -> ProviderServer:
@@ -209,6 +266,16 @@ class ProviderServer:
         process.join()
         unlink_address(self.address)
         self._process = None
+
+    def _log_fields(self, *, process: BaseProcess | None = None) -> dict[str, object]:
+        return {
+            "address": self.address,
+            "device": self.device,
+            "pid": None if process is None else process.pid,
+            "start_method": self.start_method,
+            "startup_timeout": self.startup_timeout,
+            "shutdown_timeout": self.shutdown_timeout,
+        }
 
 
 class RemoteProviderError(RuntimeError):

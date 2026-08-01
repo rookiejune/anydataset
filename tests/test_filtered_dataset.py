@@ -844,6 +844,7 @@ class FilteredDatasetTest(unittest.TestCase):
                     commit_samples=2,
                 )
                 log_text = _read_filter_log()
+                events = _read_events()
 
             self.assertEqual(
                 calls.read_text(encoding="utf-8").splitlines(),
@@ -856,6 +857,13 @@ class FilteredDatasetTest(unittest.TestCase):
             self.assertEqual(result.counts, {"accept": 2, "reject": 2})
             self.assertEqual(result.select_by("accept").indices, (0, 2))
             self.assertIn("ranges=2-3", log_text)
+            resume_event = [
+                entry for entry in events if entry["event"] == "filter_resume"
+            ][-1]
+            self.assertEqual(resume_event["fields"]["expected"], 4)
+            self.assertEqual(resume_event["fields"]["completed"], 2)
+            self.assertEqual(resume_event["fields"]["missing"], 2)
+            self.assertEqual(resume_event["fields"]["ranges"], "2-3")
             cache_root = result.cache_path.parents[1]
             self.assertFalse(
                 (cache_root.parent / f".{cache_root.name}.resume").exists()
@@ -1769,19 +1777,32 @@ class FilteredDatasetTest(unittest.TestCase):
 
     def test_rule_apply_logs_cache_build_reason(self):
         _register_rows_source("unit_test_filter_cache_log")
-        with tempfile.TemporaryDirectory():
-            dataset = _dataset("unit_test_filter_cache_log", [0])
-            rule = FilterRule(
-                name="log_reason",
-                factory=lambda: lambda sample: True,
-            )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home = Path(tmpdir) / "home"
+            with mock.patch.dict(os.environ, {"ANYDATASET_HOME": str(home)}):
+                dataset = _dataset("unit_test_filter_cache_log", [0])
+                rule = FilterRule(
+                    name="log_reason",
+                    factory=lambda: lambda sample: True,
+                )
 
-            rule.apply(dataset_factory=lambda: dataset, device="cpu")
-            log_text = _read_filter_log()
+                rule.apply(dataset_factory=lambda: dataset, device="cpu")
+                log_text = _read_filter_log()
+                events = _read_events()
 
         self.assertIn("building filter cache", log_text)
         self.assertIn("reason='current generation pointer is missing'", log_text)
         self.assertIn("rule='log_reason'", log_text)
+        miss_event = [
+            entry for entry in events if entry["event"] == "filter_cache_miss"
+        ][0]
+        self.assertEqual(miss_event["fields"]["rule"], "log_reason")
+        self.assertEqual(miss_event["fields"]["sample_count"], 1)
+        self.assertEqual(miss_event["fields"]["metrics"], False)
+        self.assertEqual(
+            miss_event["fields"]["reason"],
+            "current generation pointer is missing",
+        )
 
     def test_rule_apply_logs_metrics_rebuild_reason(self):
         _register_rows_source("unit_test_filter_metrics_log")
@@ -2486,6 +2507,17 @@ def _read_filter_log() -> str:
     if not logs:
         return ""
     return "\n".join(path.read_text(encoding="utf-8") for path in logs)
+
+
+def _read_events() -> list[dict[str, object]]:
+    logs = sorted(anydataset_home().glob("logs/*/events.jsonl"))
+    rows: list[dict[str, object]] = []
+    for path in logs:
+        rows.extend(
+            json.loads(line)
+            for line in path.read_text(encoding="utf-8").splitlines()
+        )
+    return rows
 
 
 def _filter_worker_logs(home: Path) -> list[Path]:

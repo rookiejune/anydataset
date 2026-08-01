@@ -500,6 +500,7 @@ class ViewMaterializerTest(unittest.TestCase):
     def test_materializer_splits_oom_batch_and_recaptures_padding(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
+            home = root / "home"
             source = root / "source"
             target = root / "target"
             dataset = _source_dataset(
@@ -515,12 +516,16 @@ class ViewMaterializerTest(unittest.TestCase):
             provider = _SplitOnOomBatchProvider()
             stdout = io.StringIO()
 
-            with redirect_stdout(stdout):
+            with (
+                mock.patch.dict(os.environ, {"ANYDATASET_HOME": str(home)}),
+                redirect_stdout(stdout),
+            ):
                 ViewMaterializer(target, batch_size=4).write(
                     dataset_factory=_DatasetFactory(dataset),
                     provider_factory=_StaticProviderFactory(provider),
                     devices="cpu",
                 )
+                events = _events(home)
 
             stored = read_store_dataset(target)
             codes = [
@@ -551,6 +556,18 @@ class ViewMaterializerTest(unittest.TestCase):
             "retrying as 2+2 after cache cleanup",
             stdout.getvalue(),
         )
+        oom_event = [
+            entry
+            for entry in events
+            if entry["event"] == "materializer_provider_oom_split"
+        ][0]
+        self.assertEqual(oom_event["fields"]["provider"], "_SplitOnOomBatchProvider")
+        self.assertEqual(oom_event["fields"]["batch_size"], 4)
+        published_event = [
+            entry for entry in events if entry["event"] == "materializer_published"
+        ][0]
+        self.assertEqual(published_event["fields"]["expected"], 4)
+        self.assertEqual(published_event["fields"]["path"], str(target))
 
     def test_materializer_clears_cuda_cache_before_splitting_oom_batch(self):
         provider = _SplitOnOomBatchProvider()
@@ -2425,6 +2442,17 @@ def _materializer_logs(home: Path) -> list[Path]:
     if len(logs) != 2:
         raise AssertionError(f"expected two materializer logs, found: {logs}")
     return logs
+
+
+def _events(home: Path) -> list[dict[str, object]]:
+    logs = sorted((home / "logs").glob("*/events.jsonl"))
+    rows: list[dict[str, object]] = []
+    for path in logs:
+        rows.extend(
+            json.loads(line)
+            for line in path.read_text(encoding="utf-8").splitlines()
+        )
+    return rows
 
 
 if __name__ == "__main__":

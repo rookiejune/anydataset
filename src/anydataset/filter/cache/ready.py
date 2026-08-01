@@ -119,6 +119,8 @@ def log_filter_cache_miss(
         "filter",
         "building filter cache: "
         + " ".join(f"{key}={value!r}" for key, value in fields.items()),
+        event="filter_cache_miss",
+        fields=fields,
     )
 
 
@@ -141,6 +143,7 @@ def write_cache(
     runtime: Runtime,
     dataset_factory: DatasetFactory,
 ) -> FilterGeneration:
+    sample_count = int(metadata["base"]["sample_count"])
     generation = create_filter_generation(
         path,
         lambda tmp: _write_cache_tmp(
@@ -166,6 +169,26 @@ def write_cache(
     try:
         cleanup_filter_resume_dir(path)
         cleanup_filter_generations_locked(path)
+        write_info(
+            "filter",
+            "published filter cache: "
+            f"cache_path={path!s} generation={generation.path.name!r} "
+            f"rule={rule.name!r} sample_count={sample_count} metrics={metrics}",
+            event="filter_cache_published",
+            fields={
+                "cache_path": path,
+                "generation_path": generation.path,
+                "generation": generation.path.name,
+                "rule": rule.name,
+                "sample_count": sample_count,
+                "metrics": metrics,
+                "devices": devices,
+                "batch_size": batch_size,
+                "num_workers": num_workers,
+                "commit_samples": commit_samples,
+                "write_workers": write_workers,
+            },
+        )
         return generation
     except Exception:
         generation.lease.close()

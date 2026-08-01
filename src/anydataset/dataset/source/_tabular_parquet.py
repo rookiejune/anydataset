@@ -24,6 +24,7 @@ from pyarrow.csv import ReadOptions  # pyright: ignore[reportPrivateImportUsage]
 from pyarrow.csv import read_csv  # pyright: ignore[reportPrivateImportUsage]
 
 from ..._compat import strict_zip
+from ..._runtime.logging import write_info
 from ..._runtime.parallel import multiprocessing_context
 from ..._runtime.sharding import validate_shard
 from ..._validation import validate_path_segment
@@ -133,6 +134,17 @@ def ensure_records(
         source_label=source_label,
     )
     if cached is not None:
+        _log_prepare_summary(
+            source_label,
+            cache_hit=True,
+            source_count=len(sources),
+            records=cached,
+            manifest_path=manifest_path,
+            cache_dir=cache_dir,
+            prepare_workers=prepare_workers,
+            converted=0,
+            reused=len(cached),
+        )
         return cached
     with FileLock(
         lock_path,
@@ -146,6 +158,17 @@ def ensure_records(
             source_label=source_label,
         )
         if cached is not None:
+            _log_prepare_summary(
+                source_label,
+                cache_hit=True,
+                source_count=len(sources),
+                records=cached,
+                manifest_path=manifest_path,
+                cache_dir=cache_dir,
+                prepare_workers=prepare_workers,
+                converted=0,
+                reused=len(cached),
+            )
             return cached
         return build_cache(
             sources,
@@ -203,11 +226,13 @@ def build_cache(
     previous = previous_records(manifest_path)
     records: list[JsonMapping | None] = []
     jobs = []
+    reused = 0
     for source in sources:
         part = part_name(source)
         existing = previous.get(str(source))
         if existing is not None and valid_record(source, existing, cache_dir):
             records.append(existing)
+            reused += 1
             continue
         records.append(None)
         jobs.append(
@@ -235,7 +260,57 @@ def build_cache(
         manifest_path,
         {"schema_version": CACHE_SCHEMA_VERSION, "files": complete},
     )
+    _log_prepare_summary(
+        source_label,
+        cache_hit=False,
+        source_count=len(sources),
+        records=complete,
+        manifest_path=manifest_path,
+        cache_dir=cache_dir,
+        prepare_workers=prepare_workers,
+        converted=len(converted),
+        reused=reused,
+    )
     return complete
+
+
+def _log_prepare_summary(
+    source_label: str,
+    *,
+    cache_hit: bool,
+    source_count: int,
+    records: Sequence[JsonMapping],
+    manifest_path: Path,
+    cache_dir: Path,
+    prepare_workers: int | None,
+    converted: int,
+    reused: int,
+) -> None:
+    row_count = sum(int(record["row_count"]) for record in records)
+    source = _log_source_name(source_label)
+    state = "hit" if cache_hit else "built"
+    write_info(
+        source,
+        f"{source_label} parquet cache {state}: "
+        f"sources={source_count} rows={row_count} "
+        f"converted={converted} reused={reused}",
+        event="source_prepare",
+        fields={
+            "source_label": source_label,
+            "cache_hit": cache_hit,
+            "source_count": source_count,
+            "row_count": row_count,
+            "converted": converted,
+            "reused": reused,
+            "manifest_path": manifest_path,
+            "cache_dir": cache_dir,
+            "prepare_workers": prepare_workers,
+        },
+    )
+
+
+def _log_source_name(source_label: str) -> str:
+    return source_label.lower().replace(" ", "_").replace("-", "_")
 
 
 def previous_records(manifest_path: Path) -> dict[str, JsonMapping]:

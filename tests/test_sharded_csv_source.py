@@ -441,6 +441,23 @@ class ShardedCsvSourceTest(unittest.TestCase):
                     self.assertEqual(len(second), 2)
 
                 convert.assert_not_called()
+                prepare_events = [
+                    entry
+                    for entry in _events(home)
+                    if entry["event"] == "source_prepare"
+                ]
+
+            self.assertEqual(
+                [entry["fields"]["cache_hit"] for entry in prepare_events],
+                [False, True],
+            )
+            self.assertEqual(prepare_events[0]["fields"]["source_label"], "sharded CSV")
+            self.assertEqual(prepare_events[0]["fields"]["source_count"], 1)
+            self.assertEqual(prepare_events[0]["fields"]["row_count"], 2)
+            self.assertEqual(prepare_events[0]["fields"]["converted"], 1)
+            self.assertEqual(prepare_events[0]["fields"]["reused"], 0)
+            self.assertEqual(prepare_events[1]["fields"]["converted"], 0)
+            self.assertEqual(prepare_events[1]["fields"]["reused"], 1)
 
     def test_rebuilds_cache_with_non_integer_schema_version(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -896,6 +913,16 @@ def _single_log(home: Path, name: str) -> Path:
     if len(logs) != 1:
         raise AssertionError(f"expected one {name}, found: {logs}")
     return logs[0]
+
+
+def _events(home: Path) -> list[dict[str, object]]:
+    logs = list((home / "logs").glob("*/events.jsonl"))
+    if len(logs) != 1:
+        raise AssertionError(f"expected one events.jsonl, found: {logs}")
+    return [
+        json.loads(line)
+        for line in logs[0].read_text(encoding="utf-8").splitlines()
+    ]
 
 
 def _src_text(row):
