@@ -9,17 +9,11 @@ from typing import Any
 import torch
 from torch import Tensor
 
-try:
-    import torchaudio
-except ImportError as exc:
-    raise ImportError(
-        "AudioProvider requires `pip install anydataset[audio]`."
-    ) from exc
-
-
 from ..types import AudioItem, AudioView
 from ..dataset.collate import Batch, FieldGroup, FieldRef
 from ..types.item import Modality, Role
+
+torchaudio: Any | None = None
 
 
 class AudioProvider(ABC):
@@ -30,7 +24,7 @@ class AudioProvider(ABC):
         if AudioView.WAVEFORM in views:
             return views[AudioView.WAVEFORM]
         if AudioView.FILE in views:
-            return torchaudio.load(_audio_source(views[AudioView.FILE]))
+            return _torchaudio().load(_audio_source(views[AudioView.FILE]))
         raise ValueError("AudioProvider expects an audio waveform or file input view.")
 
     def _batch(self, views: Mapping[AudioView, Any]) -> tuple[Tensor, int]:
@@ -59,6 +53,7 @@ class AudioProvider(ABC):
             files = _audio_files(views[AudioView.FILE])
             waveforms: list[Tensor] = []
             sample_rates: list[int] = []
+            torchaudio = _torchaudio()
             for file in files:
                 waveform, sample_rate = torchaudio.load(_audio_source(file))
                 waveforms.append(waveform)
@@ -69,6 +64,20 @@ class AudioProvider(ABC):
     @staticmethod
     def _tensor(input: Tensor) -> Tensor:
         return input.detach().cpu().contiguous()
+
+
+def _torchaudio():
+    global torchaudio
+    if torchaudio is not None:
+        return torchaudio
+    try:
+        import torchaudio as loaded
+    except ImportError as exc:
+        raise ImportError(
+            "AudioProvider file views require pip install anydataset[audio]."
+        ) from exc
+    torchaudio = loaded
+    return torchaudio
 
 
 def _audio_path(value: Any) -> Path:

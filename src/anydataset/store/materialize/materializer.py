@@ -217,6 +217,7 @@ class ViewMaterializer:
         with FileLock(materializer_lock_path(source)):
             fragments_dir = resume_dir(source, "fragments")
             dataset = dataset_factory()
+            _validate_publishable_input(dataset)
             expected = dataset_sample_count(dataset, context="snapshot")
             expected_metadata = self._resume_metadata(
                 dataset,
@@ -311,6 +312,7 @@ class ViewMaterializer:
             start_method=self.runtime.process_start_method,
         )
         dataset = dataset_factory()
+        _validate_publishable_input(dataset)
         expected = dataset_sample_count(dataset, context="resume")
         use_map_style_loader = can_select_indexes(dataset)
         fragments_dir = prepare_materializer_resume_dir(
@@ -396,6 +398,7 @@ class ViewMaterializer:
     ) -> Path | MaterializationStatus:
         output_dir = Path(self.output_dir).expanduser()
         dataset = dataset_factory()
+        _validate_publishable_input(dataset)
         expected = dataset_sample_count(dataset, context="resume")
         use_map_style_loader = can_select_indexes(dataset)
         fragments_dir = prepare_materializer_resume_dir(
@@ -769,7 +772,7 @@ class ViewMaterializer:
         use_map_style_loader: bool,
     ) -> dict[str, object]:
         return {
-            "schema_version": 4,
+            "schema_version": 5,
             "materializer": {
                 "mode": self._materializer_mode,
                 "dataset_id": self._dataset_id,
@@ -784,6 +787,7 @@ class ViewMaterializer:
                 "semantic_id": self.input_id,
                 "sample_count": expected,
                 "use_map_style_loader": use_map_style_loader,
+                "store": _store_input_metadata(dataset),
             },
             "provider": {
                 "factory": callable_id(provider_factory),
@@ -975,6 +979,47 @@ def _missing_sample_records(
             yield index, dataset[index]
         return
     yield from iter_shard(dataset, 1, 0)
+
+
+def _validate_publishable_input(dataset: Any) -> None:
+    from ...dataset.abc import AnyDataset
+    from ...types import Source
+    from ..manifest.schema import STORE_SCHEMA_VERSION
+    from ..reader import StoreDataset, read_store_manifest
+
+    if isinstance(dataset, StoreDataset):
+        if dataset.manifest.schema_version != STORE_SCHEMA_VERSION:
+            raise ValueError(
+                f"Store schema_version {dataset.manifest.schema_version} is legacy "
+                "and lacks provenance. Rematerialize or migrate the store before "
+                "using it as materializer input."
+            )
+        return
+    if isinstance(dataset, AnyDataset) and dataset.spec.source == Source.STORE:
+        read_store_manifest(dataset.spec.path, legacy_policy="reject")
+
+
+def _store_input_metadata(dataset: Any) -> dict[str, object] | None:
+    from ...dataset.abc import AnyDataset
+    from ...types import Source
+    from ..reader import StoreDataset
+
+    store: StoreDataset | None
+    if isinstance(dataset, StoreDataset):
+        store = dataset
+    elif isinstance(dataset, AnyDataset) and dataset.spec.source == Source.STORE:
+        prepared = dataset.dataset
+        if not isinstance(prepared, StoreDataset):
+            raise TypeError("store AnyDataset must prepare to StoreDataset.")
+        store = prepared
+    else:
+        store = None
+    if store is None:
+        return None
+    return {
+        "schema_version": store.manifest.schema_version,
+        "provenance": dict(store.manifest.provenance),
+    }
 
 
 def _select_sample(sample: Sample, schema: Schema) -> Sample:

@@ -98,6 +98,26 @@ class HuggingFaceDatasetTest(unittest.TestCase):
 
         self.assertEqual(rows, [(1, 1), (3, 3)])
 
+    def test_prepare_rejects_split_for_single_disk_dataset(self):
+        fake_datasets = types.ModuleType("datasets")
+
+        class DatasetDict(dict):
+            pass
+
+        fake_datasets.DatasetDict = DatasetDict
+        fake_datasets.load_from_disk = lambda *args, **kwargs: [{"value": 1}]
+        with tempfile.TemporaryDirectory():
+            dataset = AnyDataset(
+                Spec(
+                    source=Source.HF_DISK,
+                    path="/tmp/saved_dataset",
+                    split="validation",
+                ),
+            )
+            with mock.patch.dict(sys.modules, {"datasets": fake_datasets}):
+                with self.assertRaisesRegex(ValueError, "DatasetDict"):
+                    dataset.prepare()
+
     def test_prepare_requires_split_for_dataset_dict(self):
         fake_datasets = types.ModuleType("datasets")
 

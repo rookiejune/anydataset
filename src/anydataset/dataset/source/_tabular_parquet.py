@@ -333,21 +333,31 @@ def convert_files(
     else:
         workers = min(workers, len(jobs))
     if workers <= 1 or multiprocessing.current_process().daemon:
-        converted = (convert_file_job(job) for job in jobs)
-        return tuple(
-            conversion_progress(converted, total=len(jobs), label=progress_label)
+        return _convert_files_inline(jobs, progress_label=progress_label)
+    try:
+        executor = ProcessPoolExecutor(
+            max_workers=workers,
+            mp_context=multiprocessing_context("spawn"),
         )
-    with ProcessPoolExecutor(
-        max_workers=workers,
-        mp_context=multiprocessing_context("spawn"),
-    ) as executor:
+    except (NotImplementedError, PermissionError):
+        return _convert_files_inline(jobs, progress_label=progress_label)
+    with executor as pool:
         return tuple(
             conversion_progress(
-                executor.map(convert_file_job, jobs),
+                pool.map(convert_file_job, jobs),
                 total=len(jobs),
                 label=progress_label,
             )
         )
+
+
+def _convert_files_inline(
+    jobs: Sequence[tuple[int, Path, Path, str, str, str]],
+    *,
+    progress_label: str,
+) -> tuple[tuple[int, JsonMapping], ...]:
+    converted = (convert_file_job(job) for job in jobs)
+    return tuple(conversion_progress(converted, total=len(jobs), label=progress_label))
 
 
 def conversion_progress(

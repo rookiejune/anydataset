@@ -602,6 +602,26 @@ class ShardedCsvSourceTest(unittest.TestCase):
 
             executor.assert_called_once()
 
+    def test_unavailable_prepare_process_pool_falls_back_inline(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            shard_dir = root / "shard_0"
+            shard_dir.mkdir()
+            (shard_dir / "0.csv").write_text("src_text\nzero\n", encoding="utf-8")
+            (shard_dir / "1.csv").write_text("src_text\none\n", encoding="utf-8")
+            dataset = AnyDataset(
+                Spec(source="sharded_csv", path=tmpdir),
+                parse_fn=lambda row: row["src_text"],
+            )
+
+            with mock.patch(
+                "anydataset.dataset.source._tabular_parquet.ProcessPoolExecutor",
+                side_effect=PermissionError("process pools unavailable"),
+            ) as executor:
+                self.assertEqual(list(dataset), ["zero", "one"])
+
+            executor.assert_called_once()
+
     def test_daemon_worker_prepares_multiple_files_inline(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

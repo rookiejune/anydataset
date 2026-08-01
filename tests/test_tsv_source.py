@@ -114,6 +114,7 @@ class TsvSourceTest(unittest.TestCase):
                     load_options={
                         "subdirs": ("en", "zh-CN"),
                         "root_field": "root",
+                        "prepare_workers": 0,
                     },
                 ),
                 parse_fn=lambda row: (row["sentence"], row["root"]),
@@ -182,6 +183,19 @@ class TsvSourceTest(unittest.TestCase):
                 ) as convert:
                     self.assertEqual(list(second), ["hello", "tea"])
                 convert.assert_not_called()
+
+    def test_root_field_does_not_change_physical_cache_identity(self):
+        base = Spec(source="tsv", path="/data/common_voice", split="train")
+        with_root = Spec(
+            source="tsv",
+            path="/data/common_voice",
+            split="train",
+            load_options={"root_field": "root"},
+        )
+
+        self.assertEqual(base.id, with_root.id)
+        self.assertEqual(base.cache_relpath, with_root.cache_relpath)
+        self.assertNotIn("root_field", with_root.to_dict()["load_options"])
 
 
 if __name__ == "__main__":

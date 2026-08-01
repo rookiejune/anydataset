@@ -1,9 +1,15 @@
 from __future__ import annotations
 
 import anydataset
+import anydataset.dataset as dataset
 import anydataset.dataset.source as source
+import anydataset.filter as filter_api
+import anydataset.provider as provider
 import anydataset.provider_service as provider_service
+import anydataset.presets as presets
+import anydataset.runtime as runtime
 import anydataset.store as store
+import anydataset.types as any_types
 
 
 def _assert_public_all(module, expected: list[str], *, private_allowed: set[str] | None = None) -> None:
@@ -85,6 +91,117 @@ def test_source_public_api_boundary() -> None:
     )
 
 
+def test_types_public_api_boundary() -> None:
+    _assert_public_all(
+        any_types,
+        [
+            "AudioItem",
+            "AudioMeta",
+            "AudioReq",
+            "AudioView",
+            "ImageItem",
+            "ImageMeta",
+            "ImageReq",
+            "ImageView",
+            "Item",
+            "ItemTransform",
+            "Lang",
+            "Modality",
+            "Meta",
+            "Preset",
+            "Reference",
+            "Requirement",
+            "Role",
+            "Sample",
+            "Schema",
+            "SemanticAcousticView",
+            "Source",
+            "SourceKey",
+            "Spec",
+            "TextItem",
+            "TextMeta",
+            "TextReq",
+            "TextView",
+            "Transforms",
+            "View",
+            "item",
+            "remap_lang",
+        ],
+    )
+
+
+def test_presets_public_api_boundary() -> None:
+    _assert_public_all(
+        presets,
+        [
+            "CIFAR10",
+            "CommonVoice",
+            "ESC50",
+            "FSD50K",
+            "Fleurs",
+            "LibriSpeechASR",
+            "MNIST",
+            "NSynth",
+            "WMT19",
+        ],
+    )
+    _assert_not_exported(presets, ["preset_spec", "create_map_preset"])
+
+
+def test_dataset_public_api_boundary() -> None:
+    _assert_public_all(
+        dataset,
+        [
+            "AnyDataset",
+            "AudioBatch",
+            "Batch",
+            "FieldGroup",
+            "FieldRef",
+            "IterableAnyDataset",
+            "IndexSelection",
+            "MapStyleABC",
+            "Morphology",
+            "SpeechBatch",
+            "SpeechGridBatch",
+            "SpeechGridView",
+            "audio_collate",
+            "build_toy_audio_dataset",
+            "build_toy_speech_dataset",
+            "build_toy_speech_grid",
+            "collate_fn",
+            "field_lengths",
+            "load_audio_file",
+            "prepare_audio",
+            "speech_collate",
+            "speech_grid_batch",
+            "speech_grid_collate",
+        ],
+    )
+
+
+def test_filter_public_api_boundary() -> None:
+    _assert_public_all(
+        filter_api,
+        [
+            "DatasetFactory",
+            "FilterApplyKwargs",
+            "FilterDecision",
+            "FilterFactory",
+            "FilteredDataset",
+            "FilterLabel",
+            "FilterPredicate",
+            "FilterRule",
+            "RejectReplaceDataset",
+            "cleanup_filter_generations",
+        ],
+    )
+    _assert_not_exported(filter_api, ["filter_identity", "filter_path"])
+
+
+def test_runtime_public_api_boundary() -> None:
+    _assert_public_all(runtime, ["AutoStartMethod", "Runtime"])
+
+
 def test_store_public_api_boundary() -> None:
     _assert_public_all(
         store,
@@ -122,6 +239,27 @@ def test_store_public_api_boundary() -> None:
             "sample_manifest_writer",
             "read_view_manifest",
             "payload_groups",
+        ],
+    )
+
+
+def test_provider_public_api_boundary() -> None:
+    _assert_public_all(
+        provider,
+        [
+            "CodecProvider",
+            "LongCatProvider",
+            "MossTTSProvider",
+            "QwenTTSProvider",
+            "WhisperASRProvider",
+        ],
+    )
+    _assert_not_exported(
+        provider,
+        [
+            "AudioProvider",
+            "ProviderServer",
+            "RemoteProviderFactory",
         ],
     )
 

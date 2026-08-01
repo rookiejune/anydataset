@@ -32,7 +32,7 @@ from anydataset.types import (
     TextView,
 )
 from anydataset.store import DatasetWriter, ViewMaterializer
-from anydataset.store.jsonio import read_json
+from anydataset.store.jsonio import read_json, write_json
 from anydataset.store.manifest.io import read_samples_manifest, read_view_manifest
 from anydataset.store.materialize.identity import callable_id
 from anydataset.store.paths import view_dir
@@ -107,6 +107,46 @@ class ViewMaterializerTest(unittest.TestCase):
                 read_json(target / "dataset.json")["dataset_id"],
                 "longcat-delta",
             )
+
+    def test_materializer_rejects_legacy_anydataset_store_input(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            source = root / "source"
+            target = root / "target"
+            DatasetWriter(source, dataset_id="toy-audio", split="train").write(
+                [_audio_sample(torch.tensor([[1.0]]))]
+            )
+            manifest = read_json(source / "dataset.json")
+            manifest["schema_version"] = 2
+            del manifest["provenance"]
+            write_json(source / "dataset.json", manifest)
+
+            with self.assertRaisesRegex(ValueError, "schema_version 2 is legacy"):
+                ViewMaterializer(target, split="train").write(
+                    dataset_factory=_StoreDatasetFactory(source, root),
+                    provider_factory=_ProviderFactory(),
+                    devices="cpu",
+                )
+
+    def test_materializer_rejects_direct_legacy_store_dataset_input(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            source = root / "source"
+            target = root / "target"
+            DatasetWriter(source, dataset_id="toy-audio", split="train").write(
+                [_audio_sample(torch.tensor([[1.0]]))]
+            )
+            manifest = read_json(source / "dataset.json")
+            manifest["schema_version"] = 2
+            del manifest["provenance"]
+            write_json(source / "dataset.json", manifest)
+
+            with self.assertRaisesRegex(ValueError, "schema_version 2 is legacy"):
+                ViewMaterializer(target, split="train").write(
+                    dataset_factory=_DirectStoreDatasetFactory(source),
+                    provider_factory=_ProviderFactory(),
+                    devices="cpu",
+                )
 
     def test_materializer_parallel_write_preserves_sample_indexes(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -799,6 +839,7 @@ class ViewMaterializerTest(unittest.TestCase):
     def test_materializer_parallel_keep_schema_copies_selected_fields(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
+            source = root / "source"
             target = root / "target"
             samples = tuple(
                 {
@@ -817,6 +858,7 @@ class ViewMaterializerTest(unittest.TestCase):
                 }
                 for index in range(2)
             )
+            DatasetWriter(source, dataset_id="toy-mixed", split="train").write(samples)
 
             ViewMaterializer(
                 target,
@@ -827,7 +869,7 @@ class ViewMaterializerTest(unittest.TestCase):
                     )
                 },
             ).write(
-                dataset_factory=_DatasetFactory(samples),
+                dataset_factory=_StoreDatasetFactory(source, root),
                 provider_factory=_ParallelProviderFactory(),
                 devices=("cpu:0", "cpu:1"),
             )
@@ -1666,11 +1708,7 @@ class ViewMaterializerTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             target = root / "target"
-            samples = tuple(
-                _audio_sample(torch.tensor([[float(index)]]))
-                for index in range(4)
-            )
-            dataset_factory = _DatasetFactory(samples)
+            dataset_factory = _UnpicklableDatasetFactory(4)
             provider_factory = _ParallelProviderFactory()
             materializer = ViewMaterializer(
                 target,
@@ -1823,6 +1861,73 @@ class ViewMaterializerTest(unittest.TestCase):
             stale = list(root.glob(".target.resume.stale-*"))
             self.assertEqual(len(stale), 1)
             self.assertTrue((stale[0] / "fragments" / "resume.json").is_file())
+
+    def test_materializer_resume_metadata_rebuilds_when_store_provenance_changes(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            source = root / "source"
+            target = root / "target"
+            calls = root / "calls.txt"
+            samples = tuple(
+                _audio_sample(torch.tensor([[float(index)]]))
+                for index in range(4)
+            )
+            DatasetWriter(
+                source,
+                dataset_id="toy-audio",
+                split="train",
+                provenance={"input_id": "v1"},
+            ).write(samples)
+            dataset_factory = _StoreDatasetFactory(source, root)
+
+            with self.assertRaisesRegex(RuntimeError, "stop after first batch"):
+                ViewMaterializer(
+                    target,
+                    split="train",
+                    batch_size=2,
+                    commit_samples=2,
+                ).write(
+                    dataset_factory=dataset_factory,
+                    provider_factory=_FailOnceBatchProviderFactory(calls),
+                    devices="cpu",
+                )
+
+            manifest = read_json(source / "dataset.json")
+            manifest["provenance"] = {"input_id": "v2"}
+            write_json(source / "dataset.json", manifest)
+
+            ViewMaterializer(
+                target,
+                split="train",
+                batch_size=2,
+                commit_samples=2,
+            ).write(
+                dataset_factory=dataset_factory,
+                provider_factory=_FailOnceBatchProviderFactory(calls),
+                devices="cpu",
+            )
+
+            stored = read_store_dataset(target)
+            self.assertEqual(len(stored), 4)
+            self.assertEqual(
+                calls.read_text(encoding="utf-8").splitlines(),
+                ["0,1", "2,3", "0,1", "2,3"],
+            )
+            for index in range(4):
+                self.assertTrue(
+                    torch.equal(
+                        stored[index][Role.DEFAULT, Modality.AUDIO]
+                        .views[AudioView.LONGCAT]["semantic_codes"],
+                        torch.tensor([[index]]),
+                    )
+                )
+            stale = list(root.glob(".target.resume.stale-*"))
+            self.assertEqual(len(stale), 1)
+            resume = read_json(stale[0] / "fragments" / "resume.json")
+            self.assertEqual(
+                resume["input"]["store"]["provenance"],
+                {"input_id": "v1"},
+            )
 
 
 def _source_dataset(path: Path, root: Path, samples):
@@ -2106,6 +2211,14 @@ class _StoreDatasetFactory:
 
     def __call__(self):
         return _store_dataset(self.path, self.root)
+
+
+@dataclass(frozen=True)
+class _DirectStoreDatasetFactory:
+    path: Path
+
+    def __call__(self):
+        return read_store_dataset(self.path, legacy_policy="allow")
 
 
 @dataclass(frozen=True)

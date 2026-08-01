@@ -229,6 +229,20 @@ class CanonicalDatasetTest(unittest.TestCase):
         self.assertNotIn("prepare_workers", base.to_dict()["load_options"])
         self.assertNotIn("prepare_workers", with_workers.to_dict()["load_options"])
 
+    def test_spec_root_field_is_physical_for_non_tsv_sources(self):
+        base = Spec(source="custom_rows", path="/data/rows")
+        with_root = Spec(
+            source="custom_rows",
+            path="/data/rows",
+            load_options={"root_field": "root"},
+        )
+
+        self.assertNotEqual(base.id, with_root.id)
+        self.assertEqual(
+            with_root.to_dict()["load_options"]["root_field"],
+            "root",
+        )
+
     def test_spec_load_options_are_frozen(self):
         spec = Spec(
             source=Source.HF,

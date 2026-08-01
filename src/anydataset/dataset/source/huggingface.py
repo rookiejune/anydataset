@@ -74,6 +74,10 @@ def _prepare_hf_disk(spec: types.Spec) -> Any:
 
     dataset = load_from_disk(spec.path, **dict(spec.load_options))
     if not isinstance(dataset, DatasetDict):
+        if spec.split is not None:
+            raise ValueError(
+                "huggingface_disk split is only supported for DatasetDict inputs."
+            )
         return dataset
 
     if spec.split is None:

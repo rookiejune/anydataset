@@ -11,12 +11,7 @@ from ..dataset.collate import Batch, FieldGroup, FieldRef
 from ..types.item import Modality, Role
 from ..types.item import AudioItem, AudioMeta, AudioView, TextItem, TextView
 
-try:
-    import torchaudio
-except ImportError as exc:
-    raise ImportError(
-        "MossTTSProvider requires `pip install anydataset[audio]`."
-    ) from exc
+torchaudio: Any | None = None
 
 
 class MossTTSProvider:
@@ -162,7 +157,7 @@ class MossTTSProvider:
     def _waveform_path(self, waveform: torch.Tensor, sample_rate: int) -> str:
         self._prepare_reference_file()
         path = self._reference_dir / f"ref-{self._reference_file_count:08d}.wav"
-        torchaudio.save(str(path), waveform.detach().cpu(), sample_rate)
+        _torchaudio().save(str(path), waveform.detach().cpu(), sample_rate)
         self._reference_file_count += 1
         return str(path)
 
@@ -238,6 +233,21 @@ def _audio_output(output: Any) -> AudioItem:
             )
         },
     )
+
+
+def _torchaudio():
+    global torchaudio
+    if torchaudio is not None:
+        return torchaudio
+    try:
+        import torchaudio as loaded
+    except ImportError as exc:
+        raise ImportError(
+            "MossTTSProvider waveform reference audio requires "
+            "pip install anydataset[audio]."
+        ) from exc
+    torchaudio = loaded
+    return torchaudio
 
 
 def _positive_int(name: str, value: int) -> int:
