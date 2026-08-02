@@ -146,6 +146,7 @@ loader = dataset.dataloader(
     costs=lengths,
     max_batch_memory=64_000,
     planning_window=256,
+    distributed_plan_window=32,
     shuffle=True,
     collate_fn=collate,
     num_workers=4,
@@ -168,6 +169,11 @@ With no custom sampler, the dataset builds the rank-local read plan behind the
 single `shuffle` flag, and distributed planning never reassigns a planned batch
 to a different rank. `StoreDataset` overrides that private plan to shuffle
 payload shard groups first and then shuffle sample indexes inside each group.
+In DDP, `distributed_plan_window` bounds how many rank-local batch plans are
+generated before synchronizing step counts; lower values reduce first-batch
+latency when cost lookup or packing is expensive.
+Set `ANYDATASET_DEBUG_DDP_PLANS=1` to log each DDP planning chunk before and
+after synchronization.
 Every group is sliced across ranks, so a store with one payload shard still
 feeds every rank while planned batches remain shard-local. DDP synchronizes
 plan counts with tensor collectives over bounded windows and only trims

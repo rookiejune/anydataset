@@ -713,6 +713,8 @@ from anydataset.dataset.collate import collate_fn
 loader = dataset.dataloader(
     costs=lengths,
     max_batch_memory=64_000,
+    planning_window=256,
+    distributed_plan_window=32,
     max_batch_samples=32,
     shuffle=True,
     seed=13,
@@ -725,6 +727,10 @@ loader = dataset.dataloader(
 shuffle；`StoreDataset.__getitem__` 和全局 index shard 语义不变。外层只保留
 `dataset.dataloader(..., shuffle=...)` 这一处
 shuffle 配置，不再需要单独导入 store 专用 sampler。
+DDP 下 `distributed_plan_window` 控制每次同步前各 rank 需要先生成多少个本地 batch plan；
+当 cost lookup 或 packing 较重时，可以调小它来降低 first-batch 等待。
+设置 `ANYDATASET_DEBUG_DDP_PLANS=1` 可以在每个 DDP planning chunk 同步前后输出
+rank、窗口和 plan count。
 
 reader 显式支持 `schema_version: 2` 和当前的 `schema_version: 3`。v2 store 没有
 provenance，仍可直接读取；新写入的 v3 store 会保存 materializer 的 `input_id` 和

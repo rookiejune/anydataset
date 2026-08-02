@@ -301,19 +301,21 @@ def test_distributed_planning_sync_is_bounded() -> None:
         mock.patch("anydataset.dataset._ddp.dist.get_world_size", return_value=2),
         mock.patch(
             "anydataset.dataset._ddp.plan_counts",
-            side_effect=lambda local, _world_size: (local, 127),
+            side_effect=lambda local, _world_size: (local, 7),
         ),
         pytest.warns(RuntimeWarning, match="dropped rank-local final batches"),
     ):
-        synchronized = list(synchronized_plans(plans(), drop_tail=True))
+        synchronized = list(
+            synchronized_plans(plans(), drop_tail=True, plan_window=8)
+        )
 
-    assert len(synchronized) == 127
-    assert consumed == list(range(128))
+    assert len(synchronized) == 7
+    assert consumed == list(range(8))
 
 
 def test_distributed_planning_requires_equal_counts_without_tail_drop() -> None:
     def plans():
-        for index in range(128):
+        for index in range(8):
             yield _Plan(records=(_Record(index=index, cost=1),), cost=1)
 
     with (
@@ -322,11 +324,30 @@ def test_distributed_planning_requires_equal_counts_without_tail_drop() -> None:
         mock.patch("anydataset.dataset._ddp.dist.get_world_size", return_value=2),
         mock.patch(
             "anydataset.dataset._ddp.plan_counts",
-            return_value=(128, 127),
+            return_value=(8, 7),
         ),
         pytest.raises(RuntimeError, match="equal rank-local batch counts"),
     ):
-        list(synchronized_plans(plans(), drop_tail=False))
+        list(synchronized_plans(plans(), drop_tail=False, plan_window=8))
+
+
+def test_distributed_plan_window_is_loader_configurable() -> None:
+    loader = _dataset([1]).dataloader(
+        costs=None,
+        max_batch_memory=1,
+        distributed_plan_window=4,
+    )
+
+    assert loader.batch_sampler.distributed_plan_window == 4
+
+
+def test_requires_positive_distributed_plan_window() -> None:
+    with pytest.raises(ValueError, match="distributed_plan_window"):
+        _dataset([1]).dataloader(
+            costs=None,
+            max_batch_memory=1,
+            distributed_plan_window=0,
+        )
 
 
 def test_distributed_plan_counts_use_tensor_collective() -> None:

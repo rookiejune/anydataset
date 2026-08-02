@@ -149,8 +149,10 @@ store 的 map-style `__getitem__` 保持全局下标随机访问语义，不隐�
 shuffle，再在 group 内 shuffle 样本；batch planner 只在同一个 group 内组 batch。
 `sharded_csv` 和 `tsv` 使用 Parquet row group 作为同类 index group，避免全量样本
 index list 和跨 row group 随机读取；其他 map-style dataset 使用有界连续 index group。planner
-只维护 `planning_window` 个候选，DDP 按固定 plan window 同步并只裁剪 rank-local 最终
-batch 尾部，不修改通用 `iter_shard()` 的 modulo 契约。
+只维护 `planning_window` 个候选，DDP 按 `distributed_plan_window` 个 plan 的有界 chunk
+同步并只裁剪 rank-local 最终 batch 尾部，不修改通用 `iter_shard()` 的 modulo 契约。
+默认 DDP 同步窗口保持较小，以降低 cost lookup 或 batch packing 较重时的 first-batch
+等待；需要定位卡点时可用 `ANYDATASET_DEBUG_DDP_PLANS=1` 打开 chunk 级日志。
 reader 默认只接受字段和 Parquet manifest 结构完整的 `schema_version: 3` store；
 v2 store 没有 provenance，属于 legacy compatibility 格式，只能通过显式
 `legacy_policy="warn"` 或 `"allow"` 读取。`warn` 会发出明确的

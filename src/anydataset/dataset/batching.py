@@ -129,6 +129,7 @@ class _BatchSampler(Sampler[list[int]]):
         seed: int,
         epoch: int,
         planning_window: int = 256,
+        distributed_plan_window: int = 32,
         max_batch_samples: int | None = None,
         drop_distributed_tail: bool = True,
     ) -> None:
@@ -144,6 +145,9 @@ class _BatchSampler(Sampler[list[int]]):
         self.seed = _int("seed", seed)
         self.epoch = _non_negative_int("epoch", epoch)
         self.planning_window = _positive_int("planning_window", planning_window)
+        self.distributed_plan_window = _positive_int(
+            "distributed_plan_window", distributed_plan_window
+        )
         self.max_batch_samples = (
             None
             if max_batch_samples is None
@@ -161,6 +165,7 @@ class _BatchSampler(Sampler[list[int]]):
         for plan in synchronized_plans(
             plans,
             drop_tail=self.drop_distributed_tail,
+            plan_window=self.distributed_plan_window,
         ):
             yield [record.index for record in plan.records]
 
@@ -214,6 +219,7 @@ class _DataLoader(TorchDataLoader):
         seed: int = 0,
         epoch: int = 0,
         planning_window: int = 256,
+        distributed_plan_window: int = 32,
         max_batch_samples: int | None = None,
         drop_distributed_tail: bool = True,
         **loader_kwargs: Any,
@@ -233,6 +239,7 @@ class _DataLoader(TorchDataLoader):
             seed=seed,
             epoch=epoch,
             planning_window=planning_window,
+            distributed_plan_window=distributed_plan_window,
             max_batch_samples=max_batch_samples,
             drop_distributed_tail=drop_distributed_tail,
         )
