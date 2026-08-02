@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from enum import Enum
 from pathlib import Path
@@ -152,6 +153,8 @@ class _FilterCache:
         "_input_id",
         "_labels",
         "_lease",
+        "_logs_dir",
+        "_elapsed_seconds",
         "_metrics_path",
         "_rule",
     )
@@ -166,6 +169,8 @@ class _FilterCache:
         lease: GenerationLease,
         metrics_path: Path | None = None,
         input_id: str | None = None,
+        logs_dir: Path | None = None,
+        elapsed_seconds: float | None = None,
     ) -> None:
         base = filter_base(base)
         if not isinstance(rule, FilterRule):
@@ -188,6 +193,8 @@ class _FilterCache:
         self._lease = lease
         self._metrics_path = None if metrics_path is None else Path(metrics_path)
         self._input_id = input_id
+        self._logs_dir = None if logs_dir is None else Path(logs_dir)
+        self._elapsed_seconds = elapsed_seconds
 
     def __repr__(self) -> str:
         return (
@@ -250,6 +257,27 @@ class _FilterCache:
     @property
     def metrics_path(self) -> Path | None:
         return self._metrics_path
+
+    @property
+    def logs_dir(self) -> Path | None:
+        return self._logs_dir
+
+    @property
+    def elapsed_seconds(self) -> float | None:
+        return self._elapsed_seconds
+
+    @property
+    def base_count(self) -> int:
+        return sum(self.counts.values())
+
+    @property
+    def samples_per_second(self) -> float | None:
+        elapsed = self.elapsed_seconds
+        if elapsed is None:
+            return None
+        if elapsed <= 0.0:
+            return math.inf if self.base_count > 0 else 0.0
+        return self.base_count / elapsed
 
     @property
     def input_id(self) -> str | None:
@@ -437,6 +465,22 @@ class FilteredDataset(MapStyleABC):
     @property
     def metrics_path(self) -> Path | None:
         return self._cache.metrics_path
+
+    @property
+    def logs_dir(self) -> Path | None:
+        return self._cache.logs_dir
+
+    @property
+    def elapsed_seconds(self) -> float | None:
+        return self._cache.elapsed_seconds
+
+    @property
+    def base_count(self) -> int:
+        return self._cache.base_count
+
+    @property
+    def samples_per_second(self) -> float | None:
+        return self._cache.samples_per_second
 
     @property
     def input_id(self) -> str | None:

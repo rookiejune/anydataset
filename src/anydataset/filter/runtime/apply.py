@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from time import perf_counter
 from typing import TYPE_CHECKING
 
+from ..._runtime.logging import run_logs_dir
 from ..._runtime.devices import Devices, resolve_devices
 from ..._runtime.resume import dataset_sample_count
 from ..._validation import (
@@ -57,6 +59,8 @@ def apply_filter(
 ) -> _FilterCache:
     from ..api import _FilterCache
 
+    logs_dir = run_logs_dir()
+    started_at = perf_counter()
     dataset = filter_base(dataset_factory())
     generation = ensure_filter(
         dataset,
@@ -77,15 +81,19 @@ def apply_filter(
         dataset_factory=dataset_factory,
     )
     try:
+        partitions = read_partitions(generation.path)
+        elapsed_seconds = perf_counter() - started_at
         return _FilterCache(
             dataset,
-            read_partitions(generation.path),
+            partitions,
             rule,
             generation.path,
             lease=generation.lease,
             metrics_path=metrics_path(generation.path) if metrics else None,
             dataset_factory=dataset_factory,
             input_id=input_id,
+            logs_dir=logs_dir,
+            elapsed_seconds=elapsed_seconds,
         )
     except Exception:
         generation.lease.close()
