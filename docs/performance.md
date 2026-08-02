@@ -13,6 +13,11 @@
   `Runtime(reader_start_method="auto")` 在没有 server 时使用 spawn，在
   `server_start_method` 非空时使用 fork。后台 writer 默认使用 thread backend；只有显式
   使用 process writer backend 时才读取 `writer_start_method`。
+- 公开入口默认值优先保证跨 provider、跨平台的可用性和可恢复性，而不是把某个
+  workspace 的生产吞吐配置固化为库默认值。高吞吐任务应在调用方 workflow/job wrapper
+  中显式设置 `batch_size`、`num_workers`、`prefetch_factor`、
+  `write_workers`、`write_prefetch`、`commit_samples` 或 `num_shards`，并把
+  依赖具体数据集、存储和 GPU 的 benchmark 结论留在对应项目文档中。
 - 默认用户数据集以 map-style 为主。`StoreDataset`、`FilteredDataset` 这类默认
   map-style shard 语义的 materializer/filter 热路径会使用 map-style indexed
   loader；`AnyDataset` 仍优先保留 source-aware `iter_shard` 路径，避免把顺序
@@ -115,6 +120,24 @@
 - materializer resume metadata 除自动 factory 标识外，还接受显式 `input_id` 和
   `provider_id` 语义版本。它们共同决定 fragment 是否可复用，避免 mutable input 或模型
   checkpoint 变化后错误续跑。
+
+## 公开默认值与生产调优
+
+公开入口默认值只表达跨项目安全语义；吞吐相关参数由调用方根据任务、硬件和存储显式配置。
+不要把 workspace 中某个数据集、provider 或 GPU 的 benchmark 结果反推成
+`anydataset` 的库级默认值。
+
+| 入口 | 当前默认值 | 默认值定位 | 生产调优入口 |
+| --- | --- | --- | --- |
+| `Runtime()` | 本地 reader 用 spawn；有 server 隔离时 `reader_start_method="auto"` 解析为 fork；writer 默认 thread backend | 避免本地 provider/CUDA 状态被 worker 继承，同时让 server-owned provider 场景减少 reader 启动成本 | server/provider 已隔离时用 `Runtime(server_start_method=..., reader_start_method="auto")`；只有明确需要跨进程写入时才改 writer backend |
+| `DatasetWriter` | `num_shards=1`、`num_workers=0`、`prefetch_factor=None` | 默认串行写，支持任意 iterable，避免默认要求 dataset factory 可 pickle | 大数据集显式传 `dataset_factory`，按数据源和存储调 `num_shards`、`num_workers`、`prefetch_factor` |
+| `FilterRule.apply` | `device="auto"`、`batch_size=1`、`num_workers=0`、`prefetch_factor=None`、`commit_samples=100_000`、`write_workers=1` | 兼容只实现逐样本 `__call__` 的 predicate，并用后台 writer 重叠 partition cache 落盘 | predicate 支持 `call_batch` 时显式增大 `batch_size`；CPU decode 或特征读取重时调 `num_workers`/`prefetch_factor`；落盘慢时调 `write_workers`/`write_prefetch` |
+| `ViewMaterializer` / `ModalityMaterializer` | `batch_size=1`、`num_workers=0`、`prefetch_factor=None`、`commit_samples=max(batch_size, 1024)`、`write_workers=1` | 默认单样本 provider 可运行，resume fragment 不产生过多小文件，并让 provider 执行与落盘重叠 | GPU/provider 生产任务在 workflow/job wrapper 中显式调 `batch_size`、`num_workers`、`prefetch_factor`、`write_workers`、`write_prefetch`、`commit_samples` 和 `devices` |
+| `AnyDataset.from_store(...)` | `views=None` 读取完整 store 语义 | 默认保留数据集语义，不猜训练只需要哪些 view | 训练、过滤或物化只需要部分 payload 时显式传 `views=...`，减少 manifest 和 payload 读取 |
+
+如果某个 workflow 已经有稳定 benchmark，例如固定 A100、固定 provider、固定 store 后端，
+应在对应 workspace/job wrapper 文档中记录推荐组合，并由 wrapper 显式传参。
+库级文档只记录这些参数如何影响吞吐和可恢复性。
 
 ## 阶段一基准
 

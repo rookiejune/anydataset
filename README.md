@@ -893,6 +893,11 @@ inside their runtime shard logic so each sample is covered once.
 `write_workers` controls background fragment writer threads inside each
 materializer worker; the default is one writer so provider execution can
 overlap with store writes. `write_prefetch` bounds pending write jobs.
+Public defaults are intentionally conservative: they keep single-process,
+single-sample execution usable across providers and platforms. Production
+workflows should tune `batch_size`, `num_workers`, `prefetch_factor`,
+`write_workers`, `write_prefetch`, and `commit_samples` in the calling
+script or job wrapper based on the provider, storage backend, and hardware.
 
 ```python
 def provider_factory(device: str):

@@ -874,7 +874,7 @@ materializer = ViewMaterializer(
 合并 store。materializer 默认使用可续跑 fragment：已完成的
 provider batch 会聚合成 checkpoint chunk，保留在目标目录旁边的隐藏 resume 目录中；
 重跑时按全局 `sample_index` 跳过，最后再原子提交最终 store。`commit_samples`
-控制 checkpoint 粒度，默认是 `max(batch_size, 32)`，避免默认可续跑时产生过多小文件；
+控制 checkpoint 粒度，默认是 `max(batch_size, 1024)`，避免默认可续跑时产生过多小文件；
 需要更细断点时可以显式调低。
 resume compatibility 会记录两个 factory 的自动标识。当输入快照或 provider 行为依赖
 callable 无法表达的状态（例如可变文件或 checkpoint 内容）时，用 `input_id` 和
@@ -889,6 +889,10 @@ manifest 的 provenance，参与下游 filter cache identity。
 shard 会把 rank 和 DataLoader worker 组合起来，保证样本只覆盖一次。
 `write_workers` 控制每个 materializer worker 内部的后台写线程数，默认用一个 writer
 让 provider 计算和 fragment 落盘重叠；`write_prefetch` 控制待写任务上限。
+公开 API 默认值刻意保持保守：默认路径要在不同 provider、平台和调用环境里都能以
+单进程、单样本方式稳定运行。生产 workflow 应在脚本或 job wrapper 中根据 provider、
+存储后端和硬件显式调 `batch_size`、`num_workers`、`prefetch_factor`、
+`write_workers`、`write_prefetch` 和 `commit_samples`。
 
 ```python
 def provider_factory(device: str):
