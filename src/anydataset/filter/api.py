@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import math
 from collections.abc import Iterable, Iterator, Mapping, Sequence
+from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from types import MappingProxyType
@@ -26,6 +26,7 @@ from .runtime.factory import make_filtered_dataset_factory
 from .runtime.options import options as apply_options
 from .types import (
     DatasetFactory,
+    FilterApplyReport,
     FilterApplyKwargs,
     FilterDecision,
     FilterFactory,
@@ -142,6 +143,24 @@ class FilterRule:
             **apply_kwargs,
         )
 
+    def apply_with_report(
+        self,
+        *,
+        dataset_factory: DatasetFactory,
+        labels: FilterLabel | Sequence[FilterLabel] | None = None,
+        **apply_kwargs: Unpack[FilterApplyKwargs],
+    ) -> FilterApplyResult:
+        return FilteredDataset._apply_with_report(
+            self.name,
+            self.factory,
+            rule_id=self.rule_id,
+            version=self.version,
+            content_id=self.content_id,
+            dataset_factory=dataset_factory,
+            labels=labels,
+            **apply_kwargs,
+        )
+
 
 class _FilterCache:
     __slots__ = (
@@ -153,8 +172,6 @@ class _FilterCache:
         "_input_id",
         "_labels",
         "_lease",
-        "_logs_dir",
-        "_elapsed_seconds",
         "_metrics_path",
         "_rule",
     )
@@ -169,8 +186,6 @@ class _FilterCache:
         lease: GenerationLease,
         metrics_path: Path | None = None,
         input_id: str | None = None,
-        logs_dir: Path | None = None,
-        elapsed_seconds: float | None = None,
     ) -> None:
         base = filter_base(base)
         if not isinstance(rule, FilterRule):
@@ -193,8 +208,6 @@ class _FilterCache:
         self._lease = lease
         self._metrics_path = None if metrics_path is None else Path(metrics_path)
         self._input_id = input_id
-        self._logs_dir = None if logs_dir is None else Path(logs_dir)
-        self._elapsed_seconds = elapsed_seconds
 
     def __repr__(self) -> str:
         return (
@@ -259,27 +272,6 @@ class _FilterCache:
         return self._metrics_path
 
     @property
-    def logs_dir(self) -> Path | None:
-        return self._logs_dir
-
-    @property
-    def elapsed_seconds(self) -> float | None:
-        return self._elapsed_seconds
-
-    @property
-    def base_count(self) -> int:
-        return sum(self.counts.values())
-
-    @property
-    def samples_per_second(self) -> float | None:
-        elapsed = self.elapsed_seconds
-        if elapsed is None:
-            return None
-        if elapsed <= 0.0:
-            return math.inf if self.base_count > 0 else 0.0
-        return self.base_count / elapsed
-
-    @property
     def input_id(self) -> str | None:
         return self._input_id
 
@@ -314,7 +306,7 @@ class FilteredDataset(MapStyleABC):
     ) -> None:
         normalized = None if labels is None else normalized_labels(labels)
         options = apply_options(apply_kwargs)
-        cache = apply_filter(
+        applied = apply_filter(
             FilterRule(
                 name,
                 factory,
@@ -336,8 +328,54 @@ class FilteredDataset(MapStyleABC):
             runtime=options["runtime"],
             rebuild=options["rebuild"],
             dataset_factory=dataset_factory,
+            with_report=False,
         )
-        self._bind_cache(cache, labels=normalized)
+        self._bind_cache(applied.cache, labels=normalized)
+
+    @classmethod
+    def _apply_with_report(
+        cls,
+        name: str,
+        factory: FilterFactory,
+        *,
+        rule_id: str | None = None,
+        version: str | None = None,
+        content_id: str | None = None,
+        dataset_factory: DatasetFactory,
+        labels: FilterLabel | Sequence[FilterLabel] | None = None,
+        **apply_kwargs: Unpack[FilterApplyKwargs],
+    ) -> FilterApplyResult:
+        normalized = None if labels is None else normalized_labels(labels)
+        options = apply_options(apply_kwargs)
+        applied = apply_filter(
+            FilterRule(
+                name,
+                factory,
+                rule_id=rule_id,
+                version=version,
+                content_id=content_id,
+            ),
+            input_id=options["input_id"],
+            metrics=options["metrics"],
+            device=options["device"],
+            batch_size=options["batch_size"],
+            num_workers=options["num_workers"],
+            prefetch_factor=options["prefetch_factor"],
+            commit_samples=options["commit_samples"],
+            max_shard_samples=options["max_shard_samples"],
+            write_workers=options["write_workers"],
+            write_prefetch=options["write_prefetch"],
+            worker_timeout=options["worker_timeout"],
+            runtime=options["runtime"],
+            rebuild=options["rebuild"],
+            dataset_factory=dataset_factory,
+            with_report=True,
+        )
+        dataset = cls._from_cache(applied.cache, labels=normalized)
+        report = applied.report
+        if report is None:
+            raise RuntimeError("filter apply report was not collected.")
+        return FilterApplyResult(dataset=dataset, report=report)
 
     def _bind_cache(
         self,
@@ -467,22 +505,6 @@ class FilteredDataset(MapStyleABC):
         return self._cache.metrics_path
 
     @property
-    def logs_dir(self) -> Path | None:
-        return self._cache.logs_dir
-
-    @property
-    def elapsed_seconds(self) -> float | None:
-        return self._cache.elapsed_seconds
-
-    @property
-    def base_count(self) -> int:
-        return self._cache.base_count
-
-    @property
-    def samples_per_second(self) -> float | None:
-        return self._cache.samples_per_second
-
-    @property
     def input_id(self) -> str | None:
         return self._cache.input_id
 
@@ -505,6 +527,12 @@ class FilteredDataset(MapStyleABC):
 
     def __getitem__(self, index: int) -> Sample:
         return filter_universe(self.base)[self._indices[index]]
+
+
+@dataclass(frozen=True)
+class FilterApplyResult:
+    dataset: FilteredDataset
+    report: FilterApplyReport
 
 
 def _restore_filter_cache(
@@ -582,6 +610,8 @@ def selected_index(
 
 __all__ = [
     "DatasetFactory",
+    "FilterApplyReport",
+    "FilterApplyResult",
     "FilterDecision",
     "FilterFactory",
     "FilteredDataset",

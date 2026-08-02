@@ -3,6 +3,8 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum
+import math
+from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, TypedDict, Union, runtime_checkable
 
 from .._compat import NotRequired
@@ -28,6 +30,23 @@ _Index = Sequence[int]
 class FilterDecision:
     label: FilterLabel
     metrics: Mapping[str, JsonValue]
+
+
+@dataclass(frozen=True)
+class FilterApplyReport:
+    """Wall-clock observability for one explicit filter apply call."""
+
+    logs_dir: Path
+    elapsed_seconds: float
+    sample_count: int
+    cache_hit: bool
+    cache_path: Path
+
+    @property
+    def samples_per_second(self) -> float:
+        if self.elapsed_seconds <= 0.0:
+            return math.inf if self.sample_count > 0 else 0.0
+        return self.sample_count / self.elapsed_seconds
 
 
 FilterOutput = Union[FilterLabel, FilterDecision]

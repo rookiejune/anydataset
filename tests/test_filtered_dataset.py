@@ -317,7 +317,22 @@ class FilteredDatasetTest(unittest.TestCase):
         self.assertEqual(_values(result.select_by("accept")), [2, 3])
         self.assertEqual(calls, [])
 
-    def test_rule_apply_exposes_runtime_observability(self):
+    def test_rule_apply_does_not_create_run_logs_on_hot_cache(self):
+        _register_rows_source("unit_test_filter_no_hot_logs")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home = Path(tmpdir) / "home"
+            dataset = _dataset("unit_test_filter_no_hot_logs", [0, 1, 2])
+            rule = FilterRule("no_hot_logs", _true_factory)
+
+            with mock.patch.dict(os.environ, {"ANYDATASET_HOME": str(home)}):
+                rule.apply(dataset_factory=lambda: dataset, device="cpu")
+                logs_dir = home / "logs"
+                run_count = len(tuple(logs_dir.iterdir()))
+                rule.apply(dataset_factory=lambda: dataset, device="cpu")
+
+            self.assertEqual(len(tuple(logs_dir.iterdir())), run_count)
+
+    def test_rule_apply_with_report_exposes_runtime_observability(self):
         _register_rows_source("unit_test_filter_observability")
         with tempfile.TemporaryDirectory() as tmpdir:
             home = Path(tmpdir) / "home"
@@ -325,24 +340,23 @@ class FilteredDatasetTest(unittest.TestCase):
             rule = FilterRule("even_observable", _true_factory)
 
             with mock.patch.dict(os.environ, {"ANYDATASET_HOME": str(home)}):
-                result = rule.apply(dataset_factory=lambda: dataset, device="cpu")
+                applied = rule.apply_with_report(
+                    dataset_factory=lambda: dataset,
+                    device="cpu",
+                )
+                result = applied.dataset
+                report = applied.report
                 selected = result.select_by("accept")
 
-            self.assertEqual(result.base_count, 3)
-            self.assertEqual(selected.base_count, 3)
-            self.assertIsNotNone(result.logs_dir)
-            self.assertEqual(result.logs_dir, selected.logs_dir)
-            assert result.logs_dir is not None
-            self.assertEqual(result.logs_dir.parent, home / "logs")
-            self.assertTrue((result.logs_dir / "run.json").is_file())
-            self.assertIsNotNone(result.elapsed_seconds)
-            assert result.elapsed_seconds is not None
-            self.assertGreaterEqual(result.elapsed_seconds, 0.0)
-            self.assertEqual(result.elapsed_seconds, selected.elapsed_seconds)
-            self.assertIsNotNone(result.samples_per_second)
-            assert result.samples_per_second is not None
-            self.assertGreater(result.samples_per_second, 0.0)
-            self.assertEqual(result.samples_per_second, selected.samples_per_second)
+            self.assertEqual(len(result), 3)
+            self.assertEqual(len(selected), 3)
+            self.assertEqual(report.sample_count, 3)
+            self.assertFalse(report.cache_hit)
+            self.assertEqual(report.cache_path, result.cache_path)
+            self.assertEqual(report.logs_dir.parent, home / "logs")
+            self.assertTrue((report.logs_dir / "run.json").is_file())
+            self.assertGreaterEqual(report.elapsed_seconds, 0.0)
+            self.assertGreater(report.samples_per_second, 0.0)
 
     def test_concurrent_cold_cache_waits_and_reuses_result(self):
         _register_rows_source("unit_test_filter_concurrent_cache")
@@ -1171,9 +1185,9 @@ class FilteredDatasetTest(unittest.TestCase):
         self.assertEqual(restored.cache_path, filtered.cache_path)
         self.assertEqual(restored.metrics_path, filtered.metrics_path)
         self.assertEqual(restored.input_id, "pickle-input-v1")
-        self.assertIsNone(restored.logs_dir)
-        self.assertIsNone(restored.elapsed_seconds)
-        self.assertIsNone(restored.samples_per_second)
+        self.assertFalse(hasattr(restored, "logs_dir"))
+        self.assertFalse(hasattr(restored, "elapsed_seconds"))
+        self.assertFalse(hasattr(restored, "samples_per_second"))
         self.assertEqual(_values(restored), [0, 2])
         self.assertEqual(len(list(restored.iter_metrics())), 4)
 
@@ -1392,34 +1406,6 @@ class FilteredDatasetTest(unittest.TestCase):
         self.assertEqual(manifest["partitions"][0]["label"], "accept")
         self.assertEqual(manifest["partitions"][0]["count"], 2)
         self.assertEqual(len(manifest["partitions"][0]["files"]), 1)
-
-    def test_apply_exposes_runtime_stats_and_logs_dir(self):
-        _register_rows_source("unit_test_filter_runtime_stats")
-        dataset = _dataset("unit_test_filter_runtime_stats", [0, 1, 2])
-        rule = FilterRule(
-            name="runtime_stats",
-            factory=lambda: lambda sample: _value(sample) % 2 == 0,
-        )
-
-        result = rule.apply(dataset_factory=lambda: dataset, device="cpu")
-
-        elapsed_seconds = result.elapsed_seconds
-        samples_per_second = result.samples_per_second
-        logs_dir = result.logs_dir
-        self.assertEqual(result.base_count, 3)
-        self.assertIsNotNone(elapsed_seconds)
-        if elapsed_seconds is None:
-            self.fail("filter apply did not expose elapsed_seconds")
-        self.assertGreaterEqual(elapsed_seconds, 0.0)
-        self.assertIsNotNone(samples_per_second)
-        if samples_per_second is None:
-            self.fail("filter apply did not expose samples_per_second")
-        self.assertGreater(samples_per_second, 0.0)
-        self.assertIsNotNone(logs_dir)
-        if logs_dir is None:
-            self.fail("filter apply did not expose a logs_dir")
-        self.assertEqual(logs_dir.parent, anydataset_home() / "logs")
-        self.assertTrue((logs_dir / "run.json").is_file())
 
     def test_store_provenance_versions_filter_cache_identity(self):
         with tempfile.TemporaryDirectory() as tmpdir:

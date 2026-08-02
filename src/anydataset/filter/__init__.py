@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-from .api import FilteredDataset, FilterRule
+from .api import FilterApplyResult, FilteredDataset, FilterRule
 from .cache.generations import cleanup_filter_generations
 from .online import RejectReplaceDataset
 from .types import (
     DatasetFactory,
     FilterApplyKwargs,
+    FilterApplyReport,
     FilterDecision,
     FilterFactory,
     FilterLabel,
@@ -15,6 +16,8 @@ from .types import (
 __all__ = [
     "DatasetFactory",
     "FilterApplyKwargs",
+    "FilterApplyReport",
+    "FilterApplyResult",
     "FilterDecision",
     "FilterFactory",
     "FilteredDataset",

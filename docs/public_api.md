@@ -27,14 +27,17 @@ Use these paths for application code:
 - `anydataset.presets`: built-in dataset preset classes.
 - `anydataset.dataset`: dataset base classes, index selection, generic collate
   helpers, and morphology collate/view contracts.
-- `anydataset.filter`: cached filter rules, filtered datasets, online reject /
-  replace filtering, filter decisions, and filter cleanup entry points.
+- `anydataset.filter`: cached filter rules, filtered datasets, explicit filter
+  apply reports, online reject / replace filtering, filter decisions, and filter
+  cleanup entry points.
 - `anydataset.store`: canonical store writing, view/materialization providers,
   explicit store migration, payload integrity checks, and retained-file cleanup.
 - `anydataset.runtime`: process/device runtime configuration.
 - `anydataset.provider`: built-in model/provider classes.
 - `anydataset.provider_service`: provider process server and remote provider /
   filter client factories.
+- `anydataset.quality`: quality rule-building utilities for text,
+  translation, and speech filters.
 
 `anydataset.provider` and `anydataset.provider_service` are intentionally
 separate public surfaces. Provider modules define model/data transformation
@@ -67,9 +70,10 @@ These paths are intended for users extending anydataset:
   samples in presets and user-defined parsers.
 - Provider protocols and wrapper classes exported from `anydataset.store`
   define view and modality materialization contracts.
-- Quality rule classes under `anydataset.quality.rules`,
+- Quality rule classes should be imported from `anydataset.quality` by default.
+  Focused submodules such as `anydataset.quality.rules`,
   `anydataset.quality.text`, `anydataset.quality.translation`, and
-  `anydataset.quality.speech` are public rule-building utilities.
+  `anydataset.quality.speech` remain public extension paths.
 
 ## Internal API
 

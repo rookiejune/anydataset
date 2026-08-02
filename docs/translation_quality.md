@@ -142,9 +142,15 @@
 
 ```python
 from anydataset import FilterRule, Lang, Preset
-from anydataset.quality.rules import QualityChain, Rule
-from anydataset.quality.text import ChineseGEC, TextAcceptability, TextQuality
-from anydataset.quality.translation import Bicleaner, TranslationQuality
+from anydataset.quality import (
+    Bicleaner,
+    ChineseGEC,
+    QualityChain,
+    Rule,
+    TextAcceptability,
+    TextQuality,
+    TranslationQuality,
+)
 from anydataset.types import Role
 
 def factory():

@@ -281,6 +281,19 @@ exposes `cache_path`, preserves map-style indexing, and provides
 `iter_shard(num_shards, shard_id)` as `(sample_index, sample)` pairs over the
 selected global-index order.
 
+Runtime observability is explicit rather than stored on the dataset object:
+
+```python
+applied = rule.apply_with_report(dataset_factory=dataset_factory, device="cpu")
+filtered = applied.dataset
+report = applied.report
+```
+
+`FilterApplyReport` contains the run logs directory, wall-clock elapsed seconds,
+sample count, cache path, and whether the call reused a ready cache. Its
+`samples_per_second` property is apply-call throughput, so cache hits measure
+cache lookup and partition loading rather than predicate speed.
+
 ## Online safety net
 
 For rare CPU-only rejects after an accept partition is already selected, wrap

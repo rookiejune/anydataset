@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from time import perf_counter
 from typing import TYPE_CHECKING
 
@@ -30,13 +31,19 @@ from ..cache.identity import (
     metadata,
 )
 from ..cache.storage import read_partitions
-from ..types import DatasetFactory
+from ..types import DatasetFactory, FilterApplyReport
 
 if TYPE_CHECKING:
     from ..api import FilterRule, _FilterCache
 
 _CACHE_LOCK_TIMEOUT = 3600.0
 _CACHE_LOCK_POLL = 0.2
+
+
+@dataclass(frozen=True)
+class _AppliedFilter:
+    cache: _FilterCache
+    report: FilterApplyReport | None
 
 
 def apply_filter(
@@ -56,13 +63,14 @@ def apply_filter(
     runtime: Runtime,
     rebuild: bool,
     dataset_factory: DatasetFactory,
-) -> _FilterCache:
+    with_report: bool = False,
+) -> _AppliedFilter:
     from ..api import _FilterCache
 
-    logs_dir = run_logs_dir()
-    started_at = perf_counter()
+    logs_dir = run_logs_dir() if with_report else None
+    started_at = perf_counter() if with_report else None
     dataset = filter_base(dataset_factory())
-    generation = ensure_filter(
+    generation, sample_count, cache_hit = ensure_filter(
         dataset,
         rule,
         input_id=input_id,
@@ -82,8 +90,7 @@ def apply_filter(
     )
     try:
         partitions = read_partitions(generation.path)
-        elapsed_seconds = perf_counter() - started_at
-        return _FilterCache(
+        cache = _FilterCache(
             dataset,
             partitions,
             rule,
@@ -92,9 +99,17 @@ def apply_filter(
             metrics_path=metrics_path(generation.path) if metrics else None,
             dataset_factory=dataset_factory,
             input_id=input_id,
-            logs_dir=logs_dir,
-            elapsed_seconds=elapsed_seconds,
         )
+        report = None
+        if logs_dir is not None and started_at is not None:
+            report = FilterApplyReport(
+                logs_dir=logs_dir,
+                elapsed_seconds=perf_counter() - started_at,
+                sample_count=sample_count,
+                cache_hit=cache_hit,
+                cache_path=generation.path,
+            )
+        return _AppliedFilter(cache=cache, report=report)
     except Exception:
         generation.lease.close()
         raise
@@ -118,7 +133,7 @@ def ensure_filter(
     runtime: Runtime,
     rebuild: bool,
     dataset_factory: DatasetFactory,
-) -> FilterGeneration:
+) -> tuple[FilterGeneration, int, bool]:
     from ..api import FilterRule
     from ..cache.resume import cleanup_filter_resume_dir
 
@@ -154,7 +169,7 @@ def ensure_filter(
             metrics=metrics,
         )
         if generation is not None:
-            return generation
+            return generation, base_count, True
 
     lock_path = filter_lock_path(rule, identity)
     with FileLock(
@@ -175,7 +190,7 @@ def ensure_filter(
                 metrics=metrics,
             )
             if generation is not None:
-                return generation
+                return generation, base_count, True
             if reason is None:
                 raise RuntimeError("filter cache miss must include a reason.")
         log_filter_cache_miss(
@@ -186,21 +201,25 @@ def ensure_filter(
             metrics=metrics,
             reason=reason,
         )
-        return write_cache(
-            cache_path,
-            expected,
-            dataset,
-            rule,
-            metrics=metrics,
-            devices=devices,
-            batch_size=batch_size,
-            num_workers=num_workers,
-            prefetch_factor=prefetch_factor,
-            commit_samples=commit_samples,
-            max_shard_samples=max_shard_samples,
-            write_workers=write_workers,
-            write_prefetch=write_prefetch,
-            worker_timeout=worker_timeout,
-            runtime=runtime,
-            dataset_factory=dataset_factory,
+        return (
+            write_cache(
+                cache_path,
+                expected,
+                dataset,
+                rule,
+                metrics=metrics,
+                devices=devices,
+                batch_size=batch_size,
+                num_workers=num_workers,
+                prefetch_factor=prefetch_factor,
+                commit_samples=commit_samples,
+                max_shard_samples=max_shard_samples,
+                write_workers=write_workers,
+                write_prefetch=write_prefetch,
+                worker_timeout=worker_timeout,
+                runtime=runtime,
+                dataset_factory=dataset_factory,
+            ),
+            base_count,
+            False,
         )

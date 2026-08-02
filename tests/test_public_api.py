@@ -6,6 +6,7 @@ import anydataset.dataset.source as source
 import anydataset.filter as filter_api
 import anydataset.provider as provider
 import anydataset.provider_service as provider_service
+import anydataset.quality as quality
 import anydataset.presets as presets
 import anydataset.runtime as runtime
 import anydataset.store as store
@@ -185,6 +186,8 @@ def test_filter_public_api_boundary() -> None:
         [
             "DatasetFactory",
             "FilterApplyKwargs",
+            "FilterApplyReport",
+            "FilterApplyResult",
             "FilterDecision",
             "FilterFactory",
             "FilteredDataset",
@@ -196,6 +199,28 @@ def test_filter_public_api_boundary() -> None:
         ],
     )
     _assert_not_exported(filter_api, ["filter_identity", "filter_path"])
+
+
+def test_quality_public_api_boundary() -> None:
+    _assert_public_all(
+        quality,
+        [
+            "Bicleaner",
+            "ChineseGEC",
+            "QualityChain",
+            "QualityLabel",
+            "QualityRule",
+            "Rule",
+            "Scorer",
+            "SpeechQuality",
+            "SpeechQualityProfile",
+            "TextAcceptability",
+            "TextQuality",
+            "TextQualityProfile",
+            "TranslationQuality",
+            "TranslationQualityProfile",
+        ],
+    )
 
 
 def test_runtime_public_api_boundary() -> None:
