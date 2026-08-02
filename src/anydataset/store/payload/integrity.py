@@ -79,6 +79,8 @@ def validate_store_view_payloads(
                             f"has invalid payload key {member.name!r}."
                         )
                     missing.discard(member.name)
+                    if level == "full" and member.name in expected:
+                        _read_payload_member(archive, member, path)
         except tarfile.TarError as exc:
             raise ValueError(f"View shard is not a valid tar archive: {path}") from exc
         if level == "full" and missing:
@@ -86,6 +88,28 @@ def validate_store_view_payloads(
             raise ValueError(
                 f"View {_view_path(view)} shard {shard!r} is missing payload {key!r}."
             )
+        if level == "full":
+            extra = members - expected
+            if extra:
+                key = min(extra)
+                raise ValueError(
+                    f"View {_view_path(view)} shard {shard!r} "
+                    f"has extra payload {key!r}."
+                )
+
+
+def _read_payload_member(
+    archive: tarfile.TarFile,
+    member: tarfile.TarInfo,
+    path: Path,
+) -> None:
+    try:
+        payload = archive.extractfile(member)
+        if payload is None:
+            raise ValueError(f"View shard is missing payload body: {path}")
+        payload.read()
+    except (OSError, tarfile.TarError) as exc:
+        raise ValueError(f"View shard payload could not be read: {path}") from exc
 
 
 def _validate_level(level: str) -> None:

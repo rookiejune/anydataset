@@ -222,6 +222,33 @@ class StoreIntegrityTest(unittest.TestCase):
                     with self.assertRaisesRegex(ValueError, "duplicate payload key"):
                         validate_store_view_payloads(root, view, level=level)
 
+    def test_full_integrity_rejects_extra_tar_payload_member(self):
+        view = (Role.DEFAULT, Modality.TEXT, TextView.TEXT)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir) / "store"
+            _write_store(root)
+            shard = view_shard_path(root, view, "000000.tar")
+            with tarfile.open(shard, "a") as archive:
+                _add_tar_member(archive, "999999999999.txt")
+
+            validate_store_view_payloads(root, view, level="normal")
+            with self.assertRaisesRegex(ValueError, "extra payload"):
+                validate_store_view_payloads(root, view, level="full")
+
+    def test_full_integrity_reads_payload_body(self):
+        view = (Role.DEFAULT, Modality.TEXT, TextView.TEXT)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir) / "store"
+            _write_store(root)
+
+            validate_store_view_payloads(root, view, level="normal")
+            with mock.patch(
+                "tarfile.ExFileObject.read",
+                side_effect=OSError("payload read failed"),
+            ):
+                with self.assertRaisesRegex(ValueError, "payload could not be read"):
+                    validate_store_view_payloads(root, view, level="full")
+
     def test_integrity_ignores_non_file_member_with_payload_name(self):
         view = (Role.DEFAULT, Modality.TEXT, TextView.TEXT)
         with tempfile.TemporaryDirectory() as tmpdir:

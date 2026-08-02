@@ -110,8 +110,8 @@
   覆盖缓存，后台 writer 用完成队列降低 pending 扫描成本；collate 对 schema 计划预编译，
   变长 tensor 使用一次性 batch/mask 分配。
 - integrity 校验提供 `fast`、`normal` 和 `full` 三档；`normal` 起会拒绝非法或重复的 tar
-  payload member，默认的 `full` 还会核对全部 manifest 引用。JSON 和目录原子替换在支持的
-  文件系统上额外同步父目录，便于断电恢复场景。
+  payload member，默认的 `full` 还会读取全部 manifest 引用的 payload body，并拒绝 manifest
+  外的额外 payload member。JSON 和目录原子替换在支持的文件系统上额外同步父目录，便于断电恢复场景。
 - materializer resume metadata 除自动 factory 标识外，还接受显式 `input_id` 和
   `provider_id` 语义版本。它们共同决定 fragment 是否可复用，避免 mutable input 或模型
   checkpoint 变化后错误续跑。

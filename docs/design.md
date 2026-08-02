@@ -17,8 +17,11 @@ Store reader 对 manifest 和 payload shard 使用带 fingerprint 的进程内�
 metadata，不改变核心 manifest schema；旧 store 或 sidecar 不可用时 reader 回退到完整
 manifest/tar 扫描。
 
-`torch.load` 读取 payload 属于 pickle 反序列化边界，store 必须来自可信来源。需要更快的
-发布校验时可显式选择 integrity `fast` 或 `normal`，默认 `full` 保持完整 payload key 校验。
+Store payload 默认使用 PyTorch safe weights-only 反序列化，支持 tensor、基础容器和
+字符串等常见 view 值。读取包含自定义 Python 对象的旧 store 时，调用方必须确认 store
+来自可信来源，并显式传入 `unsafe_pickle_payloads=True` 打开 pickle 反序列化边界。需要
+更快的发布校验时可显式选择 integrity `fast` 或 `normal`，默认 `full` 会读取
+manifest 引用的 payload body，并拒绝 tar shard 中 manifest 外的额外 payload member。
 
 ## Schema 心智模型
 
@@ -148,8 +151,10 @@ shuffle，再在 group 内 shuffle 样本；batch planner 只在同一个 group 
 index list 和跨 row group 随机读取；其他 map-style dataset 使用有界连续 index group。planner
 只维护 `planning_window` 个候选，DDP 按固定 plan window 同步并只裁剪 rank-local 最终
 batch 尾部，不修改通用 `iter_shard()` 的 modulo 契约。
-reader 显式支持字段和 Parquet manifest 结构完整的 `schema_version: 2` 和 `3` store；
-v2 store 没有 provenance，仍可读取，但读取时必须发出明确的 `RuntimeWarning`。
+reader 默认只接受字段和 Parquet manifest 结构完整的 `schema_version: 3` store；
+v2 store 没有 provenance，属于 legacy compatibility 格式，只能通过显式
+`legacy_policy="warn"` 或 `"allow"` 读取。`warn` 会发出明确的
+`RuntimeWarning`，默认 `reject` 保持发布和 cache-sensitive 路径的安全边界。
 v2 缺失的 provenance 只能按空值参与 identity，不能静默猜测 input/provider 语义；
 发布 store 或生成 cache-sensitive 派生数据前应重新物化或迁移到 v3。新写入的 v3 store
 在 dataset manifest 中保存 materializer 的 `input_id` 和 `provider_id`。更早格式必须先显式迁移或重新物化，

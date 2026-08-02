@@ -27,12 +27,24 @@ from anydataset.types import AudioItem, AudioView, Modality, Role
 
 
 class PayloadCacheTest(unittest.TestCase):
-    def test_payload_value_uses_explicit_weights_only_mode(self):
+    def test_payload_value_uses_safe_weights_only_mode_by_default(self):
         view = (Role.DEFAULT, Modality.AUDIO, AudioView.WAVEFORM)
         with mock.patch(
             "anydataset.store.payload.archive.torch.load", return_value="loaded"
         ) as load:
             self.assertEqual(payload_value(view, b"payload"), "loaded")
+
+        self.assertTrue(load.call_args.kwargs["weights_only"])
+
+    def test_payload_value_uses_unsafe_pickle_when_explicit(self):
+        view = (Role.DEFAULT, Modality.AUDIO, AudioView.WAVEFORM)
+        with mock.patch(
+            "anydataset.store.payload.archive.torch.load", return_value="loaded"
+        ) as load:
+            self.assertEqual(
+                payload_value(view, b"payload", unsafe_pickle=True),
+                "loaded",
+            )
 
         self.assertFalse(load.call_args.kwargs["weights_only"])
 

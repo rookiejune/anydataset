@@ -85,6 +85,7 @@ class StoreDataset(MapStyleABC):
         compare=False,
         repr=False,
     )
+    _unsafe_pickle_payloads: bool = field(default=False, compare=False, repr=False)
     _payload_group_cache: PayloadGroupCache = field(
         default_factory=_PayloadGroupCache,
         compare=False,
@@ -188,6 +189,7 @@ class StoreDataset(MapStyleABC):
     def __setstate__(self, state: dict[str, Any]) -> None:
         attributes = cast(dict[str, Any], self.__dict__)
         attributes.update(state)
+        attributes.setdefault("_unsafe_pickle_payloads", False)
         manifest_cache = state.get("_manifest_cache")
         if not isinstance(manifest_cache, ManifestParquetCache):
             manifest_cache = ManifestParquetCache()
@@ -213,8 +215,11 @@ def read_store_dataset(
     views: Iterable[tuple[item.Role, item.Modality, item.View]] | None = None,
     *,
     preload: bool = False,
-    legacy_policy: str = "warn",
+    legacy_policy: str = "reject",
+    unsafe_pickle_payloads: bool = False,
 ) -> StoreDataset:
+    if type(unsafe_pickle_payloads) is not bool:
+        raise TypeError("unsafe_pickle_payloads must be a boolean.")
     root = Path(root).expanduser().resolve()
     _validate_dataset_root(root)
     manifest = read_store_manifest(root, legacy_policy=legacy_policy)
@@ -269,6 +274,7 @@ def read_store_dataset(
             views=store_views,
             _file_lease=file_lease,
             _manifest_cache=manifest_cache,
+            _unsafe_pickle_payloads=unsafe_pickle_payloads,
         )
     except Exception:
         manifest_cache.close()
@@ -278,7 +284,7 @@ def read_store_dataset(
 def read_store_manifest(
     root: str | Path,
     *,
-    legacy_policy: str = "warn",
+    legacy_policy: str = "reject",
 ) -> DatasetManifest:
     root = Path(root).expanduser()
     _validate_dataset_root(root)
@@ -622,7 +628,11 @@ def _view_value(
         return str(_cached_file_payload(dataset, entry, view))
 
     data = read_payload_bytes(dataset.root, view.view, entry, cache=dataset._payloads)
-    return payload_value(view.view, data)
+    return payload_value(
+        view.view,
+        data,
+        unsafe_pickle=dataset._unsafe_pickle_payloads,
+    )
 
 
 def _cached_file_payload(

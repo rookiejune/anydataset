@@ -20,8 +20,21 @@ class StoreSource:
 
     def prepare(self, spec: Spec, cache_path: Path) -> StoreDataset:
         _ = cache_path
-        _validate_load_options(spec, (), source="store")
-        dataset = read_store_dataset(spec.path, views=self.views)
+        _validate_load_options(
+            spec,
+            ("legacy_policy", "unsafe_pickle_payloads"),
+            source="store",
+        )
+        legacy_policy = spec.load_options.get("legacy_policy", "reject")
+        unsafe_pickle_payloads = spec.load_options.get("unsafe_pickle_payloads", False)
+        if type(unsafe_pickle_payloads) is not bool:
+            raise TypeError("store unsafe_pickle_payloads load option must be a boolean.")
+        dataset = read_store_dataset(
+            spec.path,
+            views=self.views,
+            legacy_policy=legacy_policy,
+            unsafe_pickle_payloads=unsafe_pickle_payloads,
+        )
         if spec.split is not None and dataset.manifest.split != spec.split:
             raise ValueError(
                 f"Store dataset split {dataset.manifest.split!r} does not match "

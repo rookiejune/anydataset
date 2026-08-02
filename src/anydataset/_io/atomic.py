@@ -19,8 +19,6 @@ def replace_dir(target: str | Path, write: Callable[[Path], ValueT]) -> Path:
     tmp.mkdir(parents=True)
     try:
         write(tmp)
-        if target.exists():
-            target.rmdir()
         os.replace(tmp, target)
         fsync_directory(target.parent)
         return target

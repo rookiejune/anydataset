@@ -358,15 +358,29 @@ class AnyDataset(_Base, MapStyleABC):
         *,
         views: tuple[tuple[Role, Modality, View], ...] | None = None,
         transforms: Transforms | None = None,
+        legacy_policy: str = "reject",
+        unsafe_pickle_payloads: bool = False,
     ) -> AnyDataset:
         """Open a canonical store while loading only the selected views."""
 
         if views is not None and not isinstance(views, tuple):
             raise TypeError("views must be a tuple or None.")
+        if type(unsafe_pickle_payloads) is not bool:
+            raise TypeError("unsafe_pickle_payloads must be a boolean.")
         from .source.store import StoreSource
 
+        load_options: dict[str, object] = {}
+        if legacy_policy != "reject":
+            load_options["legacy_policy"] = legacy_policy
+        if unsafe_pickle_payloads:
+            load_options["unsafe_pickle_payloads"] = True
         dataset = cls(
-            Spec(source=Source.STORE, path=str(path), split=split),
+            Spec(
+                source=Source.STORE,
+                path=str(path),
+                split=split,
+                load_options=load_options,
+            ),
             transforms=transforms,
         )
         dataset._source = StoreSource(views)

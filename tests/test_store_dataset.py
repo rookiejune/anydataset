@@ -19,6 +19,8 @@ from anydataset.types import (
     AudioMeta,
     AudioReq,
     AudioView,
+    ImageItem,
+    ImageView,
     Modality,
     Role,
     TextItem,
@@ -55,6 +57,11 @@ from anydataset.store.reader import (
 )
 
 
+@dataclass(frozen=True)
+class _CustomPayload:
+    value: str
+
+
 class StoreSourceTest(unittest.TestCase):
     def test_dataset_store_writer_validates_views_at_construction(self):
         with self.assertRaisesRegex(TypeError, "views must be a tuple"):
@@ -88,6 +95,114 @@ class StoreSourceTest(unittest.TestCase):
         self.assertEqual(audio.meta[AudioMeta.LABEL], "speech")
         self.assertEqual(text.views[TextView.TEXT], "hello")
 
+    def test_store_reader_rejects_custom_payload_objects_by_default(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output = Path(tmpdir) / "dataset"
+            DatasetWriter(output, dataset_id="custom-payload").write(
+                [
+                    {
+                        (Role.DEFAULT, Modality.IMAGE): ImageItem(
+                            views={ImageView.PIXEL: _CustomPayload("unsafe")}
+                        )
+                    }
+                ]
+            )
+
+            dataset = read_store_dataset(output)
+
+            with self.assertRaisesRegex(ValueError, "safe tensor-only"):
+                dataset[0]
+
+    def test_store_reader_allows_custom_payload_objects_when_trusted(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output = Path(tmpdir) / "dataset"
+            DatasetWriter(output, dataset_id="custom-payload").write(
+                [
+                    {
+                        (Role.DEFAULT, Modality.IMAGE): ImageItem(
+                            views={ImageView.PIXEL: _CustomPayload("trusted")}
+                        )
+                    }
+                ]
+            )
+
+            dataset = read_store_dataset(output, unsafe_pickle_payloads=True)
+            sample = dataset[0]
+
+        self.assertEqual(
+            sample[Role.DEFAULT, Modality.IMAGE].views[ImageView.PIXEL],
+            _CustomPayload("trusted"),
+        )
+
+    def test_store_source_accepts_explicit_unsafe_pickle_payloads(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output = Path(tmpdir) / "dataset"
+            DatasetWriter(output, dataset_id="custom-payload").write(
+                [
+                    {
+                        (Role.DEFAULT, Modality.IMAGE): ImageItem(
+                            views={ImageView.PIXEL: _CustomPayload("source")}
+                        )
+                    }
+                ]
+            )
+            dataset = AnyDataset(
+                Spec(
+                    source=Source.STORE,
+                    path=str(output),
+                    load_options={"unsafe_pickle_payloads": True},
+                )
+            )
+
+            sample = dataset[0]
+
+        self.assertEqual(
+            sample[Role.DEFAULT, Modality.IMAGE].views[ImageView.PIXEL],
+            _CustomPayload("source"),
+        )
+
+    def test_store_source_rejects_non_bool_unsafe_pickle_payloads(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output = Path(tmpdir) / "dataset"
+            DatasetWriter(output, dataset_id="toy-audio").write(
+                [_audio_sample(waveform=torch.tensor([[1.0]]))]
+            )
+            dataset = AnyDataset(
+                Spec(
+                    source=Source.STORE,
+                    path=str(output),
+                    load_options={"unsafe_pickle_payloads": "true"},
+                )
+            )
+
+            with self.assertRaisesRegex(TypeError, "must be a boolean"):
+                dataset.prepare()
+
+    def test_anydataset_from_store_accepts_explicit_unsafe_pickle_payloads(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output = Path(tmpdir) / "dataset"
+            DatasetWriter(output, dataset_id="custom-payload").write(
+                [
+                    {
+                        (Role.DEFAULT, Modality.IMAGE): ImageItem(
+                            views={ImageView.PIXEL: _CustomPayload("from-store")}
+                        )
+                    }
+                ]
+            )
+            dataset = AnyDataset.from_store(output, unsafe_pickle_payloads=True)
+
+            sample = dataset[0]
+
+        self.assertEqual(
+            sample[Role.DEFAULT, Modality.IMAGE].views[ImageView.PIXEL],
+            _CustomPayload("from-store"),
+        )
+
+    def test_anydataset_from_store_rejects_non_bool_unsafe_pickle_payloads(self):
+        with self.assertRaisesRegex(TypeError, "must be a boolean"):
+            AnyDataset.from_store("unused", unsafe_pickle_payloads="true")  # type: ignore[arg-type]
+
     def test_store_dataset_cost_row_is_manifest_entry(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             output = Path(tmpdir) / "dataset"
@@ -120,7 +235,21 @@ class StoreSourceTest(unittest.TestCase):
             self.assertEqual(manifest.dataset_id, "toy-audio")
             self.assertEqual(manifest.sample_count, 1)
 
-    def test_reader_warns_for_schema_v2_store_by_default(self):
+    def test_reader_rejects_schema_v2_store_by_default(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output = Path(tmpdir) / "dataset"
+            DatasetWriter(output, dataset_id="toy-audio").write(
+                [_audio_sample(waveform=torch.tensor([[1.0]]))]
+            )
+            manifest = read_json(output / "dataset.json")
+            manifest["schema_version"] = 2
+            del manifest["provenance"]
+            write_json(output / "dataset.json", manifest)
+
+            with self.assertRaisesRegex(ValueError, "schema_version 2 is legacy"):
+                read_store_dataset(output)
+
+    def test_reader_warns_for_schema_v2_store_with_explicit_policy(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             output = Path(tmpdir) / "dataset"
             DatasetWriter(output, dataset_id="toy-audio").write(
@@ -132,7 +261,7 @@ class StoreSourceTest(unittest.TestCase):
             write_json(output / "dataset.json", manifest)
 
             with self.assertWarnsRegex(RuntimeWarning, "schema_version 2"):
-                dataset = read_store_dataset(output)
+                dataset = read_store_dataset(output, legacy_policy="warn")
 
             self.assertEqual(dataset.manifest.schema_version, 2)
             self.assertEqual(dataset.manifest.provenance, {})
@@ -154,6 +283,54 @@ class StoreSourceTest(unittest.TestCase):
             warn.assert_not_called()
             self.assertEqual(dataset.manifest.schema_version, 2)
             self.assertEqual(dataset.manifest.provenance, {})
+
+    def test_store_source_allows_schema_v2_with_explicit_policy(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output = Path(tmpdir) / "dataset"
+            DatasetWriter(output, dataset_id="toy-audio").write(
+                [_audio_sample(waveform=torch.tensor([[1.0]]))]
+            )
+            manifest = read_json(output / "dataset.json")
+            manifest["schema_version"] = 2
+            del manifest["provenance"]
+            write_json(output / "dataset.json", manifest)
+
+            dataset = AnyDataset(
+                Spec(
+                    source=Source.STORE,
+                    path=str(output),
+                    load_options={"legacy_policy": "allow"},
+                )
+            )
+            sample = dataset[0]
+
+        self.assertTrue(
+            torch.equal(
+                sample[Role.DEFAULT, Modality.AUDIO].views[AudioView.WAVEFORM][0],
+                torch.tensor([[1.0]]),
+            )
+        )
+
+    def test_anydataset_from_store_allows_schema_v2_with_explicit_policy(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output = Path(tmpdir) / "dataset"
+            DatasetWriter(output, dataset_id="toy-audio").write(
+                [_audio_sample(waveform=torch.tensor([[1.0]]))]
+            )
+            manifest = read_json(output / "dataset.json")
+            manifest["schema_version"] = 2
+            del manifest["provenance"]
+            write_json(output / "dataset.json", manifest)
+
+            dataset = AnyDataset.from_store(output, legacy_policy="allow")
+            sample = dataset[0]
+
+        self.assertTrue(
+            torch.equal(
+                sample[Role.DEFAULT, Modality.AUDIO].views[AudioView.WAVEFORM][0],
+                torch.tensor([[1.0]]),
+            )
+        )
 
     def test_reader_rejects_schema_v2_store_with_explicit_policy(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -512,6 +689,7 @@ class StoreSourceTest(unittest.TestCase):
             dataset_state = dataset.__getstate__()
             dataset_state.pop("_manifest_cache")
             dataset_state.pop("_resource_state")
+            dataset_state.pop("_unsafe_pickle_payloads")
             dataset_state["samples"] = samples
             dataset_state["views"] = views
             restored = StoreDataset.__new__(StoreDataset)

@@ -647,15 +647,18 @@ then shuffles rank-local indexes within each group, and plans batches without
 crossing shard-group boundaries. Use
 `seed=...` and `loader.set_epoch(epoch)` for reproducible epoch changes.
 
-Readers explicitly support store `schema_version: 2` and the current
-`schema_version: 3`. Version 2 stores have no provenance but remain readable;
-new v3 stores persist materializer `input_id` and `provider_id`.
+Store readers default to the current `schema_version: 3`. Version 2 stores have
+no provenance and are treated as legacy: `read_store_dataset(...)`,
+`AnyDataset.from_store(...)`, and `Source.STORE` reject them unless the caller
+explicitly chooses `legacy_policy="allow"` or `legacy_policy="warn"`. New v3
+stores persist materializer `input_id` and `provider_id`.
 
 > Warning: v2 compatibility is legacy read support, not a recommended production
-> format. Reading a v2 store emits a `RuntimeWarning`; its missing provenance is
-> treated as empty, so downstream cache identity cannot distinguish input or
-> provider semantic versions. Rematerialize or migrate to v3 before publishing a
-> store or using it as the basis for cache-sensitive derived data.
+> format. `legacy_policy="warn"` emits a `RuntimeWarning`; `"allow"` is a
+> silent explicit opt-in. In both cases, missing provenance is treated as empty,
+> so downstream cache identity cannot distinguish input or provider semantic
+> versions. Rematerialize or migrate to v3 before publishing a store or using it
+> as the basis for cache-sensitive derived data.
 
 The preceding canonical store format used the same sample manifest and directory
 layout, but had no dataset schema version and keyed view manifests by
@@ -678,7 +681,8 @@ fields or alignment.
 Use the integrity maintenance helper before publishing or moving a store. `fast` checks
 manifest references and shard existence, `normal` also parses every referenced
 tar archive and rejects invalid or duplicate file members, and the default
-`full` level additionally verifies every referenced payload key:
+`full` level additionally reads referenced payload bodies and rejects extra
+payload members that are not present in the manifest:
 
 ```python
 from pathlib import Path
@@ -690,6 +694,13 @@ validate_store_payloads((Path("/data/my_anydataset"),), level="full")
 Store readers retain manifest and tar handles for repeated access. Close them
 deterministically with `dataset.close()` or use `read_store_dataset(...)` as a
 context manager when the reader lifetime is bounded.
+
+Store payloads are read with PyTorch's safe weights-only deserialization by
+default. Tensor payloads, strings, and ordinary Python containers remain
+supported. Stores containing custom Python payload objects require an explicit
+`AnyDataset.from_store(..., unsafe_pickle_payloads=True)` or
+`read_store_dataset(..., unsafe_pickle_payloads=True)` opt-in, and should only be
+read from trusted sources.
 
 `AudioView.FILE` payloads are extracted under
 `$ANYDATASET_HOME/cache/store-files`. A reader that selected the file view holds

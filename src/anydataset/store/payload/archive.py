@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import pickle
 import tarfile
 import threading
 from collections import OrderedDict
@@ -189,15 +190,32 @@ def payload_for_view(
     return _torch_payload(sample_index, value)
 
 
-def payload_value(view: tuple[Role, Modality, View], data: bytes) -> Any:
+def payload_value(
+    view: tuple[Role, Modality, View],
+    data: bytes,
+    *,
+    unsafe_pickle: bool = False,
+) -> Any:
     _, modality, key = view
     if modality is Modality.AUDIO and key == AudioView.FILE:
         return data
     if modality is Modality.TEXT and key == TextView.TEXT:
         return data.decode("utf-8")
-    # Store payloads intentionally support arbitrary Python values, so keep the
-    # legacy unpickling behavior explicit and avoid PyTorch's implicit-mode warning.
-    return torch.load(BytesIO(data), map_location="cpu", weights_only=False)
+    try:
+        return torch.load(
+            BytesIO(data),
+            map_location="cpu",
+            weights_only=not unsafe_pickle,
+        )
+    except pickle.UnpicklingError as exc:
+        if unsafe_pickle:
+            raise
+        raise ValueError(
+            "Store payload could not be loaded with safe tensor-only "
+            "deserialization. If this store contains custom Python payload "
+            "objects and comes from a trusted source, pass "
+            "unsafe_pickle_payloads=True."
+        ) from exc
 
 
 def read_payload_bytes(

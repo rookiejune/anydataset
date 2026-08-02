@@ -1449,14 +1449,8 @@ class FilteredDatasetTest(unittest.TestCase):
             write_store_json(path / "dataset.json", manifest)
             rule = FilterRule(name="all", factory=lambda: lambda _sample: True)
 
-            def prepared_store_dataset():
-                dataset = AnyDataset(Spec(source="store", path=str(path)))
-                with self.assertWarns(RuntimeWarning):
-                    dataset.prepare()
-                return dataset.dataset
-
             with self.assertRaisesRegex(ValueError, "schema_version 2 is legacy"):
-                rule.apply(dataset_factory=prepared_store_dataset, device="cpu")
+                AnyDataset(Spec(source="store", path=str(path))).prepare()
 
             allowed = read_store_dataset(path, legacy_policy="allow")
             with self.assertRaisesRegex(ValueError, "schema_version 2 is legacy"):
