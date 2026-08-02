@@ -340,6 +340,33 @@ def test_distributed_planning_fails_fast_on_empty_rank() -> None:
     assert consumed == list(range(8))
 
 
+def test_distributed_planning_fails_fast_on_invalid_counts() -> None:
+    consumed: list[int] = []
+
+    def plans():
+        for index in range(8):
+            consumed.append(index)
+            yield _Plan(records=(_Record(index=index, cost=1),), cost=1)
+
+    with (
+        mock.patch("anydataset.dataset._ddp.dist.is_available", return_value=True),
+        mock.patch("anydataset.dataset._ddp.dist.is_initialized", return_value=True),
+        mock.patch("anydataset.dataset._ddp.dist.get_world_size", return_value=2),
+        mock.patch("anydataset.dataset._ddp.dist.get_rank", return_value=0),
+        mock.patch(
+            "anydataset.dataset._ddp.plan_counts",
+            return_value=(8, -1),
+        ),
+        pytest.raises(
+            RuntimeError,
+            match="invalid rank-local plan counts",
+        ),
+    ):
+        list(synchronized_plans(plans(), drop_tail=True, plan_window=8))
+
+    assert consumed == list(range(8))
+
+
 def test_distributed_planning_requires_equal_counts_without_tail_drop() -> None:
     def plans():
         for index in range(8):
@@ -445,15 +472,18 @@ def test_distributed_plan_counts_use_cuda_device_for_nccl() -> None:
         devices.append(device)
         return FakeTensor(values)
 
-    def fake_empty(
-        size: int,
+    def fake_full(
+        size: tuple[int, ...],
+        fill_value: int,
         *,
         dtype: object,
         device: object,
     ) -> FakeTensor:
+        assert size == (2,)
+        assert fill_value == -1
         assert dtype is torch.int64
         devices.append(device)
-        return FakeTensor([0] * size)
+        return FakeTensor([fill_value] * size[0])
 
     def gather(output: FakeTensor, local: FakeTensor) -> None:
         output.values[:] = [local.values[0], 127]
@@ -463,7 +493,7 @@ def test_distributed_plan_counts_use_cuda_device_for_nccl() -> None:
         mock.patch("anydataset.dataset._ddp.torch.cuda.current_device", return_value=3),
         mock.patch("anydataset.dataset._ddp.torch.device") as device,
         mock.patch("anydataset.dataset._ddp.torch.tensor", side_effect=fake_tensor),
-        mock.patch("anydataset.dataset._ddp.torch.empty", side_effect=fake_empty),
+        mock.patch("anydataset.dataset._ddp.torch.full", side_effect=fake_full),
         mock.patch(
             "anydataset.dataset._ddp.dist.all_gather_into_tensor",
             side_effect=gather,

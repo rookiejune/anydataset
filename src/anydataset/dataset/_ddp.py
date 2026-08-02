@@ -47,6 +47,13 @@ def synchronized_plans(
         local = list(islice(source, window))
         elapsed = perf_counter() - started
         counts = plan_counts(len(local), world_size)
+        if any(count < 0 for count in counts):
+            raise RuntimeError(
+                "dataloader received invalid rank-local plan counts: "
+                f"rank={_rank_id()} chunk={chunk} window={window} "
+                f"local_count={len(local)} counts={counts}. "
+                f"Enable {PLAN_DEBUG_ENV}=1 and inspect dataset length/index groups."
+            )
         kept = min(counts)
         if debug_plans_enabled():
             log_debug_plan(
@@ -117,7 +124,7 @@ def plan_counts(local_count: int, world_size: int) -> tuple[int, ...]:
         else torch.device("cpu")
     )
     local = torch.tensor([local_count], dtype=torch.int64, device=device)
-    gathered = torch.empty(world_size, dtype=torch.int64, device=device)
+    gathered = torch.full((world_size,), -1, dtype=torch.int64, device=device)
     dist.all_gather_into_tensor(gathered, local)
     return tuple(int(value) for value in gathered.cpu().tolist())
 
