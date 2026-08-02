@@ -289,10 +289,13 @@ filtered = applied.dataset
 report = applied.report
 ```
 
-`FilterApplyReport` contains the run logs directory, wall-clock elapsed seconds,
-sample count, cache path, and whether the call reused a ready cache. Its
-`samples_per_second` property is apply-call throughput, so cache hits measure
-cache lookup and partition loading rather than predicate speed.
+`FilterApplyReport` contains wall-clock elapsed seconds, per-phase timings
+(`dataset_seconds`, `cache_lookup_seconds`, `cache_build_seconds`, and
+`partition_read_seconds`), sample count, cache path, and whether the call reused
+a ready cache. `logs_dir` is populated only for calls that actually build or
+rebuild a cache; hot cache hits leave it as `None`. Its `samples_per_second`
+property is apply-call throughput, so cache hits measure cache lookup and
+partition loading rather than predicate speed.
 
 ## Online safety net
 

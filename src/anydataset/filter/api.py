@@ -21,6 +21,7 @@ from .cache.identity import (
 from .cache.generations import GenerationLease, lease_filter_generation
 from .cache.storage import merged_index, read_metrics, read_partitions
 from .rules import label, unique_labels, validate_string
+from .runtime import serialization as _filter_serialization
 from .runtime.apply import apply_filter
 from .runtime.factory import make_filtered_dataset_factory
 from .runtime.options import options as apply_options
@@ -34,6 +35,11 @@ from .types import (
     FilterPredicate,
     _Index,
 )
+
+# Keep the historical pickle entry points importable from this module.
+_restore_filter_cache = _filter_serialization.restore_filter_cache
+_restore_filtered_dataset = _filter_serialization.restore_filtered_dataset
+_unavailable_filter_factory = _filter_serialization.unavailable_filter_factory
 
 
 class FilterRule:
@@ -533,50 +539,6 @@ class FilteredDataset(MapStyleABC):
 class FilterApplyResult:
     dataset: FilteredDataset
     report: FilterApplyReport
-
-
-def _restore_filter_cache(
-    dataset_factory: DatasetFactory,
-    rule_name: str,
-    cache_path: Path,
-    metrics_path: Path | None,
-    input_id: str | None,
-    rule_id: str | None = None,
-    version: str | None = None,
-    content_id: str | None = None,
-) -> _FilterCache:
-    generation = lease_filter_generation(cache_path)
-    try:
-        return _FilterCache(
-            filter_base(dataset_factory()),
-            read_partitions(generation.path),
-            FilterRule(
-                rule_name,
-                _unavailable_filter_factory,
-                rule_id=rule_id,
-                version=version,
-                content_id=content_id,
-            ),
-            generation.path,
-            lease=generation.lease,
-            dataset_factory=dataset_factory,
-            metrics_path=metrics_path,
-            input_id=input_id,
-        )
-    except Exception:
-        generation.lease.close()
-        raise
-
-
-def _restore_filtered_dataset(
-    cache: _FilterCache,
-    labels: tuple[str, ...],
-) -> FilteredDataset:
-    return FilteredDataset._from_cache(cache, labels=labels)
-
-
-def _unavailable_filter_factory() -> FilterPredicate:
-    raise RuntimeError("cached filtered dataset cannot rebuild its upstream rule.")
 
 
 def selected_labels(

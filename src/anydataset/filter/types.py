@@ -36,8 +36,12 @@ class FilterDecision:
 class FilterApplyReport:
     """Wall-clock observability for one explicit filter apply call."""
 
-    logs_dir: Path
+    logs_dir: Path | None
     elapsed_seconds: float
+    dataset_seconds: float
+    cache_lookup_seconds: float
+    cache_build_seconds: float
+    partition_read_seconds: float
     sample_count: int
     cache_hit: bool
     cache_path: Path

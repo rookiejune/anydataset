@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 from ..cache.identity import FilterBase, filter_base
 from ..cache.generations import GenerationLease
 from ..types import DatasetFactory
+from .serialization import unavailable_filter_factory as _unavailable_filter_factory
 
 if TYPE_CHECKING:
     from ..api import FilterRule
@@ -132,7 +133,3 @@ def _make_filtered_dataset_factory(
         content_id=content_id,
         lease=generation.lease,
     )
-
-
-def _unavailable_filter_factory():
-    raise RuntimeError("cached filtered-view factory cannot rebuild its upstream rule.")

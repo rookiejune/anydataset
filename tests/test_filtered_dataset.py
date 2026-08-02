@@ -353,10 +353,54 @@ class FilteredDatasetTest(unittest.TestCase):
             self.assertEqual(report.sample_count, 3)
             self.assertFalse(report.cache_hit)
             self.assertEqual(report.cache_path, result.cache_path)
-            self.assertEqual(report.logs_dir.parent, home / "logs")
-            self.assertTrue((report.logs_dir / "run.json").is_file())
+            logs_dir = report.logs_dir
+            self.assertIsNotNone(logs_dir)
+            assert logs_dir is not None
+            self.assertEqual(logs_dir.parent, home / "logs")
+            self.assertTrue((logs_dir / "run.json").is_file())
             self.assertGreaterEqual(report.elapsed_seconds, 0.0)
+            self.assertGreaterEqual(report.dataset_seconds, 0.0)
+            self.assertGreaterEqual(report.cache_lookup_seconds, 0.0)
+            self.assertGreater(report.cache_build_seconds, 0.0)
+            self.assertGreaterEqual(report.partition_read_seconds, 0.0)
+            self.assertLessEqual(
+                report.dataset_seconds
+                + report.cache_lookup_seconds
+                + report.cache_build_seconds
+                + report.partition_read_seconds,
+                report.elapsed_seconds,
+            )
             self.assertGreater(report.samples_per_second, 0.0)
+
+    def test_rule_apply_with_report_hot_cache_skips_run_logs(self):
+        _register_rows_source("unit_test_filter_report_hot_cache")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home = Path(tmpdir) / "home"
+            dataset = _dataset("unit_test_filter_report_hot_cache", [0, 1, 2])
+            rule = FilterRule("hot_observable", _true_factory)
+
+            with mock.patch.dict(os.environ, {"ANYDATASET_HOME": str(home)}):
+                cold = rule.apply_with_report(
+                    dataset_factory=lambda: dataset,
+                    device="cpu",
+                )
+                logs_dir = home / "logs"
+                run_count = len(tuple(logs_dir.iterdir()))
+                hot = rule.apply_with_report(
+                    dataset_factory=lambda: dataset,
+                    device="cpu",
+                )
+
+            self.assertFalse(cold.report.cache_hit)
+            self.assertTrue(hot.report.cache_hit)
+            self.assertEqual(hot.dataset.cache_path, cold.dataset.cache_path)
+            self.assertEqual(hot.report.cache_path, cold.report.cache_path)
+            self.assertIsNone(hot.report.logs_dir)
+            self.assertEqual(hot.report.cache_build_seconds, 0.0)
+            self.assertGreaterEqual(hot.report.cache_lookup_seconds, 0.0)
+            self.assertGreaterEqual(hot.report.partition_read_seconds, 0.0)
+            self.assertGreater(hot.report.samples_per_second, 0.0)
+            self.assertEqual(len(tuple(logs_dir.iterdir())), run_count)
 
     def test_concurrent_cold_cache_waits_and_reuses_result(self):
         _register_rows_source("unit_test_filter_concurrent_cache")

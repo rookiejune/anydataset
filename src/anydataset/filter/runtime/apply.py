@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from time import perf_counter
 from typing import TYPE_CHECKING
 
@@ -46,6 +47,16 @@ class _AppliedFilter:
     report: FilterApplyReport | None
 
 
+@dataclass(frozen=True)
+class _EnsuredFilter:
+    generation: FilterGeneration
+    sample_count: int
+    cache_hit: bool
+    logs_dir: Path | None
+    cache_lookup_seconds: float
+    cache_build_seconds: float
+
+
 def apply_filter(
     rule: FilterRule,
     *,
@@ -67,10 +78,11 @@ def apply_filter(
 ) -> _AppliedFilter:
     from ..api import _FilterCache
 
-    logs_dir = run_logs_dir() if with_report else None
-    started_at = perf_counter() if with_report else None
+    started_at = perf_counter()
+    dataset_started_at = perf_counter()
     dataset = filter_base(dataset_factory())
-    generation, sample_count, cache_hit = ensure_filter(
+    dataset_seconds = perf_counter() - dataset_started_at
+    ensured = ensure_filter(
         dataset,
         rule,
         input_id=input_id,
@@ -89,29 +101,35 @@ def apply_filter(
         dataset_factory=dataset_factory,
     )
     try:
-        partitions = read_partitions(generation.path)
+        partition_started_at = perf_counter()
+        partitions = read_partitions(ensured.generation.path)
+        partition_read_seconds = perf_counter() - partition_started_at
         cache = _FilterCache(
             dataset,
             partitions,
             rule,
-            generation.path,
-            lease=generation.lease,
-            metrics_path=metrics_path(generation.path) if metrics else None,
+            ensured.generation.path,
+            lease=ensured.generation.lease,
+            metrics_path=metrics_path(ensured.generation.path) if metrics else None,
             dataset_factory=dataset_factory,
             input_id=input_id,
         )
         report = None
-        if logs_dir is not None and started_at is not None:
+        if with_report:
             report = FilterApplyReport(
-                logs_dir=logs_dir,
+                logs_dir=ensured.logs_dir,
                 elapsed_seconds=perf_counter() - started_at,
-                sample_count=sample_count,
-                cache_hit=cache_hit,
-                cache_path=generation.path,
+                dataset_seconds=dataset_seconds,
+                cache_lookup_seconds=ensured.cache_lookup_seconds,
+                cache_build_seconds=ensured.cache_build_seconds,
+                partition_read_seconds=partition_read_seconds,
+                sample_count=ensured.sample_count,
+                cache_hit=ensured.cache_hit,
+                cache_path=ensured.generation.path,
             )
         return _AppliedFilter(cache=cache, report=report)
     except Exception:
-        generation.lease.close()
+        ensured.generation.lease.close()
         raise
 
 
@@ -133,7 +151,7 @@ def ensure_filter(
     runtime: Runtime,
     rebuild: bool,
     dataset_factory: DatasetFactory,
-) -> tuple[FilterGeneration, int, bool]:
+) -> _EnsuredFilter:
     from ..api import FilterRule
     from ..cache.resume import cleanup_filter_resume_dir
 
@@ -157,6 +175,7 @@ def ensure_filter(
     write_prefetch = optional_positive_int("write_prefetch", write_prefetch)
     worker_timeout = optional_positive_float("worker_timeout", worker_timeout)
 
+    lookup_started_at = perf_counter()
     identity = filter_identity(dataset, input_id=input_id)
     base_count = dataset_sample_count(dataset, context="filter")
     expected = metadata(identity, base_count, rule)
@@ -169,7 +188,14 @@ def ensure_filter(
             metrics=metrics,
         )
         if generation is not None:
-            return generation, base_count, True
+            return _EnsuredFilter(
+                generation=generation,
+                sample_count=base_count,
+                cache_hit=True,
+                logs_dir=None,
+                cache_lookup_seconds=perf_counter() - lookup_started_at,
+                cache_build_seconds=0.0,
+            )
 
     lock_path = filter_lock_path(rule, identity)
     with FileLock(
@@ -190,9 +216,18 @@ def ensure_filter(
                 metrics=metrics,
             )
             if generation is not None:
-                return generation, base_count, True
+                return _EnsuredFilter(
+                    generation=generation,
+                    sample_count=base_count,
+                    cache_hit=True,
+                    logs_dir=None,
+                    cache_lookup_seconds=perf_counter() - lookup_started_at,
+                    cache_build_seconds=0.0,
+                )
             if reason is None:
                 raise RuntimeError("filter cache miss must include a reason.")
+        build_started_at = perf_counter()
+        logs_dir = run_logs_dir()
         log_filter_cache_miss(
             cache_path,
             rule,
@@ -201,25 +236,29 @@ def ensure_filter(
             metrics=metrics,
             reason=reason,
         )
-        return (
-            write_cache(
-                cache_path,
-                expected,
-                dataset,
-                rule,
-                metrics=metrics,
-                devices=devices,
-                batch_size=batch_size,
-                num_workers=num_workers,
-                prefetch_factor=prefetch_factor,
-                commit_samples=commit_samples,
-                max_shard_samples=max_shard_samples,
-                write_workers=write_workers,
-                write_prefetch=write_prefetch,
-                worker_timeout=worker_timeout,
-                runtime=runtime,
-                dataset_factory=dataset_factory,
-            ),
-            base_count,
-            False,
+        generation = write_cache(
+            cache_path,
+            expected,
+            dataset,
+            rule,
+            metrics=metrics,
+            devices=devices,
+            batch_size=batch_size,
+            num_workers=num_workers,
+            prefetch_factor=prefetch_factor,
+            commit_samples=commit_samples,
+            max_shard_samples=max_shard_samples,
+            write_workers=write_workers,
+            write_prefetch=write_prefetch,
+            worker_timeout=worker_timeout,
+            runtime=runtime,
+            dataset_factory=dataset_factory,
+        )
+        return _EnsuredFilter(
+            generation=generation,
+            sample_count=base_count,
+            cache_hit=False,
+            logs_dir=logs_dir,
+            cache_lookup_seconds=build_started_at - lookup_started_at,
+            cache_build_seconds=perf_counter() - build_started_at,
         )
