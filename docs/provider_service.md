@@ -195,11 +195,27 @@ directory exists. String socket paths are removed before the server binds and
 again when it exits. A TCP address can be used when filesystem sockets are not
 appropriate.
 
-`authkey` is optional bytes. When set, the same value must be passed to the
-server and every remote factory; a mismatch raises
-`multiprocessing.AuthenticationError`. Authentication does not encrypt IPC
-payloads, so expose TCP listeners only on a trusted network or add an external
-secure transport boundary.
+When `authkey` is omitted, `ProviderServer`, `RemoteProviderFactory`,
+`RemoteProvider`, `RemoteFilterFactory`, and `RemoteFilterPredicate` default
+to `bytes(multiprocessing.current_process().authkey)`. That default gives
+callers in the same process tree an authenticated transport without manually
+threading a key through every local proxy. Raw
+`multiprocessing.connection.Client` does not apply this anydataset default;
+pass `bytes(multiprocessing.current_process().authkey)` when probing a default
+local provider directly. Use explicit shared non-empty bytes when the server and
+clients are not created under the same process tree or run on different
+machines.
+
+The `multiprocessing` authentication handshake runs before the service receives
+and unpickles a request. A mismatched key raises
+`multiprocessing.AuthenticationError` and the server ignores that connection.
+Passing `authkey=None` explicitly is different from omitting `authkey`: it
+disables the `multiprocessing` authentication handshake for that server or
+proxy. Raw `multiprocessing.connection.Client` callers must also pass
+`authkey=None` when talking to a no-auth server. No-auth mode should be limited
+to trusted local boundaries. Authentication does not encrypt IPC payloads, so
+expose TCP listeners only on a trusted network or add an external secure
+transport boundary.
 
 For multiple devices, start one server per device and provide every exact
 device-to-address mapping to the remote factory. `RemoteProviderFactory`

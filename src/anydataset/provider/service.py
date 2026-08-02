@@ -4,6 +4,7 @@ import os
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
+from multiprocessing import current_process
 from typing import TYPE_CHECKING, Any
 
 from .._runtime.logging import write_info, write_warning
@@ -34,11 +35,15 @@ if TYPE_CHECKING:
 ProviderFactory = Callable[[str], Any]
 
 
+def _default_authkey() -> bytes:
+    return bytes(current_process().authkey)
+
+
 @dataclass(frozen=True)
 class RemoteProvider:
     output: View
     address: ProviderAddress
-    authkey: bytes | None = None
+    authkey: bytes | None = field(default_factory=_default_authkey, repr=False)
 
     def __call__(self, views: ViewMap) -> Any:
         return _value(request(self.address, self.authkey, _ProviderCommand.CALL, views))
@@ -56,7 +61,7 @@ class RemoteProvider:
 class RemoteProviderFactory:
     output: View
     addresses: Mapping[str, ProviderAddress]
-    authkey: bytes | None = None
+    authkey: bytes | None = field(default_factory=_default_authkey, repr=False)
 
     def __call__(self, device: str) -> RemoteProvider:
         try:
@@ -75,7 +80,7 @@ class RemoteProviderFactory:
 @dataclass(frozen=True)
 class RemoteFilterPredicate:
     address: ProviderAddress
-    authkey: bytes | None = None
+    authkey: bytes | None = field(default_factory=_default_authkey, repr=False)
 
     def __call__(self, sample: Any) -> Any:
         return _value(request(self.address, self.authkey, _ProviderCommand.CALL, sample))
@@ -87,7 +92,7 @@ class RemoteFilterPredicate:
 @dataclass(frozen=True)
 class RemoteFilterFactory:
     addresses: Mapping[str, ProviderAddress]
-    authkey: bytes | None = None
+    authkey: bytes | None = field(default_factory=_default_authkey, repr=False)
     device_env: str = "ANYDATASET_FILTER_DEVICE"
 
     def __call__(self) -> RemoteFilterPredicate:
@@ -111,7 +116,7 @@ class ProviderServer:
     address: ProviderAddress
     provider_factory: ProviderFactory
     device: str
-    authkey: bytes | None = None
+    authkey: bytes | None = field(default_factory=_default_authkey, repr=False)
     start_method: StartMethod = "spawn"
     startup_timeout: float | None = 120.0
     shutdown_timeout: float = 10.0

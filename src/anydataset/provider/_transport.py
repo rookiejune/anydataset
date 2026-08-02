@@ -24,7 +24,7 @@ def request(
     command: _ProviderCommand,
     payload: Any,
 ) -> _ProviderResponse:
-    conn = Client(connection_address(address), authkey=authkey)
+    conn = Client(connection_address(address), authkey=_authkey_value(authkey))
     try:
         conn.send(_ProviderRequest(command=command, payload=payload))
         response = conn.recv()
@@ -33,3 +33,7 @@ def request(
     if not isinstance(response, _ProviderResponse):
         raise TypeError("Provider server returned an invalid response.")
     return response
+
+
+def _authkey_value(authkey: bytes | None) -> bytes | None:
+    return authkey

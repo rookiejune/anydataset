@@ -5,17 +5,30 @@ from collections.abc import Callable
 from multiprocessing import AuthenticationError
 from multiprocessing.connection import Client, Listener
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from ._protocol import (
     ProviderAddress,
-    _ProviderServerConfig,
     _accept_connection,
+    _ProviderServerConfig,
     _serve_connection,
 )
 from ._transport import connection_address
 
 ProviderFactory = Callable[[str], Any]
+
+
+def _default_authkey() -> bytes:
+    from multiprocessing import current_process
+
+    return bytes(current_process().authkey)
+
+
+class _DefaultAuthkey:
+    pass
+
+
+_DEFAULT_AUTHKEY = _DefaultAuthkey()
 
 
 def serve_provider(
@@ -25,7 +38,7 @@ def serve_provider(
     address = connection_address(config.address)
     unlink_address(config.address, config.authkey)
     provider = provider_factory(config.device)
-    listener = Listener(address, authkey=config.authkey)
+    listener = Listener(address, authkey=_authkey_value(config.authkey))
     try:
         while True:
             conn = _accept_connection(listener)
@@ -44,7 +57,7 @@ def serve_provider(
 
 def unlink_address(
     address: ProviderAddress,
-    authkey: bytes | None = None,
+    authkey: bytes | None | _DefaultAuthkey = _DEFAULT_AUTHKEY,
 ) -> None:
     connection = connection_address(address)
     if not isinstance(connection, str):
@@ -60,9 +73,12 @@ def unlink_address(
         pass
 
 
-def socket_in_use(path: Path, authkey: bytes | None = None) -> bool:
+def socket_in_use(
+    path: Path,
+    authkey: bytes | None | _DefaultAuthkey = _DEFAULT_AUTHKEY,
+) -> bool:
     try:
-        conn = Client(str(path), authkey=authkey)
+        conn = Client(str(path), authkey=_authkey_value(authkey))
     except AuthenticationError:
         return True
     except (ConnectionRefusedError, FileNotFoundError, PermissionError, OSError):
@@ -72,3 +88,9 @@ def socket_in_use(path: Path, authkey: bytes | None = None) -> bool:
     except Exception:
         pass
     return True
+
+
+def _authkey_value(authkey: bytes | None | _DefaultAuthkey) -> bytes | None:
+    if authkey is _DEFAULT_AUTHKEY:
+        return _default_authkey()
+    return cast("bytes | None", authkey)

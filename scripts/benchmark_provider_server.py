@@ -86,7 +86,7 @@ def main() -> None:
         server.start()
         remote_load_seconds = time.perf_counter() - remote_load_start
         try:
-            remote = RemoteProvider(AudioView.LONGCAT, address)
+            remote = RemoteProvider(AudioView.LONGCAT, address, authkey=server.authkey)
             remote_call = request(remote, views, batch)
             remote_result = measure(
                 remote_call,
@@ -97,7 +97,7 @@ def main() -> None:
                 partial(
                     _request,
                     address,
-                    None,
+                    server.authkey,
                     _ProviderCommand.PING,
                     None,
                 ),

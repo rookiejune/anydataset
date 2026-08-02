@@ -4,16 +4,16 @@ import json
 import os
 import tempfile
 import unittest
-from multiprocessing import AuthenticationError
+from multiprocessing import AuthenticationError, current_process
 from multiprocessing.connection import Client
 from pathlib import Path
 from unittest import mock
 
 import anydataset.provider_service as provider_service
 from anydataset.provider._protocol import (
+    _handle_request,
     _ProviderCommand,
     _ProviderRequest,
-    _handle_request,
     _serve_connection,
 )
 from anydataset.provider._server import socket_in_use, unlink_address
@@ -126,9 +126,10 @@ class ProviderServerTest(unittest.TestCase):
             )
 
             with server:
-                self.assertTrue(socket_in_use(address, None))
+                self.assertEqual(server.authkey, bytes(current_process().authkey))
+                self.assertTrue(socket_in_use(address))
                 with self.assertRaisesRegex(RuntimeError, "already in use"):
-                    unlink_address(address, None)
+                    unlink_address(address)
                 other = ProviderServer(
                     address=address,
                     provider_factory=_echo_provider,
@@ -139,6 +140,46 @@ class ProviderServerTest(unittest.TestCase):
                     other.start()
                 predicate = RemoteFilterPredicate(address)
                 self.assertEqual(predicate("still-running"), "still-running")
+
+    def test_default_authkey_rejects_wrong_client_key(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            address = Path(tmpdir) / "provider.sock"
+            server = ProviderServer(
+                address=address,
+                provider_factory=_echo_provider,
+                device="cpu",
+            )
+
+            with server:
+                with self.assertRaises(AuthenticationError):
+                    Client(str(address), authkey=b"wrong-key")
+
+                predicate = RemoteFilterPredicate(address)
+                self.assertEqual(predicate("still-running"), "still-running")
+
+    def test_explicit_none_authkey_disables_authentication(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            address = Path(tmpdir) / "provider.sock"
+            server = ProviderServer(
+                address=address,
+                provider_factory=_echo_provider,
+                device="cpu",
+                authkey=None,
+            )
+
+            with server:
+                self.assertIsNone(server.authkey)
+
+                conn = Client(str(address), authkey=None)
+                try:
+                    conn.send(_ProviderRequest(_ProviderCommand.CALL, "value"))
+                    response = conn.recv()
+                finally:
+                    conn.close()
+
+                self.assertEqual(response.value, "value")
+                explicit_none = RemoteFilterPredicate(address, authkey=None)
+                self.assertEqual(explicit_none("explicit-none"), "explicit-none")
 
     def test_request_releases_exception_before_cuda_cleanup(self):
         class _FailingProvider:
@@ -177,9 +218,9 @@ class ProviderServerTest(unittest.TestCase):
             )
 
             with server:
-                disconnected = Client(str(address))
+                disconnected = Client(str(address), authkey=server.authkey)
                 disconnected.close()
-                malformed = Client(str(address))
+                malformed = Client(str(address), authkey=server.authkey)
                 malformed.send_bytes(b"not-a-pickle")
                 malformed.close()
 
@@ -218,7 +259,7 @@ class ProviderServerTest(unittest.TestCase):
             )
 
             with server:
-                malformed = Client(str(address))
+                malformed = Client(str(address), authkey=server.authkey)
                 malformed.send(_ProviderRequest("unsupported", None))
                 response = malformed.recv()
                 malformed.close()
