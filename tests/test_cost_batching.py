@@ -313,6 +313,33 @@ def test_distributed_planning_sync_is_bounded() -> None:
     assert consumed == list(range(8))
 
 
+def test_distributed_planning_fails_fast_on_empty_rank() -> None:
+    consumed: list[int] = []
+
+    def plans():
+        for index in range(8):
+            consumed.append(index)
+            yield _Plan(records=(_Record(index=index, cost=1),), cost=1)
+
+    with (
+        mock.patch("anydataset.dataset._ddp.dist.is_available", return_value=True),
+        mock.patch("anydataset.dataset._ddp.dist.is_initialized", return_value=True),
+        mock.patch("anydataset.dataset._ddp.dist.get_world_size", return_value=2),
+        mock.patch("anydataset.dataset._ddp.dist.get_rank", return_value=0),
+        mock.patch(
+            "anydataset.dataset._ddp.plan_counts",
+            return_value=(8, 0),
+        ),
+        pytest.raises(
+            RuntimeError,
+            match="rank-local planning produced zero batches",
+        ),
+    ):
+        list(synchronized_plans(plans(), drop_tail=True, plan_window=8))
+
+    assert consumed == list(range(8))
+
+
 def test_distributed_planning_requires_equal_counts_without_tail_drop() -> None:
     def plans():
         for index in range(8):
@@ -339,6 +366,34 @@ def test_distributed_plan_window_is_loader_configurable() -> None:
     )
 
     assert loader.batch_sampler.distributed_plan_window == 4
+
+
+def test_debug_rank_local_index_groups() -> None:
+    from anydataset.dataset.batching import _BatchSampler
+
+    dataset = _GroupedDataset()
+    sampler = _BatchSampler(
+        dataset,
+        costs=None,
+        max_batch_memory=1,
+        sampler=None,
+        shuffle=True,
+        seed=7,
+        epoch=2,
+    )
+
+    with (
+        mock.patch.dict("os.environ", {"ANYDATASET_DEBUG_DDP_PLANS": "1"}),
+        mock.patch("anydataset.dataset.batching.rank", return_value=(2, 1)),
+        mock.patch("anydataset.dataset.batching.log_debug_plan") as debug,
+    ):
+        groups = list(sampler._dataset_index_groups())
+
+    assert groups == [[1, 0], [3, 2]]
+    messages = [call.args[0] for call in debug.call_args_list]
+    assert any("rank=1 world_size=2 dataset_length=4" in message for message in messages)
+    assert any("shuffle=True seed=7 epoch=2" in message for message in messages)
+    assert any("group=0 length=2 head=(1, 0)" in message for message in messages)
 
 
 def test_requires_positive_distributed_plan_window() -> None:

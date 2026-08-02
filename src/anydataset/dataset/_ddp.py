@@ -17,7 +17,8 @@ from .._runtime.sharding import runtime_rank
 
 
 _DEFAULT_PLAN_WINDOW = 32
-_DEBUG_ENV = "ANYDATASET_DEBUG_DDP_PLANS"
+PLAN_DEBUG_ENV = "ANYDATASET_DEBUG_DDP_PLANS"
+_DEBUG_ENV = PLAN_DEBUG_ENV
 _LOGGER = logging.getLogger(__name__)
 _T = TypeVar("_T")
 
@@ -37,8 +38,8 @@ def synchronized_plans(
     window = _positive_plan_window(plan_window)
     chunk = 0
     while True:
-        if _debug_enabled():
-            _log_debug_plan(
+        if debug_plans_enabled():
+            log_debug_plan(
                 f"collecting rank-local plans rank={_rank_id()} "
                 f"chunk={chunk} window={window}"
             )
@@ -47,12 +48,20 @@ def synchronized_plans(
         elapsed = perf_counter() - started
         counts = plan_counts(len(local), world_size)
         kept = min(counts)
-        if _debug_enabled():
-            _log_debug_plan(
+        if debug_plans_enabled():
+            log_debug_plan(
                 "synchronized rank-local plans "
                 f"rank={_rank_id()} chunk={chunk} window={window} "
                 f"local_count={len(local)} counts={counts} kept={kept} "
                 f"collect_seconds={elapsed:.3f}"
+            )
+        if chunk == 0 and kept == 0 and any(count > 0 for count in counts):
+            raise RuntimeError(
+                "dataloader rank-local planning produced zero batches on at least "
+                "one DDP rank: "
+                f"rank={_rank_id()} chunk={chunk} window={window} "
+                f"local_count={len(local)} counts={counts} kept={kept}. "
+                f"Enable {PLAN_DEBUG_ENV}=1 and inspect dataset length/index groups."
             )
         if any(count != kept for count in counts):
             if not drop_tail:
@@ -79,12 +88,16 @@ def _positive_plan_window(value: int) -> int:
     return value
 
 
-def _debug_enabled() -> bool:
-    value = os.environ.get(_DEBUG_ENV)
+def debug_plans_enabled() -> bool:
+    value = os.environ.get(PLAN_DEBUG_ENV)
     return value is not None and value.lower() not in {"", "0", "false", "no"}
 
 
-def _log_debug_plan(message: str) -> None:
+def _debug_enabled() -> bool:
+    return debug_plans_enabled()
+
+
+def log_debug_plan(message: str) -> None:
     _LOGGER.info(message)
     warnings.warn(message, RuntimeWarning, stacklevel=2)
 

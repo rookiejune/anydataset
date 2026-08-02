@@ -12,7 +12,7 @@ from typing import Any, Optional, overload
 from torch.utils.data import Sampler
 from torch.utils.data import DataLoader as TorchDataLoader
 
-from ._ddp import rank, synchronized_plans
+from ._ddp import debug_plans_enabled, log_debug_plan, rank, synchronized_plans
 from .abc import MapStyleABC
 
 
@@ -196,13 +196,51 @@ class _BatchSampler(Sampler[list[int]]):
 
     def _dataset_index_groups(self) -> Iterator[Sequence[int]]:
         num_replicas, rank_id = rank()
-        yield from self.dataset._shuffle(
+        groups = self.dataset._shuffle(
             shuffle=self.shuffle,
             seed=self.seed,
             epoch=self.epoch,
             num_replicas=num_replicas,
             rank=rank_id,
         )
+        if debug_plans_enabled():
+            yield from self._debug_dataset_index_groups(
+                groups,
+                num_replicas=num_replicas,
+                rank_id=rank_id,
+            )
+            return
+        yield from groups
+
+    def _debug_dataset_index_groups(
+        self,
+        groups: Iterable[Sequence[int]],
+        *,
+        num_replicas: int,
+        rank_id: int,
+    ) -> Iterator[Sequence[int]]:
+        log_debug_plan(
+            "rank-local dataset index groups "
+            f"rank={rank_id} world_size={num_replicas} "
+            f"dataset_length={len(self.dataset)} shuffle={self.shuffle} "
+            f"seed={self.seed} epoch={self.epoch}"
+        )
+        count = 0
+        for indexes in groups:
+            if count < 3:
+                log_debug_plan(
+                    "rank-local dataset index group "
+                    f"rank={rank_id} group={count} length={len(indexes)} "
+                    f"head={_index_group_head(indexes)}"
+                )
+            count += 1
+            yield indexes
+        if count == 0:
+            log_debug_plan(
+                "rank-local dataset index groups empty "
+                f"rank={rank_id} world_size={num_replicas} "
+                f"dataset_length={len(self.dataset)}"
+            )
 
 
 class _DataLoader(TorchDataLoader):
@@ -327,6 +365,10 @@ def _costs(
     if len(costs) != sample_count:
         raise ValueError("costs and dataset must have equal length.")
     return costs
+
+
+def _index_group_head(indexes: Sequence[int], limit: int = 8) -> tuple[int, ...]:
+    return tuple(indexes[:limit])
 
 
 def _record(costs: _Costs, index: int) -> _Record:
