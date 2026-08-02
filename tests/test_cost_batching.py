@@ -367,6 +367,33 @@ def test_distributed_planning_fails_fast_on_invalid_counts() -> None:
     assert consumed == list(range(8))
 
 
+def test_distributed_planning_fails_fast_on_too_large_counts() -> None:
+    consumed: list[int] = []
+
+    def plans():
+        for index in range(8):
+            consumed.append(index)
+            yield _Plan(records=(_Record(index=index, cost=1),), cost=1)
+
+    with (
+        mock.patch("anydataset.dataset._ddp.dist.is_available", return_value=True),
+        mock.patch("anydataset.dataset._ddp.dist.is_initialized", return_value=True),
+        mock.patch("anydataset.dataset._ddp.dist.get_world_size", return_value=2),
+        mock.patch("anydataset.dataset._ddp.dist.get_rank", return_value=0),
+        mock.patch(
+            "anydataset.dataset._ddp.plan_counts",
+            return_value=(8, 999),
+        ),
+        pytest.raises(
+            RuntimeError,
+            match="invalid rank-local plan counts",
+        ),
+    ):
+        list(synchronized_plans(plans(), drop_tail=True, plan_window=8))
+
+    assert consumed == list(range(8))
+
+
 def test_distributed_planning_requires_equal_counts_without_tail_drop() -> None:
     def plans():
         for index in range(8):
@@ -432,14 +459,15 @@ def test_requires_positive_distributed_plan_window() -> None:
         )
 
 
-def test_distributed_plan_counts_use_tensor_collective() -> None:
-    def gather(output: torch.Tensor, local: torch.Tensor) -> None:
-        output.copy_(torch.tensor([int(local.item()), 127], dtype=torch.int64))
+def test_distributed_plan_counts_use_scalar_list_collective() -> None:
+    def gather(gathered: list[torch.Tensor], local: torch.Tensor) -> None:
+        gathered[0].copy_(local)
+        gathered[1].fill_(127)
 
     with (
         mock.patch("anydataset.dataset._ddp.dist.get_backend", return_value="gloo"),
         mock.patch(
-            "anydataset.dataset._ddp.dist.all_gather_into_tensor",
+            "anydataset.dataset._ddp.dist.all_gather",
             side_effect=gather,
         ) as collective,
     ):
@@ -454,11 +482,8 @@ def test_distributed_plan_counts_use_cuda_device_for_nccl() -> None:
         def __init__(self, values: list[int]) -> None:
             self.values = values
 
-        def cpu(self) -> FakeTensor:
-            return self
-
-        def tolist(self) -> list[int]:
-            return self.values
+        def item(self) -> int:
+            return self.values[0]
 
     devices: list[object] = []
 
@@ -479,14 +504,15 @@ def test_distributed_plan_counts_use_cuda_device_for_nccl() -> None:
         dtype: object,
         device: object,
     ) -> FakeTensor:
-        assert size == (2,)
+        assert size == (1,)
         assert fill_value == -1
         assert dtype is torch.int64
         devices.append(device)
-        return FakeTensor([fill_value] * size[0])
+        return FakeTensor([fill_value])
 
-    def gather(output: FakeTensor, local: FakeTensor) -> None:
-        output.values[:] = [local.values[0], 127]
+    def gather(gathered: list[FakeTensor], local: FakeTensor) -> None:
+        gathered[0].values[:] = [local.values[0]]
+        gathered[1].values[:] = [127]
 
     with (
         mock.patch("anydataset.dataset._ddp.dist.get_backend", return_value="nccl"),
@@ -495,7 +521,7 @@ def test_distributed_plan_counts_use_cuda_device_for_nccl() -> None:
         mock.patch("anydataset.dataset._ddp.torch.tensor", side_effect=fake_tensor),
         mock.patch("anydataset.dataset._ddp.torch.full", side_effect=fake_full),
         mock.patch(
-            "anydataset.dataset._ddp.dist.all_gather_into_tensor",
+            "anydataset.dataset._ddp.dist.all_gather",
             side_effect=gather,
         ),
     ):
@@ -504,7 +530,7 @@ def test_distributed_plan_counts_use_cuda_device_for_nccl() -> None:
         counts = plan_counts(128, 2)
 
     assert counts == (128, 127)
-    assert devices == [("cuda", 3), ("cuda", 3)]
+    assert devices == [("cuda", 3), ("cuda", 3), ("cuda", 3)]
 
 
 @pytest.mark.parametrize(
