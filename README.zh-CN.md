@@ -411,6 +411,28 @@ predicate 返回 `True` 会归为 `"accept"`，返回 `False` 会归为 `"reject
 
 `FilteredDataset(...)` 会先检查当前 base dataset 和 rule identity 是否已经有可用缓存；没有就先构建。它默认选择缓存里所有 label；需要某些 label 时用 `select_by(...)` 基于同一份缓存派生视图。`FilterRule.apply(...)` 是便利入口，只是把自己的 rule identity 和 `factory` 转发给 `FilteredDataset`。
 
+调用方如果需要观察某一次 apply 的墙钟耗时，可以使用
+`FilterRule.apply_with_report(...)`；它不会把本次运行状态存回 dataset 对象：
+
+```python
+applied = rule.apply_with_report(dataset_factory=dataset_factory, device="cpu")
+filtered = applied.dataset
+report = applied.report
+
+if not report.cache_hit and report.logs_dir is not None:
+    print(f"filter logs: {report.logs_dir}")
+print(
+    "filter apply took "
+    f"{report.elapsed_seconds:.2f}s "
+    f"({report.samples_per_second:.1f} samples/s)"
+)
+```
+
+`FilterApplyReport` 会拆分 dataset 构建、cache lookup/build 和 partition read
+耗时。命中 hot cache 时，`report.logs_dir` 是 `None`，
+`report.cache_build_seconds` 是 `0.0`；report 记录的是本次 apply 调用开销，
+不是缓存 schema metadata。
+
 物理 dataset 和 filtered view 的 filter cache identity 会自动生成。对于内容或顺序
 由业务工程管理、可能变化的输入，调用 `apply()` 或 `FilteredDataset(...)` 时传入非空
 `input_id`。它表示整个 filter 输入快照的语义版本，并补充自动生成的 class、`Spec`

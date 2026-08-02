@@ -4,6 +4,9 @@
 
 - Add `RejectReplaceDataset` for low reject-rate online CPU safety nets that
   replace rejects via sequential look-ahead and a worker-local accept buffer.
+- Add explicit filter apply reports via `FilterRule.apply_with_report(...)`,
+  with segmented apply-call timing and hot-cache reports that avoid creating
+  run log directories.
 - Add `dataset.morphology` audio/speech/speech_grid batch contracts and
   `IndexSelection` for stable map-style index views.
 - Extend speech quality filtering and filter collect/type contracts used by

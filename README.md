@@ -390,6 +390,29 @@ label by default. Use `select_by(...)` to derive a label view over the same
 cache. `FilterRule.apply(...)` is a convenience wrapper that forwards its
 `name` and `factory` to `FilteredDataset`.
 
+Use `FilterRule.apply_with_report(...)` when a caller needs wall-clock
+observability for a specific apply call without storing run state on the
+dataset object:
+
+```python
+applied = rule.apply_with_report(dataset_factory=dataset_factory, device="cpu")
+filtered = applied.dataset
+report = applied.report
+
+if not report.cache_hit and report.logs_dir is not None:
+    print(f"filter logs: {report.logs_dir}")
+print(
+    "filter apply took "
+    f"{report.elapsed_seconds:.2f}s "
+    f"({report.samples_per_second:.1f} samples/s)"
+)
+```
+
+`FilterApplyReport` separates dataset construction, cache lookup/build, and
+partition-read timings. On hot-cache hits, `report.logs_dir` is `None` and
+`report.cache_build_seconds` is `0.0`; the report measures apply-call
+overhead, not cache schema metadata.
+
 Filter cache identity is automatic for physical datasets and filtered views.
 For a mutable or application-owned input, pass a non-empty `input_id` to
 `apply()` or `FilteredDataset(...)`. The ID versions the entire input snapshot
