@@ -23,8 +23,7 @@ class SpeechGridView:
     def shape(self) -> tuple[int, int]:
         """``(n_speaker, n_text)`` for this single grid sample."""
 
-        n_text, n_speaker = self.grid.shape
-        return n_speaker, n_text
+        return len(self.speaker_ids), len(self.texts)
 
     @property
     def speaker_ids(self) -> tuple[str, ...]:
@@ -32,7 +31,9 @@ class SpeechGridView:
 
     @property
     def texts(self) -> tuple[str, ...]:
-        return tuple(_row_text(self.grid, index) for index in range(len(self.grid)))
+        return tuple(
+            _row_text(self.grid, index) for index in range(len(self.grid.row_specs))
+        )
 
     def full(self, *, view: AudioView = AudioView.WAVEFORM) -> SpeechGridBatch:
         """Materialize the full rectangle as a batch of size 1."""
@@ -57,7 +58,10 @@ class SpeechGridView:
     ) -> SpeechGridBatch:
         """Materialize one text column as a batch of size 1."""
 
-        return speech_grid_batch(self.grid.select(text=text).load(view=view))
+        row = self._text_row(text)
+        return speech_grid_batch(
+            self.grid.select(source=row.source_index, text=row.role).load(view=view)
+        )
 
     def cell(
         self,
@@ -68,7 +72,14 @@ class SpeechGridView:
     ) -> SpeechGridBatch:
         """Materialize one cell as a batch of size 1."""
 
-        return speech_grid_batch(self.grid.select(text=text, speaker=speaker).load(view=view))
+        row = self._text_row(text)
+        return speech_grid_batch(
+            self.grid.select(
+                source=row.source_index,
+                text=row.role,
+                speaker=speaker,
+            ).load(view=view)
+        )
 
     def pairs(
         self,
@@ -82,6 +93,16 @@ class SpeechGridView:
         if len(speakers) < 2:
             raise ValueError("pairs requires at least two speakers.")
         return tuple(self.cell(text=text, speaker=speaker, view=view) for speaker in speakers)
+
+    def _text_row(self, text: int):
+        if isinstance(text, bool):
+            raise TypeError("text must be a text row index.")
+        index = int(text)
+        if index < 0:
+            index += len(self.grid.row_specs)
+        if index < 0 or index >= len(self.grid.row_specs):
+            raise IndexError("text row index out of range.")
+        return self.grid.row_specs[index]
 
 
 def speech_grid_batch(block: SpeakerAudioBlock) -> SpeechGridBatch:

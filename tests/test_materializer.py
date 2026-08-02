@@ -39,6 +39,7 @@ from anydataset.store.materialize.identity import callable_id
 from anydataset.store.paths import view_dir
 from anydataset.store.reader import read_store_dataset
 from anydataset._runtime.parallel import iter_shard
+from anydataset._runtime.resume import resume_dir
 
 
 class ViewMaterializerTest(unittest.TestCase):
@@ -1832,6 +1833,41 @@ class ViewMaterializerTest(unittest.TestCase):
                 ["0,1", "2,3", "0,1", "2,3"],
             )
             self.assertEqual(len(stored), 4)
+
+    def test_materializer_resume_metadata_quarantines_corrupt_resume_json(self):
+        cases = {
+            "target-invalid-json": "{",
+            "target-non-mapping": "[]",
+        }
+        for target_name, contents in cases.items():
+            with self.subTest(target_name=target_name):
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    root = Path(tmpdir)
+                    target = root / target_name
+                    fragments = resume_dir(target, "fragments")
+                    fragments.mkdir(parents=True)
+                    (fragments / "resume.json").write_text(
+                        contents,
+                        encoding="utf-8",
+                    )
+
+                    ViewMaterializer(target, split="train").write(
+                        dataset_factory=_DatasetFactory(
+                            (_audio_sample(torch.tensor([[1.0]])),),
+                        ),
+                        provider_factory=_ProviderFactory(),
+                        devices="cpu",
+                    )
+
+                    self.assertEqual(len(read_store_dataset(target)), 1)
+                    stale = list(root.glob(f".{target.name}.resume.stale-*"))
+                    self.assertEqual(len(stale), 1)
+                    self.assertEqual(
+                        (stale[0] / "fragments" / "resume.json").read_text(
+                            encoding="utf-8",
+                        ),
+                        contents,
+                    )
 
     def test_materializer_resume_metadata_rebuilds_when_provider_changes(self):
         with tempfile.TemporaryDirectory() as tmpdir:

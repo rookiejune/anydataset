@@ -14,7 +14,7 @@ def prepare_materializer_resume_dir(
 ) -> Path:
     path = resume_dir(output_dir, "fragments")
     expected = dict(metadata)
-    if path.exists() and stored_resume_metadata(path) != expected:
+    if path.exists() and _stored_resume_metadata_or_incompatible(path) != expected:
         stale = quarantine_resume_dir(output_dir)
         write_warning(
             "materializer",
@@ -40,6 +40,13 @@ def stored_resume_metadata(path: Path) -> Mapping[str, object] | None:
     if not isinstance(data, Mapping):
         raise ValueError("Materializer resume metadata must be a mapping.")
     return data
+
+
+def _stored_resume_metadata_or_incompatible(path: Path) -> Mapping[str, object] | None:
+    try:
+        return stored_resume_metadata(path)
+    except (OSError, TypeError, ValueError):
+        return None
 
 
 def materializer_lock_path(output_dir: str | Path) -> Path:

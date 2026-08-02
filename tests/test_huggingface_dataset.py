@@ -40,18 +40,48 @@ class HuggingFaceDatasetTest(unittest.TestCase):
     def test_prepare_rejects_streaming(self):
         fake_datasets = types.ModuleType("datasets")
         fake_datasets.load_dataset = lambda *args, **kwargs: []
+        cases = (True, 1, 0, "true", None)
+        for streaming in cases:
+            with self.subTest(streaming=streaming):
+                with tempfile.TemporaryDirectory():
+                    dataset = AnyDataset(
+                        Spec(
+                            source=Source.HF,
+                            path="org/audio",
+                            split="train",
+                            load_options={"streaming": streaming},
+                        ),
+                    )
+                    with mock.patch.dict(sys.modules, {"datasets": fake_datasets}):
+                        with self.assertRaisesRegex(
+                            ValueError,
+                            "streaming is not supported",
+                        ):
+                            dataset.prepare()
+
+    def test_prepare_accepts_explicit_streaming_false(self):
+        calls = []
+        fake_datasets = types.ModuleType("datasets")
+
+        def load_dataset(*args, **kwargs):
+            calls.append((args, kwargs))
+            return [{"value": 1}]
+
+        fake_datasets.load_dataset = load_dataset
         with tempfile.TemporaryDirectory():
             dataset = AnyDataset(
                 Spec(
                     source=Source.HF,
                     path="org/audio",
                     split="train",
-                    load_options={"streaming": True},
+                    load_options={"streaming": False},
                 ),
             )
             with mock.patch.dict(sys.modules, {"datasets": fake_datasets}):
-                with self.assertRaisesRegex(ValueError, "streaming is not supported"):
-                    dataset.prepare()
+                prepared = dataset.prepare()
+
+        self.assertEqual(prepared, [{"value": 1}])
+        self.assertNotIn("streaming", calls[0][1])
 
     def test_prepare_requires_split(self):
         fake_datasets = types.ModuleType("datasets")

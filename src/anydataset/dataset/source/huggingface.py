@@ -47,7 +47,8 @@ def _prepare_hf(spec: types.Spec, cache_path: Path) -> Any:
     if spec.split is None:
         raise ValueError("huggingface source requires Spec.split.")
     load_kwargs = dict(spec.load_options)
-    if load_kwargs.get("streaming") is True:
+    streaming = load_kwargs.pop("streaming", False)
+    if streaming is not False:
         raise ValueError(
             "Hugging Face streaming is not supported. Omit `streaming` or set "
             "`streaming=False`, or use Source.HF_DISK for local map-style data."
