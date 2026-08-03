@@ -31,7 +31,8 @@ class ShardingSource(DatasetSource, Protocol):
     ``.shard()`` (for example Hugging Face ``Dataset.shard``). Prepared rows
     may expose such a method for other APIs; iterable datasets ignore it and
     only use ``iter_shard`` here or a scan-time index modulo fallback. The
-    yielded index is always the dense global row index.
+    yielded index is always the dense global row index. For map-style prepared
+    data, the source must cover the complete selected shard.
     """
 
     def iter_shard(
@@ -50,6 +51,7 @@ def _native_shard(
     *,
     num_shards: int,
     shard_id: int,
+    sample_count: int | None,
 ) -> Iterator[tuple[int, Any]] | None:
     """Return a validated native shard, or ``None`` for the scan fallback.
 
@@ -69,6 +71,7 @@ def _native_shard(
         rows,
         num_shards=num_shards,
         shard_id=shard_id,
+        sample_count=sample_count,
         label="Source shard",
     )
 

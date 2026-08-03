@@ -21,6 +21,7 @@ def validated_shard_rows(
     *,
     num_shards: int,
     shard_id: int,
+    sample_count: int | None = None,
     label: str,
 ) -> Iterator[tuple[int, Any]]:
     validate_shard(num_shards, shard_id)
@@ -35,6 +36,11 @@ def validated_shard_rows(
         sample_index, value = entry
         if isinstance(sample_index, bool) or not isinstance(sample_index, int):
             raise TypeError(f"{label} sample indexes must be integers.")
+        if sample_count is not None and expected >= sample_count:
+            raise ValueError(
+                f"{label} must stop before sample index {sample_count}; "
+                f"got extra index {sample_index}."
+            )
         if sample_index != expected:
             raise ValueError(
                 f"{label} must yield dense global sample indexes: "
@@ -42,6 +48,11 @@ def validated_shard_rows(
             )
         yield sample_index, value
         expected += num_shards
+    if sample_count is not None and expected < sample_count:
+        raise ValueError(
+            f"{label} must cover global shard indexes below {sample_count}; "
+            f"stopped before index {expected}."
+        )
 
 
 def validated_range_rows(

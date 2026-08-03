@@ -43,6 +43,20 @@ class ParallelRuntimeTest(unittest.TestCase):
                 with self.assertRaisesRegex(error, message):
                     list(iter_shard(_ShardedDataset(rows), 2, 1))
 
+    def test_iter_shard_validates_known_map_style_tail(self):
+        with self.assertRaisesRegex(ValueError, "stopped before index 3"):
+            list(iter_shard(_SizedShardedDataset(((1, "one"),)), 2, 1))
+        with self.assertRaisesRegex(ValueError, "extra index 5"):
+            list(
+                iter_shard(
+                    _SizedShardedDataset(
+                        ((1, "one"), (3, "three"), (5, "five"))
+                    ),
+                    2,
+                    1,
+                )
+            )
+
     def test_global_index_sampler_shards_by_rank(self):
         sampler = GlobalIndexSampler(sample_count=8, num_shards=3, shard_id=1)
 
@@ -210,6 +224,15 @@ class _ShardedDataset:
     def iter_shard(self, num_shards: int, shard_id: int):
         del num_shards, shard_id
         return self.rows
+
+
+@dataclass(frozen=True)
+class _SizedShardedDataset(_ShardedDataset):
+    def __len__(self) -> int:
+        return 4
+
+    def __getitem__(self, index: int):
+        raise AssertionError(f"native shard unexpectedly loaded index {index}")
 
 
 if __name__ == "__main__":

@@ -839,6 +839,20 @@ class CanonicalDatasetTest(unittest.TestCase):
                 ValueError,
                 "expected 3, got 5",
             ),
+            (
+                [(1, {"value": 1})],
+                ValueError,
+                "stopped before index 3",
+            ),
+            (
+                [
+                    (1, {"value": 1}),
+                    (3, {"value": 3}),
+                    (5, {"value": 5}),
+                ],
+                ValueError,
+                "extra index 5",
+            ),
         )
 
         for entries, error, message in cases:
@@ -848,10 +862,23 @@ class CanonicalDatasetTest(unittest.TestCase):
                     parse_fn=lambda row: row["value"],
                 )
                 dataset._source = _FixedShardedSource(entries)
-                dataset._dataset = object()
+                dataset._dataset = [
+                    {"value": index}
+                    for index in range(4)
+                ]
 
                 with self.assertRaisesRegex(error, message):
                     list(dataset.iter_shard(2, 1))
+
+    def test_iterable_native_shard_does_not_require_a_known_tail(self):
+        dataset = IterableAnyDataset(
+            spec=Spec(source=Source.HF, path="/tmp/missing"),
+            parse_fn=lambda row: row["value"],
+        )
+        dataset._source = _FixedShardedSource([(1, {"value": 1})])
+        dataset._dataset = object()
+
+        self.assertEqual(list(dataset.iter_shard(2, 1)), [(1, 1)])
 
     def test_iterable_dataset_ignores_non_callable_shard_attribute(self):
         dataset = IterableAnyDataset(
@@ -1322,6 +1349,12 @@ class _FixedShardedSource:
 class _NoScanRows:
     def __init__(self, rows):
         self.rows = rows
+
+    def __len__(self):
+        return len(self.rows)
+
+    def __getitem__(self, index):
+        return self.rows[index]
 
     def __iter__(self):
         raise AssertionError("native sharding must not scan all rows")

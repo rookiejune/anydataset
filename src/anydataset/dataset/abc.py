@@ -165,6 +165,7 @@ class _Base(_DatasetOperations, ABC):
         *,
         num_shards: int,
         shard_id: int,
+        sample_count: int | None,
     ) -> Iterator[tuple[int, Sample]] | None:
         from .source.protocol import _native_shard
 
@@ -173,6 +174,7 @@ class _Base(_DatasetOperations, ABC):
             dataset,
             num_shards=num_shards,
             shard_id=shard_id,
+            sample_count=sample_count,
         )
         if rows is None:
             return None
@@ -204,6 +206,7 @@ class IterableAnyDataset(_Base, IterableDataset):
             self.dataset,
             num_shards=num_shards,
             shard_id=shard_id,
+            sample_count=None,
         )
         if native is not None:
             yield from native
@@ -460,6 +463,7 @@ class AnyDataset(_Base, MapStyleABC):
             dataset,
             num_shards=num_shards,
             shard_id=shard_id,
+            sample_count=len(dataset),
         )
         if native is not None:
             yield from native

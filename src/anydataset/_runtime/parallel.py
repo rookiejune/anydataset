@@ -173,6 +173,7 @@ def iter_shard(
     validate_shard(num_shards, shard_id)
     iter_shard = getattr(dataset, "iter_shard", None)
     if callable(iter_shard):
+        sample_count = len(dataset) if can_select_indexes(dataset) else None
         method = cast(
             Callable[[int, int], Any],
             iter_shard,
@@ -181,6 +182,7 @@ def iter_shard(
             method(num_shards, shard_id),
             num_shards=num_shards,
             shard_id=shard_id,
+            sample_count=sample_count,
             label="dataset iter_shard()",
         )
         return
