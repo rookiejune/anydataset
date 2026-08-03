@@ -80,7 +80,8 @@ def migrate_store(source: str | Path, output: str | Path) -> Path:
         write_json(dataset_json_path(root), dataset_manifest_dict(manifest))
         write_payload_groups(root, views, manifest.sample_count)
         dataset_ready_path(root).touch()
-        read_store_dataset(root, preload=True)
+        with read_store_dataset(root, preload=True):
+            pass
         validate_store_payloads((root,))
         return root
 

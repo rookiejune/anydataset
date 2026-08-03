@@ -71,13 +71,12 @@ def write_sample_records(
             )
             sample_count += 1
             for view in selected:
-                value = sample_view_value(sample, view)
-                if value is None:
-                    if views is not None:
-                        raise KeyError(
-                            f"Sample {current_sample_id} is missing view {view_path(view)}."
-                        )
-                    continue
+                try:
+                    value = sample_view_value(sample, view)
+                except KeyError as exc:
+                    raise KeyError(
+                        f"Sample {current_sample_id} is missing view {view_path(view)}."
+                    ) from exc
                 sink = sinks.get(view)
                 if sink is None:
                     sink = ViewWriter(

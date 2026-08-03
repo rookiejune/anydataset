@@ -142,7 +142,6 @@ def speech_grid_collate(samples: Sequence[SpeechGridBatch]) -> SpeechGridBatch:
     channels: int | None = None
     waveform_dtype: torch.dtype | None = None
     waveform_device: torch.device | None = None
-    lengths_dtype: torch.dtype | None = None
     lengths_device: torch.device | None = None
     for sample in samples:
         if not isinstance(sample, SpeechGridBatch):
@@ -152,7 +151,6 @@ def speech_grid_collate(samples: Sequence[SpeechGridBatch]) -> SpeechGridBatch:
             channels = int(sample.waveforms.shape[3])
             waveform_dtype = sample.waveforms.dtype
             waveform_device = sample.waveforms.device
-            lengths_dtype = sample.lengths.dtype
             lengths_device = sample.lengths.device
         elif sample.sample_rate != sample_rate:
             raise ValueError("speech_grid_collate requires a uniform sample_rate.")
@@ -162,8 +160,6 @@ def speech_grid_collate(samples: Sequence[SpeechGridBatch]) -> SpeechGridBatch:
             raise TypeError("speech_grid_collate requires uniform waveform dtypes.")
         if sample.waveforms.device != waveform_device:
             raise ValueError("speech_grid_collate requires uniform waveform devices.")
-        if sample.lengths.dtype != lengths_dtype:
-            raise TypeError("speech_grid_collate requires uniform lengths dtypes.")
         if sample.lengths.device != lengths_device:
             raise ValueError("speech_grid_collate requires uniform lengths devices.")
         for batch_index, (speakers, sample_texts) in enumerate(

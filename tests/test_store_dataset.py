@@ -424,12 +424,25 @@ class StoreSourceTest(unittest.TestCase):
             dataset = AnyDataset(
                 Spec(source=Source.STORE, path=str(output), split="validation"),
             )
+            opened = []
 
-            with self.assertRaisesRegex(
-                ValueError,
-                "split 'train' does not match requested split 'validation'",
+            def read_tracked_store(*args, **kwargs):
+                store = read_store_dataset(*args, **kwargs)
+                opened.append(store)
+                return store
+
+            with mock.patch(
+                "anydataset.dataset.source.store.read_store_dataset",
+                side_effect=read_tracked_store,
             ):
-                dataset.prepare()
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "split 'train' does not match requested split 'validation'",
+                ):
+                    dataset.prepare()
+
+            self.assertEqual(len(opened), 1)
+            self.assertTrue(opened[0].closed)
 
     def test_store_source_rejects_requested_split_when_manifest_has_none(self):
         with tempfile.TemporaryDirectory() as tmpdir:

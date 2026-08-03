@@ -51,6 +51,9 @@ anydataset-store = "anydataset.store.maintenance:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+anydataset = ["py.typed"]
+
 [tool.ruff]
 line-length = 88
 target-version = "py39"

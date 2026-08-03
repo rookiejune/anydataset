@@ -12,13 +12,14 @@ from .._runtime.sharding import (
     iter_map_style_range,
     iter_map_style_shard,
     runtime_shard,
+    validated_range_rows,
     validate_range,
     validate_shard,
 )
 from ..types import Preset, Source, Spec
 from ..types._sample import select as select_sample
 from ..types.item import Modality, Role, View
-from ..resolver import resolve_dataset
+from ..resolver import resolve_dataset, split_name_and_split
 from ._shuffle import index_groups, shuffle_index_groups
 
 if TYPE_CHECKING:
@@ -35,6 +36,15 @@ _DEFAULT_SHUFFLE_GROUP_SAMPLES = 4096
 @runtime_checkable
 class _IndexGrouped(Protocol):
     def iter_index_groups(self) -> Iterator[Sequence[int]]: ...
+
+
+@runtime_checkable
+class _IndexedRange(Protocol):
+    def iter_indexed_range(
+        self,
+        start: int,
+        stop: int,
+    ) -> Iterable[tuple[int, Any]]: ...
 
 
 class _RuntimeSharded(Protocol):
@@ -84,6 +94,7 @@ class _Base(_DatasetOperations, ABC):
         parse_fn: Callable[[Any], Sample] | None = None,
         transforms: Transforms | None = None,
     ) -> None:
+        _reject_preset_input(spec)
         self.spec = resolve_dataset(spec)
         self._cache_manager = None
         self._dataset = None
@@ -425,16 +436,16 @@ class AnyDataset(_Base, MapStyleABC):
     ) -> Iterator[tuple[int, Sample]]:
         validate_range(len(self), start, stop)
         dataset = self.dataset
-        iter_indexed = getattr(dataset, "iter_indexed_range", None)
-        if callable(iter_indexed):
-            method = cast(
-                Callable[[int, int], Iterator[tuple[int, Any]]],
-                iter_indexed,
+        if isinstance(dataset, _IndexedRange):
+            rows = validated_range_rows(
+                dataset.iter_indexed_range(start, stop),
+                start=start,
+                stop=stop,
+                label="Prepared dataset range",
             )
-            for index, row in method(start, stop):
+            for index, row in rows:
                 yield index, self.transform_sample(self.parse_fn(row))
             return
-
         for index, row in iter_map_style_range(dataset, start, stop):
             yield index, self.transform_sample(self.parse_fn(row))
 
@@ -462,6 +473,21 @@ def _identity_sample(row: Any) -> Sample:
     return row
 
 
+def _reject_preset_input(spec: str | Preset | Spec) -> None:
+    preset: Preset | None = None
+    if isinstance(spec, Preset):
+        preset = spec
+    elif isinstance(spec, str) and "://" not in spec:
+        name, _split = split_name_and_split(spec)
+        try:
+            preset = Preset(name)
+        except ValueError:
+            pass
+    if preset is not None:
+        raise TypeError(
+            "Preset inputs require AnyDataset.preset(...); pass "
+            "preset.spec() explicitly to use only the physical Spec."
+        )
 
 
 def _write_dataset(

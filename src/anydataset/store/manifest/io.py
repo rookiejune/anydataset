@@ -134,12 +134,6 @@ class ManifestParquetCache:
 _DEFAULT_CACHE = ManifestParquetCache()
 
 
-def close_manifest_parquet_cache() -> None:
-    """Close handles retained by standalone manifest helper calls."""
-
-    _DEFAULT_CACHE.close()
-
-
 def manifest_parquet_cache() -> ManifestParquetCache:
     """Return the process-global cache used by standalone manifest helpers."""
 

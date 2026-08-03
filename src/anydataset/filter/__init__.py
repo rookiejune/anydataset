@@ -4,6 +4,7 @@ from .api import FilterApplyResult, FilteredDataset, FilterRule
 from .cache.generations import cleanup_filter_generations
 from .online import RejectReplaceDataset
 from .types import (
+    BatchFilterPredicate,
     DatasetFactory,
     FilterApplyKwargs,
     FilterApplyReport,
@@ -14,6 +15,7 @@ from .types import (
 )
 
 __all__ = [
+    "BatchFilterPredicate",
     "DatasetFactory",
     "FilterApplyKwargs",
     "FilterApplyReport",

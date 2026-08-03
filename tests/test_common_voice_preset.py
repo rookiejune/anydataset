@@ -1,6 +1,7 @@
 from pathlib import Path
 import tempfile
 import unittest
+from typing import Any
 from unittest import mock
 
 from anydataset import Preset, resolve_dataset
@@ -46,6 +47,39 @@ class CommonVoicePresetTest(unittest.TestCase):
         self.assertEqual(spec.version, "23.0-2025-09-17")
         self.assertEqual(spec.path, str(root / "cv-corpus-23.0-2025-09-17"))
         self.assertEqual(spec.load_options["subdirs"], ("zh-CN",))
+
+    def test_version_must_match_versioned_root(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            corpus = Path(tmpdir) / "cv-corpus-23.0-2025-09-17"
+            language_root = corpus / "en"
+            language_root.mkdir(parents=True)
+
+            for root in (corpus, language_root):
+                with self.subTest(root=root):
+                    with self.assertRaisesRegex(ValueError, "version"):
+                        Preset.COMMON_VOICE.spec(
+                            root=root,
+                            version="24.0-2025-12-05",
+                        )
+
+            matching = Preset.COMMON_VOICE.spec(
+                root=corpus,
+                version="23.0-2025-09-17",
+            )
+
+        self.assertEqual(matching.version, "23.0-2025-09-17")
+
+    def test_latest_version_sort_handles_non_numeric_corpus_names(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            current = root / "cv-corpus-24.0-2025-12-05"
+            (current / "en").mkdir(parents=True)
+            (root / "cv-corpus-backup" / "en").mkdir(parents=True)
+
+            spec = Preset.COMMON_VOICE.spec(root=root, languages=("en",))
+
+        self.assertEqual(spec.path, str(current))
+        self.assertEqual(spec.version, "24.0-2025-12-05")
 
     def test_resolves_common_voice_shorthand(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -105,6 +139,18 @@ class CommonVoicePresetTest(unittest.TestCase):
     def test_rejects_empty_split(self):
         with self.assertRaisesRegex(ValueError, "split"):
             Preset.COMMON_VOICE.spec(split="")
+
+    def test_rejects_invalid_version(self):
+        cases: tuple[tuple[Any, type[Exception]], ...] = (
+            ("", ValueError),
+            (" ", ValueError),
+            (1, TypeError),
+        )
+
+        for version, error in cases:
+            with self.subTest(version=version):
+                with self.assertRaisesRegex(error, "version"):
+                    Preset.COMMON_VOICE.spec(root="unused", version=version)
 
     def test_missing_auto_version_fails_clearly(self):
         with tempfile.TemporaryDirectory() as tmpdir:

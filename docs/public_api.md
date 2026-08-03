@@ -27,11 +27,12 @@ Use these paths for application code:
 - `anydataset.presets`: built-in dataset preset classes.
 - `anydataset.dataset`: dataset base classes, index selection, generic collate
   helpers, and morphology collate/view contracts.
-- `anydataset.filter`: cached filter rules, filtered datasets, explicit filter
-  apply reports, online reject / replace filtering, filter decisions, and filter
-  cleanup entry points.
+- `anydataset.filter`: cached filter rules, filtered datasets, scalar and batch
+  filter predicate contracts, explicit filter apply reports, online reject /
+  replace filtering, filter decisions, and filter cleanup entry points.
 - `anydataset.store`: canonical store writing, view/materialization providers,
-  explicit store migration, payload integrity checks, and retained-file cleanup.
+  scalar and batch transform types, explicit store migration, payload integrity
+  checks, and retained-file cleanup.
 - `anydataset.runtime`: process/device runtime configuration.
 - `anydataset.provider`: built-in model/provider classes.
 - `anydataset.provider_service`: provider process server and remote provider /
@@ -50,6 +51,12 @@ remote client factories for executing those objects out of process. Wire
 commands, request/response envelopes, connection loops, and serialization
 helpers live under private implementation modules such as
 `anydataset.provider._protocol` and are not public API.
+
+Batch-aware integrations can type their filter predicates with
+`anydataset.filter.BatchFilterPredicate`. Store providers can import
+`BatchOutput`, `BatchViewTransform`, and `BatchModalityTransform` directly from
+`anydataset.store`; callers do not need to depend on the internal materializer
+modules that consume those contracts.
 
 ## Extension API
 

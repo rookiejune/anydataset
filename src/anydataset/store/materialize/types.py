@@ -10,7 +10,12 @@ from collections.abc import Sequence
 from typing import Any, Protocol, TypeVar, Union
 
 from ...types.item import AudioView, ImageView, Modality, Sample, TextView, View
-from ...view import ModalityProvider, Provider
+from ...view import (
+    BatchModalityProvider,
+    BatchViewProvider,
+    ModalityProvider,
+    Provider,
+)
 
 ViewT = TypeVar("ViewT")
 
@@ -19,6 +24,17 @@ ModalityProviderLike = Union[
     ModalityProvider[ImageView],
     ModalityProvider[TextView],
 ]
+BatchViewProviderLike = Union[
+    BatchViewProvider[AudioView],
+    BatchViewProvider[ImageView],
+    BatchViewProvider[TextView],
+]
+BatchModalityProviderLike = Union[
+    BatchModalityProvider[AudioView],
+    BatchModalityProvider[ImageView],
+    BatchModalityProvider[TextView],
+]
+BatchProviderLike = Union[BatchViewProviderLike, BatchModalityProviderLike]
 MaterializerProvider = Union[
     Provider,
     ModalityProviderLike,

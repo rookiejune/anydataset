@@ -86,15 +86,20 @@ def validate_view_sets(
 
 def sample_view_value(sample: Sample, view: tuple[Role, Modality, View]) -> Any:
     role, modality, key = view
-    item = sample.get((role, modality))
-    if item is None:
-        return None
+    try:
+        item = sample[role, modality]
+    except KeyError as exc:
+        ref = sample_ref_path((role, modality))
+        raise KeyError(f"Sample is missing item {ref}.") from exc
     item_type = modality.item_type()
     if not isinstance(item, item_type) or not isinstance(key, modality.view_type()):
         raise TypeError(
             f"{modality.value} store view must reference an {item_type.__name__}."
         )
-    return cast(Mapping[View, Any], item.views).get(key)
+    try:
+        return cast(Mapping[View, Any], item.views)[key]
+    except KeyError as exc:
+        raise KeyError(f"Sample item is missing view {view_path(view)}.") from exc
 
 
 def validate_item(modality: Modality, item: Item) -> None:

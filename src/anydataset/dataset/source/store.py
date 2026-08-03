@@ -36,6 +36,7 @@ class StoreSource:
             unsafe_pickle_payloads=unsafe_pickle_payloads,
         )
         if spec.split is not None and dataset.manifest.split != spec.split:
+            dataset.close()
             raise ValueError(
                 f"Store dataset split {dataset.manifest.split!r} does not match "
                 f"requested split {spec.split!r}."

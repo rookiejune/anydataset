@@ -14,6 +14,8 @@ from anydataset.types import (
     AudioItem,
     AudioMeta,
     AudioView,
+    ImageItem,
+    ImageView,
     Modality,
     Role,
     TextItem,
@@ -25,7 +27,7 @@ from anydataset.store.part.commit import (
     commit_fragment_part,
     commit_store_fragments,
     commit_store_parts,
-    completed_fragment_indexes,
+    compact_completed_fragment_indexes,
     store_fragments,
 )
 from anydataset.store.part.writer import DatasetFragmentWriter, DatasetPartWriter
@@ -214,10 +216,49 @@ class DatasetWriterTest(unittest.TestCase):
                 views=((Role.DEFAULT, Modality.AUDIO, AudioView.WAVEFORM),),
             )
 
-            with self.assertRaises(KeyError):
+            with self.assertRaisesRegex(KeyError, "missing view"):
                 writer.write([audio_sample(file=str(missing), sample_rate=16000)])
 
             self.assertFalse(output.exists())
+
+    def test_writer_round_trips_none_generic_payload_with_inferred_views(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output = Path(tmpdir) / "dataset"
+            sample = {
+                (Role.DEFAULT, Modality.IMAGE): ImageItem(
+                    views={ImageView.PIXEL: None}
+                )
+            }
+
+            DatasetWriter(output, dataset_id="none-payload").write([sample])
+
+            with read_store_dataset(output) as dataset:
+                value = dataset[0][Role.DEFAULT, Modality.IMAGE].views[
+                    ImageView.PIXEL
+                ]
+            self.assertIsNone(value)
+
+    def test_writer_round_trips_none_generic_payload_with_explicit_views(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output = Path(tmpdir) / "dataset"
+            view = (Role.DEFAULT, Modality.IMAGE, ImageView.PIXEL)
+            sample = {
+                (Role.DEFAULT, Modality.IMAGE): ImageItem(
+                    views={ImageView.PIXEL: None}
+                )
+            }
+
+            DatasetWriter(
+                output,
+                dataset_id="none-payload",
+                views=(view,),
+            ).write([sample])
+
+            with read_store_dataset(output) as dataset:
+                value = dataset[0][Role.DEFAULT, Modality.IMAGE].views[
+                    ImageView.PIXEL
+                ]
+            self.assertIsNone(value)
 
     def test_writer_rejects_sample_without_views(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -281,10 +322,13 @@ class DatasetWriterTest(unittest.TestCase):
             ).write([(2, samples[2])])
 
             self.assertEqual(
-                completed_fragment_indexes(
-                    fragments,
-                    dataset_id="toy-audio",
-                    split="train",
+                frozenset(
+                    compact_completed_fragment_indexes(
+                        fragments,
+                        dataset_id="toy-audio",
+                        split="train",
+                        expected=3,
+                    )
                 ),
                 frozenset({0, 1, 2}),
             )
@@ -417,12 +461,46 @@ class DatasetWriterTest(unittest.TestCase):
                     write_json(metadata_path, metadata)
 
                     with self.assertRaisesRegex(ValueError, message):
-                        completed_fragment_indexes(
+                        compact_completed_fragment_indexes(
                             fragments,
                             dataset_id="toy-audio",
+                            expected=1,
                         )
 
-    def test_completed_fragment_indexes_rechecks_fragment_on_every_scan(self):
+    def test_fragment_metadata_rejects_empty_sample_indexes_with_path(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fragments = Path(tmpdir) / "fragments"
+            fragment = fragments / "batch-000000000000-000000000000-a"
+            DatasetPartWriter(
+                fragment,
+                dataset_id="toy-audio",
+                shard_id=0,
+                num_shards=1,
+            ).write(())
+            write_json(
+                fragment / "fragment.json",
+                {
+                    "dataset_id": "toy-audio",
+                    "split": None,
+                    "fragment_id": fragment.name,
+                    "sample_count": 0,
+                    "sample_indexes": [],
+                },
+            )
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "sample_indexes must not be empty",
+            ) as raised:
+                compact_completed_fragment_indexes(
+                    fragments,
+                    dataset_id="toy-audio",
+                    expected=0,
+                )
+
+            self.assertIn(str(fragment), str(raised.exception))
+
+    def test_compact_fragment_indexes_rechecks_fragment_on_every_scan(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             fragments = Path(tmpdir) / "fragments"
             fragment = fragments / "batch-000000000000-000000000000-a"
@@ -442,9 +520,12 @@ class DatasetWriterTest(unittest.TestCase):
                 ]
             )
             self.assertEqual(
-                completed_fragment_indexes(
-                    fragments,
-                    dataset_id="toy-audio",
+                frozenset(
+                    compact_completed_fragment_indexes(
+                        fragments,
+                        dataset_id="toy-audio",
+                        expected=1,
+                    )
                 ),
                 frozenset({0}),
             )
@@ -457,9 +538,10 @@ class DatasetWriterTest(unittest.TestCase):
                 ValueError,
                 "sample indexes do not match its metadata",
             ):
-                completed_fragment_indexes(
+                compact_completed_fragment_indexes(
                     fragments,
                     dataset_id="toy-audio",
+                    expected=1,
                 )
 
     def test_fragment_manifest_merge_reads_one_row_per_store_lazily(self):
@@ -638,6 +720,35 @@ class DatasetWriterTest(unittest.TestCase):
             commit_store_parts(output, parts, dataset_id="toy-audio")
 
             self.assertEqual(dict(read_store_manifest(output).provenance), provenance)
+
+    def test_commit_parts_reads_each_part_metadata_once(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            parts = _audio_parts(root, ({}, {}))
+
+            with mock.patch.object(
+                store_parts,
+                "read_json",
+                wraps=read_json,
+            ) as read_metadata:
+                commit_store_parts(
+                    root / "dataset",
+                    parts,
+                    dataset_id="toy-audio",
+                )
+
+            part_reads = [
+                Path(call.args[0])
+                for call in read_metadata.call_args_list
+                if Path(call.args[0]).name == "part.json"
+            ]
+            self.assertCountEqual(
+                part_reads,
+                [
+                    parts / "part-00000" / "part.json",
+                    parts / "part-00001" / "part.json",
+                ],
+            )
 
     def test_commit_parts_rejects_provenance_conflicts(self):
         first = {"input_id": "source-v1"}

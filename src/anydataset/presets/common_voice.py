@@ -143,9 +143,11 @@ def _corpus_root_and_languages(
 ) -> tuple[Path, tuple[str, ...]]:
     base = _base_root(root)
     if base.name.startswith("cv-corpus-"):
+        _validate_requested_version(base, version)
         return base, _selected_languages(base, languages)
 
     if base.parent.name.startswith("cv-corpus-"):
+        _validate_requested_version(base.parent, version)
         if languages is not None and languages != (base.name,):
             raise ValueError(
                 "Common Voice language root only supports its own language. "
@@ -169,6 +171,10 @@ def _versioned_corpus_root(root: Path, version: str | None) -> Path:
 
 
 def _corpus_name(version: str) -> str:
+    if not isinstance(version, str):
+        raise TypeError("Common Voice version must be a string.")
+    if not version or version.strip() != version:
+        raise ValueError("Common Voice version must be a non-empty string.")
     if version.startswith("cv-corpus-"):
         return version
     return f"cv-corpus-{version}"
@@ -185,12 +191,27 @@ def _corpus_version(corpus_root: Path) -> str:
     return name.removeprefix("cv-corpus-")
 
 
-def _corpus_sort_key(path: Path) -> tuple[int | str, ...]:
-    return tuple(
-        int(part) if part.isdecimal() else part
-        for part in re.split(r"([0-9]+)", path.name.removeprefix("cv-corpus-"))
-        if part
-    )
+def _validate_requested_version(corpus_root: Path, version: str | None) -> None:
+    if version is None:
+        return
+    requested = _corpus_name(version)
+    if corpus_root.name != requested:
+        raise ValueError(
+            f"Common Voice root selects {corpus_root.name!r}, but version "
+            f"selects {requested!r}."
+        )
+
+
+def _corpus_sort_key(path: Path) -> tuple[tuple[int, int, str], ...]:
+    parts = []
+    for part in re.split(r"([0-9]+)", path.name.removeprefix("cv-corpus-")):
+        if not part:
+            continue
+        if part.isdecimal():
+            parts.append((1, int(part), ""))
+        else:
+            parts.append((0, 0, part))
+    return tuple(parts)
 
 
 def _selected_languages(

@@ -121,7 +121,8 @@ def _smoke_install(root: Path, version: str) -> None:
                 f"assert version('anydataset') == {version!r}; "
                 "installed = {str(path) for path in files('anydataset')}; "
                 "assert 'anydataset/__init__.py' in installed; "
-                "assert 'anydataset/_version.py' in installed"
+                "assert 'anydataset/_version.py' in installed; "
+                "assert 'anydataset/py.typed' in installed"
             ),
         ],
         root,

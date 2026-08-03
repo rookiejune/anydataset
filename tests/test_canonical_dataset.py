@@ -2,6 +2,7 @@ import pickle
 import unittest
 from dataclasses import FrozenInstanceError
 from pathlib import Path
+from typing import Any
 from unittest import mock
 
 import numpy as np
@@ -57,6 +58,20 @@ class _ExtendedTextReq(TextReq):
 
 
 class CanonicalDatasetTest(unittest.TestCase):
+    def test_generic_dataset_rejects_preset_inputs(self):
+        for dataset_type in (AnyDataset, IterableAnyDataset):
+            for value in (Preset.MNIST, "mnist", "mnist:validation"):
+                with self.subTest(dataset_type=dataset_type, value=value):
+                    with self.assertRaisesRegex(TypeError, "AnyDataset.preset"):
+                        dataset_type(value)
+
+        dataset = AnyDataset(
+            Preset.MNIST.spec(),
+            parse_fn=lambda row: row["label"],
+        )
+        dataset._dataset = [{"label": 7}]
+        self.assertEqual(dataset[0], 7)
+
     def test_dataset_uses_falsey_callable_parser(self):
         dataset = AnyDataset(
             Spec(source=Source.HF, path="unused"),
@@ -429,7 +444,8 @@ class CanonicalDatasetTest(unittest.TestCase):
         self.assertEqual(target.views[TextView.TEXT], "The tea is hot.")
 
     def test_wmt19_preset_uses_config_language_pair(self):
-        sample = WMT19(config_name="de-en").parse_fn(
+        dataset = WMT19(config_name="DE-EN")
+        sample = dataset.parse_fn(
             {
                 "translation": {
                     "de": "Der Tee ist heiss.",
@@ -440,13 +456,65 @@ class CanonicalDatasetTest(unittest.TestCase):
 
         source = sample[Role.SOURCE, Modality.TEXT]
         target = sample[Role.TARGET, Modality.TEXT]
+        self.assertEqual(dataset.spec.load_options["config_name"], "de-en")
         self.assertEqual(source.views[TextView.TEXT], "Der Tee ist heiss.")
         self.assertEqual(target.views[TextView.TEXT], "The tea is hot.")
 
     def test_wmt19_preset_accepts_explicit_language_pair(self):
-        dataset = WMT19(source_lang="de", target_lang="en")
+        dataset = WMT19(source_lang="DE", target_lang="EN")
 
         self.assertEqual(dataset.spec.load_options["config_name"], "de-en")
+
+    def test_wmt19_preset_normalizes_lang_enum_values(self):
+        dataset = WMT19(source_lang=Lang.ZH, target_lang=Lang.EN)
+
+        sample = dataset.parse_fn(
+            {"translation": {"zh": "Ni hao.", "en": "Hello."}}
+        )
+
+        self.assertEqual(dataset.spec.load_options["config_name"], "zh-en")
+        self.assertEqual(
+            sample[Role.SOURCE, Modality.TEXT].meta[TextMeta.LANG],
+            Lang.ZH,
+        )
+        self.assertEqual(
+            sample[Role.TARGET, Modality.TEXT].meta[TextMeta.LANG],
+            Lang.EN,
+        )
+
+    def test_wmt19_spec_owns_language_pair_options(self):
+        spec = Preset.WMT19.spec(
+            source_lang=Lang.DE,
+            target_lang="en",
+            download_mode="reuse_dataset_if_exists",
+        )
+
+        self.assertEqual(spec.load_options["config_name"], "de-en")
+        self.assertEqual(
+            spec.load_options["download_mode"],
+            "reuse_dataset_if_exists",
+        )
+        self.assertNotIn("source_lang", spec.load_options)
+        self.assertNotIn("target_lang", spec.load_options)
+        extended = Preset.WMT19.spec(source_lang="GU", target_lang="EN")
+        self.assertEqual(extended.load_options["config_name"], "gu-en")
+
+    def test_wmt19_rejects_invalid_language_options(self):
+        cases: tuple[tuple[dict[str, Any], type[Exception], str], ...] = (
+            ({"source_lang": ""}, ValueError, "source_lang"),
+            ({"target_lang": " "}, ValueError, "target_lang"),
+            ({"source_lang": 1}, TypeError, "source_lang"),
+            ({"source_lang": "Lang.ZH"}, ValueError, "source_lang"),
+            ({"source_lang": "zh-CN"}, ValueError, "source_lang"),
+            ({"config_name": 1}, TypeError, "config_name"),
+            ({"config_name": "Lang.ZH-en"}, ValueError, "config_name source"),
+            ({"config_name": "zh-CN-en"}, ValueError, "<source>-<target>"),
+        )
+
+        for kwargs, error, message in cases:
+            with self.subTest(kwargs=kwargs):
+                with self.assertRaisesRegex(error, message):
+                    WMT19(**kwargs)
 
     def test_wmt19_preset_rejects_conflicting_config_and_languages(self):
         with self.assertRaises(ValueError):
@@ -673,6 +741,49 @@ class CanonicalDatasetTest(unittest.TestCase):
 
         self.assertEqual(values, [(1, 1), (3, 3)])
         self.assertEqual(rows.shard_calls, [])
+
+    def test_map_range_uses_validated_prepared_range(self):
+        dataset = AnyDataset(
+            spec=Spec(source=Source.HF, path="/tmp/missing"),
+            parse_fn=lambda row: row,
+        )
+        entries = [(0, "zero"), (1, "one"), (2, "two")]
+        rows = _RowsWithIndexedRange(["zero", "one", "two"], entries)
+        dataset._dataset = rows
+
+        values = list(dataset.iter_indexed_range(0, len(dataset)))
+
+        self.assertEqual(values, entries)
+        self.assertEqual(rows.range_calls, [(0, 3)])
+
+    def test_map_range_validates_prepared_range_indexes(self):
+        cases: tuple[tuple[Any, type[Exception], str], ...] = (
+            (None, TypeError, "return an iterable"),
+            ([[0, "zero"]], TypeError, "tuples"),
+            ([(True, "zero")], TypeError, "integers"),
+            ([(1, "one")], ValueError, "expected 0, got 1"),
+            ([(0, "zero"), (0, "duplicate")], ValueError, "expected 1, got 0"),
+            ([(0, "zero"), (1, "one")], ValueError, r"cover \[0, 3\)"),
+            (
+                [(0, "zero"), (1, "one"), (2, "two"), (3, "extra")],
+                ValueError,
+                "extra index 3",
+            ),
+        )
+
+        for entries, error, message in cases:
+            with self.subTest(entries=entries):
+                dataset = AnyDataset(
+                    spec=Spec(source=Source.HF, path="/tmp/missing"),
+                    parse_fn=lambda row: row,
+                )
+                dataset._dataset = _RowsWithIndexedRange(
+                    ["zero", "one", "two"],
+                    entries,
+                )
+
+                with self.assertRaisesRegex(error, message):
+                    list(dataset.iter_indexed_range(0, len(dataset)))
 
     def test_iterable_native_shard_validates_global_indexes(self):
         cases = (
@@ -1217,6 +1328,23 @@ class _RawShardedRows:
     def iter_shard(self, num_shards: int, shard_id: int):
         self.shard_calls.append((num_shards, shard_id))
         raise AssertionError("raw sharding requires source opt-in")
+
+
+class _RowsWithIndexedRange:
+    def __init__(self, rows, entries):
+        self.rows = rows
+        self.entries = entries
+        self.range_calls = []
+
+    def __len__(self):
+        return len(self.rows)
+
+    def __getitem__(self, index):
+        return self.rows[index]
+
+    def iter_indexed_range(self, start: int, stop: int):
+        self.range_calls.append((start, stop))
+        return self.entries
 
 
 class _FalseyParser:

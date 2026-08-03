@@ -66,7 +66,14 @@ from .resume import (
 )
 from .worker import WorkerConfig, materialize_worker
 from .modality import with_modality_provider
-from .types import MaterializerProvider, ModalityProviderLike, SampleProviderLike
+from .types import (
+    BatchModalityProviderLike,
+    BatchSampleProviderLike,
+    BatchViewProviderLike,
+    MaterializerProvider,
+    ModalityProviderLike,
+    SampleProviderLike,
+)
 from .view import with_view_provider
 from ..part.commit import (
     commit_store_fragments,
@@ -903,7 +910,7 @@ class ViewMaterializer:
     ) -> Iterator[Sample]:
         return self._output_samples(
             samples,
-            with_batch_view_provider(samples, cast(Provider, provider)),
+            with_batch_view_provider(samples, cast(BatchViewProviderLike, provider)),
         )
 
     def _output_sample(self, source: Sample, output: Sample) -> Sample:
@@ -1025,7 +1032,7 @@ class SampleMaterializer(ViewMaterializer):
         provider: MaterializerProvider,
     ) -> Iterator[Sample]:
         try:
-            call_batch = provider.call_batch  # type: ignore[attr-defined]
+            call_batch = cast(BatchSampleProviderLike, provider).call_batch
         except AttributeError as exc:
             raise TypeError(
                 "batch_size > 1 requires sample provider.call_batch()."
@@ -1084,7 +1091,7 @@ class ModalityMaterializer(ViewMaterializer):
             samples,
             with_batch_modality_provider(
                 samples,
-                cast(ModalityProviderLike, provider),
+                cast(BatchModalityProviderLike, provider),
                 selected_roles=self.roles,
             ),
         )

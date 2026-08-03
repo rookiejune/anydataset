@@ -77,6 +77,12 @@ class _FragmentInfo:
     provenance: Mapping[str, str]
 
 
+@dataclass(frozen=True)
+class _PartInfo:
+    path: Path
+    metadata: Mapping[str, object]
+
+
 def _common_provenance(
     inputs: Iterable[tuple[Path, Mapping[str, str]]],
     *,
@@ -142,12 +148,18 @@ def commit_store_parts(
     provenance: Mapping[str, str] | None = None,
     progress: CommitProgress | None = None,
 ) -> Path:
-    parts = _part_roots(parts_dir)
-    _put_progress(progress, "scan", len(parts))
-    if not parts:
+    part_infos = _part_infos(parts_dir)
+    _put_progress(progress, "scan", len(part_infos))
+    if not part_infos:
         raise ValueError(f"No materialized parts found: {parts_dir}")
-    input_provenance = _validate_parts(parts, dataset_id, split, progress=progress)
+    input_provenance = _validate_parts(
+        part_infos,
+        dataset_id,
+        split,
+        progress=progress,
+    )
     commit_provenance = _commit_provenance(input_provenance, provenance)
+    parts = tuple(info.path for info in part_infos)
     views = _store_views(parts)
     validate_store_payloads(parts)
     with _bounded_store_roots(
@@ -254,7 +266,7 @@ def commit_fragment_part(
             "max_shard_samples",
             max_shard_samples,
         )
-    fragment_infos, roots = _validate_fragment_roots_with_info(
+    fragment_infos, roots = _fragment_info_roots(
         tuple(Path(path) for path in fragments),
         dataset_id=dataset_id,
         split=split,
@@ -311,32 +323,6 @@ def commit_fragment_part(
             return root
 
         return replace_dir(output_dir, write)
-
-
-def completed_fragment_indexes(
-    fragments_dir: str | Path,
-    *,
-    dataset_id: str,
-    split: str | None = None,
-) -> frozenset[int]:
-    root = Path(fragments_dir)
-    if not root.is_dir():
-        return frozenset()
-    fragment_paths = _fragment_paths(root)
-    entries = tuple(
-        (
-            path.name,
-            _read_fragment_info(path, dataset_id=dataset_id, split=split).indexes,
-        )
-        for path in fragment_paths
-    )
-    completed: set[int] = set()
-    for _fragment_id, indexes in entries:
-        for index in indexes:
-            if index in completed:
-                raise ValueError(f"Duplicate resume index {index}.")
-            completed.add(index)
-    return frozenset(completed)
 
 
 def compact_completed_fragment_indexes(
@@ -955,14 +941,24 @@ def _store_views(stores: tuple[Path, ...]) -> tuple[tuple[Role, Modality, View],
     return tuple(sorted(views, key=view_path))
 
 
-def _part_roots(parts_dir: str | Path) -> tuple[Path, ...]:
+def _part_infos(parts_dir: str | Path) -> tuple[_PartInfo, ...]:
     root = Path(parts_dir).expanduser()
     if not root.is_dir():
         raise FileNotFoundError(root)
     return tuple(
         sorted(
-            (path for path in root.iterdir() if _part_json_path(path).is_file()),
-            key=lambda path: _part_sort_key(path),
+            (
+                _PartInfo(
+                    path=path,
+                    metadata=_read_metadata(_part_json_path(path), "Part"),
+                )
+                for path in root.iterdir()
+                if _part_json_path(path).is_file()
+            ),
+            key=lambda info: (
+                _metadata_integer(info.metadata, "shard_id", kind="Part"),
+                info.path.name,
+            ),
         )
     )
 
@@ -1071,21 +1067,6 @@ def _fragment_info_roots(
     return infos, tuple(info.path for info in infos)
 
 
-def _validate_fragment_roots_with_info(
-    fragments: tuple[Path, ...],
-    *,
-    dataset_id: str,
-    split: str | None,
-    progress: CommitProgress | None = None,
-) -> tuple[tuple[_FragmentInfo, ...], tuple[Path, ...]]:
-    return _fragment_info_roots(
-        fragments,
-        dataset_id=dataset_id,
-        split=split,
-        progress=progress,
-    )
-
-
 def _read_metadata(path: Path, kind: str) -> Mapping[str, object]:
     data = read_json(path)
     if not isinstance(data, Mapping):
@@ -1105,13 +1086,8 @@ def _metadata_integer(
     return value
 
 
-def _part_sort_key(path: Path) -> tuple[int, str]:
-    data = _read_metadata(_part_json_path(path), "Part")
-    return _metadata_integer(data, "shard_id", kind="Part"), path.name
-
-
 def _validate_parts(
-    parts: tuple[Path, ...],
+    parts: tuple[_PartInfo, ...],
     dataset_id: str,
     split: str | None,
     *,
@@ -1120,8 +1096,9 @@ def _validate_parts(
     num_shards: int | None = None
     shard_ids: set[int] = set()
     provenances: list[tuple[Path, Mapping[str, str]]] = []
-    for part in parts:
-        data = _read_metadata(_part_json_path(part), "Part")
+    for info in parts:
+        part = info.path
+        data = info.metadata
         manifest = read_store_manifest(part, legacy_policy="reject")
         provenances.append((part, manifest.provenance))
         if data.get("dataset_id") != dataset_id:
@@ -1175,7 +1152,7 @@ def _read_fragment_info(
         raise ValueError(f"Fragment {path} split does not match {split!r}.")
     if data.get("fragment_id") != path.name:
         raise ValueError(f"Fragment {path} id does not match its directory name.")
-    indexes = _fragment_sample_indexes(data)
+    indexes = _fragment_sample_indexes(data, path=path)
     manifest = read_store_manifest(path, legacy_policy="reject")
     if manifest.dataset_id != data.get("dataset_id"):
         raise ValueError(
@@ -1225,10 +1202,16 @@ def _validate_fragment_sample_manifest(path: Path, indexes: tuple[int, ...]) -> 
     raise ValueError(f"Fragment {path} sample indexes do not match its metadata.")
 
 
-def _fragment_sample_indexes(data: Mapping[str, object]) -> tuple[int, ...]:
+def _fragment_sample_indexes(
+    data: Mapping[str, object],
+    *,
+    path: Path,
+) -> tuple[int, ...]:
     raw = data.get("sample_indexes")
     if not isinstance(raw, list):
         raise ValueError("Fragment sample_indexes must be a list.")
+    if not raw:
+        raise ValueError(f"Fragment {path} sample_indexes must not be empty.")
     indexes: list[int] = []
     for value in raw:
         if type(value) is not int:

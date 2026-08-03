@@ -213,6 +213,7 @@ def test_filter_public_api_boundary() -> None:
     _assert_public_all(
         filter_api,
         [
+            "BatchFilterPredicate",
             "DatasetFactory",
             "FilterApplyKwargs",
             "FilterApplyReport",
@@ -262,7 +263,10 @@ def test_store_public_api_boundary() -> None:
         [
             "DatasetWriter",
             "BatchModalityProvider",
+            "BatchModalityTransform",
+            "BatchOutput",
             "BatchViewProvider",
+            "BatchViewTransform",
             "FunctionModalityProvider",
             "FunctionViewProvider",
             "ModalityMaterializer",

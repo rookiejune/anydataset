@@ -51,12 +51,24 @@ class StoreMigrationTest(unittest.TestCase):
             source = root / "v1"
             output = root / "v3"
             _write_v1_store(source)
+            opened = []
 
-            migrated = migrate_store(source, output)
-            dataset = read_store_dataset(migrated, preload=True)
-            first = dataset[0]
-            second = dataset[1]
+            def read_tracked_store(*args, **kwargs):
+                dataset = read_store_dataset(*args, **kwargs)
+                opened.append(dataset)
+                return dataset
 
+            with mock.patch(
+                "anydataset.store.manifest.migration.read_store_dataset",
+                side_effect=read_tracked_store,
+            ):
+                migrated = migrate_store(source, output)
+            with read_store_dataset(migrated, preload=True) as dataset:
+                first = dataset[0]
+                second = dataset[1]
+
+            self.assertEqual(len(opened), 1)
+            self.assertTrue(opened[0].closed)
             self.assertEqual(migrated, output.resolve())
             self.assertEqual(read_json(output / "dataset.json")["schema_version"], 3)
             self.assertNotIn("schema_version", read_json(source / "dataset.json"))

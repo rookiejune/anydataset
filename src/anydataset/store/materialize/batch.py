@@ -15,8 +15,14 @@ from ..._compat import strict_zip
 from ..._runtime.devices import clear_cuda_cache, release_exception
 from ...dataset.collate import Batch, collate_fn
 from ...types.item import Item, Modality, Requirement, Role, Sample
+from ...view import BatchOutput
 from .modality import modality_inputs, role_items, with_modality_view
-from .types import ModalityProviderLike, output_modality
+from .types import (
+    BatchModalityProviderLike,
+    BatchProviderLike,
+    BatchViewProviderLike,
+    output_modality,
+)
 from .view import with_view
 
 OomCallback = Callable[[int, int, int], None]
@@ -67,7 +73,7 @@ def with_resilient_batch_provider(
 
 def with_batch_view_provider(
     samples: Sequence[Sample],
-    provider: Any,
+    provider: BatchViewProviderLike,
 ) -> Iterator[Sample]:
     output = provider.output
     modality = output_modality(output)
@@ -93,7 +99,7 @@ def with_batch_view_provider(
 
 def with_batch_modality_provider(
     samples: Sequence[Sample],
-    provider: ModalityProviderLike,
+    provider: BatchModalityProviderLike,
     *,
     selected_roles: Collection[Role] | None = None,
 ) -> Iterator[Sample]:
@@ -245,9 +251,9 @@ def _sorted_refs(
 
 
 def _call_batch(
-    provider: Any,
+    provider: BatchProviderLike,
     batch: Batch,
-) -> Sequence[Any] | Mapping[tuple[Role, Modality], Sequence[Any]]:
+) -> BatchOutput:
     try:
         call_batch = provider.call_batch
     except AttributeError as exc:
