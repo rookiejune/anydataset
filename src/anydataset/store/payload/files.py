@@ -25,11 +25,11 @@ class StoreFilesInUseError(RuntimeError):
 
 class StoreFilesLease:
     def __init__(self, root: str | Path) -> None:
-        self.root = Path(root).expanduser().resolve()
-        self.cache_path = files_dir(self.root)
-        self.lock_path = lease_path(self.root)
+        self.root: Path = Path(root).expanduser().resolve()
+        self.cache_path: Path = files_dir(self.root)
+        self.lock_path: Path = lease_path(self.root)
         self._fd: int | None = None
-        self._pid = os.getpid()
+        self._pid: int = os.getpid()
         self._acquire()
 
     @property
