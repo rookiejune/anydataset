@@ -245,6 +245,7 @@ def test_store_public_api_boundary() -> None:
             "ModalityProvider",
             "ModalityTransform",
             "Provider",
+            "SampleMaterializer",
             "validate_store_payloads",
             "validate_store_view_payloads",
             "ViewMaterializer",

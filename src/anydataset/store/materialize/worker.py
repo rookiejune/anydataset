@@ -22,7 +22,7 @@ from ..part.commit import commit_fragment_part, store_fragments
 
 DatasetFactory = Callable[[], Any]
 ProviderFactory = Callable[[str], MaterializerProvider]
-MaterializerMode = Literal["view", "modality"]
+MaterializerMode = Literal["view", "modality", "sample"]
 
 
 @dataclass(frozen=True)
@@ -130,7 +130,7 @@ def materialize_worker(
 
 
 def worker_materializer(config: WorkerConfig):
-    from .materializer import ModalityMaterializer, ViewMaterializer
+    from .materializer import ModalityMaterializer, SampleMaterializer, ViewMaterializer
 
     if config.mode == "modality":
         return ModalityMaterializer(
@@ -146,6 +146,20 @@ def worker_materializer(config: WorkerConfig):
             keep_schema=config.keep_schema,
             runtime=config.runtime,
             roles=config.roles,
+        )
+    if config.mode == "sample":
+        return SampleMaterializer(
+            output_dir=config.output_dir,
+            split=config.split,
+            max_shard_samples=config.max_shard_samples,
+            batch_size=config.batch_size,
+            commit_samples=config.commit_samples,
+            num_workers=config.num_workers,
+            prefetch_factor=config.prefetch_factor,
+            write_workers=config.write_workers,
+            write_prefetch=config.write_prefetch,
+            keep_schema=config.keep_schema,
+            runtime=config.runtime,
         )
     return ViewMaterializer(
         output_dir=config.output_dir,

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from collections.abc import Callable, Collection, Iterable, Iterator, Sequence
+from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, cast
@@ -67,7 +67,7 @@ from .resume import (
 )
 from .worker import WorkerConfig, materialize_worker
 from .modality import with_modality_provider
-from .types import MaterializerProvider, ModalityProviderLike
+from .types import MaterializerProvider, ModalityProviderLike, SampleProviderLike
 from .view import with_view_provider
 from ..part.commit import (
     commit_store_fragments,
@@ -78,7 +78,7 @@ from ..writer import DatasetWriter
 
 DatasetFactory = Callable[[], Any]
 ProviderFactory = Callable[[str], MaterializerProvider]
-_MaterializerMode = Literal["view", "modality"]
+_MaterializerMode = Literal["view", "modality", "sample"]
 
 _PROGRESS_STAGES = ("reader", "provider", "writer")
 _COMMIT_PROGRESS_STAGES = (
@@ -981,6 +981,50 @@ class ViewMaterializer:
 
 
 @dataclass
+class SampleMaterializer(ViewMaterializer):
+    """Resumably materialize complete output samples from input samples.
+
+    Unlike ViewMaterializer and ModalityMaterializer, this class delegates the
+    whole sample transform to the provider. It is intended for dependent
+    pipelines where a publishable unit must include multiple generated fields
+    from the same source sample.
+    """
+
+    @property
+    def _materializer_mode(self) -> _MaterializerMode:
+        return "sample"
+
+    def _sample_with_provider(
+        self,
+        sample: Sample,
+        provider: MaterializerProvider,
+    ) -> Sample:
+        return self._output_sample(
+            sample,
+            _validated_sample_provider_output(
+                cast(SampleProviderLike, provider)(sample),
+            ),
+        )
+
+    def _samples_with_batch_provider(
+        self,
+        samples: Sequence[Sample],
+        provider: MaterializerProvider,
+    ) -> Iterator[Sample]:
+        try:
+            call_batch = provider.call_batch  # type: ignore[attr-defined]
+        except AttributeError as exc:
+            raise TypeError(
+                "batch_size > 1 requires sample provider.call_batch()."
+            ) from exc
+        outputs = tuple(
+            _validated_sample_provider_output(output) for output in call_batch(samples)
+        )
+        validate_batch_outputs(outputs, len(samples))
+        yield from self._output_samples(samples, iter(outputs))
+
+
+@dataclass
 class ModalityMaterializer(ViewMaterializer):
     roles: frozenset[Role] | None = None
 
@@ -1031,6 +1075,12 @@ class ModalityMaterializer(ViewMaterializer):
                 selected_roles=self.roles,
             ),
         )
+
+
+def _validated_sample_provider_output(output: object) -> Sample:
+    if not isinstance(output, Mapping):
+        raise TypeError("sample provider output must be a sample mapping.")
+    return cast(Sample, output)
 
 
 def _missing_sample_records(

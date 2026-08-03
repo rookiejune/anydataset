@@ -16,7 +16,7 @@ from anydataset import AnyDataset, Source, Spec
 from anydataset.dataset.collate import FieldGroup, FieldRef
 from anydataset.provider_service import ProviderServer, RemoteProviderFactory
 from anydataset.runtime import Runtime
-from anydataset.store import MaterializationStatus, ModalityMaterializer
+from anydataset.store import MaterializationStatus, ModalityMaterializer, SampleMaterializer
 from anydataset.types import (
     AudioItem,
     AudioMeta,
@@ -1712,6 +1712,69 @@ class ViewMaterializerTest(unittest.TestCase):
                     provider_factory=provider_factory,
                 )
 
+    def test_sample_materializer_writes_complete_samples(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = root / "target"
+            samples = tuple(_text_sample(f"text-{index}") for index in range(3))
+
+            SampleMaterializer(target, split="train", batch_size=2).write(
+                dataset_factory=_DatasetFactory(samples),
+                provider_factory=_SampleProviderFactory(),
+                devices="cpu",
+            )
+
+            stored = read_store_dataset(target)
+            self.assertEqual(len(stored), 3)
+            self.assertEqual(
+                stored[1][Role.DEFAULT, Modality.TEXT].views[TextView.TEXT],
+                "text-1",
+            )
+            self.assertTrue(
+                torch.equal(
+                    stored[1][Role.DEFAULT, Modality.AUDIO].views[AudioView.WAVEFORM][0],
+                    torch.tensor([[1.0]]),
+                )
+            )
+
+    def test_sample_materializer_snapshots_complete_dense_prefix(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = root / "target"
+            snapshot = root / "snapshot"
+            samples = tuple(_text_sample(f"text-{index}") for index in range(4))
+            dataset_factory = _DatasetFactory(samples)
+            provider_factory = _SampleProviderFactory()
+            materializer = SampleMaterializer(
+                target,
+                split="train",
+                commit_samples=2,
+            )
+
+            status = materializer.write(
+                dataset_factory=dataset_factory,
+                provider_factory=provider_factory,
+                devices="cpu",
+                max_new_samples=2,
+                finalize=False,
+            )
+            self.assertIsInstance(status, MaterializationStatus)
+            materializer.snapshot(
+                snapshot,
+                dataset_factory=dataset_factory,
+                provider_factory=provider_factory,
+            )
+
+            self.assertEqual(len(read_store_dataset(snapshot)), 2)
+            self.assertFalse(target.exists())
+
+            materializer.write(
+                dataset_factory=dataset_factory,
+                provider_factory=provider_factory,
+                devices="cpu",
+            )
+            self.assertEqual(len(read_store_dataset(target)), 4)
+
     def test_materializer_rejects_bounded_finalization(self):
         materializer = ViewMaterializer("target")
 
@@ -2250,6 +2313,21 @@ class _ASRProvider:
         return f"sum={int(waveform.sum().item())}"
 
 
+class _SampleProvider:
+    def __call__(self, sample):
+        text = sample[Role.DEFAULT, Modality.TEXT].views[TextView.TEXT]
+        index = int(text.rsplit("-", 1)[-1])
+        return {
+            **sample,
+            (Role.DEFAULT, Modality.AUDIO): AudioItem(
+                views={AudioView.WAVEFORM: (torch.tensor([[float(index)]]), 16000)},
+            ),
+        }
+
+    def call_batch(self, samples):
+        return [self(sample) for sample in samples]
+
+
 @dataclass(frozen=True)
 class _DatasetFactory:
     dataset: object
@@ -2391,6 +2469,12 @@ class _TTSProviderFactory:
 class _ASRProviderFactory:
     def __call__(self, device: str):
         return _ASRProvider()
+
+
+@dataclass(frozen=True)
+class _SampleProviderFactory:
+    def __call__(self, device: str):
+        return _SampleProvider()
 
 
 @dataclass(frozen=True)

@@ -6,9 +6,10 @@ used by view, modality, and batch materialization helpers.
 
 from __future__ import annotations
 
-from typing import Any, TypeVar, Union
+from collections.abc import Sequence
+from typing import Any, Protocol, TypeVar, Union
 
-from ...types.item import AudioView, ImageView, Modality, TextView, View
+from ...types.item import AudioView, ImageView, Modality, Sample, TextView, View
 from ...view import ModalityProvider, Provider
 
 ViewT = TypeVar("ViewT")
@@ -21,7 +22,18 @@ ModalityProviderLike = Union[
 MaterializerProvider = Union[
     Provider,
     ModalityProviderLike,
+    "SampleProviderLike",
 ]
+
+
+class SampleProviderLike(Protocol):
+    def __call__(self, sample: Sample) -> Sample: ...
+
+
+class BatchSampleProviderLike(Protocol):
+    def __call__(self, sample: Sample) -> Sample: ...
+
+    def call_batch(self, samples: Sequence[Sample]) -> Sequence[Sample]: ...
 
 
 def output_modality(view: View) -> Modality:

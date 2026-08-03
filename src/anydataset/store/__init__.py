@@ -12,6 +12,7 @@ from ..view import (
 from .materialize.materializer import (
     MaterializationStatus,
     ModalityMaterializer,
+    SampleMaterializer,
     ViewMaterializer,
 )
 from .migration import migrate_store
@@ -34,6 +35,7 @@ __all__ = [
     "ModalityProvider",
     "ModalityTransform",
     "Provider",
+    "SampleMaterializer",
     "validate_store_payloads",
     "validate_store_view_payloads",
     "ViewMaterializer",
