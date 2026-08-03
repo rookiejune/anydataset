@@ -675,10 +675,11 @@ and payloads. The selection is preserved across pickle/spawn and participates
 in filter cache identity, while the physical `Spec` continues to identify the
 store itself.
 
-The store directory schema is the durable on-disk format. `StoreDataset` and
-`DatasetWriter` also use a separately versioned pickle state for short-lived
-runtime transport across spawn and `DataLoader` workers; those pickles are not
-a durable dataset format. Unsupported runtime pickle versions fail explicitly.
+The store directory schema is the durable on-disk format. `StoreDataset`,
+`DatasetWriter`, and the retained-file lease carried by store readers use
+independently versioned pickle states for short-lived runtime transport across
+spawn and `DataLoader` workers; those pickles are not a durable dataset format.
+Unsupported runtime pickle versions fail explicitly.
 
 Store payloads are written to tar shards per view. The same
 `dataset.dataloader(..., shuffle=True)` entry point remains the only shuffle

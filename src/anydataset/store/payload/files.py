@@ -5,6 +5,7 @@ import hashlib
 import os
 import shutil
 import threading
+from collections.abc import Mapping
 from pathlib import Path
 from types import TracebackType
 from typing import Any
@@ -12,9 +13,15 @@ from typing import Any
 from ..._io.files import stat_fingerprint
 from ...cache import anydataset_home
 from ...types.item import Modality, Role, View
+from .._pickle_state import decode_pickle_state, validate_pickle_fields
 from ..manifest.schema import ViewManifestEntry
 from ..paths import view_shard_path
 
+_STORE_FILES_LEASE_PICKLE_VERSION = 1
+_STORE_FILES_LEASE_PICKLE_FIELDS = frozenset({"root", "active"})
+_STORE_FILES_LEASE_LEGACY_PICKLE_FIELDS = frozenset(
+    {"root", "cache_path", "lock_path", "active"}
+)
 _LEASES: dict[tuple[int, str], int] = {}
 _LEASES_LOCK = threading.Lock()
 
@@ -60,19 +67,32 @@ class StoreFilesLease:
 
     def __getstate__(self) -> dict[str, Any]:
         return {
+            "pickle_schema_version": _STORE_FILES_LEASE_PICKLE_VERSION,
             "root": self.root,
-            "cache_path": self.cache_path,
-            "lock_path": self.lock_path,
             "active": self.active,
         }
 
-    def __setstate__(self, state: dict[str, Any]) -> None:
-        self.root = Path(state["root"])
-        self.cache_path = Path(state["cache_path"])
-        self.lock_path = Path(state["lock_path"])
+    def __setstate__(self, state: object) -> None:
+        legacy, values = decode_pickle_state(
+            state,
+            kind="StoreFilesLease",
+            current_version=_STORE_FILES_LEASE_PICKLE_VERSION,
+        )
+        if legacy:
+            values = _migrate_store_files_lease_pickle_v0(values)
+        else:
+            validate_pickle_fields(
+                values,
+                kind="StoreFilesLease",
+                required=_STORE_FILES_LEASE_PICKLE_FIELDS,
+            )
+        root, active = _validated_store_files_lease_pickle_state(values)
+        self.root = root
+        self.cache_path = files_dir(root)
+        self.lock_path = lease_path(root)
         self._fd = None
         self._pid = os.getpid()
-        if state["active"]:
+        if active:
             self._acquire()
 
     def __del__(self) -> None:
@@ -101,6 +121,43 @@ class StoreFilesLease:
         self._fd = None
         self._acquire()
         os.close(inherited)
+
+
+def _migrate_store_files_lease_pickle_v0(
+    state: dict[str, Any],
+) -> dict[str, Any]:
+    validate_pickle_fields(
+        state,
+        kind="StoreFilesLease",
+        required=_STORE_FILES_LEASE_LEGACY_PICKLE_FIELDS,
+    )
+    root, active = _validated_store_files_lease_pickle_state(state)
+    for name, expected in (
+        ("cache_path", files_dir(root)),
+        ("lock_path", lease_path(root)),
+    ):
+        value = state[name]
+        if not isinstance(value, Path):
+            raise TypeError(
+                f"StoreFilesLease legacy pickle field {name!r} must be a Path."
+            )
+        if value != expected:
+            raise ValueError(
+                f"StoreFilesLease legacy pickle {name} must match root."
+            )
+    return {"root": root, "active": active}
+
+
+def _validated_store_files_lease_pickle_state(
+    state: Mapping[str, Any],
+) -> tuple[Path, bool]:
+    root = state["root"]
+    if not isinstance(root, Path):
+        raise TypeError("StoreFilesLease pickle field 'root' must be a Path.")
+    active = state["active"]
+    if type(active) is not bool:
+        raise TypeError("StoreFilesLease pickle field 'active' must be a boolean.")
+    return root.expanduser().resolve(), active
 
 
 def lease_store_files(root: str | Path) -> StoreFilesLease:

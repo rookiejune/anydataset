@@ -127,11 +127,12 @@ helpers, and JSON path helpers remain private implementation details.
 ## Runtime pickle policy
 
 The store directory schema is the long-lived persisted data format. In
-contrast, the versioned pickle states used by `StoreDataset` and
-`DatasetWriter` are runtime transport contracts for process spawn and
-`DataLoader` workers. Do not retain those pickles as durable dataset assets.
-Unversioned legacy runtime states follow the explicit v0 migration path;
-unsupported versions, fields, and field types fail instead of being guessed.
+contrast, `StoreDataset`, `DatasetWriter`, and the retained-file lease carried
+by store readers use independently versioned pickle states as runtime transport
+contracts for process spawn and `DataLoader` workers. Do not retain those
+pickles as durable dataset assets. Unversioned legacy runtime states follow the
+explicit v0 migration path; unsupported versions, fields, and field types fail
+instead of being guessed.
 
 ## Adding public names
 

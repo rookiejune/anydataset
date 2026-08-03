@@ -24,9 +24,12 @@ from anydataset.store.manifest.schema import STORE_SCHEMA_VERSION, ViewManifestE
 from anydataset.store.manifest.io import read_sample_manifest_index
 from anydataset.store.paths import view_manifest_parquet_path, view_shard_path
 from anydataset.store.payload.files import (
+    StoreFilesLease,
     StoreFilesInUseError,
     cleanup_store_files,
+    files_dir,
     lease_store_files,
+    lease_path,
 )
 from anydataset.store.payload import integrity as store_integrity
 from anydataset.store.payload.integrity import (
@@ -324,6 +327,184 @@ class StoreIntegrityTest(unittest.TestCase):
 
 
 class StoreFilesCleanupTest(unittest.TestCase):
+    def test_lease_pickle_state_is_explicit_and_versioned(self):
+        with tempfile.TemporaryDirectory() as tmpdir, mock.patch(
+            "anydataset.store.payload.files.anydataset_home",
+            return_value=Path(tmpdir) / "home",
+        ):
+            root = Path(tmpdir) / "store"
+            lease = lease_store_files(root)
+            try:
+                state = lease.__getstate__()
+            finally:
+                lease.close()
+
+        self.assertEqual(
+            state,
+            {
+                "pickle_schema_version": 1,
+                "root": root.resolve(),
+                "active": True,
+            },
+        )
+
+    def test_lease_pickle_state_derives_runtime_paths_from_root(self):
+        with tempfile.TemporaryDirectory() as tmpdir, mock.patch(
+            "anydataset.store.payload.files.anydataset_home",
+            return_value=Path(tmpdir) / "home",
+        ):
+            root = (Path(tmpdir) / "store").resolve()
+            restored = StoreFilesLease.__new__(StoreFilesLease)
+            restored.__setstate__(
+                {
+                    "pickle_schema_version": 1,
+                    "root": root,
+                    "active": False,
+                }
+            )
+
+            self.assertEqual(restored.root, root)
+            self.assertEqual(restored.cache_path, files_dir(root))
+            self.assertEqual(restored.lock_path, lease_path(root))
+            self.assertFalse(restored.active)
+
+    def test_lease_rejects_invalid_current_pickle_state(self):
+        root = Path("store").resolve()
+        cases = (
+            ([], TypeError, "Invalid StoreFilesLease pickle state"),
+            (
+                {"pickle_schema_version": 2, "root": root, "active": False},
+                ValueError,
+                "Unsupported StoreFilesLease pickle_schema_version 2",
+            ),
+            (
+                {"pickle_schema_version": 0, "root": root, "active": False},
+                ValueError,
+                "Unsupported StoreFilesLease pickle_schema_version 0",
+            ),
+            (
+                {"pickle_schema_version": True, "root": root, "active": False},
+                TypeError,
+                "pickle_schema_version must be an integer",
+            ),
+            (
+                {"pickle_schema_version": 1, "active": False},
+                ValueError,
+                "missing required field 'root'",
+            ),
+            (
+                {
+                    "pickle_schema_version": 1,
+                    "root": root,
+                    "active": False,
+                    "extra": None,
+                },
+                ValueError,
+                "unsupported field 'extra'",
+            ),
+            (
+                {
+                    "pickle_schema_version": 1,
+                    "root": str(root),
+                    "active": False,
+                },
+                TypeError,
+                "field 'root' must be a Path",
+            ),
+            (
+                {"pickle_schema_version": 1, "root": root, "active": 1},
+                TypeError,
+                "field 'active' must be a boolean",
+            ),
+        )
+        for state, error, message in cases:
+            with self.subTest(state=state):
+                restored = StoreFilesLease.__new__(StoreFilesLease)
+                with self.assertRaisesRegex(error, message):
+                    restored.__setstate__(state)
+
+    def test_lease_migrates_consistent_legacy_pickle_state(self):
+        with tempfile.TemporaryDirectory() as tmpdir, mock.patch(
+            "anydataset.store.payload.files.anydataset_home",
+            return_value=Path(tmpdir) / "home",
+        ):
+            root = Path(tmpdir) / "store"
+            original = lease_store_files(root)
+            legacy = {
+                "root": original.root,
+                "cache_path": original.cache_path,
+                "lock_path": original.lock_path,
+                "active": True,
+            }
+            original.close()
+
+            restored = StoreFilesLease.__new__(StoreFilesLease)
+            restored.__setstate__(legacy)
+            try:
+                self.assertEqual(restored.root, root.resolve())
+                self.assertEqual(restored.cache_path, legacy["cache_path"])
+                self.assertEqual(restored.lock_path, legacy["lock_path"])
+                self.assertTrue(restored.active)
+            finally:
+                restored.close()
+
+    def test_lease_rejects_invalid_legacy_pickle_state_before_acquire(self):
+        with tempfile.TemporaryDirectory() as tmpdir, mock.patch(
+            "anydataset.store.payload.files.anydataset_home",
+            return_value=Path(tmpdir) / "home",
+        ):
+            root = Path(tmpdir) / "store"
+            original = lease_store_files(root)
+            legacy = {
+                "root": original.root,
+                "cache_path": original.cache_path,
+                "lock_path": original.lock_path,
+                "active": True,
+            }
+            original.close()
+
+            cases = (
+                (
+                    {**legacy, "cache_path": Path(tmpdir) / "other-cache"},
+                    ValueError,
+                    "cache_path must match root",
+                ),
+                (
+                    {**legacy, "lock_path": Path(tmpdir) / "other.lock"},
+                    ValueError,
+                    "lock_path must match root",
+                ),
+                (
+                    {**legacy, "cache_path": str(legacy["cache_path"])},
+                    TypeError,
+                    "field 'cache_path' must be a Path",
+                ),
+                (
+                    {**legacy, "active": 1},
+                    TypeError,
+                    "field 'active' must be a boolean",
+                ),
+                (
+                    {key: value for key, value in legacy.items() if key != "lock_path"},
+                    ValueError,
+                    "missing required field 'lock_path'",
+                ),
+                (
+                    {**legacy, "extra": None},
+                    ValueError,
+                    "unsupported field 'extra'",
+                ),
+            )
+            for state, error, message in cases:
+                with self.subTest(state=state), mock.patch.object(
+                    StoreFilesLease,
+                    "_acquire",
+                ) as acquire:
+                    restored = StoreFilesLease.__new__(StoreFilesLease)
+                    with self.assertRaisesRegex(error, message):
+                        restored.__setstate__(state)
+                    acquire.assert_not_called()
+
     def test_reader_and_explicit_lease_preserve_retained_file(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
