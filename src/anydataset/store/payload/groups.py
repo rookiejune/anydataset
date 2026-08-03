@@ -10,7 +10,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from ..._io.files import StatFingerprint, stat_fingerprint
+from ..._io.files import (
+    PortableStatFingerprint,
+    StatFingerprint,
+    portable_stat_fingerprint,
+    stat_fingerprint,
+)
 from ...types.item import Modality, Role, View
 from ..manifest.index import SampleManifestSequence, StoreViews, view_path
 from ..jsonio import read_json, write_json
@@ -73,9 +78,16 @@ def write_payload_groups(
         _relative_path(root, samples_parquet_path(root)):
         list(stat_fingerprint(samples_parquet_path(root).stat()))
     }
+    portable_fingerprints = {
+        _relative_path(root, samples_parquet_path(root)):
+        list(portable_stat_fingerprint(samples_parquet_path(root).stat()))
+    }
     for view in views:
         path = view_manifest_parquet_path(root, view)
         fingerprints[_relative_path(root, path)] = list(stat_fingerprint(path.stat()))
+        portable_fingerprints[_relative_path(root, path)] = list(
+            portable_stat_fingerprint(path.stat())
+        )
 
     cache = ManifestParquetCache(max_open_files=max(16, len(views) + 1))
     try:
@@ -93,6 +105,7 @@ def write_payload_groups(
             "version": PAYLOAD_GROUPS_VERSION,
             "sample_count": sample_count,
             "fingerprints": fingerprints,
+            "portable_fingerprints": portable_fingerprints,
             "groups": encoded,
             "groups_sha256": _groups_checksum(encoded),
         },
@@ -160,6 +173,7 @@ def groups_from_sidecar(
     if sidecar.get("sample_count") != sample_count:
         return None
     fingerprints = sidecar.get("fingerprints")
+    portable_fingerprints = sidecar.get("portable_fingerprints")
     raw_groups = sidecar.get("groups")
     checksum = sidecar.get("groups_sha256")
     if (
@@ -175,11 +189,14 @@ def groups_from_sidecar(
     for path in paths:
         key = _relative_path(root, path)
         expected = fingerprints.get(key)
-        if (
-            not isinstance(expected, list)
-            or len(expected) != 5
-            or any(type(value) is not int for value in expected)
-            or tuple(expected) != stat_fingerprint(path.stat())
+        portable = (
+            portable_fingerprints.get(key)
+            if isinstance(portable_fingerprints, Mapping)
+            else None
+        )
+        stat = path.stat()
+        if not _fingerprint_matches(expected, stat_fingerprint(stat)) and not (
+            _fingerprint_matches(portable, portable_stat_fingerprint(stat))
         ):
             return None
 
@@ -209,7 +226,10 @@ def groups_from_sidecar(
         groups.append(tuple(bucket))
     if covered != sample_count:
         return None
-    return tuple(groups)
+    decoded = tuple(groups)
+    if not _covers_dense_indexes(decoded, sample_count):
+        return None
+    return decoded
 
 
 def layout_fingerprint(
@@ -371,6 +391,15 @@ def _bucket_indexes(bucket: tuple[PayloadGroup, ...]) -> Iterator[int]:
         yield from group.indexes()
 
 
+def _covers_dense_indexes(groups: PayloadGroups, sample_count: int) -> bool:
+    expected = 0
+    for index in heapq.merge(*(_bucket_indexes(bucket) for bucket in groups)):
+        if index != expected:
+            return False
+        expected += 1
+    return expected == sample_count
+
+
 def _groups_checksum(groups: list[Any]) -> str:
     payload = json.dumps(
         groups,
@@ -378,6 +407,18 @@ def _groups_checksum(groups: list[Any]) -> str:
         separators=(",", ":"),
     ).encode("utf-8")
     return hashlib.sha256(payload).hexdigest()
+
+
+def _fingerprint_matches(
+    value: object,
+    fingerprint: StatFingerprint | PortableStatFingerprint,
+) -> bool:
+    return (
+        isinstance(value, list)
+        and len(value) == len(fingerprint)
+        and all(type(part) is int for part in value)
+        and tuple(value) == fingerprint
+    )
 
 
 def _relative_path(root: Path, path: Path) -> str:

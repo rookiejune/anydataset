@@ -8,7 +8,6 @@ formats in their own modules.
 from __future__ import annotations
 
 import time
-from collections import deque
 from collections.abc import Callable
 from concurrent.futures import Executor, Future, ProcessPoolExecutor, ThreadPoolExecutor
 from queue import Empty, SimpleQueue
@@ -41,10 +40,8 @@ class BackgroundWriteSink(Generic[T]):
         self.on_submit = on_submit
         self.on_complete = on_complete
         self._executor: Executor | None = None
-        self._pending: deque[tuple[T, Future[None], float]] = deque()
+        self._pending: dict[Future[None], tuple[T, float]] = {}
         self._ready_queue: SimpleQueue[Future[None]] = SimpleQueue()
-        self._ready_futures: set[Future[None]] = set()
-        self._pending_futures: set[Future[None]] = set()
         self._closed = False
 
     def __enter__(self) -> BackgroundWriteSink[T]:
@@ -88,9 +85,8 @@ class BackgroundWriteSink(Generic[T]):
         while len(self._pending) >= self._pending_limit:
             self._drain_one()
         future = executor.submit(self.write, job)
+        self._pending[future] = (job, time.perf_counter())
         future.add_done_callback(self._mark_ready)
-        self._pending.append((job, future, time.perf_counter()))
-        self._pending_futures.add(future)
         self._on_submit(job, len(self._pending))
 
     def close(self) -> None:
@@ -112,8 +108,6 @@ class BackgroundWriteSink(Generic[T]):
         if self._closed:
             return
         self._pending.clear()
-        self._ready_futures.clear()
-        self._pending_futures.clear()
         if self._executor is not None:
             self._executor.shutdown(cancel_futures=True)
             self._executor = None
@@ -126,31 +120,28 @@ class BackgroundWriteSink(Generic[T]):
         return max(1, self.workers * 2)
 
     def _drain_one(self) -> None:
-        job, future, start = self._pending.popleft()
-        self._pending_futures.discard(future)
-        self._ready_futures.discard(future)
+        while self._pending:
+            future = self._ready_queue.get()
+            if future in self._pending:
+                self._complete(future)
+                return
+
+    def _complete(self, future: Future[None]) -> None:
+        job, start = self._pending.pop(future)
         future.result()
         self._on_complete(job, len(self._pending), time.perf_counter() - start)
 
     def _drain_ready(self) -> None:
-        self._collect_ready()
-        while self._pending:
-            future = self._pending[0][1]
-            if future not in self._ready_futures and not future.done():
-                return
-            self._drain_one()
-
-    def _mark_ready(self, future: Future[None]) -> None:
-        self._ready_queue.put(future)
-
-    def _collect_ready(self) -> None:
         while True:
             try:
                 future = self._ready_queue.get_nowait()
-                if future in self._pending_futures:
-                    self._ready_futures.add(future)
             except Empty:
                 return
+            if future in self._pending:
+                self._complete(future)
+
+    def _mark_ready(self, future: Future[None]) -> None:
+        self._ready_queue.put(future)
 
     def _on_submit(self, job: T, pending: int) -> None:
         if self.on_submit is not None:

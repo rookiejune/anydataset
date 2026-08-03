@@ -17,7 +17,11 @@ from anydataset import AnyDataset, Source, Spec
 from anydataset.dataset.collate import FieldGroup, FieldRef
 from anydataset.provider_service import ProviderServer, RemoteProviderFactory
 from anydataset.runtime import Runtime
-from anydataset.store import MaterializationStatus, ModalityMaterializer, SampleMaterializer
+from anydataset.store import (
+    MaterializationStatus,
+    ModalityMaterializer,
+    SampleMaterializer,
+)
 from anydataset.types import (
     AudioItem,
     AudioMeta,
@@ -44,6 +48,15 @@ from anydataset._runtime.resume import resume_dir
 
 
 class ViewMaterializerTest(unittest.TestCase):
+    def test_default_commit_is_bounded_independently_of_shard_size(self):
+        materializer = ViewMaterializer(
+            Path("target"),
+            max_shard_samples=12_345,
+            batch_size=8,
+        )
+
+        self.assertEqual(materializer.commit_samples, 1024)
+
     def test_fragment_writer_skips_previously_completed_indexes(self):
         sample = _audio_sample(torch.tensor([[1.0]]))
         strategy = mock.Mock()
@@ -345,6 +358,11 @@ class ViewMaterializerTest(unittest.TestCase):
         first.terminate.assert_called_once_with()
         first.join.assert_called_once_with()
         second.join.assert_not_called()
+        configs = [call.kwargs["args"][0] for call in context.Process.call_args_list]
+        self.assertEqual(
+            [config.completed_indexes for config in configs],
+            [(), ()],
+        )
 
     def test_materializer_rejects_daemonic_parent_for_nested_workers(self):
         process = mock.Mock()
@@ -429,11 +447,14 @@ class ViewMaterializerTest(unittest.TestCase):
                     (Role.DEFAULT, Modality.AUDIO, AudioView.WAVEFORM),
                 ).exists()
             )
-            self.assertEqual(set(sample[Role.DEFAULT, Modality.AUDIO].views), {AudioView.LONGCAT})
+            self.assertEqual(
+                set(sample[Role.DEFAULT, Modality.AUDIO].views), {AudioView.LONGCAT}
+            )
             self.assertTrue(
                 torch.equal(
-                    sample[Role.DEFAULT, Modality.AUDIO]
-                    .views[AudioView.LONGCAT]["semantic_codes"],
+                    sample[Role.DEFAULT, Modality.AUDIO].views[AudioView.LONGCAT][
+                        "semantic_codes"
+                    ],
                     torch.tensor([[11, 12, 13]]),
                 )
             )
@@ -464,20 +485,22 @@ class ViewMaterializerTest(unittest.TestCase):
             self.assertEqual(provider.single_calls, 0)
             self.assertTrue(
                 torch.equal(
-                    stored[0][Role.DEFAULT, Modality.AUDIO]
-                    .views[AudioView.LONGCAT]["semantic_codes"],
+                    stored[0][Role.DEFAULT, Modality.AUDIO].views[AudioView.LONGCAT][
+                        "semantic_codes"
+                    ],
                     torch.tensor([[1, 2, 3]]),
                 )
             )
             self.assertTrue(
                 torch.equal(
-                    stored[1][Role.DEFAULT, Modality.AUDIO]
-                    .views[AudioView.LONGCAT]["semantic_codes"],
+                    stored[1][Role.DEFAULT, Modality.AUDIO].views[AudioView.LONGCAT][
+                        "semantic_codes"
+                    ],
                     torch.tensor([[4]]),
                 )
             )
 
-    def test_materializer_uses_remote_provider_with_fork_loader(self):
+    def test_materializer_uses_remote_provider_with_spawn_loader(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             target = root / "target"
@@ -485,7 +508,9 @@ class ViewMaterializerTest(unittest.TestCase):
                 _text_sample("hello"),
                 _text_sample("world"),
             )
-            address = Path("/tmp") / f"anydataset-provider-{os.getpid()}-{id(self)}.sock"
+            address = (
+                Path("/tmp") / f"anydataset-provider-{os.getpid()}-{id(self)}.sock"
+            )
             server = ProviderServer(
                 address=address,
                 provider_factory=_TextBatchProviderFactory(prefix="remote"),
@@ -558,29 +583,33 @@ class ViewMaterializerTest(unittest.TestCase):
             )
             self.assertTrue(
                 torch.equal(
-                    stored[0][Role.SOURCE, Modality.AUDIO]
-                    .views[AudioView.LONGCAT]["semantic_codes"],
+                    stored[0][Role.SOURCE, Modality.AUDIO].views[AudioView.LONGCAT][
+                        "semantic_codes"
+                    ],
                     torch.tensor([[1, 2, 3]]),
                 )
             )
             self.assertTrue(
                 torch.equal(
-                    stored[0][Role.TARGET, Modality.AUDIO]
-                    .views[AudioView.LONGCAT]["semantic_codes"],
+                    stored[0][Role.TARGET, Modality.AUDIO].views[AudioView.LONGCAT][
+                        "semantic_codes"
+                    ],
                     torch.tensor([[4]]),
                 )
             )
             self.assertTrue(
                 torch.equal(
-                    stored[1][Role.SOURCE, Modality.AUDIO]
-                    .views[AudioView.LONGCAT]["semantic_codes"],
+                    stored[1][Role.SOURCE, Modality.AUDIO].views[AudioView.LONGCAT][
+                        "semantic_codes"
+                    ],
                     torch.tensor([[5]]),
                 )
             )
             self.assertTrue(
                 torch.equal(
-                    stored[1][Role.TARGET, Modality.AUDIO]
-                    .views[AudioView.LONGCAT]["semantic_codes"],
+                    stored[1][Role.TARGET, Modality.AUDIO].views[AudioView.LONGCAT][
+                        "semantic_codes"
+                    ],
                     torch.tensor([[6, 7]]),
                 )
             )
@@ -613,9 +642,7 @@ class ViewMaterializerTest(unittest.TestCase):
                             _audio_sample(torch.tensor([[2.0]])),
                         )
                     ),
-                    provider_factory=_StaticProviderFactory(
-                        _StringBatchProvider()
-                    ),
+                    provider_factory=_StaticProviderFactory(_StringBatchProvider()),
                     devices="cpu",
                 )
 
@@ -630,9 +657,7 @@ class ViewMaterializerTest(unittest.TestCase):
                             _audio_sample(torch.tensor([[2.0]])),
                         )
                     ),
-                    provider_factory=_StaticProviderFactory(
-                        _StringRefBatchProvider()
-                    ),
+                    provider_factory=_StaticProviderFactory(_StringRefBatchProvider()),
                     devices="cpu",
                 )
 
@@ -668,8 +693,9 @@ class ViewMaterializerTest(unittest.TestCase):
 
             stored = read_store_dataset(target)
             codes = [
-                stored[index][Role.DEFAULT, Modality.AUDIO]
-                .views[AudioView.LONGCAT]["semantic_codes"]
+                stored[index][Role.DEFAULT, Modality.AUDIO].views[AudioView.LONGCAT][
+                    "semantic_codes"
+                ]
                 for index in range(4)
             ]
 
@@ -724,7 +750,9 @@ class ViewMaterializerTest(unittest.TestCase):
                 ],
             )
 
-            with mock.patch("anydataset.store.materialize.batch.clear_cuda_cache") as clear:
+            with mock.patch(
+                "anydataset.store.materialize.batch.clear_cuda_cache"
+            ) as clear:
                 ViewMaterializer(target, batch_size=2).write(
                     dataset_factory=_DatasetFactory(dataset),
                     provider_factory=_StaticProviderFactory(provider),
@@ -790,15 +818,17 @@ class ViewMaterializerTest(unittest.TestCase):
             )
             self.assertTrue(
                 torch.equal(
-                    sample[Role.SOURCE, Modality.AUDIO]
-                    .views[AudioView.LONGCAT]["semantic_codes"],
+                    sample[Role.SOURCE, Modality.AUDIO].views[AudioView.LONGCAT][
+                        "semantic_codes"
+                    ],
                     torch.tensor([[11, 12]]),
                 )
             )
             self.assertTrue(
                 torch.equal(
-                    sample[Role.TARGET, Modality.AUDIO]
-                    .views[AudioView.LONGCAT]["semantic_codes"],
+                    sample[Role.TARGET, Modality.AUDIO].views[AudioView.LONGCAT][
+                        "semantic_codes"
+                    ],
                     torch.tensor([[13, 14]]),
                 )
             )
@@ -840,8 +870,9 @@ class ViewMaterializerTest(unittest.TestCase):
             self.assertEqual(set(sample), {(Role.DEFAULT, Modality.AUDIO)})
             self.assertTrue(
                 torch.equal(
-                    sample[Role.DEFAULT, Modality.AUDIO]
-                    .views[AudioView.LONGCAT]["semantic_codes"],
+                    sample[Role.DEFAULT, Modality.AUDIO].views[AudioView.LONGCAT][
+                        "semantic_codes"
+                    ],
                     torch.tensor([[11, 12]]),
                 )
             )
@@ -1102,7 +1133,9 @@ class ViewMaterializerTest(unittest.TestCase):
                 Lang.EN,
             )
 
-    def test_modality_materializer_collates_multiple_roles_for_one_batch_provider_call(self):
+    def test_modality_materializer_collates_multiple_roles_for_one_batch_provider_call(
+        self,
+    ):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             source = root / "source"
@@ -1144,9 +1177,7 @@ class ViewMaterializerTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             target = root / "target"
-            samples = (
-                _role_text_sample(source_text="hello", target_text="hi"),
-            )
+            samples = (_role_text_sample(source_text="hello", target_text="hi"),)
 
             ModalityMaterializer(
                 target,
@@ -1428,8 +1459,7 @@ class ViewMaterializerTest(unittest.TestCase):
             source = root / "source"
             target = root / "target"
             samples = [
-                _audio_sample(torch.tensor([[float(index)]]))
-                for index in range(4)
+                _audio_sample(torch.tensor([[float(index)]])) for index in range(4)
             ]
             DatasetWriter(source, dataset_id="toy-audio", split="train").write(samples)
             dataset = _store_dataset(source, root)
@@ -1457,8 +1487,9 @@ class ViewMaterializerTest(unittest.TestCase):
                 sample = stored[index]
                 self.assertTrue(
                     torch.equal(
-                        sample[Role.DEFAULT, Modality.AUDIO]
-                        .views[AudioView.LONGCAT]["semantic_codes"],
+                        sample[Role.DEFAULT, Modality.AUDIO].views[AudioView.LONGCAT][
+                            "semantic_codes"
+                        ],
                         torch.tensor([[index + 10]]),
                     )
                 )
@@ -1468,10 +1499,7 @@ class ViewMaterializerTest(unittest.TestCase):
             root = Path(tmpdir)
             home = root / "home"
             target = root / "target"
-            samples = tuple(
-                _text_sample(f"text-{index}")
-                for index in range(4)
-            )
+            samples = tuple(_text_sample(f"text-{index}") for index in range(4))
 
             with mock.patch.dict(os.environ, {"ANYDATASET_HOME": str(home)}):
                 ViewMaterializer(target, split="train").write(
@@ -1483,15 +1511,21 @@ class ViewMaterializerTest(unittest.TestCase):
             stored = read_store_dataset(target)
             logs = _materializer_logs(home)
             self.assertEqual(len(stored), 4)
-            self.assertEqual([path.name for path in logs], ["part-00000.log", "part-00001.log"])
+            self.assertEqual(
+                [path.name for path in logs], ["part-00000.log", "part-00001.log"]
+            )
             self.assertIn("cpu:0", logs[0].read_text(encoding="utf-8"))
             self.assertIn("cpu:1", logs[1].read_text(encoding="utf-8"))
             self.assertIn(
                 f"worker log: {logs[0]}",
                 logs[0].read_text(encoding="utf-8"),
             )
-            self.assertIn("loading provider on cpu:0", logs[0].read_text(encoding="utf-8"))
-            self.assertIn("loaded provider on cpu:0", logs[0].read_text(encoding="utf-8"))
+            self.assertIn(
+                "loading provider on cpu:0", logs[0].read_text(encoding="utf-8")
+            )
+            self.assertIn(
+                "loaded provider on cpu:0", logs[0].read_text(encoding="utf-8")
+            )
             self.assertIn(
                 "starting materialization on cpu:0",
                 logs[0].read_text(encoding="utf-8"),
@@ -1591,7 +1625,9 @@ class ViewMaterializerTest(unittest.TestCase):
             stored = read_store_dataset(target)
             logs = _materializer_logs(home)
             self.assertEqual(len(stored), 8)
-            self.assertEqual([path.name for path in logs], ["part-00000.log", "part-00001.log"])
+            self.assertEqual(
+                [path.name for path in logs], ["part-00000.log", "part-00001.log"]
+            )
             for index in range(8):
                 prefix = "cpu1" if index % 2 else "cpu0"
                 self.assertEqual(
@@ -1623,16 +1659,22 @@ class ViewMaterializerTest(unittest.TestCase):
             stored = read_store_dataset(target)
             logs = _materializer_logs(home)
             self.assertEqual(len(stored), 4)
-            self.assertEqual([path.name for path in logs], ["part-00000.log", "part-00001.log"])
+            self.assertEqual(
+                [path.name for path in logs], ["part-00000.log", "part-00001.log"]
+            )
             self.assertTrue(
                 torch.equal(
-                    stored[0][Role.DEFAULT, Modality.AUDIO].views[AudioView.WAVEFORM][0],
+                    stored[0][Role.DEFAULT, Modality.AUDIO].views[AudioView.WAVEFORM][
+                        0
+                    ],
                     torch.tensor([[1.0]]),
                 )
             )
             self.assertTrue(
                 torch.equal(
-                    stored[1][Role.DEFAULT, Modality.AUDIO].views[AudioView.WAVEFORM][0],
+                    stored[1][Role.DEFAULT, Modality.AUDIO].views[AudioView.WAVEFORM][
+                        0
+                    ],
                     torch.tensor([[102.0]]),
                 )
             )
@@ -1660,8 +1702,7 @@ class ViewMaterializerTest(unittest.TestCase):
             calls = root / "calls.txt"
             reads = root / "reads.txt"
             samples = tuple(
-                _audio_sample(torch.tensor([[float(index)]]))
-                for index in range(4)
+                _audio_sample(torch.tensor([[float(index)]])) for index in range(4)
             )
             factory = _ReadTrackingDatasetFactory(samples, reads)
 
@@ -1707,8 +1748,9 @@ class ViewMaterializerTest(unittest.TestCase):
             for index in range(4):
                 self.assertTrue(
                     torch.equal(
-                        stored[index][Role.DEFAULT, Modality.AUDIO]
-                        .views[AudioView.LONGCAT]["semantic_codes"],
+                        stored[index][Role.DEFAULT, Modality.AUDIO].views[
+                            AudioView.LONGCAT
+                        ]["semantic_codes"],
                         torch.tensor([[index]]),
                     )
                 )
@@ -1718,8 +1760,7 @@ class ViewMaterializerTest(unittest.TestCase):
             root = Path(tmpdir)
             target = root / "target"
             samples = tuple(
-                _audio_sample(torch.tensor([[float(index)]]))
-                for index in range(5)
+                _audio_sample(torch.tensor([[float(index)]])) for index in range(5)
             )
             dataset_factory = _DatasetFactory(samples)
             provider_factory = _ProviderFactory()
@@ -1767,8 +1808,7 @@ class ViewMaterializerTest(unittest.TestCase):
             root = Path(tmpdir)
             target = root / "target"
             samples = tuple(
-                _audio_sample(torch.tensor([[float(index)]]))
-                for index in range(5)
+                _audio_sample(torch.tensor([[float(index)]])) for index in range(5)
             )
             dataset_factory = _DatasetFactory(samples)
             provider_factory = _ProviderFactory()
@@ -1800,8 +1840,7 @@ class ViewMaterializerTest(unittest.TestCase):
             target = root / "target"
             snapshot = root / "snapshot"
             samples = tuple(
-                _audio_sample(torch.tensor([[float(index)]]))
-                for index in range(5)
+                _audio_sample(torch.tensor([[float(index)]])) for index in range(5)
             )
             dataset_factory = _DatasetFactory(samples)
             provider_factory = _ProviderFactory()
@@ -1837,8 +1876,7 @@ class ViewMaterializerTest(unittest.TestCase):
             root = Path(tmpdir)
             target = root / "target"
             samples = tuple(
-                _audio_sample(torch.tensor([[float(index)]]))
-                for index in range(4)
+                _audio_sample(torch.tensor([[float(index)]])) for index in range(4)
             )
             dataset_factory = _DatasetFactory(samples)
             provider_factory = _ProviderFactory()
@@ -1879,7 +1917,9 @@ class ViewMaterializerTest(unittest.TestCase):
             )
             self.assertTrue(
                 torch.equal(
-                    stored[1][Role.DEFAULT, Modality.AUDIO].views[AudioView.WAVEFORM][0],
+                    stored[1][Role.DEFAULT, Modality.AUDIO].views[AudioView.WAVEFORM][
+                        0
+                    ],
                     torch.tensor([[1.0]]),
                 )
             )
@@ -2009,7 +2049,9 @@ class ViewMaterializerTest(unittest.TestCase):
                 waveform, sample_rate = stored[index][
                     Role.DEFAULT, Modality.AUDIO
                 ].views[AudioView.WAVEFORM]
-                self.assertTrue(torch.equal(waveform, torch.tensor([[float(index + 1)]])))
+                self.assertTrue(
+                    torch.equal(waveform, torch.tensor([[float(index + 1)]]))
+                )
                 self.assertEqual(sample_rate, 16000)
 
     def test_materializer_default_resume_commits_coarser_than_provider_batches(self):
@@ -2018,8 +2060,7 @@ class ViewMaterializerTest(unittest.TestCase):
             target = root / "target"
             calls = root / "calls.txt"
             samples = tuple(
-                _audio_sample(torch.tensor([[float(index)]]))
-                for index in range(4)
+                _audio_sample(torch.tensor([[float(index)]])) for index in range(4)
             )
 
             with self.assertRaisesRegex(RuntimeError, "stop after first batch"):
@@ -2085,8 +2126,7 @@ class ViewMaterializerTest(unittest.TestCase):
             target = root / "target"
             calls = root / "calls.txt"
             samples = tuple(
-                _audio_sample(torch.tensor([[float(index)]]))
-                for index in range(4)
+                _audio_sample(torch.tensor([[float(index)]])) for index in range(4)
             )
 
             with self.assertRaisesRegex(RuntimeError, "stop after first batch"):
@@ -2117,8 +2157,9 @@ class ViewMaterializerTest(unittest.TestCase):
             for index in range(4):
                 self.assertTrue(
                     torch.equal(
-                        stored[index][Role.DEFAULT, Modality.AUDIO]
-                        .views[AudioView.LONGCAT]["semantic_codes"],
+                        stored[index][Role.DEFAULT, Modality.AUDIO].views[
+                            AudioView.LONGCAT
+                        ]["semantic_codes"],
                         torch.tensor([[index + 100]]),
                     )
                 )
@@ -2133,8 +2174,7 @@ class ViewMaterializerTest(unittest.TestCase):
             target = root / "target"
             calls = root / "calls.txt"
             samples = tuple(
-                _audio_sample(torch.tensor([[float(index)]]))
-                for index in range(4)
+                _audio_sample(torch.tensor([[float(index)]])) for index in range(4)
             )
             DatasetWriter(
                 source,
@@ -2180,8 +2220,9 @@ class ViewMaterializerTest(unittest.TestCase):
             for index in range(4):
                 self.assertTrue(
                     torch.equal(
-                        stored[index][Role.DEFAULT, Modality.AUDIO]
-                        .views[AudioView.LONGCAT]["semantic_codes"],
+                        stored[index][Role.DEFAULT, Modality.AUDIO].views[
+                            AudioView.LONGCAT
+                        ]["semantic_codes"],
                         torch.tensor([[index]]),
                     )
                 )
@@ -2287,8 +2328,7 @@ class _TextBatchProvider(_TextProvider):
     def call_batch(self, batch):
         ref = (Role.DEFAULT, Modality.TEXT)
         return [
-            f"{self.prefix}:{text}"
-            for text in batch.sample[ref].views[TextView.TEXT]
+            f"{self.prefix}:{text}" for text in batch.sample[ref].views[TextView.TEXT]
         ]
 
 
@@ -2306,9 +2346,7 @@ class _BatchProvider(_Provider):
         ref = (Role.DEFAULT, Modality.AUDIO)
         waveform, _ = batch.sample[ref].views[AudioView.WAVEFORM]
         self.batch_shapes.append(tuple(waveform.shape))
-        lengths = batch.lengths(
-            FieldRef(ref, FieldGroup.VIEWS, AudioView.WAVEFORM)
-        )
+        lengths = batch.lengths(FieldRef(ref, FieldGroup.VIEWS, AudioView.WAVEFORM))
         return [
             {
                 "semantic_codes": (
@@ -2358,9 +2396,7 @@ class _SplitOnOomBatchProvider(_BatchProvider):
         self.batch_shapes.append(tuple(waveform.shape))
         if waveform.shape[0] > 1:
             raise torch.OutOfMemoryError("CUDA out of memory")
-        lengths = batch.lengths(
-            FieldRef(ref, FieldGroup.VIEWS, AudioView.WAVEFORM)
-        )
+        lengths = batch.lengths(FieldRef(ref, FieldGroup.VIEWS, AudioView.WAVEFORM))
         return [
             {"semantic_codes": waveform[index, :, : int(length.item())].to(torch.int64)}
             for index, length in enumerate(lengths)
@@ -2717,8 +2753,7 @@ def _events(home: Path) -> list[dict[str, object]]:
     rows: list[dict[str, object]] = []
     for path in logs:
         rows.extend(
-            json.loads(line)
-            for line in path.read_text(encoding="utf-8").splitlines()
+            json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()
         )
     return rows
 

@@ -37,7 +37,6 @@ from ..._runtime.resume import (
     log_resume_summary,
     missing_indexes,
     resume_dir,
-    validate_completed_indexes,
 )
 from ..._validation import (
     non_negative_int,
@@ -72,7 +71,7 @@ from .view import with_view_provider
 from ..part.commit import (
     commit_store_fragments,
     commit_store_parts,
-    completed_fragment_indexes,
+    compact_completed_fragment_indexes,
 )
 from ..writer import DatasetWriter
 
@@ -230,21 +229,15 @@ class ViewMaterializer:
                 raise ValueError(
                     "Snapshot materializer identity does not match the resume state."
                 )
-            completed = tuple(
-                sorted(
-                    validate_completed_indexes(
-                        completed_fragment_indexes(
-                            fragments_dir,
-                            dataset_id=self._dataset_id,
-                            split=self.split,
-                        ),
-                        expected,
-                    )
-                )
+            completed = compact_completed_fragment_indexes(
+                fragments_dir,
+                dataset_id=self._dataset_id,
+                split=self.split,
+                expected=expected,
             )
             if not completed:
                 raise ValueError("No completed materialization samples to snapshot.")
-            if completed != tuple(range(len(completed))):
+            if completed[0] != 0 or completed[-1] != len(completed) - 1:
                 raise ValueError(
                     "A materialization snapshot requires a dense completed prefix "
                     "starting at sample index 0."
@@ -255,6 +248,7 @@ class ViewMaterializer:
                 dataset_id=self._dataset_id,
                 split=self.split,
                 expected_sample_count=len(completed),
+                max_shard_samples=self.max_shard_samples,
                 provenance=self._provenance,
             )
 
@@ -325,13 +319,11 @@ class ViewMaterializer:
                 use_map_style_loader=use_map_style_loader,
             ),
         )
-        completed = validate_completed_indexes(
-            completed_fragment_indexes(
-                fragments_dir,
-                dataset_id=self._dataset_id,
-                split=self.split,
-            ),
-            expected,
+        completed = compact_completed_fragment_indexes(
+            fragments_dir,
+            dataset_id=self._dataset_id,
+            split=self.split,
+            expected=expected,
         )
         missing = self._work_indexes(
             completed,
@@ -365,18 +357,17 @@ class ViewMaterializer:
             fragments_dir=fragments_dir,
             expected=expected,
             use_map_style_loader=use_map_style_loader,
+            completed_indexes=completed,
             completed_count=len(completed),
             missing_indexes=missing,
             finalize=finalize,
         )
         if not finalize:
-            completed = validate_completed_indexes(
-                completed_fragment_indexes(
-                    fragments_dir,
-                    dataset_id=self._dataset_id,
-                    split=self.split,
-                ),
-                expected,
+            completed = compact_completed_fragment_indexes(
+                fragments_dir,
+                dataset_id=self._dataset_id,
+                split=self.split,
+                expected=expected,
             )
             status = self._status(expected, completed)
             self._log_status(status)
@@ -413,13 +404,11 @@ class ViewMaterializer:
                 use_map_style_loader=use_map_style_loader,
             ),
         )
-        completed = validate_completed_indexes(
-            completed_fragment_indexes(
-                fragments_dir,
-                dataset_id=self._dataset_id,
-                split=self.split,
-            ),
-            expected,
+        completed = compact_completed_fragment_indexes(
+            fragments_dir,
+            dataset_id=self._dataset_id,
+            split=self.split,
+            expected=expected,
         )
         missing = self._work_indexes(
             completed,
@@ -461,6 +450,7 @@ class ViewMaterializer:
                         dataset=dataset,
                         sample_count=expected,
                         use_map_style_loader=use_map_style_loader,
+                        completed_indexes=completed,
                         sample_indexes=missing,
                         fragments_dir=fragments_dir,
                         expected=expected,
@@ -481,6 +471,7 @@ class ViewMaterializer:
                     provider,
                     fragments_dir=fragments_dir,
                     expected=expected,
+                    completed_indexes=completed,
                     progress=progress,
                 )
         return self._finish_resumable(
@@ -491,7 +482,7 @@ class ViewMaterializer:
 
     def _work_indexes(
         self,
-        completed: frozenset[int],
+        completed: Collection[int],
         expected: int,
         *,
         sample_indexes: Sequence[int] | None,
@@ -522,13 +513,11 @@ class ViewMaterializer:
         finalize: bool,
         parts: bool = False,
     ) -> Path | MaterializationStatus:
-        completed = validate_completed_indexes(
-            completed_fragment_indexes(
-                fragments_dir,
-                dataset_id=self._dataset_id,
-                split=self.split,
-            ),
-            expected,
+        completed = compact_completed_fragment_indexes(
+            fragments_dir,
+            dataset_id=self._dataset_id,
+            split=self.split,
+            expected=expected,
         )
         if not indexes_complete(completed, expected):
             if finalize:
@@ -633,6 +622,7 @@ class ViewMaterializer:
                 dataset_id=self._dataset_id,
                 split=self.split,
                 expected_sample_count=expected,
+                max_shard_samples=self.max_shard_samples,
                 provenance=self._provenance,
                 progress=_commit_progress(progress),
             )
@@ -665,6 +655,7 @@ class ViewMaterializer:
         dataset: Any | None = None,
         sample_count: int | None = None,
         use_map_style_loader: bool | None = None,
+        completed_indexes: Collection[int] | None = None,
         sample_indexes: Sequence[int] | None = None,
         fragments_dir: Path,
         expected: int,
@@ -682,6 +673,7 @@ class ViewMaterializer:
             provider,
             fragments_dir=fragments_dir,
             expected=expected,
+            completed_indexes=completed_indexes,
             progress=progress,
             worker_id=worker_id,
         )
@@ -720,6 +712,7 @@ class ViewMaterializer:
         use_map_style_loader: bool,
         completed_count: int,
         missing_indexes: Sequence[int],
+        completed_indexes: Sequence[int] | None = None,
         finalize: bool = True,
     ) -> None:
         commit_samples = self.commit_samples
@@ -730,6 +723,9 @@ class ViewMaterializer:
         barrier = context.Barrier(len(devices))
         master_addr = os.environ.get("MASTER_ADDR", "127.0.0.1")
         master_port = os.environ.get("MASTER_PORT", free_port())
+        worker_completed_indexes = (
+            () if use_map_style_loader else completed_indexes
+        )
         workers = [
             context.Process(
                 target=materialize_worker,
@@ -750,6 +746,7 @@ class ViewMaterializer:
                         mode=self._materializer_mode,
                         runtime=self.runtime,
                         use_map_style_loader=use_map_style_loader,
+                        completed_indexes=worker_completed_indexes,
                         missing_indexes=missing_indexes,
                         fragments_dir=fragments_dir,
                         parts_dir=fragments_dir / ".parts",
@@ -864,22 +861,21 @@ class ViewMaterializer:
         *,
         fragments_dir: Path,
         expected: int,
+        completed_indexes: Collection[int] | None = None,
         progress: ProgressSink | None = None,
         worker_id: int = 0,
     ) -> None:
         commit_samples = self.commit_samples
         if commit_samples is None:
             raise RuntimeError("materializer commit_samples was not initialized.")
-        completed = set(
-            validate_completed_indexes(
-                completed_fragment_indexes(
-                    fragments_dir,
-                    dataset_id=self._dataset_id,
-                    split=self.split,
-                ),
-                expected,
+        completed = completed_indexes
+        if completed is None:
+            completed = compact_completed_fragment_indexes(
+                fragments_dir,
+                dataset_id=self._dataset_id,
+                split=self.split,
+                expected=expected,
             )
-        )
         writer = FragmentBatchWriter(
             strategy=_FragmentStrategy(self),
             config=FragmentBatchConfig(
@@ -1111,6 +1107,7 @@ class MaterializerWorker:
         dataset_factory: DatasetFactory,
         sample_count: int,
         use_map_style_loader: bool,
+        completed_indexes: Sequence[int] | None,
         sample_indexes: Sequence[int],
         fragments_dir: Path,
         expected: int,
@@ -1122,6 +1119,7 @@ class MaterializerWorker:
             dataset_factory=dataset_factory,
             sample_count=sample_count,
             use_map_style_loader=use_map_style_loader,
+            completed_indexes=completed_indexes,
             sample_indexes=sample_indexes,
             fragments_dir=fragments_dir,
             expected=expected,

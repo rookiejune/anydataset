@@ -598,7 +598,9 @@ def _cached_file_payload(
             != target
         ):
             raise ValueError("View shard changed while caching file payload.")
-        atomic_write_bytes(target, data)
+        # Extracted FILE payloads are disposable cache entries. Atomic rename
+        # prevents torn reads; syncing every sample only adds storage latency.
+        atomic_write_bytes(target, data, durable=False)
     return target
 
 

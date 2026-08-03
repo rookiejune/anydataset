@@ -10,7 +10,12 @@ from ..manifest.schema import (
 )
 from ..manifest.io import view_manifest_writer
 from ..paths import view_ready_path, view_shard_path
-from ..payload.archive import add_payload, payload_for_view, write_payload_index
+from ..payload.archive import (
+    Payload,
+    add_payload,
+    payload_for_view,
+    write_payload_index,
+)
 
 
 class ViewWriter:
@@ -33,7 +38,12 @@ class ViewWriter:
         self.closed = False
 
     def write(self, sample_index: int, value: Any) -> None:
-        payload = payload_for_view(self.view, sample_index, value)
+        self.write_payload(
+            sample_index,
+            payload_for_view(self.view, sample_index, value),
+        )
+
+    def write_payload(self, sample_index: int, payload: Payload) -> None:
         if self._should_roll():
             self._roll_shard()
         add_payload(self.tar, payload)

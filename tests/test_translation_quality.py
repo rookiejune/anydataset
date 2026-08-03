@@ -199,6 +199,63 @@ class TranslationQualityTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "no default model"):
             TextAcceptability(role=Role.TARGET, lang=Lang.FR)
 
+    def test_acceptability_retries_only_unsupported_top_k(self):
+        class LegacyClassifier(_Classifier):
+            def __call__(self, text: str, **kwargs):
+                self.calls.append((text, kwargs))
+                if "top_k" in kwargs:
+                    raise TypeError(
+                        "__call__() got an unexpected keyword argument 'top_k'"
+                    )
+                return self.output
+
+        classifier = LegacyClassifier(
+            [
+                {"label": "LABEL_0", "score": 0.2},
+                {"label": "LABEL_1", "score": 0.8},
+            ]
+        )
+        predicate = TextAcceptability(role=Role.TARGET, lang=Lang.EN)
+
+        with mock.patch(
+            "anydataset.quality.text._classifier",
+            return_value=classifier,
+        ):
+            decision = predicate(_text_pair("hello", "bonjour"))
+
+        self.assertEqual(decision.label, QualityLabel.ACCEPT)
+        self.assertEqual(
+            classifier.calls,
+            [
+                ("bonjour", {"truncation": True, "top_k": None}),
+                ("bonjour", {"truncation": True, "return_all_scores": True}),
+            ],
+        )
+
+    def test_acceptability_preserves_classifier_type_error(self):
+        class BrokenClassifier:
+            def __init__(self):
+                self.calls = []
+
+            def __call__(self, text: str, **kwargs):
+                self.calls.append((text, kwargs))
+                raise TypeError("classifier implementation failed")
+
+        classifier = BrokenClassifier()
+        predicate = TextAcceptability(role=Role.TARGET, lang=Lang.EN)
+
+        with mock.patch(
+            "anydataset.quality.text._classifier",
+            return_value=classifier,
+        ):
+            with self.assertRaisesRegex(TypeError, "classifier implementation failed"):
+                predicate(_text_pair("hello", "bonjour"))
+
+        self.assertEqual(
+            classifier.calls,
+            [("bonjour", {"truncation": True, "top_k": None})],
+        )
+
     def test_chinese_gec_rejects_large_correction(self):
         corrector = _Classifier([{"generated_text": "今天心情很好"}])
         predicate = ChineseGEC(role=Role.TARGET)
@@ -311,6 +368,64 @@ class TranslationQualityTest(unittest.TestCase):
         self.assertEqual(decision.metrics["rules"][2]["label"], "reject")
         self.assertIn("model:bicleaner_reject", decision.metrics["flags"])
         self.assertEqual(decision.metrics["transitions"][-1]["to"], "reject")
+
+    def test_chain_dispatches_batch_rules_once_and_scalar_rules_per_sample(self):
+        class BatchRule:
+            def __init__(self):
+                self.calls = []
+
+            def __call__(self, _sample):
+                raise AssertionError("batch rule should use call_batch()")
+
+            def call_batch(self, samples):
+                self.calls.append(samples)
+                return (QualityLabel.REJECT, QualityLabel.ACCEPT)
+
+        class ScalarRule:
+            def __init__(self):
+                self.calls = []
+
+            def __call__(self, sample):
+                self.calls.append(sample)
+                return QualityLabel.ACCEPT
+
+        samples = (
+            _text_pair("first", "premier"),
+            _text_pair("second", "deuxieme"),
+        )
+        batch_rule = BatchRule()
+        scalar_rule = ScalarRule()
+        predicate = QualityChain(
+            (Rule("batch", batch_rule), Rule("scalar", scalar_rule))
+        )
+
+        decisions = predicate.call_batch(samples)
+
+        self.assertEqual(len(batch_rule.calls), 1)
+        self.assertEqual(batch_rule.calls[0], samples)
+        self.assertEqual(scalar_rule.calls, list(samples))
+        self.assertEqual(
+            [decision.label for decision in decisions],
+            [QualityLabel.REVIEW, QualityLabel.ACCEPT],
+        )
+
+    def test_chain_rejects_wrong_child_batch_size(self):
+        class WrongSizeRule:
+            def __call__(self, _sample):
+                raise AssertionError("batch rule should use call_batch()")
+
+            def call_batch(self, _samples):
+                return (QualityLabel.ACCEPT,)
+
+        predicate = QualityChain((Rule("wrong", WrongSizeRule()),))
+
+        with self.assertRaisesRegex(ValueError, "one output per input sample"):
+            predicate.call_batch(
+                (
+                    _text_pair("first", "premier"),
+                    _text_pair("second", "deuxieme"),
+                )
+            )
 
     def test_chain_rejects_invalid_rule_flags(self):
         for flags in ("not-a-list", ["valid", 1]):

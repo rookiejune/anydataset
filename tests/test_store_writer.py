@@ -26,6 +26,7 @@ from anydataset.store.part.commit import (
     commit_store_fragments,
     commit_store_parts,
     completed_fragment_indexes,
+    store_fragments,
 )
 from anydataset.store.part.writer import DatasetFragmentWriter, DatasetPartWriter
 from anydataset.store.config import DEFAULT_MAX_SHARD_SAMPLES
@@ -312,6 +313,73 @@ class DatasetWriterTest(unittest.TestCase):
             self.assertEqual(indexes, [0, 1, 2])
             self.assertTrue(dataset_ready_path(output).exists())
 
+    def test_fragment_listing_validates_only_assigned_shard(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fragments = Path(tmpdir) / "fragments"
+            names = []
+            for index in range(4):
+                name = f"batch-{index:012d}-{index:012d}-{index}"
+                names.append(name)
+                DatasetFragmentWriter(
+                    fragments / name,
+                    dataset_id="toy-audio",
+                    fragment_id=name,
+                ).write(
+                    [
+                        (
+                            index,
+                            audio_sample(
+                                waveform=torch.tensor([[float(index)]]),
+                                sample_rate=4,
+                            ),
+                        )
+                    ]
+                )
+
+            with mock.patch.object(
+                store_parts,
+                "_read_fragment_info",
+                wraps=store_parts._read_fragment_info,
+            ) as read_info:
+                assigned = store_fragments(
+                    fragments,
+                    dataset_id="toy-audio",
+                    shard_id=1,
+                    num_shards=2,
+                )
+
+            self.assertEqual([path.name for path in assigned], names[1::2])
+            self.assertEqual(read_info.call_count, 2)
+
+    def test_fragment_listing_preserves_metadata_order_for_custom_ids(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fragments = Path(tmpdir) / "fragments"
+            for name, index in (("z-fragment", 0), ("a-fragment", 1)):
+                DatasetFragmentWriter(
+                    fragments / name,
+                    dataset_id="toy-audio",
+                    fragment_id=name,
+                ).write(
+                    [
+                        (
+                            index,
+                            audio_sample(
+                                waveform=torch.tensor([[float(index)]]),
+                                sample_rate=4,
+                            ),
+                        )
+                    ]
+                )
+
+            assigned = store_fragments(
+                fragments,
+                dataset_id="toy-audio",
+                shard_id=0,
+                num_shards=2,
+            )
+
+            self.assertEqual([path.name for path in assigned], ["z-fragment"])
+
     def test_fragment_metadata_rejects_boolean_integer_fields(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -353,6 +421,46 @@ class DatasetWriterTest(unittest.TestCase):
                             fragments,
                             dataset_id="toy-audio",
                         )
+
+    def test_completed_fragment_indexes_rechecks_fragment_on_every_scan(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fragments = Path(tmpdir) / "fragments"
+            fragment = fragments / "batch-000000000000-000000000000-a"
+            DatasetFragmentWriter(
+                fragment,
+                dataset_id="toy-audio",
+                fragment_id=fragment.name,
+            ).write(
+                [
+                    (
+                        0,
+                        audio_sample(
+                            waveform=torch.tensor([[1.0]]),
+                            sample_rate=4,
+                        ),
+                    )
+                ]
+            )
+            self.assertEqual(
+                completed_fragment_indexes(
+                    fragments,
+                    dataset_id="toy-audio",
+                ),
+                frozenset({0}),
+            )
+
+            metadata_path = fragment / "fragment.json"
+            metadata = dict(read_json(metadata_path))
+            metadata["sample_indexes"] = [1]
+            write_json(metadata_path, metadata)
+            with self.assertRaisesRegex(
+                ValueError,
+                "sample indexes do not match its metadata",
+            ):
+                completed_fragment_indexes(
+                    fragments,
+                    dataset_id="toy-audio",
+                )
 
     def test_fragment_manifest_merge_reads_one_row_per_store_lazily(self):
         stores = (Path("fragment-a"), Path("fragment-b"))
@@ -896,6 +1004,129 @@ class DatasetWriterTest(unittest.TestCase):
 
             self.assertEqual(os.stat(fragment_shard).st_ino, os.stat(output_shard).st_ino)
 
+    def test_fragment_commit_repacks_to_target_shard_size(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            fragments = root / "fragments"
+            output = root / "dataset"
+            view = (Role.DEFAULT, Modality.AUDIO, AudioView.WAVEFORM)
+            for index in range(5):
+                name = f"batch-{index:012d}-{index:012d}-{index}"
+                DatasetFragmentWriter(
+                    fragments / name,
+                    dataset_id="toy-audio",
+                    split="train",
+                    fragment_id=name,
+                ).write(
+                    [
+                        (
+                            index,
+                            audio_sample(
+                                waveform=torch.tensor([[float(index)]]),
+                                sample_rate=4,
+                            ),
+                        )
+                    ]
+                )
+
+            commit_store_fragments(
+                output,
+                fragments,
+                dataset_id="toy-audio",
+                split="train",
+                expected_sample_count=5,
+                max_shard_samples=3,
+            )
+
+            entries = tuple(read_view_manifest(output, view))
+            self.assertEqual(
+                [entry.shard for entry in entries],
+                [
+                    "part-00000-000000.tar",
+                    "part-00000-000000.tar",
+                    "part-00000-000000.tar",
+                    "part-00000-000001.tar",
+                    "part-00000-000001.tar",
+                ],
+            )
+            for shard, expected in (
+                ("part-00000-000000.tar", 3),
+                ("part-00000-000001.tar", 2),
+            ):
+                with tarfile.open(view_shard_path(output, view, shard), "r") as archive:
+                    self.assertEqual(
+                        sum(member.isfile() for member in archive),
+                        expected,
+                    )
+                self.assertTrue(view_shard_index_path(output, view, shard).is_file())
+
+            dataset = read_store_dataset(output)
+            for index in range(5):
+                waveform, sample_rate = dataset[index][
+                    Role.DEFAULT, Modality.AUDIO
+                ].views[AudioView.WAVEFORM]
+                self.assertTrue(
+                    torch.equal(waveform, torch.tensor([[float(index)]]))
+                )
+                self.assertEqual(sample_rate, 4)
+
+    def test_fragment_parts_repack_with_distinct_shard_prefixes(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            fragments = root / "fragments"
+            parts = root / "parts"
+            output = root / "dataset"
+            view = (Role.DEFAULT, Modality.AUDIO, AudioView.WAVEFORM)
+            for index in range(6):
+                name = f"batch-{index:012d}-{index:012d}-{index}"
+                DatasetFragmentWriter(
+                    fragments / name,
+                    dataset_id="toy-audio",
+                    fragment_id=name,
+                ).write(
+                    [
+                        (
+                            index,
+                            audio_sample(
+                                waveform=torch.tensor([[float(index)]]),
+                                sample_rate=4,
+                            ),
+                        )
+                    ]
+                )
+
+            for shard_id in range(2):
+                assigned = store_fragments(
+                    fragments,
+                    dataset_id="toy-audio",
+                    shard_id=shard_id,
+                    num_shards=2,
+                )
+                commit_fragment_part(
+                    parts / f"part-{shard_id:05d}",
+                    assigned,
+                    dataset_id="toy-audio",
+                    shard_id=shard_id,
+                    num_shards=2,
+                    max_shard_samples=2,
+                )
+            commit_store_parts(output, parts, dataset_id="toy-audio")
+
+            entries = tuple(read_view_manifest(output, view))
+            self.assertEqual(
+                {entry.shard for entry in entries},
+                {
+                    "part-00000-000000.tar",
+                    "part-00000-000001.tar",
+                    "part-00001-000000.tar",
+                    "part-00001-000001.tar",
+                },
+            )
+            self.assertEqual(
+                [entry.sample_index for entry in entries],
+                list(range(6)),
+            )
+
     def test_commit_fragments_preserves_order_for_unsorted_fragment_batch(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -1196,6 +1427,35 @@ class DatasetWriterTest(unittest.TestCase):
 
             self.assertTrue(torch.equal(waveform, torch.tensor([[1.0]])))
             self.assertEqual(sample_rate, 4)
+
+    def test_commit_parts_reuses_existing_payload_index(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            parts, _part, view, entry = _single_audio_part(root)
+            output = root / "output"
+
+            with mock.patch.object(
+                store_parts,
+                "write_payload_index",
+                side_effect=AssertionError("payload index was rebuilt"),
+            ):
+                commit_store_parts(output, parts, dataset_id="toy-audio")
+
+            dataset = read_store_dataset(output)
+            with mock.patch.object(
+                tarfile.TarFile,
+                "getmembers",
+                side_effect=AssertionError("copied payload index was ignored"),
+            ):
+                waveform, sample_rate = dataset[0][
+                    Role.DEFAULT, Modality.AUDIO
+                ].views[AudioView.WAVEFORM]
+
+            self.assertTrue(torch.equal(waveform, torch.tensor([[1.0]])))
+            self.assertEqual(sample_rate, 4)
+            self.assertTrue(
+                view_shard_index_path(output, view, entry.shard).is_file()
+            )
 
     def test_commit_parts_compresses_interleaved_payload_groups(self):
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -36,32 +36,32 @@ class SpeechGridView:
             _row_text(self.grid, index) for index in range(len(self.grid.row_specs))
         )
 
-    def full(self, *, view: AudioView = AudioView.WAVEFORM) -> SpeechGridBatch:
+    def full(self) -> SpeechGridBatch:
         """Materialize the full rectangle as a batch of size 1."""
 
-        return speech_grid_batch(self.grid.select().load(view=view))
+        return speech_grid_batch(self.grid.select().load(view=AudioView.WAVEFORM))
 
     def by_speaker(
         self,
         speaker: str,
-        *,
-        view: AudioView = AudioView.WAVEFORM,
     ) -> SpeechGridBatch:
         """Materialize one speaker column as a batch of size 1."""
 
-        return speech_grid_batch(self.grid.select(speaker=speaker).load(view=view))
+        return speech_grid_batch(
+            self.grid.select(speaker=speaker).load(view=AudioView.WAVEFORM)
+        )
 
     def by_text(
         self,
         text: int,
-        *,
-        view: AudioView = AudioView.WAVEFORM,
     ) -> SpeechGridBatch:
         """Materialize one text column as a batch of size 1."""
 
         row = self._text_row(text)
         return speech_grid_batch(
-            self.grid.select(source=row.source_index, text=row.role).load(view=view)
+            self.grid.select(source=row.source_index, text=row.role).load(
+                view=AudioView.WAVEFORM
+            )
         )
 
     def cell(
@@ -69,7 +69,6 @@ class SpeechGridView:
         *,
         text: int,
         speaker: str,
-        view: AudioView = AudioView.WAVEFORM,
     ) -> SpeechGridBatch:
         """Materialize one cell as a batch of size 1."""
 
@@ -79,7 +78,7 @@ class SpeechGridView:
                 source=row.source_index,
                 text=row.role,
                 speaker=speaker,
-            ).load(view=view)
+            ).load(view=AudioView.WAVEFORM)
         )
 
     def pairs(
@@ -87,13 +86,12 @@ class SpeechGridView:
         *,
         text: int,
         speakers: Sequence[str],
-        view: AudioView = AudioView.WAVEFORM,
     ) -> tuple[SpeechGridBatch, ...]:
         """Materialize one cell per speaker for the same text row."""
 
         if len(speakers) < 2:
             raise ValueError("pairs requires at least two speakers.")
-        return tuple(self.cell(text=text, speaker=speaker, view=view) for speaker in speakers)
+        return tuple(self.cell(text=text, speaker=speaker) for speaker in speakers)
 
     def _text_row(self, text: int):
         if isinstance(text, bool):
@@ -112,12 +110,15 @@ class SpeechGridView:
 def speech_grid_batch(block: SpeakerAudioBlock) -> SpeechGridBatch:
     """Convert a SpeakerAudioBlock into a batch-1 speaker x text grid."""
 
+    if block.audio_view is not AudioView.WAVEFORM:
+        raise ValueError("speech_grid_batch requires a waveform audio block.")
     # SpeakerAudioBlock stores [n_text, n_speaker, ...]; morphology uses speaker x text.
     waveforms = block.waveforms.transpose(0, 1).unsqueeze(0)
     lengths = block.lengths.transpose(0, 1).unsqueeze(0)
     return SpeechGridBatch(
         waveforms=waveforms,
         lengths=lengths,
+        sample_rate=block.sample_rate,
         speaker_ids=(tuple(block.speaker_ids),),
         texts=(tuple(block.texts),),
     )
@@ -137,9 +138,34 @@ def speech_grid_collate(samples: Sequence[SpeechGridBatch]) -> SpeechGridBatch:
     speaker_ids: list[tuple[str | None, ...]] = []
     texts: list[tuple[str | None, ...]] = []
     pieces: list[tuple[Tensor, Tensor]] = []
+    sample_rate: int | None = None
+    channels: int | None = None
+    waveform_dtype: torch.dtype | None = None
+    waveform_device: torch.device | None = None
+    lengths_dtype: torch.dtype | None = None
+    lengths_device: torch.device | None = None
     for sample in samples:
         if not isinstance(sample, SpeechGridBatch):
             raise TypeError("speech_grid_collate expects SpeechGridBatch samples.")
+        if sample_rate is None:
+            sample_rate = sample.sample_rate
+            channels = int(sample.waveforms.shape[3])
+            waveform_dtype = sample.waveforms.dtype
+            waveform_device = sample.waveforms.device
+            lengths_dtype = sample.lengths.dtype
+            lengths_device = sample.lengths.device
+        elif sample.sample_rate != sample_rate:
+            raise ValueError("speech_grid_collate requires a uniform sample_rate.")
+        if int(sample.waveforms.shape[3]) != channels:
+            raise ValueError("speech_grid_collate requires uniform channel counts.")
+        if sample.waveforms.dtype != waveform_dtype:
+            raise TypeError("speech_grid_collate requires uniform waveform dtypes.")
+        if sample.waveforms.device != waveform_device:
+            raise ValueError("speech_grid_collate requires uniform waveform devices.")
+        if sample.lengths.dtype != lengths_dtype:
+            raise TypeError("speech_grid_collate requires uniform lengths dtypes.")
+        if sample.lengths.device != lengths_device:
+            raise ValueError("speech_grid_collate requires uniform lengths devices.")
         for batch_index, (speakers, sample_texts) in enumerate(
             strict_zip(sample.speaker_ids, sample.texts)
         ):
@@ -156,7 +182,8 @@ def speech_grid_collate(samples: Sequence[SpeechGridBatch]) -> SpeechGridBatch:
 
     max_speakers = max(waveform.shape[0] for waveform, _ in pieces)
     max_texts = max(waveform.shape[1] for waveform, _ in pieces)
-    channels = pieces[0][0].shape[2]
+    if sample_rate is None or channels is None:
+        raise RuntimeError("speech_grid_collate failed to resolve audio metadata.")
     max_time = max(waveform.shape[-1] for waveform, _ in pieces)
     batch_size = len(pieces)
     device = pieces[0][0].device
@@ -178,6 +205,7 @@ def speech_grid_collate(samples: Sequence[SpeechGridBatch]) -> SpeechGridBatch:
     return SpeechGridBatch(
         waveforms=waveforms,
         lengths=lengths,
+        sample_rate=sample_rate,
         speaker_ids=tuple(speaker_ids),
         texts=tuple(texts),
     )

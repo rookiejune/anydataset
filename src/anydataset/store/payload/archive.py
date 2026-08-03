@@ -13,6 +13,7 @@ from typing import Any, Callable, cast
 import torch
 
 from ..._io.files import StatFingerprint as _StatFingerprint
+from ..._io.files import portable_stat_fingerprint as _portable_stat_fingerprint
 from ..._io.files import stat_fingerprint as _stat_fingerprint
 from ..._validation import validate_path_segment
 from ...types.item import AudioView, Modality, Role, TextView, View
@@ -264,21 +265,30 @@ def write_payload_index(
     """
 
     path = view_shard_path(root, view, shard)
-    fingerprint = _stat_fingerprint(path.stat())
-    with tarfile.open(path, "r") as archive:
-        members = {
-            member.name: {
+    stat = path.stat()
+    fingerprint = _stat_fingerprint(stat)
+    portable_fingerprint = _portable_stat_fingerprint(stat)
+    members: dict[str, dict[str, int]] = {}
+    with tarfile.open(path, "r|") as archive:
+        for member in archive:
+            if not member.isfile():
+                continue
+            if member.name in members:
+                raise ValueError(
+                    f"View shard has duplicate payload key {member.name!r}."
+                )
+            _validate_payload_key(member.name)
+            members[member.name] = {
                 "offset": member.offset_data,
                 "size": member.size,
             }
-            for member in _payload_members(archive).values()
-        }
     index_path = view_shard_index_path(root, view, shard)
     write_json(
         index_path,
         {
             "version": PAYLOAD_INDEX_VERSION,
             "fingerprint": list(fingerprint),
+            "portable_fingerprint": list(portable_fingerprint),
             "members": members,
         },
     )
@@ -424,15 +434,27 @@ def _read_payload_index(
     ):
         return None
     raw_fingerprint = data.get("fingerprint")
-    if (
-        not isinstance(raw_fingerprint, list)
-        or len(raw_fingerprint) != len(fingerprint)
-        or any(
-            not isinstance(value, int) or isinstance(value, bool)
+    fingerprint_matches = (
+        isinstance(raw_fingerprint, list)
+        and len(raw_fingerprint) == len(fingerprint)
+        and all(
+            isinstance(value, int) and not isinstance(value, bool)
             for value in raw_fingerprint
         )
-        or tuple(raw_fingerprint) != fingerprint
-    ):
+        and tuple(raw_fingerprint) == fingerprint
+    )
+    raw_portable = data.get("portable_fingerprint")
+    portable = (fingerprint[2], fingerprint[3])
+    portable_matches = (
+        isinstance(raw_portable, list)
+        and len(raw_portable) == len(portable)
+        and all(
+            isinstance(value, int) and not isinstance(value, bool)
+            for value in raw_portable
+        )
+        and tuple(raw_portable) == portable
+    )
+    if not fingerprint_matches and not portable_matches:
         return None
     raw_members = data.get("members")
     if not isinstance(raw_members, dict):

@@ -28,6 +28,7 @@ from anydataset.store.payload.files import (
     cleanup_store_files,
     lease_store_files,
 )
+from anydataset.store.payload import integrity as store_integrity
 from anydataset.store.payload.integrity import (
     validate_store_payloads,
     validate_store_view_payloads,
@@ -172,6 +173,18 @@ class StoreMigrationTest(unittest.TestCase):
 
 
 class StoreIntegrityTest(unittest.TestCase):
+    def test_integrity_spills_large_expected_key_sets(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir) / "store"
+            _write_store(root)
+
+            with mock.patch.object(
+                store_integrity,
+                "_EXPECTED_KEYS_MEMORY_LIMIT",
+                1,
+            ):
+                validate_store_payloads((root,), level="full")
+
     def test_integrity_levels_validate_increasing_payload_detail(self):
         view = (Role.DEFAULT, Modality.TEXT, TextView.TEXT)
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -234,6 +247,22 @@ class StoreIntegrityTest(unittest.TestCase):
             validate_store_view_payloads(root, view, level="normal")
             with self.assertRaisesRegex(ValueError, "extra payload"):
                 validate_store_view_payloads(root, view, level="full")
+
+    def test_full_integrity_does_not_read_extra_payload_body(self):
+        view = (Role.DEFAULT, Modality.TEXT, TextView.TEXT)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir) / "store"
+            _write_store(root)
+            shard = view_shard_path(root, view, "000000.tar")
+            with tarfile.open(shard, "a") as archive:
+                _add_tar_member(archive, "999999999999.txt")
+
+            with mock.patch(
+                "tarfile.ExFileObject.read",
+                side_effect=OSError("extra payload should not be read"),
+            ):
+                with self.assertRaisesRegex(ValueError, "extra payload"):
+                    validate_store_view_payloads(root, view, level="full")
 
     def test_full_integrity_reads_payload_body(self):
         view = (Role.DEFAULT, Modality.TEXT, TextView.TEXT)

@@ -9,12 +9,12 @@ domain-specific formats at their own layer.
 from __future__ import annotations
 
 import errno
-import fcntl
 import hashlib
-import json
+import heapq
 import os
 import shutil
 import time
+from array import array
 from bisect import bisect_right
 from collections.abc import Collection, Iterable, Sequence
 from dataclasses import dataclass
@@ -34,11 +34,6 @@ _CLEANUP_RESUME_RETRY_ERRNOS = {
 }
 if hasattr(errno, "ESTALE"):
     _CLEANUP_RESUME_RETRY_ERRNOS.add(errno.ESTALE)
-
-_COMPLETED_INDEX_CACHE = ".completed-indexes.jsonl"
-_COMPLETED_INDEX_CACHE_SCHEMA_VERSION = 1
-_COMPLETED_INDEX_CACHE_LOCK = ".completed-indexes.jsonl.lock"
-
 
 def resume_root(output_dir: str | Path) -> Path:
     output_dir = Path(output_dir).expanduser()
@@ -142,24 +137,67 @@ def validate_completed_indexes(indexes: Iterable[int], expected: int) -> frozens
     return completed
 
 
-def indexes_complete(indexes: frozenset[int], expected: int) -> bool:
+class CompactIndexes(Sequence[int]):
+    """Sorted immutable indexes backed by a packed signed 64-bit array."""
+
+    def __init__(self, expected: int, indexes: array) -> None:
+        _validate_expected(expected)
+        if indexes.typecode != "q":
+            raise TypeError("compact indexes must use signed 64-bit storage.")
+        self.expected = expected
+        self._indexes = indexes
+
+    def __len__(self) -> int:
+        return len(self._indexes)
+
+    def __iter__(self) -> Iterator[int]:
+        return iter(self._indexes)
+
+    @overload
+    def __getitem__(self, index: int) -> int: ...
+
+    @overload
+    def __getitem__(self, index: slice) -> tuple[int, ...]: ...
+
+    def __getitem__(self, index: int | slice) -> int | tuple[int, ...]:
+        if isinstance(index, slice):
+            return tuple(self._indexes[index])
+        return int(self._indexes[index])
+
+    def __contains__(self, index: object) -> bool:
+        if isinstance(index, bool) or not isinstance(index, int):
+            return False
+        position = bisect_right(self._indexes, index)
+        return position > 0 and self._indexes[position - 1] == index
+
+
+def indexes_complete(indexes: Collection[int], expected: int) -> bool:
     return len(indexes) == expected
 
 
-def missing_indexes(completed: frozenset[int], expected: int) -> Sequence[int]:
-    validate_completed_indexes(completed, expected)
-    missing_count = expected - len(completed)
-    if not completed:
+def missing_indexes(completed: Collection[int], expected: int) -> Sequence[int]:
+    if isinstance(completed, CompactIndexes):
+        _validate_expected(expected)
+        if completed.expected != expected:
+            raise ValueError("Completed indexes expected sample count does not match.")
+        validated: Collection[int] = completed
+    else:
+        validated = validate_completed_indexes(completed, expected)
+    missing_count = expected - len(validated)
+    if not validated:
         return range(expected)
-    if missing_count <= len(completed):
-        return tuple(index for index in range(expected) if index not in completed)
-    return ComplementIndexes(expected, tuple(sorted(completed)))
+    if isinstance(validated, CompactIndexes):
+        missing = ComplementIndexes(expected, validated)
+        return tuple(missing) if missing_count <= len(validated) else missing
+    if missing_count <= len(validated):
+        return tuple(index for index in range(expected) if index not in validated)
+    return ComplementIndexes(expected, array("q", sorted(validated)))
 
 
 @dataclass(frozen=True)
 class ComplementIndexes(Sequence[int]):
     expected: int
-    completed: tuple[int, ...]
+    completed: Sequence[int]
 
     def __post_init__(self) -> None:
         _validate_expected(self.expected)
@@ -288,138 +326,46 @@ def log_resume_summary(
     )
 
 
-def cached_completed_indexes(
-    root: str | Path,
-    fragment_ids: Iterable[str],
-) -> frozenset[int] | None:
-    path = Path(root) / _COMPLETED_INDEX_CACHE
-    if not path.is_file():
-        return None
-    expected = frozenset(fragment_ids)
-    try:
-        entries = _read_completed_index_entries(path)
-    except (OSError, UnicodeError, json.JSONDecodeError, ValueError, TypeError):
-        return None
-    if frozenset(entries) != expected:
-        return None
-    indexes: set[int] = set()
-    for fragment_indexes in entries.values():
-        for index in fragment_indexes:
-            if index in indexes:
-                raise ValueError(f"Duplicate resume index {index}.")
-            indexes.add(index)
-    return frozenset(indexes)
-
-
-def write_completed_index_cache(
-    root: str | Path,
+def compact_completed_index_entries(
     entries: Iterable[tuple[str, Sequence[int]]],
-) -> None:
-    path = Path(root) / _COMPLETED_INDEX_CACHE
-    rows = tuple(
-        _completed_index_row(fragment_id, indexes) for fragment_id, indexes in entries
-    )
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.parent / f".{path.name}.{os.getpid()}.tmp"
-    with tmp.open("w", encoding="utf-8") as file:
-        for row in rows:
-            file.write(json.dumps(row, separators=(",", ":")) + "\n")
-    os.replace(tmp, path)
+    *,
+    expected: int,
+) -> CompactIndexes:
+    """Compact authoritative fragment index rows into one validated sequence."""
 
-
-def append_completed_index_cache(
-    root: str | Path,
-    fragment_id: str,
-    indexes: Sequence[int],
-) -> None:
-    path = Path(root) / _COMPLETED_INDEX_CACHE
-    path.parent.mkdir(parents=True, exist_ok=True)
-    line = (
-        json.dumps(
-            _completed_index_row(fragment_id, indexes),
-            separators=(",", ":"),
-        )
-        + "\n"
-    )
-    payload = line.encode("utf-8")
-    lock_path = Path(root) / _COMPLETED_INDEX_CACHE_LOCK
-    lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o644)
-    try:
-        fcntl.flock(lock_fd, fcntl.LOCK_EX)
-        fd = os.open(path, os.O_APPEND | os.O_CREAT | os.O_WRONLY, 0o644)
-        try:
-            _write_all(fd, payload)
-            os.fsync(fd)
-        finally:
-            os.close(fd)
-    finally:
-        fcntl.flock(lock_fd, fcntl.LOCK_UN)
-        os.close(lock_fd)
-
-
-def _write_all(fd: int, payload: bytes) -> None:
-    offset = 0
-    while offset < len(payload):
-        written = os.write(fd, payload[offset:])
-        if written <= 0:
-            raise OSError("Failed to write completed index cache entry.")
-        offset += written
-
-
-def _completed_index_row(fragment_id: str, indexes: Sequence[int]) -> dict[str, object]:
-    validate_path_segment("fragment id", fragment_id)
-    ordered = tuple(_completed_index(index) for index in indexes)
-    if len(set(ordered)) != len(ordered):
-        raise ValueError("completed indexes must be unique.")
-    return {
-        "schema_version": _COMPLETED_INDEX_CACHE_SCHEMA_VERSION,
-        "fragment_id": fragment_id,
-        "indexes": list(ordered),
-    }
-
-
-def _read_completed_index_entries(path: Path) -> dict[str, tuple[int, ...]]:
-    entries: dict[str, tuple[int, ...]] = {}
-    with path.open(encoding="utf-8") as file:
-        for line in file:
-            if not line.strip():
-                continue
-            data = json.loads(line)
-            if not isinstance(data, dict):
-                raise ValueError("Completed index cache row must be an object.")
-            version = data.get("schema_version")
-            if (
-                type(version) is not int
-                or version != _COMPLETED_INDEX_CACHE_SCHEMA_VERSION
-            ):
-                raise ValueError("Completed index cache schema_version mismatch.")
-            fragment_id = data.get("fragment_id")
-            if not isinstance(fragment_id, str):
+    _validate_expected(expected)
+    arrays: list[array[int]] = []
+    for _fragment_id, indexes in entries:
+        packed = array("q")
+        last_fragment_index: int | None = None
+        for value in indexes:
+            index = _completed_index(value)
+            if index < 0 or index >= expected:
                 raise ValueError(
-                    "Completed index cache fragment_id must be a path segment."
+                    f"Completed fragment index is outside dataset: {index}."
                 )
-            try:
-                validate_path_segment("Completed index cache fragment_id", fragment_id)
-            except ValueError as exc:
+            if last_fragment_index is not None and index <= last_fragment_index:
                 raise ValueError(
-                    "Completed index cache fragment_id must be a path segment."
-                ) from exc
-            raw = data.get("indexes")
-            if not isinstance(raw, list):
-                raise ValueError("Completed index cache indexes must be a list.")
-            indexes = tuple(_completed_index(value) for value in raw)
-            previous = entries.get(fragment_id)
-            if previous is not None and previous != indexes:
-                raise ValueError(
-                    f"Completed index cache has duplicate fragment {fragment_id}."
+                    "Completed fragment indexes must be strictly increasing."
                 )
-            entries[fragment_id] = indexes
-    return entries
+            packed.append(index)
+            last_fragment_index = index
+        if packed:
+            arrays.append(packed)
+
+    ordered = array("q")
+    last_index: int | None = None
+    for index in heapq.merge(*arrays):
+        if index == last_index:
+            raise ValueError(f"Duplicate resume index {index}.")
+        ordered.append(index)
+        last_index = index
+    return CompactIndexes(expected, ordered)
 
 
 def _completed_index(value: object) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
-        raise ValueError("Completed index cache entries must be integers.")
+        raise ValueError("Completed fragment indexes must be integers.")
     return value
 
 

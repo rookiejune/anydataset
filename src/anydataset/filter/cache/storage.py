@@ -3,20 +3,27 @@ from __future__ import annotations
 import heapq
 import json
 from array import array
-from bisect import bisect_right
+from bisect import bisect_left, bisect_right
+from collections import OrderedDict
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
+from itertools import islice
 from pathlib import Path, PureWindowsPath
 from threading import Lock
 from typing import Any, cast, overload
 
-from ..._io.parquet import read_rows, write_columns
+from ..._io.parquet import pyarrow, read_rows, write_columns
 from ..._io.shard import BufferedShardWriter
 from ...store.jsonio import read_json, write_json
 from ..rules import label_file_id
 from ..types import JsonValue, _FilterMetricsRow, _Index, validate_metrics
 
 _METRICS_SCHEMA_VERSION = 1
+_MAX_CACHED_INDEX_SHARDS = 8
+_MAX_CACHED_INDEX_VALUES = 8_000_000
+_INDEX_BATCH_SIZE = 4096
+_MERGED_PAGE_SIZE = 4096
+_MAX_CACHED_MERGED_PAGES = 4
 
 
 @dataclass(frozen=True)
@@ -151,6 +158,7 @@ def _manifest_relative_path(value: object, context: str) -> str:
     parts = path.replace("\\", "/").split("/")
     if (
         not path
+        or path != path.replace("\\", "/")
         or Path(path).is_absolute()
         or PureWindowsPath(path).is_absolute()
         or PureWindowsPath(path).drive
@@ -182,6 +190,7 @@ def read_partitions(path: Path) -> dict[str, _Index]:
     try:
         before = _partition_snapshot(path)
         manifest = load_partition_manifest(path / "partitions.json")
+        shard_cache = _IndexShardCache()
         partitions: dict[str, _Index] = {}
         for partition in manifest.partitions:
             partitions[partition.label] = _FileIndex(
@@ -194,6 +203,7 @@ def read_partitions(path: Path) -> dict[str, _Index]:
                     for file in partition.files
                 ),
                 partition.count,
+                shard_cache,
             )
         after = _partition_snapshot(path)
     except FileNotFoundError as exc:
@@ -318,19 +328,52 @@ class _IndexFile:
     fingerprint: _FileFingerprint
 
 
-class _FileIndex(Sequence[int]):
-    __slots__ = ("_count", "_files", "_offsets", "_shards")
+class _IndexShardCache:
+    """Bound packed partition data shared by every label in one cache reader."""
 
-    def __init__(self, files: Sequence[_IndexFile], count: int) -> None:
+    __slots__ = ("_lock", "_value_count", "_values")
+
+    def __init__(self) -> None:
+        self._values: OrderedDict[_IndexFile, array[int]] = OrderedDict()
+        self._value_count = 0
+        self._lock = Lock()
+
+    def get(self, file: _IndexFile) -> array[int]:
+        with self._lock:
+            cached = self._values.get(file)
+            if cached is not None:
+                self._values.move_to_end(file)
+                return cached
+            loaded = _read_index_file(file)
+            self._values[file] = loaded
+            self._value_count += len(loaded)
+            while len(self._values) > 1 and (
+                len(self._values) > _MAX_CACHED_INDEX_SHARDS
+                or self._value_count > _MAX_CACHED_INDEX_VALUES
+            ):
+                _evicted_file, evicted = self._values.popitem(last=False)
+                self._value_count -= len(evicted)
+            return loaded
+
+
+class _FileIndex(Sequence[int]):
+    __slots__ = ("_cache", "_count", "_files", "_offsets")
+
+    def __init__(
+        self,
+        files: Sequence[_IndexFile],
+        count: int,
+        cache: _IndexShardCache,
+    ) -> None:
         self._files = tuple(files)
         self._count = count
+        self._cache = cache
         offsets = [0]
         for file in self._files:
             offsets.append(offsets[-1] + file.count)
         if offsets[-1] != count:
             raise ValueError("partition manifest count does not match shard counts.")
         self._offsets = tuple(offsets)
-        self._shards: list[array[int] | None] = [None] * len(self._files)
 
     def __len__(self) -> int:
         return self._count
@@ -354,9 +397,21 @@ class _FileIndex(Sequence[int]):
         return int(shard[index - self._offsets[shard_index]])
 
     def __iter__(self):
-        for shard_index in range(len(self._files)):
-            for index in self._shard(shard_index):
-                yield int(index)
+        yield from self._iter_from(0)
+
+    def _iter_from(self, start: int) -> Iterator[int]:
+        if start < 0 or start > len(self):
+            raise IndexError("filter index iterator start out of range.")
+        if start == len(self):
+            return
+        shard_index = bisect_right(self._offsets, start) - 1
+        position = start
+        while shard_index < len(self._files):
+            shard_offset = self._offsets[shard_index]
+            local_start = position - shard_offset
+            yield from _iter_index_file(self._files[shard_index], local_start)
+            shard_index += 1
+            position = self._offsets[shard_index]
 
     def _iter_slice(self, start: int, stop: int, step: int) -> Iterable[int]:
         if step <= 0:
@@ -380,36 +435,64 @@ class _FileIndex(Sequence[int]):
             shard_index += 1
 
     def _shard(self, index: int) -> array[int]:
-        shard = self._shards[index]
+        return self._cache.get(self._files[index])
+
+
+class _FileIndexCursor(Sequence[int]):
+    """Keep one active file shard outside the shared LRU during local scans."""
+
+    __slots__ = ("_index", "_shard", "_shard_index")
+
+    def __init__(self, index: _FileIndex) -> None:
+        self._index = index
+        self._shard: array[int] | None = None
+        self._shard_index = -1
+
+    def __len__(self) -> int:
+        return len(self._index)
+
+    @overload
+    def __getitem__(self, index: int) -> int: ...
+
+    @overload
+    def __getitem__(self, index: slice) -> tuple[int, ...]: ...
+
+    def __getitem__(self, index: int | slice) -> int | tuple[int, ...]:
+        if isinstance(index, slice):
+            return tuple(
+                self[position] for position in range(*index.indices(len(self)))
+            )
+        if index < 0:
+            index += len(self)
+        if index < 0 or index >= len(self):
+            raise IndexError("filter index cursor out of range.")
+        shard_index = bisect_right(self._index._offsets, index) - 1
+        if shard_index != self._shard_index:
+            self._shard = self._index._shard(shard_index)
+            self._shard_index = shard_index
+        shard = self._shard
         if shard is None:
-            file = self._files[index]
-            try:
-                before = _fingerprint(file.path)
-                if before != file.fingerprint:
-                    raise _snapshot_changed(file.path)
-                shard = read_index_rows(file.path)
-                after = _fingerprint(file.path)
-            except FileNotFoundError as exc:
-                raise _snapshot_changed(file.path) from exc
-            if before != after or after != file.fingerprint:
-                raise _snapshot_changed(file.path)
-            if len(shard) != file.count:
-                raise ValueError(
-                    "Filter partition shard row count does not match its manifest: "
-                    f"{file.path}."
-                )
-            self._shards[index] = shard
-        return shard
+            raise RuntimeError("filter index cursor shard was not loaded.")
+        return int(shard[index - self._index._offsets[shard_index]])
 
 
 class _MergedIndex(Sequence[int]):
-    __slots__ = ("_count", "_error", "_indexes", "_iterator", "_lock", "_values")
+    __slots__ = (
+        "_count",
+        "_error",
+        "_indexes",
+        "_iterator",
+        "_lock",
+        "_next_page",
+        "_pages",
+    )
 
     def __init__(self, indexes: Sequence[_Index]) -> None:
         self._indexes = tuple(indexes)
         self._count = sum(len(index) for index in self._indexes)
-        self._values = array("q")
+        self._pages: OrderedDict[int, array[int]] = OrderedDict()
         self._iterator: Iterator[int] | None = None
+        self._next_page = 0
         self._error: Exception | None = None
         self._lock = Lock()
 
@@ -430,33 +513,205 @@ class _MergedIndex(Sequence[int]):
             index += len(self)
         if index < 0 or index >= len(self):
             raise IndexError("filter index out of range.")
-        self._ensure(index + 1)
-        return int(self._values[index])
+        page_index, offset = divmod(index, _MERGED_PAGE_SIZE)
+        return int(self._page(page_index)[offset])
 
     def __iter__(self) -> Iterator[int]:
-        for index in range(len(self)):
-            yield self[index]
+        yield from self._merged_values()
 
-    def _ensure(self, count: int) -> None:
-        if len(self._values) >= count:
-            return
+    def _page(self, page_index: int) -> array[int]:
         with self._lock:
             if self._error is not None:
                 raise self._error
-            if self._iterator is None:
-                self._iterator = iter(heapq.merge(*self._indexes))
+            cached = self._pages.get(page_index)
+            if cached is not None:
+                try:
+                    if page_index == self._next_page:
+                        if self._iterator is None:
+                            self._iterator = iter(self._merged_values())
+                        sequential = self._read_page(self._iterator, page_index)
+                        if sequential != cached:
+                            raise RuntimeError(
+                                "Cached filter index page does not match its "
+                                "sequential merge."
+                            )
+                        self._next_page += 1
+                except Exception as exc:
+                    self._error = exc
+                    raise
+                self._pages.move_to_end(page_index)
+                return cached
             try:
-                while len(self._values) < count:
-                    self._values.append(next(self._iterator))
-            except StopIteration as exc:
-                error = ValueError(
-                    "Merged filter partitions ended before their manifest counts."
-                )
-                self._error = error
-                raise error from exc
+                if page_index == self._next_page:
+                    if self._iterator is None:
+                        self._iterator = iter(self._merged_values())
+                    page = self._read_page(self._iterator, page_index)
+                    self._next_page += 1
+                else:
+                    page = self._random_page(page_index)
             except Exception as exc:
                 self._error = exc
                 raise
+            self._pages[page_index] = page
+            while len(self._pages) > _MAX_CACHED_MERGED_PAGES:
+                self._pages.popitem(last=False)
+            return page
+
+    def _merged_values(self) -> Iterator[int]:
+        yield from heapq.merge(*(_sequence_values(index, 0) for index in self._indexes))
+
+    def _random_page(self, page_index: int) -> array[int]:
+        if sum(isinstance(index, _FileIndex) for index in self._indexes) > (
+            _MAX_CACHED_INDEX_SHARDS
+        ):
+            return self._read_page(
+                islice(
+                    self._merged_values(),
+                    page_index * _MERGED_PAGE_SIZE,
+                    None,
+                ),
+                page_index,
+            )
+        start = page_index * _MERGED_PAGE_SIZE
+        indexes = tuple(_sequence_cursor(index) for index in self._indexes)
+        first = self._select(start, indexes)
+        positions = [bisect_left(index, first) for index in indexes]
+        before = sum(positions)
+        merged = heapq.merge(
+            *(
+                _sequence_values(index, position)
+                for index, position in zip(indexes, positions)
+            )
+        )
+        return self._read_page(
+            islice(merged, start - before, None),
+            page_index,
+        )
+
+    def _select(self, rank: int, indexes: Sequence[Sequence[int]]) -> int:
+        populated = tuple(index for index in indexes if index)
+        if not populated:
+            raise ValueError("Merged filter partitions are unexpectedly empty.")
+        low = min(index[0] for index in populated)
+        high = max(index[-1] for index in populated)
+        while low < high:
+            middle = (low + high) // 2
+            count = sum(bisect_right(index, middle) for index in populated)
+            if count <= rank:
+                low = middle + 1
+            else:
+                high = middle
+        return low
+
+    def _read_page(self, values: Iterator[int], page_index: int) -> array[int]:
+        expected = self._page_count(page_index)
+        page = array("q", islice(values, expected))
+        if len(page) != expected:
+            raise ValueError(
+                "Merged filter partitions ended before their manifest counts."
+            )
+        if page_index == (len(self) - 1) // _MERGED_PAGE_SIZE:
+            if next(values, None) is not None:
+                raise ValueError(
+                    "Merged filter partitions contain more rows than their "
+                    "manifest counts."
+                )
+        return page
+
+    def _page_count(self, page_index: int) -> int:
+        return min(
+            _MERGED_PAGE_SIZE,
+            len(self) - page_index * _MERGED_PAGE_SIZE,
+        )
+
+
+def _sequence_values(values: Sequence[int], start: int) -> Iterator[int]:
+    if isinstance(values, _FileIndex):
+        yield from values._iter_from(start)
+        return
+    for position in range(start, len(values)):
+        yield values[position]
+
+
+def _sequence_cursor(values: Sequence[int]) -> Sequence[int]:
+    if isinstance(values, _FileIndex):
+        return _FileIndexCursor(values)
+    return values
+
+
+def _read_index_file(file: _IndexFile) -> array[int]:
+    try:
+        before = _fingerprint(file.path)
+        if before != file.fingerprint:
+            raise _snapshot_changed(file.path)
+        values = read_index_rows(file.path)
+        after = _fingerprint(file.path)
+    except FileNotFoundError as exc:
+        raise _snapshot_changed(file.path) from exc
+    if before != after or after != file.fingerprint:
+        raise _snapshot_changed(file.path)
+    if len(values) != file.count:
+        raise ValueError(
+            "Filter partition shard row count does not match its manifest: "
+            f"{file.path}."
+        )
+    return values
+
+
+def _iter_index_file(file: _IndexFile, start: int = 0) -> Iterator[int]:
+    if start < 0 or start > file.count:
+        raise IndexError("filter index shard iterator start out of range.")
+    skip = start
+    for values in _iter_index_batches(file):
+        batch_count = len(values)
+        if skip >= batch_count:
+            skip -= batch_count
+            continue
+        for position in range(skip, batch_count):
+            value = values[position].as_py()
+            if value is None:
+                raise ValueError(
+                    f"Filter partition shard contains a null index: {file.path}."
+                )
+            yield int(value)
+        skip = 0
+
+
+def _iter_index_batches(file: _IndexFile) -> Iterator[Any]:
+    try:
+        before = _fingerprint(file.path)
+        if before != file.fingerprint:
+            raise _snapshot_changed(file.path)
+        _, pq = pyarrow()
+        parquet = pq.ParquetFile(file.path)
+        if parquet.metadata is None or parquet.metadata.num_rows != file.count:
+            parquet.close()
+            raise ValueError(
+                "Filter partition shard row count does not match its manifest: "
+                f"{file.path}."
+            )
+        count = 0
+        try:
+            for batch in parquet.iter_batches(
+                batch_size=_INDEX_BATCH_SIZE,
+                columns=["index"],
+                use_threads=False,
+            ):
+                values = batch.column(0)
+                count += len(values)
+                yield values
+        finally:
+            parquet.close()
+        after = _fingerprint(file.path)
+    except FileNotFoundError as exc:
+        raise _snapshot_changed(file.path) from exc
+    if before != after or after != file.fingerprint:
+        raise _snapshot_changed(file.path)
+    if count != file.count:
+        raise ValueError(
+            "Filter partition shard row count does not match its manifest: "
+            f"{file.path}."
+        )
 
 
 def _partition_snapshot(path: Path) -> tuple[_FileFingerprint, _FileFingerprint]:

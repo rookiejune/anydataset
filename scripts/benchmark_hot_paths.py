@@ -335,14 +335,15 @@ def bench_sharded_csv_lookup(
     start = time.perf_counter()
     rows = tuple(dataset[index] for index in indexes)
     seconds = time.perf_counter() - start
+    reader = dataset._parts_reader()
     return Measurement(
         seconds=seconds,
         detail={
             "rows_per_file": rows_per_file,
             "row_groups": len(file.row_groups),
             "lookups": len(indexes),
-            "open_parquet_files": len(dataset._parquet_cache),
-            "cached_row_groups": len(dataset._row_group_cache),
+            "open_parquet_files": len(reader._parquet_cache),
+            "cached_row_groups": len(reader._row_group_cache),
             "checksum": sum(int(row["id"]) for row in rows),
         },
     )

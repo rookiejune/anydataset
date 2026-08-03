@@ -2,17 +2,23 @@ from __future__ import annotations
 
 import os
 import shutil
+from array import array
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from heapq import heappop, heappush
+from itertools import chain
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import TypeVar
 
 from ..._io.atomic import replace_dir
-from ..._runtime.resume import cached_completed_indexes, write_completed_index_cache
+from ..._runtime.resume import (
+    CompactIndexes,
+    compact_completed_index_entries,
+)
 from ..._runtime.sharding import validate_shard
+from ..._validation import positive_int
 from ...types.item import Modality, Role, View
 from ..payload.integrity import validate_store_payloads
 from ..payload.groups import write_payload_groups
@@ -45,11 +51,18 @@ from ..paths import (
     dataset_json_path,
     dataset_ready_path,
     view_ready_path,
+    view_shard_index_path,
     view_shard_path,
     view_shards_dir,
 )
-from ..payload.archive import write_payload_index
+from ..payload.archive import (
+    Payload,
+    PayloadCache,
+    read_payload_bytes,
+    write_payload_index,
+)
 from ..reader import read_store_manifest, read_store_views
+from .viewwriter import ViewWriter
 
 T = TypeVar("T")
 CommitProgress = Callable[[str, int], None]
@@ -166,11 +179,17 @@ def commit_store_fragments(
     dataset_id: str,
     split: str | None = None,
     expected_sample_count: int | None = None,
+    max_shard_samples: int | None = None,
     provenance: Mapping[str, str] | None = None,
     progress: CommitProgress | None = None,
 ) -> Path:
     if expected_sample_count is not None and expected_sample_count < 0:
         raise ValueError("expected_sample_count must be non-negative.")
+    if max_shard_samples is not None:
+        max_shard_samples = positive_int(
+            "max_shard_samples",
+            max_shard_samples,
+        )
     fragments_root = Path(fragments_dir).expanduser()
     fragment_infos = (
         _fragment_infos(
@@ -209,6 +228,8 @@ def commit_store_fragments(
                 split=split,
                 expected_sample_count=expected_sample_count,
                 views=views,
+                repack_max_shard_samples=max_shard_samples,
+                shard_prefix="part-00000-",
                 provenance=commit_provenance,
                 progress=progress,
             ),
@@ -223,10 +244,16 @@ def commit_fragment_part(
     shard_id: int,
     num_shards: int,
     split: str | None = None,
+    max_shard_samples: int | None = None,
     provenance: Mapping[str, str] | None = None,
     progress: CommitProgress | None = None,
 ) -> Path:
     validate_shard(num_shards, shard_id)
+    if max_shard_samples is not None:
+        max_shard_samples = positive_int(
+            "max_shard_samples",
+            max_shard_samples,
+        )
     fragment_infos, roots = _validate_fragment_roots_with_info(
         tuple(Path(path) for path in fragments),
         dataset_id=dataset_id,
@@ -248,7 +275,6 @@ def commit_fragment_part(
             provenance=commit_provenance,
         ).write(())
     views = _store_views(roots)
-    validate_store_payloads(roots)
     sample_count = sum(len(fragment.indexes) for fragment in fragment_infos)
 
     with _bounded_store_roots(
@@ -267,6 +293,8 @@ def commit_fragment_part(
                 split=split,
                 views=views,
                 dense=False,
+                repack_max_shard_samples=max_shard_samples,
+                shard_prefix=f"part-{shard_id:05d}-",
                 provenance=commit_provenance,
                 progress=progress,
             )
@@ -295,24 +323,41 @@ def completed_fragment_indexes(
     if not root.is_dir():
         return frozenset()
     fragment_paths = _fragment_paths(root)
-    cached = cached_completed_indexes(root, (path.name for path in fragment_paths))
-    if cached is not None:
-        return cached
-    fragments = _fragment_infos_from_paths(
-        fragment_paths,
-        dataset_id=dataset_id,
-        split=split,
+    entries = tuple(
+        (
+            path.name,
+            _read_fragment_info(path, dataset_id=dataset_id, split=split).indexes,
+        )
+        for path in fragment_paths
     )
-    indexes: set[int] = set()
-    cache_entries: list[tuple[str, tuple[int, ...]]] = []
-    for fragment in fragments:
-        cache_entries.append((fragment.path.name, fragment.indexes))
-        for index in fragment.indexes:
-            if index in indexes:
-                raise ValueError(f"Duplicate materialized fragment index {index}.")
-            indexes.add(index)
-    write_completed_index_cache(root, cache_entries)
-    return frozenset(indexes)
+    completed: set[int] = set()
+    for _fragment_id, indexes in entries:
+        for index in indexes:
+            if index in completed:
+                raise ValueError(f"Duplicate resume index {index}.")
+            completed.add(index)
+    return frozenset(completed)
+
+
+def compact_completed_fragment_indexes(
+    fragments_dir: str | Path,
+    *,
+    dataset_id: str,
+    expected: int,
+    split: str | None = None,
+) -> CompactIndexes:
+    root = Path(fragments_dir)
+    if not root.is_dir():
+        return CompactIndexes(expected, array("q"))
+    fragment_paths = _fragment_paths(root)
+    entries = tuple(
+        (
+            path.name,
+            _read_fragment_info(path, dataset_id=dataset_id, split=split).indexes,
+        )
+        for path in fragment_paths
+    )
+    return compact_completed_index_entries(entries, expected=expected)
 
 
 def store_fragments(
@@ -320,7 +365,40 @@ def store_fragments(
     *,
     dataset_id: str,
     split: str | None = None,
+    shard_id: int | None = None,
+    num_shards: int | None = None,
 ) -> tuple[Path, ...]:
+    if (shard_id is None) != (num_shards is None):
+        raise ValueError("shard_id and num_shards must be provided together.")
+    if shard_id is not None and num_shards is not None:
+        validate_shard(num_shards, shard_id)
+        root = Path(fragments_dir).expanduser()
+        if not root.is_dir():
+            return ()
+        paths = _fragment_paths(root)
+        keyed: list[tuple[tuple[int, str], Path]] = []
+        for path in paths:
+            key = _materializer_fragment_sort_key(path)
+            if key is None:
+                return _fragment_roots(
+                    root,
+                    dataset_id=dataset_id,
+                    split=split,
+                )[shard_id::num_shards]
+            keyed.append((key, path))
+        ordered = tuple(
+            path
+            for _key, path in sorted(keyed, key=lambda item: item[0])
+        )
+        paths = ordered[shard_id::num_shards]
+        return tuple(
+            info.path
+            for info in _fragment_infos_from_paths(
+                paths,
+                dataset_id=dataset_id,
+                split=split,
+            )
+        )
     return _fragment_roots(
         fragments_dir,
         dataset_id=dataset_id,
@@ -385,6 +463,8 @@ def _commit_roots_to_tmp(
     expected_sample_count: int | None = None,
     views: tuple[tuple[Role, Modality, View], ...] | None = None,
     dense: bool = True,
+    repack_max_shard_samples: int | None = None,
+    shard_prefix: str = "",
     progress: CommitProgress | None = None,
 ) -> Path:
     selected_views = views if views is not None else _store_views(stores)
@@ -399,6 +479,8 @@ def _commit_roots_to_tmp(
         root,
         stores,
         views=selected_views,
+        repack_max_shard_samples=repack_max_shard_samples,
+        shard_prefix=shard_prefix,
         progress=progress,
     )
     if dense:
@@ -419,6 +501,8 @@ def _write_committed_view_manifests(
     stores: tuple[Path, ...],
     *,
     views: tuple[tuple[Role, Modality, View], ...] | None,
+    repack_max_shard_samples: int | None,
+    shard_prefix: str,
     progress: CommitProgress | None,
 ) -> None:
     selected_views = views if views is not None else _store_views(stores)
@@ -426,27 +510,42 @@ def _write_committed_view_manifests(
         return
     sample_indexes_by_ref = _sample_indexes_by_ref(root)
     for view in selected_views:
-        view_count, expected_view_count, shards = _write_ordered_view_manifest(
-            root,
-            stores,
-            view,
-            sample_indexes_by_ref.get(view[:2], ()),
-            progress=progress,
-        )
+        if repack_max_shard_samples is not None and len(stores) > 1:
+            repack = True
+            view_count, expected_view_count = _write_repacked_view_manifest(
+                root,
+                stores,
+                view,
+                sample_indexes_by_ref.get(view[:2], ()),
+                max_shard_samples=repack_max_shard_samples,
+                shard_prefix=shard_prefix,
+                progress=progress,
+            )
+            shards: frozenset[str] = frozenset()
+        else:
+            repack = False
+            view_count, expected_view_count, shards = _write_ordered_view_manifest(
+                root,
+                stores,
+                view,
+                sample_indexes_by_ref.get(view[:2], ()),
+                progress=progress,
+            )
         if view_count != expected_view_count:
             raise ValueError(
                 f"View {view_path(view)} sample count {view_count} "
                 f"does not match item count {expected_view_count}."
             )
-        for store in stores:
-            _copy_view_shards(
-                store,
-                root,
-                view,
-                shards=shards,
-                progress=progress,
-            )
-        _validate_copied_view_shards(root, view, shards)
+        if not repack:
+            for store in stores:
+                _copy_view_shards(
+                    store,
+                    root,
+                    view,
+                    shards=shards,
+                    progress=progress,
+                )
+            _validate_copied_view_shards(root, view, shards)
         view_ready_path(root, view).touch()
 
 
@@ -588,6 +687,93 @@ def _write_ordered_view_manifest(
     return count, expected_count, frozenset(shards)
 
 
+def _write_repacked_view_manifest(
+    root: Path,
+    stores: tuple[Path, ...],
+    view: tuple[Role, Modality, View],
+    sample_indexes: Iterable[int],
+    *,
+    max_shard_samples: int,
+    shard_prefix: str,
+    progress: CommitProgress | None,
+) -> tuple[int, int]:
+    indexes = iter(sample_indexes)
+    try:
+        first_index = next(indexes)
+    except StopIteration:
+        first_index = None
+
+    entries = iter(
+        _unique_sourced_view_entries(_merged_sourced_view_entries(stores, view))
+    )
+    current = _next_sourced_entry(entries)
+    if first_index is None:
+        if current is not None:
+            raise ValueError(
+                f"View {view_path(view)} has unexpected sample_index "
+                f"{current[1].sample_index}."
+            )
+        writer = view_manifest_writer(root, view)
+        writer.close()
+        return 0, 0
+
+    writer = ViewWriter(
+        root,
+        view,
+        max_shard_samples=max_shard_samples,
+        shard_prefix=shard_prefix,
+    )
+    payloads = PayloadCache()
+    count = 0
+    expected_count = 0
+    pending = 0
+    try:
+        for sample_index in chain((first_index,), indexes):
+            expected_count += 1
+            if current is None:
+                raise ValueError(
+                    f"View {view_path(view)} is missing sample_index "
+                    f"{sample_index}."
+                )
+            source, entry = current
+            if entry.sample_index < sample_index:
+                raise ValueError(
+                    f"View {view_path(view)} has unexpected sample_index "
+                    f"{entry.sample_index}."
+                )
+            if entry.sample_index != sample_index:
+                raise ValueError(
+                    f"View {view_path(view)} is missing sample_index "
+                    f"{sample_index}."
+                )
+            writer.write_payload(
+                sample_index,
+                Payload(
+                    entry.key,
+                    read_payload_bytes(source, view, entry, cache=payloads),
+                ),
+            )
+            count += 1
+            pending += 1
+            if pending >= _PROGRESS_BATCH_SIZE:
+                _put_progress(progress, "merge-views", pending)
+                pending = 0
+            current = _next_sourced_entry(entries)
+        if current is not None:
+            raise ValueError(
+                f"View {view_path(view)} has unexpected sample_index "
+                f"{current[1].sample_index}."
+            )
+        writer.close()
+        _put_progress(progress, "merge-views", pending)
+    except Exception:
+        writer.abort()
+        raise
+    finally:
+        payloads.close()
+    return count, expected_count
+
+
 def _sample_indexes_by_ref(
     root: Path,
 ) -> dict[tuple[Role, Modality], _IndexRuns]:
@@ -632,6 +818,56 @@ def _merged_view_entries(
         yield from _merged_iterators(entries, _view_entry_key)
     finally:
         cache.close()
+
+
+def _merged_sourced_view_entries(
+    stores: tuple[Path, ...],
+    view: tuple[Role, Modality, View],
+) -> Iterator[tuple[Path, ViewManifestEntry]]:
+    selected = tuple(
+        store for store in stores if view_ready_path(store, view).exists()
+    )
+    cache = ManifestParquetCache(max_open_files=max(1, len(selected)))
+    try:
+        entries = (
+            _sourced_view_entries(
+                store,
+                _validated_view_entries(
+                    read_view_manifest(store, view, cache=cache),
+                    view,
+                ),
+            )
+            for store in selected
+        )
+        yield from _merged_iterators(
+            entries,
+            lambda item: _view_entry_key(item[1]),
+        )
+    finally:
+        cache.close()
+
+
+def _sourced_view_entries(
+    source: Path,
+    entries: Iterable[ViewManifestEntry],
+) -> Iterator[tuple[Path, ViewManifestEntry]]:
+    for entry in entries:
+        yield source, entry
+
+
+def _unique_sourced_view_entries(
+    entries: Iterator[tuple[Path, ViewManifestEntry]],
+) -> Iterator[tuple[Path, ViewManifestEntry]]:
+    previous_index: int | None = None
+    for source, entry in entries:
+        if entry.sample_index == previous_index:
+            raise ValueError(
+                f"Duplicate view entry for sample_index {entry.sample_index}."
+            )
+        if previous_index is not None and entry.sample_index < previous_index:
+            raise ValueError("View manifests must be ordered by sample_index.")
+        previous_index = entry.sample_index
+        yield source, entry
 
 
 def _unique_view_entries(
@@ -689,6 +925,15 @@ def _view_entry_key(entry: ViewManifestEntry) -> int:
 
 
 def _next_entry(entries: Iterator[ViewManifestEntry]) -> ViewManifestEntry | None:
+    try:
+        return next(entries)
+    except StopIteration:
+        return None
+
+
+def _next_sourced_entry(
+    entries: Iterator[tuple[Path, ViewManifestEntry]],
+) -> tuple[Path, ViewManifestEntry] | None:
     try:
         return next(entries)
     except StopIteration:
@@ -762,12 +1007,32 @@ def _fragment_infos(
 
 def _fragment_paths(root: Path) -> tuple[Path, ...]:
     return tuple(
-        path
-        for path in root.iterdir()
-        if path.is_dir()
-        if not path.name.startswith(".")
-        if _fragment_json_path(path).is_file()
+        sorted(
+            (
+                path
+                for path in root.iterdir()
+                if path.is_dir()
+                if not path.name.startswith(".")
+                if _fragment_json_path(path).is_file()
+            ),
+            key=lambda path: path.name,
+        )
     )
+
+
+def _materializer_fragment_sort_key(path: Path) -> tuple[int, str] | None:
+    parts = path.name.split("-", 3)
+    if (
+        len(parts) != 4
+        or parts[0] != "batch"
+        or len(parts[1]) != 12
+        or len(parts[2]) != 12
+        or not parts[1].isdigit()
+        or not parts[2].isdigit()
+        or not parts[3]
+    ):
+        return None
+    return int(parts[1]), path.name
 
 
 def _fragment_infos_from_paths(
@@ -1011,7 +1276,12 @@ def _copy_view_shards(
         _link_or_copy(source, target)
         if not target.is_file():
             raise FileNotFoundError(target)
-        write_payload_index(target_root, view, shard)
+        source_index = view_shard_index_path(source_root, view, shard)
+        target_index = view_shard_index_path(target_root, view, shard)
+        if source_index.is_file():
+            _link_or_copy(source_index, target_index)
+        else:
+            write_payload_index(target_root, view, shard)
         _put_progress(progress, "link-shards", 1)
 
 

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import unittest
+from dataclasses import replace
+from unittest import mock
 
 import torch
 from anydataset.dataset.morphology import (
@@ -13,6 +15,7 @@ from anydataset.dataset.morphology import (
     build_toy_speech_dataset,
     build_toy_speech_grid,
     speech_collate,
+    speech_grid_batch,
     speech_grid_collate,
 )
 from anydataset.types import (
@@ -106,6 +109,7 @@ class MorphologyContractTest(unittest.TestCase):
         full = view.full()
         self.assertEqual(full.shape, (1, 2, 2))
         self.assertEqual(full.waveforms.shape[:3], (1, 2, 2))
+        self.assertEqual(full.sample_rate, 16000)
         self.assertEqual(full.speaker_ids, (("speaker-a", "speaker-b"),))
         self.assertEqual(full.texts, (("hello", "world"),))
         self.assertEqual(view.by_speaker("speaker-a").shape, (1, 1, 2))
@@ -121,6 +125,16 @@ class MorphologyContractTest(unittest.TestCase):
                 with self.assertRaisesRegex(TypeError, "text row index"):
                     view.by_text(text)
 
+    def test_speech_grid_view_is_waveform_only(self) -> None:
+        view = build_toy_speech_grid()
+
+        with self.assertRaises(TypeError):
+            view.full(view=AudioView.LONGCAT)
+        block = mock.Mock()
+        block.audio_view = AudioView.LONGCAT
+        with self.assertRaisesRegex(ValueError, "waveform audio block"):
+            speech_grid_batch(block)
+
     def test_speech_grid_collate_pads_independent_axes(self) -> None:
         left = build_toy_speech_grid(
             texts=("a",),
@@ -133,6 +147,7 @@ class MorphologyContractTest(unittest.TestCase):
             seconds=0.02,
         ).full()
         batch = speech_grid_collate((left, right))
+        self.assertEqual(batch.sample_rate, 16000)
         self.assertEqual(batch.shape, (2, 2, 3))
         self.assertEqual(batch.speaker_ids, (("s0", "s1"), ("s0",)))
         self.assertEqual(batch.texts, (("a",), ("x", "y", "z")))
@@ -149,6 +164,7 @@ class MorphologyContractTest(unittest.TestCase):
         unknown = SpeechGridBatch(
             waveforms=known.waveforms,
             lengths=known.lengths,
+            sample_rate=known.sample_rate,
             speaker_ids=((None, "speaker-b"),),
             texts=(("hello", None),),
         )
@@ -164,20 +180,56 @@ class MorphologyContractTest(unittest.TestCase):
             (("hello", "world"), ("hello", None)),
         )
 
+    def test_speech_grid_collate_requires_uniform_audio_contract(self) -> None:
+        grid = build_toy_speech_grid(seconds=0.01).full()
+
+        with self.assertRaisesRegex(ValueError, "uniform sample_rate"):
+            speech_grid_collate((grid, replace(grid, sample_rate=8000)))
+
+        stereo = replace(
+            grid,
+            waveforms=grid.waveforms.repeat(1, 1, 1, 2, 1),
+        )
+        with self.assertRaisesRegex(ValueError, "uniform channel counts"):
+            speech_grid_collate((grid, stereo))
+
+        float64 = replace(grid, waveforms=grid.waveforms.to(torch.float64))
+        with self.assertRaisesRegex(TypeError, "uniform waveform dtypes"):
+            speech_grid_collate((grid, float64))
+
     def test_speech_grid_validates_nested_axes_and_padding(self) -> None:
         waveforms = torch.zeros(1, 2, 2, 1, 4)
         lengths = torch.tensor([[[4, 0], [3, 0]]])
         SpeechGridBatch(
             waveforms=waveforms,
             lengths=lengths,
+            sample_rate=16000,
             speaker_ids=(("a", "b"),),
             texts=(("hello",),),
         )
+
+        with self.assertRaisesRegex(TypeError, "sample_rate must be an integer"):
+            SpeechGridBatch(
+                waveforms=waveforms,
+                lengths=lengths,
+                sample_rate=True,
+                speaker_ids=(("a", "b"),),
+                texts=(("hello",),),
+            )
+        with self.assertRaisesRegex(ValueError, "sample_rate must be positive"):
+            SpeechGridBatch(
+                waveforms=waveforms,
+                lengths=lengths,
+                sample_rate=0,
+                speaker_ids=(("a", "b"),),
+                texts=(("hello",),),
+            )
 
         with self.assertRaisesRegex(TypeError, "speaker_ids must be a tuple"):
             SpeechGridBatch(
                 waveforms=waveforms,
                 lengths=lengths,
+                sample_rate=16000,
                 speaker_ids=(["a", "b"],),
                 texts=(("hello",),),
             )
@@ -187,6 +239,7 @@ class MorphologyContractTest(unittest.TestCase):
             SpeechGridBatch(
                 waveforms=waveforms,
                 lengths=invalid_lengths,
+                sample_rate=16000,
                 speaker_ids=(("a", "b"),),
                 texts=(("hello",),),
             )

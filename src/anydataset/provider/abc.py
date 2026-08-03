@@ -65,6 +65,15 @@ class AudioProvider(ABC):
     def _tensor(input: Tensor) -> Tensor:
         return input.detach().cpu().contiguous()
 
+    @staticmethod
+    def _length_groups(
+        lengths: Tensor,
+    ) -> tuple[tuple[int, tuple[int, ...]], ...]:
+        groups: dict[int, list[int]] = {}
+        for index, value in enumerate(lengths.tolist()):
+            groups.setdefault(int(value), []).append(index)
+        return tuple((length, tuple(indexes)) for length, indexes in groups.items())
+
 
 def _torchaudio():
     global torchaudio
@@ -121,18 +130,22 @@ def _pad_waveforms(
             "Only the last waveform dimension may vary in audio file batches."
         )
 
-    max_len = max(shape[-1] for shape in shapes)
-    padded = []
-    lengths = []
-    for waveform in tensors:
-        length = waveform.shape[-1]
-        lengths.append(length)
-        if length < max_len:
-            padding = waveform.new_zeros((*prefix, max_len - length))
-            waveform = torch.cat((waveform, padding), dim=-1)
-        padded.append(waveform)
+    device = tensors[0].device
+    if any(waveform.device != device for waveform in tensors[1:]):
+        raise ValueError("Audio file waveforms must share one device.")
+    dtype = tensors[0].dtype
+    for waveform in tensors[1:]:
+        dtype = torch.promote_types(dtype, waveform.dtype)
 
-    batch = torch.stack(tuple(padded))
+    lengths = [waveform.shape[-1] for waveform in tensors]
+    max_len = max(lengths)
+    batch = tensors[0].new_zeros(
+        (len(tensors), *prefix, max_len),
+        dtype=dtype,
+    )
+    for index, waveform in enumerate(tensors):
+        batch[index, ..., : waveform.shape[-1]].copy_(waveform)
+
     rates = torch.tensor(sample_rates, dtype=torch.int64, device=batch.device)
     length_tensor = torch.tensor(lengths, dtype=torch.int64, device=batch.device)
     return batch, rates, length_tensor

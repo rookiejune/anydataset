@@ -394,7 +394,7 @@ class ModalityProviderTest(unittest.TestCase):
             {AudioView.WAVEFORM: (torch.tensor([[1.0, 2.0]]), 16000)}
         )
 
-        self.assertEqual(text, "hello")
+        self.assertEqual(text, "hello-1")
         self.assertEqual(
             FakeWhisperASREvaluator.calls,
             [
@@ -408,10 +408,30 @@ class ModalityProviderTest(unittest.TestCase):
         )
         self.assertEqual(len(FakeWhisperASREvaluator.loaded.transcribe_calls), 1)
         waveform, sample_rate = FakeWhisperASREvaluator.loaded.transcribe_calls[0]
-        self.assertTrue(torch.equal(waveform, torch.tensor([[1.0, 2.0]])))
+        self.assertTrue(torch.equal(waveform, torch.tensor([[[1.0, 2.0]]])))
         self.assertEqual(sample_rate, 16000)
 
-    def test_whisper_asr_provider_transcribes_waveform_batch(self):
+    def test_whisper_asr_provider_treats_stereo_as_one_sample(self):
+        FakeWhisperASREvaluator.calls = []
+        FakeWhisperASREvaluator.loaded = None
+        with _fake_anytrain_asr():
+            provider = WhisperASRProvider(device="cpu")
+
+        text = provider(
+            {
+                AudioView.WAVEFORM: (
+                    torch.tensor([[1.0, 2.0], [3.0, 4.0]]),
+                    16000,
+                )
+            }
+        )
+
+        self.assertEqual(text, "hello-1")
+        waveform, sample_rate = FakeWhisperASREvaluator.loaded.transcribe_calls[0]
+        self.assertEqual(tuple(waveform.shape), (1, 2, 2))
+        self.assertEqual(sample_rate, 16000)
+
+    def test_whisper_asr_provider_groups_waveforms_and_restores_sample_order(self):
         FakeWhisperASREvaluator.calls = []
         FakeWhisperASREvaluator.loaded = None
         with _fake_anytrain_asr():
@@ -446,17 +466,32 @@ class ModalityProviderTest(unittest.TestCase):
                             }
                         )
                     },
+                    {
+                        (Role.DEFAULT, Modality.AUDIO): AudioItem(
+                            views={
+                                AudioView.WAVEFORM: (
+                                    torch.tensor([[5.0, 6.0, 7.0]]),
+                                    16000,
+                                )
+                            }
+                        )
+                    },
                 ]
             )
         )
 
-        self.assertEqual(outputs, ["hello", "hello"])
+        self.assertEqual(outputs, ["hello-1", "hello-4", "hello-5"])
         self.assertEqual(len(FakeWhisperASREvaluator.loaded.transcribe_calls), 2)
         first, sample_rate = FakeWhisperASREvaluator.loaded.transcribe_calls[0]
         second, _ = FakeWhisperASREvaluator.loaded.transcribe_calls[1]
-        self.assertEqual(tuple(first.shape), (1, 3))
-        self.assertTrue(torch.equal(first, torch.tensor([[1.0, 2.0, 3.0]])))
-        self.assertTrue(torch.equal(second, torch.tensor([[4.0]])))
+        self.assertEqual(tuple(first.shape), (2, 1, 3))
+        self.assertTrue(
+            torch.equal(
+                first,
+                torch.tensor([[[1.0, 2.0, 3.0]], [[5.0, 6.0, 7.0]]]),
+            )
+        )
+        self.assertTrue(torch.equal(second, torch.tensor([[[4.0]]])))
         self.assertEqual(sample_rate, 16000)
 
     def test_whisper_asr_provider_transcribes_file_batch(self):
@@ -483,6 +518,11 @@ class ModalityProviderTest(unittest.TestCase):
                         views={AudioView.FILE: b"second"}
                     )
                 },
+                {
+                    (Role.DEFAULT, Modality.AUDIO): AudioItem(
+                        views={AudioView.FILE: b"third"}
+                    )
+                },
             ]
         )
 
@@ -494,18 +534,25 @@ class ModalityProviderTest(unittest.TestCase):
                     return torch.tensor([[1.0, 2.0, 3.0]]), 16000
                 if payload == b"second":
                     return torch.tensor([[4.0]]), 16000
+                if payload == b"third":
+                    return torch.tensor([[5.0, 6.0, 7.0]]), 16000
                 raise AssertionError(source)
 
         with patch("anydataset.provider.abc.torchaudio", FakeTorchAudio()):
             outputs = provider.call_batch(batch)
 
-        self.assertEqual(outputs, ["hello", "hello"])
+        self.assertEqual(outputs, ["hello-1", "hello-4", "hello-5"])
         self.assertEqual(len(FakeWhisperASREvaluator.loaded.transcribe_calls), 2)
         first, sample_rate = FakeWhisperASREvaluator.loaded.transcribe_calls[0]
         second, _ = FakeWhisperASREvaluator.loaded.transcribe_calls[1]
-        self.assertEqual(tuple(first.shape), (1, 3))
-        self.assertTrue(torch.equal(first, torch.tensor([[1.0, 2.0, 3.0]])))
-        self.assertTrue(torch.equal(second, torch.tensor([[4.0]])))
+        self.assertEqual(tuple(first.shape), (2, 1, 3))
+        self.assertTrue(
+            torch.equal(
+                first,
+                torch.tensor([[[1.0, 2.0, 3.0]], [[5.0, 6.0, 7.0]]]),
+            )
+        )
+        self.assertTrue(torch.equal(second, torch.tensor([[[4.0]]])))
         self.assertEqual(sample_rate, 16000)
 
     def test_whisper_asr_provider_transcribes_multiple_audio_roles(self):
@@ -541,8 +588,8 @@ class ModalityProviderTest(unittest.TestCase):
         self.assertEqual(
             outputs,
             {
-                (Role.SOURCE, Modality.AUDIO): ["hello", "hello"],
-                (Role.TARGET, Modality.AUDIO): ["hello", "hello"],
+                (Role.SOURCE, Modality.AUDIO): ["hello-1", "hello-5"],
+                (Role.TARGET, Modality.AUDIO): ["hello-4", "hello-6"],
             },
         )
         self.assertEqual(len(FakeWhisperASREvaluator.loaded.transcribe_calls), 4)
@@ -550,10 +597,43 @@ class ModalityProviderTest(unittest.TestCase):
         source_second, _ = FakeWhisperASREvaluator.loaded.transcribe_calls[1]
         target_first, _ = FakeWhisperASREvaluator.loaded.transcribe_calls[2]
         target_second, _ = FakeWhisperASREvaluator.loaded.transcribe_calls[3]
-        self.assertTrue(torch.equal(source_first, torch.tensor([[1.0, 2.0, 3.0]])))
-        self.assertTrue(torch.equal(source_second, torch.tensor([[5.0]])))
-        self.assertTrue(torch.equal(target_first, torch.tensor([[4.0]])))
-        self.assertTrue(torch.equal(target_second, torch.tensor([[6.0, 7.0]])))
+        self.assertTrue(torch.equal(source_first, torch.tensor([[[1.0, 2.0, 3.0]]])))
+        self.assertTrue(torch.equal(source_second, torch.tensor([[[5.0]]])))
+        self.assertTrue(torch.equal(target_first, torch.tensor([[[4.0]]])))
+        self.assertTrue(torch.equal(target_second, torch.tensor([[[6.0, 7.0]]])))
+
+    def test_whisper_asr_provider_rejects_wrong_transcribe_batch_size(self):
+        with _fake_anytrain_asr():
+            provider = WhisperASRProvider(device="cpu")
+
+        batch = collate_fn(
+            {
+                (Role.DEFAULT, Modality.AUDIO): AudioReq(
+                    views=frozenset({AudioView.WAVEFORM})
+                )
+            }
+        )(
+            [
+                {
+                    (Role.DEFAULT, Modality.AUDIO): AudioItem(
+                        views={AudioView.WAVEFORM: (torch.tensor([[1.0]]), 16000)}
+                    )
+                },
+                {
+                    (Role.DEFAULT, Modality.AUDIO): AudioItem(
+                        views={AudioView.WAVEFORM: (torch.tensor([[2.0]]), 16000)}
+                    )
+                },
+            ]
+        )
+
+        with patch.object(
+            FakeWhisperASREvaluator.loaded,
+            "transcribe",
+            return_value=["one"],
+        ):
+            with self.assertRaisesRegex(ValueError, "one output per input waveform"):
+                provider.call_batch(batch)
 
     def test_whisper_asr_provider_requires_one_sample_rate_per_batch(self):
         with _fake_anytrain_asr():
@@ -669,7 +749,7 @@ class FakeWhisperASREvaluator:
     def transcribe(self, waveform, sample_rate):
         self.transcribe_calls.append((waveform, sample_rate))
         if isinstance(waveform, torch.Tensor) and waveform.ndim > 2:
-            return [f"hello-{index}" for index in range(waveform.shape[0])]
+            return [f"hello-{int(sample.reshape(-1)[0].item())}" for sample in waveform]
         return "hello"
 
 

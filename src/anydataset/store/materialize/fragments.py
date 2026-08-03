@@ -12,7 +12,7 @@ from typing import Deque, Protocol, Union
 from ..._compat import strict_zip
 from ..._runtime.parallel import StartMethod
 from ..._runtime.progress import Progress, ProgressDashboard, put_progress
-from ..._runtime.resume import append_completed_index_cache, index_batch_id
+from ..._runtime.resume import index_batch_id
 from ..._runtime.write_pipeline import BackgroundWriteSink
 from ...types.item import Sample
 from .batch import validate_batch_outputs
@@ -249,7 +249,6 @@ def write_fragment(job: FragmentWriteJob) -> None:
         provenance=job.provenance,
         max_shard_samples=job.max_shard_samples,
     ).write(job.samples)
-    append_completed_index_cache(job.fragments_dir, fragment_id, job.indexes)
 
 
 def put_stage_progress(

@@ -80,18 +80,24 @@ class SpeechGridBatch:
     """Batched speaker x text grids; each sample owns its axis labels.
 
     ``waveforms`` is ``[batch, n_speaker, n_text, channels, time]`` after padding
-    within the batch. ``speaker_ids[b]`` / ``texts[b]`` label the live axes for
-    sample ``b``; pad cells use length 0. A label entry may be ``None`` for
-    unknown identity while keeping axis correspondence. Axis position is the
-    index — no parallel index / role fields. Do not flatten into ``SpeechBatch``.
+    within the batch, and ``sample_rate`` is the positive rate shared by every
+    waveform. ``speaker_ids[b]`` / ``texts[b]`` label the live axes for sample
+    ``b``; pad cells use length 0. A label entry may be ``None`` for unknown
+    identity while keeping axis correspondence. Axis position is the index — no
+    parallel index / role fields. Do not flatten into ``SpeechBatch``.
     """
 
     waveforms: Tensor
     lengths: Tensor
+    sample_rate: int
     speaker_ids: tuple[tuple[str | None, ...], ...]
     texts: tuple[tuple[str | None, ...], ...]
 
     def __post_init__(self) -> None:
+        if isinstance(self.sample_rate, bool) or not isinstance(self.sample_rate, int):
+            raise TypeError("SpeechGridBatch sample_rate must be an integer.")
+        if self.sample_rate <= 0:
+            raise ValueError("SpeechGridBatch sample_rate must be positive.")
         batch, max_speakers, max_texts = _padded_audio_axes(
             self.waveforms,
             self.lengths,

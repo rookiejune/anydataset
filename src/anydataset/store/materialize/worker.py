@@ -45,6 +45,7 @@ class WorkerConfig:
     mode: MaterializerMode
     runtime: Runtime
     use_map_style_loader: bool
+    completed_indexes: Sequence[int] | None
     missing_indexes: Sequence[int]
     fragments_dir: Path
     parts_dir: Path
@@ -99,6 +100,7 @@ def materialize_worker(
                 dataset_factory=dataset_factory,
                 sample_count=config.expected,
                 use_map_style_loader=config.use_map_style_loader,
+                completed_indexes=config.completed_indexes,
                 sample_indexes=config.missing_indexes,
                 fragments_dir=config.fragments_dir,
                 expected=config.expected,
@@ -112,15 +114,17 @@ def materialize_worker(
                     config.fragments_dir,
                     dataset_id=materializer.dataset_id,
                     split=config.split,
+                    shard_id=config.shard_id,
+                    num_shards=config.num_shards,
                 )
-                assigned = fragments[config.shard_id :: config.num_shards]
                 commit_fragment_part(
                     config.parts_dir / f"part-{config.shard_id:05d}",
-                    assigned,
+                    fragments,
                     dataset_id=materializer.dataset_id,
                     split=config.split,
                     shard_id=config.shard_id,
                     num_shards=config.num_shards,
+                    max_shard_samples=config.max_shard_samples,
                     provenance=config.provenance,
                 )
         except Exception:

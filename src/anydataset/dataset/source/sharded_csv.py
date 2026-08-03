@@ -244,8 +244,9 @@ class _ShardedCsvDataset:
         self,
         path: Path,
         row_group: int,
+        offsets: range,
     ) -> tuple[dict[str, str], ...]:
-        return self._parts_reader().read_group(path, row_group)
+        return self._parts_reader().read_group_offsets(path, row_group, offsets)
 
     def _csv_options(self) -> dict[str, Any]:
         return {}

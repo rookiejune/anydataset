@@ -31,8 +31,14 @@ class WhisperASRProvider(AudioProvider):
         )
 
     def __call__(self, views: Mapping[AudioView, Any]) -> Any:
-        waveform, sample_rate = self._waveform(views)
-        return self.asr.transcribe(waveform, sample_rate)
+        waveform, sample_rate = self._batch(views)
+        outputs = _text_outputs(self.asr.transcribe(waveform, sample_rate))
+        if len(outputs) != 1:
+            raise ValueError(
+                "WhisperASRProvider transcribe must return one output per input "
+                "waveform."
+            )
+        return outputs[0]
 
     def call_batch(
         self,
@@ -50,12 +56,20 @@ class WhisperASRProvider(AudioProvider):
         ref: tuple[Role, Modality],
     ) -> Sequence[str]:
         waveform, sample_rates, lengths = self._waveform_batch(batch, ref)
+        if waveform.ndim == 2:
+            waveform = waveform.unsqueeze(1)
         sample_rate = _single_sample_rate(sample_rates)
-        texts: list[str] = []
-        for index, length in enumerate(lengths.tolist()):
-            clipped = waveform[index, ..., : int(length)].contiguous()
-            texts.extend(_text_outputs(self.asr.transcribe(clipped, sample_rate)))
-        return texts
+        texts: dict[int, str] = {}
+        for length, indexes in self._length_groups(lengths):
+            clipped = waveform[list(indexes), ..., :length].contiguous()
+            outputs = _text_outputs(self.asr.transcribe(clipped, sample_rate))
+            if len(outputs) != len(indexes):
+                raise ValueError(
+                    "WhisperASRProvider batch transcribe must return one output "
+                    "per input waveform."
+                )
+            texts.update(zip(indexes, outputs))
+        return [texts[index] for index in range(len(lengths))]
 
 
 def _audio_refs(batch: Batch) -> tuple[tuple[Role, Modality], ...]:
@@ -82,7 +96,9 @@ def _single_sample_rate(sample_rates: torch.Tensor) -> int:
         raise ValueError("Batched waveform sample rates must not be empty.")
     first = sample_rates[0].item()
     if not torch.equal(sample_rates, sample_rates.new_full(sample_rates.shape, first)):
-        raise ValueError("WhisperASRProvider.call_batch requires one sample rate per batch.")
+        raise ValueError(
+            "WhisperASRProvider.call_batch requires one sample rate per batch."
+        )
     return int(first)
 
 
@@ -90,8 +106,12 @@ def _text_outputs(output: Any) -> Sequence[str]:
     if isinstance(output, str):
         return [output]
     if not isinstance(output, Sequence):
-        raise TypeError("WhisperASRProvider batch transcribe output must be a string sequence.")
+        raise TypeError(
+            "WhisperASRProvider batch transcribe output must be a string sequence."
+        )
     texts = list(output)
     if any(not isinstance(text, str) for text in texts):
-        raise TypeError("WhisperASRProvider batch transcribe output must contain strings.")
+        raise TypeError(
+            "WhisperASRProvider batch transcribe output must contain strings."
+        )
     return texts

@@ -58,9 +58,10 @@ class BackgroundWriteSinkTest(unittest.TestCase):
             ) as sink:
                 sink.submit("bad")
 
-    def test_background_completions_preserve_submission_order(self):
+    def test_completed_job_releases_capacity_before_slow_head(self):
         first_started = Event()
         second_done = Event()
+        third_done = Event()
         release_first = Event()
         completed = []
 
@@ -68,8 +69,10 @@ class BackgroundWriteSinkTest(unittest.TestCase):
             if value == "first":
                 first_started.set()
                 release_first.wait()
-            else:
+            elif value == "second":
                 second_done.set()
+            else:
+                third_done.set()
 
         with BackgroundWriteSink(
             write,
@@ -82,13 +85,12 @@ class BackgroundWriteSinkTest(unittest.TestCase):
             self.assertTrue(first_started.wait(timeout=5))
             sink.submit("second")
             self.assertTrue(second_done.wait(timeout=5))
-            self.assertIsNone(sink._pending[1][1].result(timeout=5))
-
-            # The second worker may finish first, but completion callbacks are FIFO.
-            sink._drain_ready()
+            sink.submit("third")
+            self.assertTrue(third_done.wait(timeout=5))
             release_first.set()
 
-        self.assertEqual(completed, ["first", "second"])
+        self.assertEqual(completed[0], "second")
+        self.assertCountEqual(completed, ["first", "second", "third"])
 
     def test_abort_preserves_body_error(self):
         def write(value: str) -> None:

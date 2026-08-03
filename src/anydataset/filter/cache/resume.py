@@ -14,13 +14,11 @@ from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 
 from ..._runtime.resume import (
-    append_completed_index_cache,
-    cached_completed_indexes,
+    CompactIndexes,
     cleanup_resume_dir,
+    compact_completed_index_entries,
     index_batch_id,
     resume_dir,
-    validate_completed_indexes,
-    write_completed_index_cache,
 )
 from ..._io.atomic import replace_dir
 from ...store.jsonio import read_json, write_json
@@ -57,22 +55,13 @@ def cleanup_filter_resume_dir(cache_path: Path) -> None:
     cleanup_resume_dir(cache_path)
 
 
-def completed_filter_indexes(path: Path, *, expected: int) -> frozenset[int]:
+def completed_filter_indexes(path: Path, *, expected: int) -> CompactIndexes:
     fragments = _filter_fragment_dirs(path)
-    cached = cached_completed_indexes(path, (fragment.name for fragment in fragments))
-    if cached is not None:
-        return validate_completed_indexes(cached, expected)
-    indexes: set[int] = set()
-    cache_entries: list[tuple[str, tuple[int, ...]]] = []
+    cache_entries: list[tuple[str, array[int]]] = []
     for fragment in tuple(sorted(fragments, key=_fragment_sort_key)):
         fragment_indexes = _fragment_scan_indexes(fragment)
         cache_entries.append((fragment.name, fragment_indexes))
-        for index in fragment_indexes:
-            if index in indexes:
-                raise ValueError(f"Duplicate filter resume index {index}.")
-            indexes.add(index)
-    write_completed_index_cache(path, cache_entries)
-    return validate_completed_indexes(indexes, expected)
+    return compact_completed_index_entries(cache_entries, expected=expected)
 
 
 def write_filter_fragment(
@@ -90,7 +79,6 @@ def write_filter_fragment(
         path / fragment_id,
         lambda tmp: _write_fragment(tmp, fragment_id, ordered, chunk),
     )
-    append_completed_index_cache(path, fragment_id, ordered)
 
 
 def filter_fragments(path: Path) -> tuple[Path, ...]:
@@ -265,21 +253,31 @@ def _json_mapping(value: object) -> Mapping[str, JsonValue]:
 
 
 def _fragment_sort_key(path: Path) -> tuple[int, str]:
-    return min(_fragment_scan_indexes(path)), path.name
+    data = _read_fragment_manifest(path)
+    raw = data.get("scan_indexes")
+    if not isinstance(raw, list) or not raw:
+        raise ValueError("Filter resume fragment scan_indexes must be a non-empty list.")
+    if _fragment_scan_count(data) != len(raw):
+        raise ValueError("Filter resume fragment scan_count mismatch.")
+    return min(_scan_index(value) for value in raw), path.name
 
 
-def _fragment_scan_indexes(path: Path) -> tuple[int, ...]:
+def _fragment_scan_indexes(path: Path) -> array[int]:
     data = _read_fragment_manifest(path)
     raw = data.get("scan_indexes")
     if not isinstance(raw, list):
         raise ValueError("Filter resume fragment scan_indexes must be a list.")
-    indexes = tuple(_scan_index(value) for value in raw)
-    if _fragment_scan_count(data) != len(indexes):
+    if _fragment_scan_count(data) != len(raw):
         raise ValueError("Filter resume fragment scan_count mismatch.")
-    stored = tuple(int(index) for index in read_index_rows(path / _INDEXES_FILE))
-    if indexes != stored:
+    stored = read_index_rows(path / _INDEXES_FILE)
+    if len(raw) != len(stored) or any(
+        _scan_index(value) != stored[position]
+        for position, value in enumerate(raw)
+    ):
         raise ValueError("Filter resume fragment index file mismatch.")
-    return indexes
+    if any(left >= right for left, right in zip(stored, stored[1:])):
+        raise ValueError("Filter resume fragment indexes must be strictly increasing.")
+    return stored
 
 
 def _fragment_scan_count(data: Mapping[str, object]) -> int:

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable, cast
@@ -107,7 +107,7 @@ class _FilterResumeFragmentWriter:
     commit_samples: int
     runtime: Runtime
     dataset_factory: DatasetFactory
-    completed: frozenset[int]
+    completed: Collection[int]
     missing: Sequence[int]
     worker_timeout: float | None
 
@@ -152,6 +152,7 @@ class _FilterResumeFragmentWriter:
 
     def _chunks(self, progress: ProgressDashboard) -> Iterable[_FilterChunk]:
         use_map_style_loader = can_select_indexes(self.dataset)
+        skip_indexes: Collection[int] = () if use_map_style_loader else self.completed
         if len(self.devices) == 1 or len(self.dataset) == 0:
             chunks = collect_ranges(
                 self.dataset,
@@ -159,7 +160,7 @@ class _FilterResumeFragmentWriter:
                 self.devices[0],
                 self.metrics,
                 self.commit_samples,
-                skip_indexes=self.completed,
+                skip_indexes=skip_indexes,
                 sample_indexes=self.missing if use_map_style_loader else None,
                 dataset_factory=self.dataset_factory,
                 batch_size=self.batch_size,
@@ -188,7 +189,7 @@ class _FilterResumeFragmentWriter:
             self.metrics,
             self.commit_samples,
             sample_count=len(self.dataset),
-            skip_indexes=self.completed,
+            skip_indexes=skip_indexes,
             sample_indexes=self.missing if use_map_style_loader else None,
             batch_size=self.batch_size,
             num_workers=self.num_workers,

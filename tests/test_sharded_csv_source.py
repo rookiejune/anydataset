@@ -74,6 +74,52 @@ class ShardedCsvSourceTest(unittest.TestCase):
                 self.assertEqual(len(dataset), 1)
                 self.assertEqual(dataset[0]["value"], "zero")
 
+    def test_prepare_streams_bounded_csv_record_batches(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            shard = Path(tmpdir) / "shard_0"
+            shard.mkdir()
+            (shard / "0.csv").write_text(
+                "value\n" + "".join(f"{index:04d}\n" for index in range(200)),
+                encoding="utf-8",
+            )
+            real_open = tabular_parquet.read_csv
+            batch_count = 0
+
+            class Reader:
+                def __init__(self, reader):
+                    self.reader = reader
+                    self.schema = reader.schema
+
+                def __iter__(self):
+                    nonlocal batch_count
+                    for batch in self.reader:
+                        batch_count += 1
+                        yield batch
+
+            def open_reader(*args, **kwargs):
+                return Reader(real_open(*args, **kwargs))
+
+            with (
+                mock.patch.object(tabular_parquet, "CSV_BLOCK_SIZE", 64),
+                mock.patch.object(tabular_parquet, "PARQUET_ROW_GROUP_SIZE", 128),
+                mock.patch.object(
+                    tabular_parquet,
+                    "read_csv",
+                    side_effect=open_reader,
+                ),
+            ):
+                dataset = AnyDataset(
+                    Spec(
+                        source="sharded_csv",
+                        path=tmpdir,
+                        load_options={"prepare_workers": 0},
+                    )
+                )
+                self.assertEqual(len(dataset), 200)
+                self.assertEqual(dataset.dataset._files()[0].row_groups, (128, 72))
+
+            self.assertGreater(batch_count, 1)
+
     def test_rejects_invalid_prepare_workers(self):
         for value in (True, 1.5):
             with self.subTest(value=value):
@@ -384,6 +430,10 @@ class ShardedCsvSourceTest(unittest.TestCase):
             self.assertEqual(
                 [call.args[1] for call in read_group.call_args_list],
                 [0, 2],
+            )
+            self.assertEqual(
+                [tuple(call.args[2]) for call in read_group.call_args_list],
+                [(1,), (0,)],
             )
             prepared.close()
 

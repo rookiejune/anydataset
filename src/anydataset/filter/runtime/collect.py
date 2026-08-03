@@ -6,7 +6,7 @@ import queue
 import time
 import traceback
 from array import array
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -66,7 +66,7 @@ class _FilterWorkerConfig:
     runtime: Runtime
     sample_count: int
     use_map_style_loader: bool
-    skip_indexes: frozenset[int]
+    skip_indexes: Collection[int]
     sample_indexes: Sequence[int] | None
     logs_dir: Path
     worker_logs_dir: Path
@@ -79,7 +79,7 @@ def collect_ranges(
     metrics: bool,
     commit_samples: int,
     *,
-    skip_indexes: frozenset[int] = frozenset(),
+    skip_indexes: Collection[int] = frozenset(),
     sample_indexes: Sequence[int] | None = None,
     dataset_factory: DatasetFactory,
     batch_size: int,
@@ -113,7 +113,7 @@ def collect_ranges_sequential(
     write_metrics: bool,
     commit_samples: int,
     *,
-    skip_indexes: frozenset[int] = frozenset(),
+    skip_indexes: Collection[int] = frozenset(),
     sample_indexes: Sequence[int] | None = None,
     dataset_factory: DatasetFactory,
     batch_size: int,
@@ -176,7 +176,7 @@ def collect_ranges_parallel(
     commit_samples: int,
     *,
     sample_count: int,
-    skip_indexes: frozenset[int] = frozenset(),
+    skip_indexes: Collection[int] = frozenset(),
     sample_indexes: Sequence[int] | None = None,
     batch_size: int,
     num_workers: int,
@@ -333,7 +333,7 @@ def collect_shard(
     runtime: Runtime,
     sample_count: int | None = None,
     use_map_style_loader: bool | None = None,
-    skip_indexes: frozenset[int] = frozenset(),
+    skip_indexes: Collection[int] = frozenset(),
     sample_indexes: Sequence[int] | None = None,
 ) -> Iterable[_IndexedFilterChunk]:
     rows: list[_FilterRow] = []
@@ -438,7 +438,7 @@ def _ordered_worker_chunks(
     workers: int,
     sample_count: int,
     commit_samples: int,
-    skip_indexes: frozenset[int],
+    skip_indexes: Collection[int],
     sample_indexes: Sequence[int] | None = None,
     worker_timeout: float | None = None,
 ) -> Iterable[_FilterChunk]:
@@ -499,7 +499,7 @@ def _ordered_worker_targets(
     sample_count: int,
     *,
     workers: int,
-    skip_indexes: frozenset[int],
+    skip_indexes: Collection[int],
     sample_indexes: Sequence[int] | None,
 ) -> Iterable[tuple[int, int]]:
     if sample_indexes is None:

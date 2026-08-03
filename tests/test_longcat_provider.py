@@ -339,6 +339,47 @@ class LongCatProviderTest(unittest.TestCase):
             torch.equal(outputs[1], torch.tensor([[20, 50, 60], [21, 51, 61]]))
         )
 
+    def test_call_batch_groups_equal_lengths_and_restores_sample_order(self):
+        with _fake_anytrain(FakeBatchedLongCatCodecLoader):
+            provider = LongCatProvider()
+
+        outputs = provider.call_batch(
+            _provider_batch(
+                _audio_sample(
+                    waveform=torch.tensor([[1.0, 2.0]]),
+                    sample_rate=16000,
+                ),
+                _audio_sample(
+                    waveform=torch.tensor([[5.0, 6.0, 7.0]]),
+                    sample_rate=16000,
+                ),
+                _audio_sample(
+                    waveform=torch.tensor([[8.0, 9.0]]),
+                    sample_rate=16000,
+                ),
+            )
+        )
+
+        self.assertEqual(
+            FakeBatchedLongCatCodecLoader.codec.calls,
+            [((2, 1, 2), 16000), ((1, 1, 3), 16000)],
+        )
+        self.assertTrue(torch.equal(outputs[0][:, 0], torch.tensor([10, 11])))
+        self.assertTrue(torch.equal(outputs[1][:, 0], torch.tensor([20, 21, 22])))
+        self.assertTrue(torch.equal(outputs[2][:, 0], torch.tensor([20, 21])))
+
+    def test_call_batch_rejects_wrong_codec_batch_size(self):
+        codes = torch.tensor([[[0, 0, 0]]])
+        provider = CodecProvider(FakeCodec(codes, (4, 5, 9)), AudioView.STABLE)
+
+        with self.assertRaisesRegex(ValueError, "one output per input waveform"):
+            provider.call_batch(
+                _provider_batch(
+                    _audio_sample(waveform=torch.zeros(2), sample_rate=16000),
+                    _audio_sample(waveform=torch.ones(2), sample_rate=16000),
+                )
+            )
+
     def test_call_batch_requires_one_sample_rate_per_batch(self):
         with _fake_anytrain(FakeBatchedLongCatCodecLoader):
             provider = LongCatProvider()

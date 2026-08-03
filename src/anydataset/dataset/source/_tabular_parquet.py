@@ -10,7 +10,7 @@ import sys
 import tempfile
 from bisect import bisect_right
 from collections import OrderedDict
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
@@ -21,7 +21,7 @@ import pyarrow.parquet as pq
 from pyarrow.csv import ConvertOptions  # pyright: ignore[reportPrivateImportUsage]
 from pyarrow.csv import ParseOptions  # pyright: ignore[reportPrivateImportUsage]
 from pyarrow.csv import ReadOptions  # pyright: ignore[reportPrivateImportUsage]
-from pyarrow.csv import read_csv  # pyright: ignore[reportPrivateImportUsage]
+from pyarrow.csv import open_csv as read_csv  # pyright: ignore[reportPrivateImportUsage]
 
 from ..._compat import strict_zip
 from ..._runtime.logging import write_info
@@ -36,6 +36,7 @@ TabularRow = Mapping[str, str]
 
 CACHE_SCHEMA_VERSION = 1
 PARQUET_ROW_GROUP_SIZE = 4096
+CSV_BLOCK_SIZE = 8 * 1024 * 1024
 MAX_CACHED_ROW_GROUPS = 2
 MAX_OPEN_PARQUET_FILES = 8
 PREPARE_LOCK_TIMEOUT = 3600.0
@@ -462,9 +463,13 @@ def convert_file_job(
     index, source, target, delimiter, encoding, source_label = job
     fingerprint = source_record(source)
     names = column_names(source, delimiter=delimiter, encoding=encoding)
-    table = read_csv(
+    batches = read_csv(
         source,
-        read_options=ReadOptions(use_threads=False, encoding=encoding),
+        read_options=ReadOptions(
+            use_threads=False,
+            encoding=encoding,
+            block_size=CSV_BLOCK_SIZE,
+        ),
         parse_options=ParseOptions(delimiter=delimiter, newlines_in_values=True),
         convert_options=ConvertOptions(
             column_types={name: pa.string() for name in names},
@@ -481,7 +486,8 @@ def convert_file_job(
             suffix=".tmp",
         ) as file:
             tmp = Path(file.name)
-        pq.write_table(table, tmp, row_group_size=PARQUET_ROW_GROUP_SIZE)
+        with pq.ParquetWriter(tmp, batches.schema) as writer:
+            write_record_batches(writer, batches, schema=batches.schema)
         validate_unchanged_source(source, fingerprint, source_label=source_label)
         os.replace(tmp, target)
     except Exception:
@@ -503,6 +509,33 @@ def convert_file_job(
         parquet.close()
     validate_unchanged_source(source, fingerprint, source_label=source_label)
     return index, record
+
+
+def write_record_batches(writer, batches: Iterable[Any], *, schema: Any) -> None:
+    pending: list[Any] = []
+    pending_rows = 0
+    for batch in batches:
+        offset = 0
+        while offset < batch.num_rows:
+            count = min(
+                PARQUET_ROW_GROUP_SIZE - pending_rows,
+                batch.num_rows - offset,
+            )
+            pending.append(batch.slice(offset, count))
+            pending_rows += count
+            offset += count
+            if pending_rows == PARQUET_ROW_GROUP_SIZE:
+                writer.write_table(
+                    pa.Table.from_batches(pending, schema=schema),
+                    row_group_size=PARQUET_ROW_GROUP_SIZE,
+                )
+                pending.clear()
+                pending_rows = 0
+    if pending:
+        writer.write_table(
+            pa.Table.from_batches(pending, schema=schema),
+            row_group_size=PARQUET_ROW_GROUP_SIZE,
+        )
 
 
 def validate_unchanged_source(
@@ -537,7 +570,7 @@ def iter_part_shard(
     *,
     num_shards: int,
     shard_id: int,
-    read_group: Callable[[Path, int], Sequence[Any]],
+    read_group: Callable[[Path, int, range], Sequence[Any]],
 ) -> Iterator[tuple[int, Any]]:
     validate_shard(num_shards, shard_id)
     for part in parts:
@@ -550,9 +583,12 @@ def iter_part_shard(
             first_offset = (shard_id - group_start) % num_shards
             if first_offset >= row_count:
                 continue
-            rows = read_group(part.path, row_group)
-            for offset in range(first_offset, row_count, num_shards):
-                yield group_start + offset, rows[offset]
+            offsets = range(first_offset, row_count, num_shards)
+            rows = read_group(part.path, row_group, offsets)
+            if len(rows) != len(offsets):
+                raise RuntimeError("Parquet shard row selection returned wrong count.")
+            for offset, row in strict_zip(offsets, rows):
+                yield group_start + offset, row
 
 
 class ParquetPartsReader:
@@ -560,7 +596,7 @@ class ParquetPartsReader:
         self._parts = tuple(parts)
         self._part_stops = tuple(part.stop for part in self._parts)
         self._row_group_cache: OrderedDict[
-            tuple[Path, int], tuple[dict[str, str], ...]
+            tuple[Path, int, range | None], tuple[dict[str, str], ...]
         ] = OrderedDict()
         self._parquet_cache: OrderedDict[Path, Any] = OrderedDict()
         self._pid = os.getpid()
@@ -633,7 +669,7 @@ class ParquetPartsReader:
             self._parts,
             num_shards=num_shards,
             shard_id=shard_id,
-            read_group=self.read_group,
+            read_group=self.read_group_offsets,
         ):
             yield index, row
 
@@ -649,11 +685,44 @@ class ParquetPartsReader:
         path: Path,
         row_group: int,
     ) -> tuple[dict[str, str], ...]:
+        return self._read_group(path, row_group, None)
+
+    def read_group_offsets(
+        self,
+        path: Path,
+        row_group: int,
+        offsets: range,
+    ) -> tuple[dict[str, str], ...]:
+        return self._read_group(path, row_group, offsets)
+
+    def _read_group(
+        self,
+        path: Path,
+        row_group: int,
+        offsets: range | None,
+    ) -> tuple[dict[str, str], ...]:
         self.reset_after_fork()
-        key = (path, row_group)
+        key = (path, row_group, offsets)
         rows = self._row_group_cache.get(key)
+        if rows is None and offsets is not None:
+            full_key = (path, row_group, None)
+            full_rows = self._row_group_cache.get(full_key)
+            if full_rows is not None:
+                if offsets == range(len(full_rows)):
+                    key = full_key
+                    rows = full_rows
+                else:
+                    rows = tuple(full_rows[offset] for offset in offsets)
+                    self._row_group_cache[key] = rows
+                    while len(self._row_group_cache) > MAX_CACHED_ROW_GROUPS:
+                        self._row_group_cache.popitem(last=False)
         if rows is None:
-            rows = tuple(self.parquet(path).read_row_group(row_group).to_pylist())
+            table = self.parquet(path).read_row_group(row_group, use_threads=False)
+            if offsets is not None and offsets != range(table.num_rows):
+                table = table.take(pa.array(offsets, type=pa.int64()))
+            elif offsets is not None:
+                key = (path, row_group, None)
+            rows = tuple(table.to_pylist())
             self._row_group_cache[key] = rows
             while len(self._row_group_cache) > MAX_CACHED_ROW_GROUPS:
                 self._row_group_cache.popitem(last=False)

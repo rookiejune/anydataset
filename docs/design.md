@@ -181,8 +181,11 @@ materializer 必须报错，不静默覆盖。
 多设备 materializer 只负责为每个设备启动独立进程并按 rank 分片，不初始化
 `torch.distributed` process group；需要 collective 的 provider 负责显式创建和释放
 自己的 process group，并定义各 rank 的同步契约。
-`commit_samples` 控制 checkpoint 粒度，默认是 `max(batch_size, 1024)`，避免默认可续跑时
-产生过多小文件；需要更细断点时可以显式调低。
+`commit_samples` 控制 checkpoint 粒度，默认是 `max(batch_size, 1024)`，限制尚未落盘的
+provider 输出数量；需要更细断点时可以显式调低。最终提交会逐 payload 读取这些 fragment，
+按 `max_shard_samples` 流式重新打包 tar，因此 checkpoint 粒度不会决定发布 store 的 shard
+数量，也不需要把一个完整目标 shard 的输出同时保留在内存中。只有一个 fragment 时继续
+复用原 shard，避免小数据集无谓重写。
 调用方可以通过 `max_new_samples` 或显式递增的 `sample_indexes` 配合
 `finalize=False`，只完成本轮计划范围并保留同一份完整输入 identity 下的 resume
 fragment。最终一次调用不再传范围并使用默认 `finalize=True`，只补齐缺失 index，覆盖
@@ -212,8 +215,9 @@ factory 标识会纳入函数代码、默认参数、closure 值和 callable 实
 server 进程只拥有 provider 和设备状态；materializer 进程只读 dataset、组 batch、
 通过 proxy provider 请求 server，并继续负责 fragment、resume 和 commit。需要隔离
 CUDA 与数据读取 worker 时，`Runtime(server_start_method="spawn")` 让调用方把 device 当作
-路由键，不在写入或过滤进程里设置 torch device。reader/writer 的 `auto` 默认始终解析为
-spawn；只在目标平台已验证 fork 安全时才显式选择 fork。后台 writer 默认使用 thread
+路由键，不在写入或过滤进程里设置 torch device。reader/writer 的 `auto` 始终解析为
+spawn；只有调用方验证目标平台和设备边界后，才显式选择 fork。显式 start method 始终
+覆盖 `auto`。后台 writer 默认使用 thread
 backend，让慢速判定或 provider 计算和落盘重叠，同时避免把 fragment job 通过 process
 pipe 序列化传输。filter cache 的写入仍由
 filter 层负责，predicate server 只负责慢速判定。

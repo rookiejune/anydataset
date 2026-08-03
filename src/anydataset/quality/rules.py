@@ -7,14 +7,19 @@ report their own label, reasons, and metrics.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum, auto
 
 from .._compat import StrEnum
 from .._immutable import Immutable
 from ..filter import FilterDecision
 from ..filter.rules import label as filter_label
-from ..filter.types import FilterOutput, JsonValue, validate_metrics
+from ..filter.types import (
+    BatchFilterPredicate,
+    FilterOutput,
+    JsonValue,
+    validate_metrics,
+)
 from ..types import Sample
 
 
@@ -56,43 +61,81 @@ class QualityChain(Immutable):
         self.seal()
 
     def __call__(self, sample: Sample) -> FilterDecision:
-        label = QualityLabel.ACCEPT
-        rows: list[dict[str, JsonValue]] = []
-        transitions: list[dict[str, str]] = []
-        flags: list[str] = []
-
+        state = _ChainState()
         for rule in self.rules:
-            previous = label
-            decision = _decision(rule.predicate(sample))
-            current = _label(decision.label)
-            label = _combine(label, current)
-            metrics = validate_metrics(decision.metrics)
-            rows.append(
+            state.apply(rule, rule.predicate(sample))
+        return state.decision()
+
+    def call_batch(self, samples: Sequence[Sample]) -> Sequence[FilterDecision]:
+        samples = tuple(samples)
+        if not samples:
+            return ()
+        states = [_ChainState() for _sample in samples]
+        for rule in self.rules:
+            outputs = _rule_outputs(rule.predicate, samples)
+            for state, output in zip(states, outputs):
+                state.apply(rule, output)
+        return tuple(state.decision() for state in states)
+
+
+@dataclass
+class _ChainState:
+    label: QualityLabel = QualityLabel.ACCEPT
+    rows: list[dict[str, JsonValue]] = field(default_factory=list)
+    transitions: list[dict[str, str]] = field(default_factory=list)
+    flags: list[str] = field(default_factory=list)
+
+    def apply(self, rule: Rule, output: FilterOutput) -> None:
+        previous = self.label
+        decision = _decision(output)
+        current = _label(decision.label)
+        self.label = _combine(self.label, current)
+        metrics = validate_metrics(decision.metrics)
+        self.rows.append(
+            {
+                "rule": rule.name,
+                "label": current.value,
+                "metrics": metrics,
+            }
+        )
+        self.flags.extend(_flags(rule.name, metrics))
+        if self.label != previous:
+            self.transitions.append(
                 {
                     "rule": rule.name,
-                    "label": current.value,
-                    "metrics": metrics,
+                    "from": previous.value,
+                    "to": self.label.value,
                 }
             )
-            flags.extend(_flags(rule.name, metrics))
-            if label != previous:
-                transitions.append(
-                    {
-                        "rule": rule.name,
-                        "from": previous.value,
-                        "to": label.value,
-                    }
-                )
 
+    def decision(self) -> FilterDecision:
         return FilterDecision(
-            label=label,
+            label=self.label,
             metrics={
-                "decision": label.value,
-                "rules": rows,
-                "transitions": transitions,
-                "flags": flags,
+                "decision": self.label.value,
+                "rules": self.rows,
+                "transitions": self.transitions,
+                "flags": self.flags,
             },
         )
+
+
+def _rule_outputs(
+    predicate: QualityRule,
+    samples: Sequence[Sample],
+) -> Sequence[FilterOutput]:
+    if not isinstance(predicate, BatchFilterPredicate):
+        return tuple(predicate(sample) for sample in samples)
+
+    outputs = predicate.call_batch(samples)
+    if isinstance(outputs, (str, bytes)) or not isinstance(outputs, Sequence):
+        raise TypeError("quality rule call_batch() must return an ordered sequence.")
+    if len(outputs) != len(samples):
+        raise ValueError(
+            "quality rule call_batch() must return one output per input sample; "
+            f"received {len(outputs)} outputs for {len(samples)} samples."
+        )
+    return outputs
 
 
 def _decision(output: FilterOutput) -> FilterDecision:

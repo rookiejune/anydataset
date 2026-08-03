@@ -62,15 +62,23 @@ class CodecProvider(nn.Module, AudioProvider):
         if waveform.ndim == 2:
             waveform = waveform.unsqueeze(1)
         sample_rate = _single_sample_rate(sample_rates)
-        outputs: list[torch.Tensor] = []
-        for index, length in enumerate(lengths.tolist()):
-            clipped = waveform[index : index + 1, ..., : int(length)].contiguous()
+        outputs: dict[int, torch.Tensor] = {}
+        for length, indexes in self._length_groups(lengths):
+            clipped = waveform[list(indexes), ..., :length].contiguous()
             codes = _codes(
                 self.codec.encode(clipped, sample_rate),
                 self.codec.codebook_sizes,
             )
-            outputs.append(self._tensor(codes)[0])
-        return outputs
+            if codes.shape[0] != len(indexes):
+                raise ValueError(
+                    "Codec encode must return one output per input waveform."
+                )
+            codes = self._tensor(codes)
+            outputs.update(
+                (sample_index, codes[batch_index])
+                for batch_index, sample_index in enumerate(indexes)
+            )
+        return [outputs[index] for index in range(len(lengths))]
 
     def _audio_batch(self, views: Mapping[AudioView, Any]) -> tuple[torch.Tensor, int]:
         waveform, sample_rate = self._waveform(views)

@@ -12,6 +12,8 @@ import torch
 from anydataset import AnyDataset, Source, Spec
 from anydataset.dataset import MapStyleABC
 from anydataset.dataset.batching import (
+    _MAX_CALLABLE_COST_CACHE,
+    _CallableCosts,
     _Plan,
     _Record,
     _plans,
@@ -53,6 +55,32 @@ def test_cost_does_not_parse_sample() -> None:
     assert measured == [4, 1, 3, 2]
     assert parsed == [4, 3, 1, 2]
     assert batches == [[40, 30], [10, 20]]
+
+
+def test_callable_cost_cache_is_bounded_and_reuses_small_epochs() -> None:
+    small_calls: list[int] = []
+    small = _CallableCosts(
+        _dataset(list(range(8))),
+        lambda row: small_calls.append(row) or row + 1,
+    )
+    assert tuple(small) == tuple(range(1, 9))
+    assert tuple(small) == tuple(range(1, 9))
+    assert small_calls == list(range(8))
+
+    sample_count = _MAX_CALLABLE_COST_CACHE + 1
+    large_calls: list[int] = []
+    large = _CallableCosts(
+        _dataset(list(range(sample_count))),
+        lambda row: large_calls.append(row) or row + 1,
+    )
+    for index in range(sample_count):
+        assert large[index] == index + 1
+
+    assert len(large._cache) == _MAX_CALLABLE_COST_CACHE
+    assert large[sample_count - 1] == sample_count
+    assert len(large_calls) == sample_count
+    assert large[0] == 1
+    assert len(large_calls) == sample_count + 1
 
 
 def test_accepts_plain_iterable_costs() -> None:

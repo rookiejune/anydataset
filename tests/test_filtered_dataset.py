@@ -11,6 +11,7 @@ import tempfile
 import threading
 import time
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import redirect_stdout
 from unittest import mock
 from collections.abc import Iterator, Sequence
@@ -18,8 +19,10 @@ from enum import auto
 from functools import partial
 from pathlib import Path
 
-import anydataset.filter.runtime.factory as filter_factory_module
 import anydataset.filter.api as filter_api_module
+import anydataset.filter.cache.storage as filter_storage
+import anydataset.filter.runtime.factory as filter_factory_module
+import anydataset.filter.runtime.resume_writer as filter_resume_writer
 import torch
 from torch.utils.data import DataLoader
 
@@ -31,6 +34,7 @@ from anydataset import (
     register_source,
 )
 from anydataset._compat import StrEnum
+from anydataset._runtime.resume import CompactIndexes
 from anydataset.filter import (
     FilterDecision,
     FilteredDataset,
@@ -38,6 +42,8 @@ from anydataset.filter import (
 )
 from anydataset.filter.cache.generations import current_filter_generation
 from anydataset.filter.cache.resume import (
+    completed_filter_indexes,
+    filter_fragments,
     iter_filter_fragment_chunks,
     prepare_filter_resume_dir,
     write_filter_fragment,
@@ -54,10 +60,17 @@ from anydataset.types import (
     Role,
 )
 from anydataset.filter.runtime.collect import collect_ranges_parallel
-from anydataset.filter.runtime.collect import _read_worker_message as read_worker_message
+from anydataset.filter.runtime.collect import (
+    _read_worker_message as read_worker_message,
+)
 from anydataset.filter.cache.storage import (
+    PartitionWriter,
+    _MAX_CACHED_INDEX_SHARDS,
+    _MAX_CACHED_MERGED_PAGES,
+    _MERGED_PAGE_SIZE,
     load_metrics_manifest,
     load_partition_manifest,
+    merged_index,
     metrics_ready,
     read_index_rows,
     read_metric_rows,
@@ -121,18 +134,290 @@ class FilteredDatasetTest(unittest.TestCase):
             max_shard_samples=1,
         )
 
-        with mock.patch(
-            "anydataset.filter.cache.storage.read_index_rows",
-            wraps=read_index_rows,
-        ) as read:
+        with (
+            mock.patch(
+                "anydataset.filter.cache.storage.read_index_rows",
+                wraps=read_index_rows,
+            ) as read,
+            mock.patch(
+                "anydataset.filter.cache.storage._iter_index_batches",
+                wraps=filter_storage._iter_index_batches,
+            ) as iter_batches,
+        ):
             selected = result.select_by("zero", "two")
 
             self.assertEqual(len(selected), 4)
             self.assertEqual(read.call_count, 0)
+            self.assertEqual(iter_batches.call_count, 0)
             self.assertEqual(selected.global_index(0), 0)
-            self.assertEqual(read.call_count, 2)
+            self.assertEqual(read.call_count, 0)
+            self.assertEqual(iter_batches.call_count, 4)
             self.assertEqual(selected.indices, (0, 2, 3, 5))
-            self.assertEqual(read.call_count, 4)
+            self.assertEqual(read.call_count, 0)
+            self.assertEqual(iter_batches.call_count, 8)
+
+    def test_filter_indexes_keep_packed_shard_and_merge_caches_bounded(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir)
+            writer = PartitionWriter(path, max_shard_samples=1)
+            writer.write_partitions(
+                {
+                    "even": tuple(range(0, 20, 2)),
+                    "odd": tuple(range(1, 20, 2)),
+                }
+            )
+            writer.close()
+            (path / ".ready").write_text("ready\n", encoding="utf-8")
+
+            partitions = read_partitions(path)
+            even = partitions["even"]
+            self.assertEqual(tuple(even), tuple(range(0, 20, 2)))
+            cache = even._cache  # type: ignore[attr-defined]
+            self.assertLessEqual(len(cache._values), _MAX_CACHED_INDEX_SHARDS)
+
+            merged = merged_index((even, partitions["odd"]))
+            self.assertEqual(
+                [merged[index] for index in (0, 7, 15, 19)],
+                [0, 7, 15, 19],
+            )
+            pages = merged._pages  # type: ignore[attr-defined]
+            self.assertLessEqual(len(pages), _MAX_CACHED_MERGED_PAGES)
+
+            universe = _MERGED_PAGE_SIZE * 12
+            expected = tuple(index for index in range(universe) if index % 3 != 1)
+            large = merged_index(
+                (
+                    range(0, universe, 3),
+                    range(2, universe, 3),
+                )
+            )
+            self.assertEqual(
+                large[_MERGED_PAGE_SIZE + 17],
+                expected[_MERGED_PAGE_SIZE + 17],
+            )
+            self.assertEqual(
+                large[_MERGED_PAGE_SIZE - 1],
+                expected[_MERGED_PAGE_SIZE - 1],
+            )
+            self.assertEqual(
+                large[_MERGED_PAGE_SIZE + 31],
+                expected[_MERGED_PAGE_SIZE + 31],
+            )
+            positions = tuple(page * _MERGED_PAGE_SIZE + 17 for page in range(2, 8))
+            self.assertEqual(
+                [large[index] for index in positions],
+                [expected[index] for index in positions],
+            )
+            self.assertLessEqual(
+                len(large._pages),  # type: ignore[attr-defined]
+                _MAX_CACHED_MERGED_PAGES,
+            )
+            self.assertFalse(hasattr(large, "_values"))
+
+            concurrent = merged_index(
+                (
+                    range(0, universe, 3),
+                    range(2, universe, 3),
+                )
+            )
+            concurrent_positions = tuple(
+                (offset * _MERGED_PAGE_SIZE + 17) % len(expected)
+                for offset in range(64)
+            )
+            with ThreadPoolExecutor(max_workers=8) as pool:
+                concurrent_values = tuple(
+                    pool.map(concurrent.__getitem__, concurrent_positions)
+                )
+            self.assertEqual(
+                concurrent_values,
+                tuple(expected[index] for index in concurrent_positions),
+            )
+            self.assertLessEqual(
+                len(concurrent._pages),  # type: ignore[attr-defined]
+                _MAX_CACHED_MERGED_PAGES,
+            )
+
+    def test_multi_label_merge_streams_each_active_shard_once(self):
+        label_count = _MAX_CACHED_INDEX_SHARDS + 1
+        samples_per_label = 600
+        sample_count = label_count * samples_per_label
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir)
+            writer = PartitionWriter(path, max_shard_samples=samples_per_label)
+            writer.write_partitions(
+                {
+                    f"label-{label}": tuple(range(label, sample_count, label_count))
+                    for label in range(label_count)
+                }
+            )
+            writer.close()
+            (path / ".ready").write_text("ready\n", encoding="utf-8")
+
+            sequential_partitions = read_partitions(path)
+            with (
+                mock.patch(
+                    "anydataset.filter.cache.storage.read_index_rows",
+                    wraps=read_index_rows,
+                ) as read,
+                mock.patch(
+                    "anydataset.filter.cache.storage._iter_index_batches",
+                    wraps=filter_storage._iter_index_batches,
+                ) as iter_batches,
+            ):
+                sequential = merged_index(tuple(sequential_partitions.values()))
+                self.assertEqual(tuple(sequential), tuple(range(sample_count)))
+            self.assertEqual(read.call_count, 0)
+            self.assertEqual(iter_batches.call_count, label_count)
+
+            random_partitions = read_partitions(path)
+            with (
+                mock.patch(
+                    "anydataset.filter.cache.storage.read_index_rows",
+                    wraps=read_index_rows,
+                ) as read,
+                mock.patch(
+                    "anydataset.filter.cache.storage._iter_index_batches",
+                    wraps=filter_storage._iter_index_batches,
+                ) as iter_batches,
+            ):
+                random_access = merged_index(tuple(random_partitions.values()))
+                self.assertEqual(random_access[_MERGED_PAGE_SIZE], _MERGED_PAGE_SIZE)
+            self.assertEqual(read.call_count, 0)
+            self.assertEqual(iter_batches.call_count, label_count)
+
+    def test_filter_resume_returns_compact_indexes_without_python_set(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = prepare_filter_resume_dir(
+                Path(tmpdir) / "cache",
+                {"sample_count": 4},
+                metrics=False,
+            )
+            write_filter_fragment(
+                path,
+                (0, 2),
+                _FilterChunk(partitions={"accept": (0, 2)}, metrics=()),
+            )
+            write_filter_fragment(
+                path,
+                (1, 3),
+                _FilterChunk(partitions={"reject": (1, 3)}, metrics=()),
+            )
+
+            completed = completed_filter_indexes(path, expected=4)
+            self.assertIsInstance(completed, CompactIndexes)
+            self.assertEqual(tuple(completed), (0, 1, 2, 3))
+            self.assertEqual(
+                tuple(completed_filter_indexes(path, expected=4)), (0, 1, 2, 3)
+            )
+
+    def test_filter_resume_rechecks_fragment_indexes_on_every_scan(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = prepare_filter_resume_dir(
+                Path(tmpdir) / "cache",
+                {"sample_count": 2},
+                metrics=False,
+            )
+            write_filter_fragment(
+                path,
+                (0, 1),
+                _FilterChunk(partitions={"accept": (0, 1)}, metrics=()),
+            )
+            self.assertEqual(tuple(completed_filter_indexes(path, expected=2)), (0, 1))
+
+            fragment = filter_fragments(path)[0]
+            write_index_rows(fragment / "indexes.parquet", (0, 0))
+            with self.assertRaisesRegex(ValueError, "index file mismatch"):
+                completed_filter_indexes(path, expected=2)
+
+    def test_map_style_resume_does_not_recheck_completed_indexes(self):
+        dataset = range(4)
+        completed = range(0, 4, 2)
+        missing = (1, 3)
+
+        def dataset_factory():
+            return dataset
+
+        def writer(devices):
+            return filter_resume_writer._FilterResumeFragmentWriter(
+                path=Path("unused"),
+                dataset=dataset,
+                rule=FilterRule("resume_args", _true_factory),
+                metrics=False,
+                devices=devices,
+                batch_size=1,
+                num_workers=0,
+                prefetch_factor=None,
+                commit_samples=2,
+                runtime=Runtime(),
+                dataset_factory=dataset_factory,
+                completed=completed,
+                missing=missing,
+                worker_timeout=None,
+            )
+
+        with mock.patch.object(
+            filter_resume_writer,
+            "collect_ranges",
+            return_value=(),
+        ) as collect:
+            self.assertEqual(tuple(writer(("cpu",))._chunks(mock.Mock())), ())
+        self.assertEqual(collect.call_args.kwargs["skip_indexes"], ())
+        self.assertIs(collect.call_args.kwargs["sample_indexes"], missing)
+
+        with (
+            mock.patch.object(
+                filter_resume_writer,
+                "parallel_dataset_factory",
+                return_value=dataset_factory,
+            ),
+            mock.patch.object(
+                filter_resume_writer,
+                "collect_ranges_parallel",
+                return_value=(),
+            ) as collect_parallel,
+        ):
+            self.assertEqual(
+                tuple(writer(("cpu:0", "cpu:1"))._chunks(mock.Mock())),
+                (),
+            )
+        self.assertEqual(collect_parallel.call_args.kwargs["skip_indexes"], ())
+        self.assertIs(collect_parallel.call_args.kwargs["sample_indexes"], missing)
+
+    def test_iterable_resume_keeps_completed_index_filter(self):
+        class IterableDataset:
+            def __len__(self):
+                return 4
+
+            def __iter__(self):
+                return iter(range(4))
+
+        dataset = IterableDataset()
+        completed = range(0, 4, 2)
+        writer = filter_resume_writer._FilterResumeFragmentWriter(
+            path=Path("unused"),
+            dataset=dataset,
+            rule=FilterRule("iterable_resume_args", _true_factory),
+            metrics=False,
+            devices=("cpu",),
+            batch_size=1,
+            num_workers=0,
+            prefetch_factor=None,
+            commit_samples=2,
+            runtime=Runtime(),
+            dataset_factory=lambda: dataset,
+            completed=completed,
+            missing=(1, 3),
+            worker_timeout=None,
+        )
+
+        with mock.patch.object(
+            filter_resume_writer,
+            "collect_ranges",
+            return_value=(),
+        ) as collect:
+            self.assertEqual(tuple(writer._chunks(mock.Mock())), ())
+        self.assertIs(collect.call_args.kwargs["skip_indexes"], completed)
+        self.assertIsNone(collect.call_args.kwargs["sample_indexes"])
 
     def test_iter_indices_and_partitions_are_lazy(self):
         _register_rows_source("unit_test_filter_lazy_iterators")
@@ -148,14 +433,23 @@ class FilteredDatasetTest(unittest.TestCase):
                 .select_by("zero", "two")
             )
 
-            with mock.patch(
-                "anydataset.filter.cache.storage.read_index_rows",
-                wraps=read_index_rows,
-            ) as read:
+            with (
+                mock.patch(
+                    "anydataset.filter.cache.storage.read_index_rows",
+                    wraps=read_index_rows,
+                ) as read,
+                mock.patch(
+                    "anydataset.filter.cache.storage._iter_index_batches",
+                    wraps=filter_storage._iter_index_batches,
+                ) as iter_batches,
+            ):
                 indices = result.iter_indices()
                 self.assertEqual(read.call_count, 0)
+                self.assertEqual(iter_batches.call_count, 0)
                 self.assertEqual(next(indices), 0)
-                self.assertGreater(read.call_count, 0)
+                self.assertEqual(read.call_count, 0)
+                self.assertEqual(iter_batches.call_count, 2)
+                indices.close()
 
             partitions = dict(result.iter_partitions())
             self.assertEqual(set(partitions), {"zero", "two"})
@@ -1330,8 +1624,7 @@ class FilteredDatasetTest(unittest.TestCase):
             )
 
             shard = [
-                (index, _value(sample))
-                for index, sample in filtered.iter_shard(2, 1)
+                (index, _value(sample)) for index, sample in filtered.iter_shard(2, 1)
             ]
 
         self.assertEqual(shard, [(1, 1), (3, 3)])
@@ -1914,7 +2207,7 @@ class FilteredDatasetTest(unittest.TestCase):
         self.assertEqual(result.counts, {"zero": 4, "one": 3, "two": 3})
         self.assertEqual(result.select_by("one", "two").indices, (1, 2, 4, 5, 7, 8))
 
-    def test_rule_apply_remote_filter_with_fork_loader(self):
+    def test_rule_apply_remote_filter_with_spawn_loader(self):
         with tempfile.TemporaryDirectory():
             dataset_factory = partial(
                 _dataset,
@@ -2097,7 +2390,9 @@ class FilteredDatasetTest(unittest.TestCase):
         stdout = io.StringIO()
 
         with (
-            mock.patch("anydataset._runtime.progress._NON_INTERACTIVE_PROGRESS_INTERVAL", 0.0),
+            mock.patch(
+                "anydataset._runtime.progress._NON_INTERACTIVE_PROGRESS_INTERVAL", 0.0
+            ),
             redirect_stdout(stdout),
         ):
             FilterRule(
@@ -2802,8 +3097,7 @@ def _read_events() -> list[dict[str, object]]:
     rows: list[dict[str, object]] = []
     for path in logs:
         rows.extend(
-            json.loads(line)
-            for line in path.read_text(encoding="utf-8").splitlines()
+            json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()
         )
     return rows
 

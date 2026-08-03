@@ -11,6 +11,7 @@ from unittest import mock
 
 import anydataset.store
 import anydataset.store.reader as store_reader
+import anydataset.store.payload.groups as payload_groups_module
 import torch
 
 from anydataset import AnyDataset, Source, Spec
@@ -464,7 +465,11 @@ class StoreSourceTest(unittest.TestCase):
             with mock.patch(
                 "anydataset._io.files.os.replace",
                 wraps=os.replace,
-            ) as replace:
+            ) as replace, mock.patch.object(
+                store_reader,
+                "atomic_write_bytes",
+                wraps=store_reader.atomic_write_bytes,
+            ) as atomic_write:
                 file_view = Path(
                     dataset[0][Role.DEFAULT, Modality.AUDIO].views[AudioView.FILE]
                 )
@@ -482,6 +487,8 @@ class StoreSourceTest(unittest.TestCase):
                 )
 
             self.assertEqual(replace.call_count, 1)
+            atomic_write.assert_called_once()
+            self.assertFalse(atomic_write.call_args.kwargs["durable"])
             self.assertTrue(file_view.is_file())
             self.assertTrue(
                 file_view.is_relative_to(Path(os.environ["ANYDATASET_HOME"]))
@@ -1035,6 +1042,43 @@ class StoreSourceTest(unittest.TestCase):
                 [[0, 1], [2, 3]],
             )
 
+    def test_payload_group_sidecar_survives_store_copy(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            source = root / "source"
+            copied = root / "copied"
+            DatasetWriter(
+                source,
+                dataset_id="toy-audio",
+                max_shard_samples=2,
+            ).write(
+                [
+                    _audio_sample(waveform=torch.tensor([[float(index)]]))
+                    for index in range(4)
+                ]
+            )
+            shutil.copytree(source, copied)
+            dataset = read_store_dataset(copied)
+
+            with mock.patch(
+                "anydataset.store.payload.groups.scan_payload_groups",
+                side_effect=AssertionError("copied payload sidecar was ignored"),
+            ):
+                groups = list(
+                    dataset._shuffle(
+                        shuffle=True,
+                        seed=0,
+                        epoch=0,
+                        num_replicas=1,
+                        rank=0,
+                    )
+                )
+
+            self.assertEqual(
+                sorted(sorted(group) for group in groups),
+                [[0, 1], [2, 3]],
+            )
+
     def test_payload_groups_rejects_non_integer_version(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             output = Path(tmpdir) / "dataset"
@@ -1088,6 +1132,44 @@ class StoreSourceTest(unittest.TestCase):
             self.assertEqual(
                 sorted(sorted(group) for group in groups),
                 [[0, 1], [2, 3]],
+            )
+
+    def test_store_shuffle_scans_when_payload_groups_overlap(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output = Path(tmpdir) / "dataset"
+            DatasetWriter(output, dataset_id="toy-audio").write(
+                [
+                    _audio_sample(waveform=torch.tensor([[float(index)]]))
+                    for index in range(4)
+                ]
+            )
+            sidecar_path = payload_groups_path(output)
+            sidecar = read_json(sidecar_path)
+            sidecar["groups"] = [[[0, 1, 2]], [[0, 3, 2]]]
+            sidecar["groups_sha256"] = payload_groups_module._groups_checksum(
+                sidecar["groups"]
+            )
+            write_json(sidecar_path, sidecar)
+            dataset = read_store_dataset(output)
+
+            with mock.patch(
+                "anydataset.store.payload.groups.scan_payload_groups",
+                wraps=payload_groups_module.scan_payload_groups,
+            ) as scan:
+                groups = list(
+                    dataset._shuffle(
+                        shuffle=True,
+                        seed=0,
+                        epoch=0,
+                        num_replicas=1,
+                        rank=0,
+                    )
+                )
+
+            scan.assert_called_once()
+            self.assertEqual(
+                sorted(sorted(group) for group in groups),
+                [[0, 1, 2, 3]],
             )
 
     def test_store_shuffle_uses_sidecar_for_selected_view_subset(self):

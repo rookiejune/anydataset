@@ -7,9 +7,15 @@ import tempfile
 from pathlib import Path
 
 StatFingerprint = tuple[int, int, int, int, int]
+PortableStatFingerprint = tuple[int, int]
 
 
-def atomic_write_bytes(path: str | Path, data: bytes) -> None:
+def atomic_write_bytes(
+    path: str | Path,
+    data: bytes,
+    *,
+    durable: bool = True,
+) -> None:
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
     tmp: Path | None = None
@@ -23,10 +29,12 @@ def atomic_write_bytes(path: str | Path, data: bytes) -> None:
         ) as file:
             tmp = Path(file.name)
             file.write(data)
-            file.flush()
-            os.fsync(file.fileno())
+            if durable:
+                file.flush()
+                os.fsync(file.fileno())
         os.replace(tmp, target)
-        fsync_directory(target.parent)
+        if durable:
+            fsync_directory(target.parent)
     except Exception:
         if tmp is not None and tmp.exists():
             tmp.unlink()
@@ -45,6 +53,12 @@ def stat_fingerprint(stat: os.stat_result) -> StatFingerprint:
         stat.st_mtime_ns,
         stat.st_ctime_ns,
     )
+
+
+def portable_stat_fingerprint(stat: os.stat_result) -> PortableStatFingerprint:
+    """Identity for disposable sidecars that survives metadata-preserving copies."""
+
+    return stat.st_size, stat.st_mtime_ns
 
 
 def fsync_directory(path: str | Path) -> None:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import shutil
 import tarfile
 import tempfile
 import threading
@@ -144,6 +145,39 @@ class PayloadCacheTest(unittest.TestCase):
 
         self.assertTrue(torch.equal(first, torch.tensor([[0.0]])))
         self.assertTrue(torch.equal(second, torch.tensor([[1.0]])))
+
+    def test_payload_index_survives_store_copy(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            source = root / "source"
+            copied = root / "copied"
+            ref = (Role.DEFAULT, Modality.AUDIO)
+            DatasetWriter(source, dataset_id="payload-index-copy").write(
+                [
+                    {
+                        ref: AudioItem(
+                            views={
+                                AudioView.WAVEFORM: (
+                                    torch.tensor([[1.0]]),
+                                    16_000,
+                                )
+                            }
+                        )
+                    }
+                ]
+            )
+            shutil.copytree(source, copied)
+            dataset = read_store_dataset(copied)
+
+            with mock.patch.object(
+                tarfile.TarFile,
+                "getmembers",
+                side_effect=AssertionError("copied sidecar index was ignored"),
+            ):
+                waveform, sample_rate = dataset[0][ref].views[AudioView.WAVEFORM]
+
+        self.assertTrue(torch.equal(waveform, torch.tensor([[1.0]])))
+        self.assertEqual(sample_rate, 16_000)
 
     def test_payload_lookup_falls_back_for_corrupt_offset(self):
         with tempfile.TemporaryDirectory() as tmpdir:

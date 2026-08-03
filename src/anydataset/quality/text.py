@@ -255,9 +255,16 @@ def _score(text: str, *, model: str, device: int | str | None) -> float:
     classifier = _classifier(model, device)
     try:
         output = classifier(text, truncation=True, top_k=None)
-    except TypeError:
+    except TypeError as exc:
+        if not _unexpected_keyword(exc, "top_k"):
+            raise
         output = classifier(text, truncation=True, return_all_scores=True)
     return _acceptability_score(model, output)
+
+
+def _unexpected_keyword(error: TypeError, name: str) -> bool:
+    message = str(error)
+    return "unexpected keyword argument" in message and repr(name) in message
 
 
 @lru_cache(maxsize=8)

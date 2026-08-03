@@ -10,9 +10,10 @@
 - 外层 device/provider worker 继续保持 spawn-friendly。provider 可能加载 CUDA 模型，
   不应为了 DataLoader 读取性能把外层进程模型改成 fork。
 - 外层扫描 worker、server 和 reader 的 start method 分开配置。
-  `Runtime(reader_start_method="auto")` 无论是否声明 server 都使用 spawn；已在目标平台
-  验证 fork 安全时可以显式选择。后台 writer 默认使用 thread backend；只有显式
-  使用 process writer backend 时才读取 `writer_start_method`。
+  reader/writer 的 `auto` 始终使用 spawn；即使 provider 由独立 server 持有，也只有调用方
+  验证目标平台和设备边界后才显式选择 fork。显式 reader/writer 配置始终覆盖 `auto`。
+  后台 writer 默认使用 thread backend；只有显式使用 process writer backend 时才读取
+  `writer_start_method`。
 - 公开入口默认值优先保证跨 provider、跨平台的可用性和可恢复性，而不是把某个
   workspace 的生产吞吐配置固化为库默认值。高吞吐任务应在调用方 workflow/job wrapper
   中显式设置 `batch_size`、`num_workers`、`prefetch_factor`、
@@ -35,8 +36,8 @@
 - 真实 LongCat 请求中，一次 Unix socket `PING` 的中位数是 0.135 ms；persistent
   connection 能省掉的只会更少，不足以抵消新增的 owner、fork、重连和 shutdown 状态。
   `ProviderServer` 保持一请求一连接。
-- server-owned provider 配合 fork reader 的 materializer 和 filter 路径已在目标 Linux
-  Python 3.9 环境通过。
+- server-owned provider 配合显式 fork reader 的 materializer 和 filter 路径已在目标
+  Linux Python 3.9 环境通过；这项结果不改变跨平台默认值。
 - 分布式动态 batch 验证已确认：存在稳定 index 时可使用 metadata-only final flush，
   无 index 时才需要回退到 object gather；anydataset 的当前 dataloader 直接沿用全局
   index 契约，不再新增独立集成层。
@@ -58,8 +59,8 @@
   分片方法。内建 `hf-disk`、`hf-files`、`store`、`tsv` 和 `sharded_csv` 通过随机访问
   实现该路径。`Source.HF` 拒绝 `streaming=True`；Hub 文件树使用
   `Source.HF_FILES`。
-- reader/writer worker 的 `auto` 默认统一使用 spawn，避免 torch/CUDA/provider 状态被
-  worker 意外继承；server 隔离场景也需要显式选择 fork。
+- reader/writer worker 的 `auto` 始终使用 spawn，避免静默继承 torch/CUDA/provider
+  状态。独立 server 拓扑若已验证 fork 安全，可由调用方显式覆盖 start method。
 - `StoreDataset` 打开时不再把 `samples.parquet` 全量转成 Python tuple；`samples` 保留
   sequence 接口，并按 parquet row group 懒加载完整 sample manifest 行。
 - `AnyDataset.from_store(..., views=...)` 在顶层选择训练所需 view，pickle/spawn 后仍保留
@@ -129,10 +130,10 @@
 
 | 入口 | 当前默认值 | 默认值定位 | 生产调优入口 |
 | --- | --- | --- | --- |
-| `Runtime()` | reader/writer 的 `auto` 均解析为 spawn；writer 默认 thread backend | 跨平台保持一致，并避免 provider/CUDA 状态被 worker 意外继承 | 已验证目标平台和对象可 fork 时显式传 `reader_start_method="fork"`；只有明确需要跨进程写入时才改 writer backend |
+| `Runtime()` | reader/writer 的 `auto` 始终解析为 spawn；writer 默认 thread backend | 不让平台或 server 拓扑静默改变进程语义，避免继承设备状态 | 验证目标平台和设备边界后可显式覆盖 reader/writer start method；只有明确需要跨进程写入时才改 writer backend |
 | `DatasetWriter` | `num_shards=1`、`num_workers=0`、`prefetch_factor=None` | 默认串行写，支持任意 iterable，避免默认要求 dataset factory 可 pickle | 大数据集显式传 `dataset_factory`，按数据源和存储调 `num_shards`、`num_workers`、`prefetch_factor` |
 | `FilterRule.apply` | `device="auto"`、`batch_size=1`、`num_workers=0`、`prefetch_factor=None`、`commit_samples=100_000`、`write_workers=1` | 兼容只实现逐样本 `__call__` 的 predicate，并用后台 writer 重叠 partition cache 落盘 | predicate 支持 `call_batch` 时显式增大 `batch_size`；CPU decode 或特征读取重时调 `num_workers`/`prefetch_factor`；落盘慢时调 `write_workers`/`write_prefetch` |
-| `ViewMaterializer` / `ModalityMaterializer` | `batch_size=1`、`num_workers=0`、`prefetch_factor=None`、`commit_samples=max(batch_size, 1024)`、`write_workers=1` | 默认单样本 provider 可运行，resume fragment 不产生过多小文件，并让 provider 执行与落盘重叠 | GPU/provider 生产任务在 workflow/job wrapper 中显式调 `batch_size`、`num_workers`、`prefetch_factor`、`write_workers`、`write_prefetch`、`commit_samples` 和 `devices` |
+| `ViewMaterializer` / `ModalityMaterializer` | `batch_size=1`、`num_workers=0`、`prefetch_factor=None`、`commit_samples=max(batch_size, 1024)`、`write_workers=1` | 默认单样本 provider 可运行，以有界 checkpoint 内存让 provider 执行与落盘重叠；最终按 `max_shard_samples` 流式 repack | GPU/provider 生产任务在 workflow/job wrapper 中显式调 `batch_size`、`num_workers`、`prefetch_factor`、`write_workers`、`write_prefetch`、`commit_samples`、`max_shard_samples` 和 `devices` |
 | `AnyDataset.from_store(...)` | `views=None` 读取完整 store 语义 | 默认保留数据集语义，不猜训练只需要哪些 view | 训练、过滤或物化只需要部分 payload 时显式传 `views=...`，减少 manifest 和 payload 读取 |
 
 如果某个 workflow 已经有稳定 benchmark，例如固定 A100、固定 provider、固定 store 后端，
@@ -203,5 +204,5 @@ PYTHONPATH=src python scripts/benchmark_hot_paths.py \
   已构造 dataset cache。
 - 如果 `map_default` 或 `map_fork` 只在特定平台快，默认实现仍要保留显式可控的 start
   method，不能把平台差异藏进静默兼容逻辑。
-- remote fork 只作为 provider/filter 已经隔离到 server 后的显式优化；默认路径和 local
-  provider 路径都继续使用 spawn。
+- provider/filter 是否隔离到 server 不改变 reader/writer 的 `auto`：默认始终使用 spawn；
+  经过目标平台验证后可显式选择 fork。

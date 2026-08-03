@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import operator
 from bisect import bisect_left
+from collections import OrderedDict
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from math import isfinite
@@ -18,13 +19,14 @@ from .abc import MapStyleABC
 
 _CostFn = Callable[[Any], int]
 _Costs = Optional[Sequence[int]]
+_MAX_CALLABLE_COST_CACHE = 4096
 
 
 class _CallableCosts(Sequence[int]):
     def __init__(self, dataset: MapStyleABC, cost_fn: _CostFn) -> None:
         self.dataset = dataset
         self.cost_fn = cost_fn
-        self._cache: dict[int, int] = {}
+        self._cache: OrderedDict[int, int] = OrderedDict()
 
     def __len__(self) -> int:
         return len(self.dataset)
@@ -48,6 +50,10 @@ class _CallableCosts(Sequence[int]):
             row = self.dataset.cost_row(resolved)
             cached = operator.index(self.cost_fn(row))
             self._cache[resolved] = cached
+            if len(self._cache) > _MAX_CALLABLE_COST_CACHE:
+                self._cache.popitem(last=False)
+        else:
+            self._cache.move_to_end(resolved)
         return cached
 
 
