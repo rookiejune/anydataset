@@ -1,8 +1,11 @@
+import errno
 import json
 import pickle
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from anydataset._runtime.resume import (
     ComplementIndexes,
@@ -64,6 +67,58 @@ class ResumeHelpersTest(unittest.TestCase):
             cleanup_resume_dir(target)
 
             self.assertFalse(root.exists())
+
+    def test_cleanup_resume_dir_retries_transient_not_empty(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = Path(tmpdir) / "dataset"
+            root = resume_root(target)
+            (root / "fragments").mkdir(parents=True)
+            real_rmtree = shutil.rmtree
+            calls = 0
+
+            def flaky_rmtree(path: Path) -> None:
+                nonlocal calls
+                calls += 1
+                if calls == 1:
+                    raise OSError(errno.ENOTEMPTY, "Directory not empty", "waveform")
+                real_rmtree(path)
+
+            with (
+                mock.patch(
+                    "anydataset._runtime.resume.shutil.rmtree",
+                    side_effect=flaky_rmtree,
+                ),
+                mock.patch("anydataset._runtime.resume.time.sleep"),
+            ):
+                cleanup_resume_dir(target)
+
+            self.assertEqual(calls, 2)
+            self.assertFalse(root.exists())
+
+    def test_cleanup_resume_dir_quarantines_persistent_not_empty(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = Path(tmpdir) / "dataset"
+            root = resume_root(target)
+            (root / "fragments").mkdir(parents=True)
+
+            with (
+                mock.patch(
+                    "anydataset._runtime.resume.shutil.rmtree",
+                    side_effect=OSError(
+                        errno.ENOTEMPTY,
+                        "Directory not empty",
+                        "waveform",
+                    ),
+                ),
+                mock.patch("anydataset._runtime.resume.time.sleep"),
+                mock.patch("anydataset._runtime.resume.write_warning"),
+            ):
+                cleanup_resume_dir(target)
+
+            self.assertFalse(root.exists())
+            stale = tuple(Path(tmpdir).glob(".dataset.resume.stale-*"))
+            self.assertEqual(len(stale), 1)
+            self.assertTrue((stale[0] / "fragments").is_dir())
 
     def test_quarantine_resume_dir_renames_hidden_sibling(self):
         with tempfile.TemporaryDirectory() as tmpdir:

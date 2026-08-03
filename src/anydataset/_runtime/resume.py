@@ -8,6 +8,7 @@ domain-specific formats at their own layer.
 
 from __future__ import annotations
 
+import errno
 import fcntl
 import hashlib
 import json
@@ -20,10 +21,19 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterator, TypeVar, overload
 
-from .logging import write_info
+from .logging import write_info, write_warning
 from .._validation import validate_path_segment
 
 T = TypeVar("T")
+
+_CLEANUP_RESUME_ATTEMPTS = 5
+_CLEANUP_RESUME_RETRY_DELAY_SECONDS = 0.2
+_CLEANUP_RESUME_RETRY_ERRNOS = {
+    errno.ENOTEMPTY,
+    errno.EBUSY,
+}
+if hasattr(errno, "ESTALE"):
+    _CLEANUP_RESUME_RETRY_ERRNOS.add(errno.ESTALE)
 
 _COMPLETED_INDEX_CACHE = ".completed-indexes.jsonl"
 _COMPLETED_INDEX_CACHE_SCHEMA_VERSION = 1
@@ -55,8 +65,41 @@ def prepare_resume_dir(output_dir: str | Path, name: str) -> Path:
 
 def cleanup_resume_dir(output_dir: str | Path) -> None:
     root = resume_root(output_dir)
-    if root.exists():
-        shutil.rmtree(root)
+    if not root.exists():
+        return
+
+    last_error: OSError | None = None
+    for attempt in range(_CLEANUP_RESUME_ATTEMPTS):
+        try:
+            shutil.rmtree(root)
+            return
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            if exc.errno not in _CLEANUP_RESUME_RETRY_ERRNOS:
+                raise
+            last_error = exc
+            if attempt + 1 < _CLEANUP_RESUME_ATTEMPTS:
+                time.sleep(_CLEANUP_RESUME_RETRY_DELAY_SECONDS)
+
+    try:
+        stale = quarantine_resume_dir(output_dir)
+    except OSError as exc:
+        if last_error is not None:
+            raise last_error from exc
+        raise
+    if stale is not None:
+        write_warning(
+            "resume",
+            "quarantined resume dir after cleanup failure: "
+            f"root={root!s} stale={stale!s} error={last_error!r}",
+            event="resume_cleanup_quarantined",
+            fields={
+                "root": root,
+                "stale": stale,
+                "error": repr(last_error),
+            },
+        )
 
 
 def quarantine_resume_dir(output_dir: str | Path) -> Path | None:
