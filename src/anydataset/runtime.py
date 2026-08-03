@@ -52,11 +52,7 @@ class Runtime:
         return self._start_method(self.writer_start_method)
 
     def _start_method(self, value: AutoStartMethod) -> StartMethod:
-        if value != "auto":
-            return value
-        if self.server_start_method is not None:
-            return "fork"
-        return "spawn"
+        return "spawn" if value == "auto" else value
 
 
 __all__ = ["AutoStartMethod", "Runtime"]

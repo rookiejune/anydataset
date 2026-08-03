@@ -54,7 +54,8 @@ These paths are intended for users extending anydataset:
 - `anydataset.dataset.source.DatasetSource` and
   `anydataset.dataset.source.ShardingSource` define source contracts.
 - `anydataset.register_source(...)` / `anydataset.dataset.source.register_source(...)`
-  register custom physical sources.
+  register custom physical sources. Their optional `operational_load_options`
+  names source-specific load options that do not participate in `Spec.id`.
 - Source keys identify physical access categories such as Hugging Face datasets,
   Hugging Face Hub file trees, stores, and tabular files. Dataset-specific logic
   belongs in `anydataset.presets`, not in `anydataset.dataset.source`.

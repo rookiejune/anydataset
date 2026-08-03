@@ -41,7 +41,43 @@ class _RuntimeSharded(Protocol):
     def iter_runtime_shard(self, shard: Shard) -> Iterator[Sample]: ...
 
 
-class _Base(ABC):
+class _DatasetOperations:
+    def __iter__(self) -> Iterator[Sample]:
+        shard = runtime_shard()
+        dataset = cast(_RuntimeSharded, self)
+        yield from dataset.iter_runtime_shard(shard)
+
+    def _default_write_split(self) -> str | None:
+        return None
+
+    def write(
+        self,
+        output_dir: str | Path,
+        *,
+        dataset_id: str | None = None,
+        split: str | None = None,
+        views: tuple[tuple[Role, Modality, View], ...] | None = None,
+        max_shard_samples: int = _DEFAULT_MAX_SHARD_SAMPLES,
+        num_shards: int = 1,
+        num_workers: int = 0,
+        prefetch_factor: int | None = None,
+        dataset_factory: Callable[[], Any] | None = None,
+    ) -> Path:
+        return _write_dataset(
+            self,
+            output_dir,
+            dataset_id=dataset_id,
+            split=self._default_write_split() if split is None else split,
+            views=views,
+            max_shard_samples=max_shard_samples,
+            num_shards=num_shards,
+            num_workers=num_workers,
+            prefetch_factor=prefetch_factor,
+            dataset_factory=dataset_factory,
+        )
+
+
+class _Base(_DatasetOperations, ABC):
     def __init__(
         self,
         spec: str | Preset | Spec,
@@ -97,11 +133,6 @@ class _Base(ABC):
         self._cache_manager = None
         self._dataset = None
 
-    def __iter__(self) -> Iterator[Sample]:
-        shard = runtime_shard()
-        dataset = cast(_RuntimeSharded, self)
-        yield from dataset.iter_runtime_shard(shard)
-
     def transform_sample(self, sample: Sample) -> Sample:
         if self.transforms is None:
             return sample
@@ -110,31 +141,8 @@ class _Base(ABC):
             transformed[reference] = transform(sample[reference])
         return transformed
 
-    def write(
-        self,
-        output_dir: str | Path,
-        *,
-        dataset_id: str | None = None,
-        split: str | None = None,
-        views: tuple[tuple[Role, Modality, View], ...] | None = None,
-        max_shard_samples: int = _DEFAULT_MAX_SHARD_SAMPLES,
-        num_shards: int = 1,
-        num_workers: int = 0,
-        prefetch_factor: int | None = None,
-        dataset_factory: Callable[[], Any] | None = None,
-    ) -> Path:
-        return _write_dataset(
-            self,
-            output_dir,
-            dataset_id=dataset_id,
-            split=self.spec.split if split is None else split,
-            views=views,
-            max_shard_samples=max_shard_samples,
-            num_shards=num_shards,
-            num_workers=num_workers,
-            prefetch_factor=prefetch_factor,
-            dataset_factory=dataset_factory,
-        )
+    def _default_write_split(self) -> str | None:
+        return self.spec.split
 
     @staticmethod
     def resolve_sample(sample: Sample, schema: Schema) -> Sample:
@@ -213,7 +221,7 @@ class IterableAnyDataset(_Base, IterableDataset):
                 yield index, self.transform_sample(self.parse_fn(row))
 
 
-class MapStyleABC(Dataset, ABC):
+class MapStyleABC(_DatasetOperations, Dataset, ABC):
     @abstractmethod
     def __len__(self) -> int:
         raise NotImplementedError
@@ -221,10 +229,6 @@ class MapStyleABC(Dataset, ABC):
     @abstractmethod
     def __getitem__(self, index: int) -> Sample:
         raise NotImplementedError
-
-    def __iter__(self) -> Iterator[Sample]:
-        shard = runtime_shard()
-        yield from self.iter_runtime_shard(shard)
 
     def dataloader(
         self,
@@ -312,32 +316,6 @@ class MapStyleABC(Dataset, ABC):
 
         for _index, sample in self.iter_indexed_range(0, usable):
             yield sample
-
-    def write(
-        self,
-        output_dir: str | Path,
-        *,
-        dataset_id: str | None = None,
-        split: str | None = None,
-        views: tuple[tuple[Role, Modality, View], ...] | None = None,
-        max_shard_samples: int = _DEFAULT_MAX_SHARD_SAMPLES,
-        num_shards: int = 1,
-        num_workers: int = 0,
-        prefetch_factor: int | None = None,
-        dataset_factory: Callable[[], Any] | None = None,
-    ) -> Path:
-        return _write_dataset(
-            self,
-            output_dir,
-            dataset_id=dataset_id,
-            split=split,
-            views=views,
-            max_shard_samples=max_shard_samples,
-            num_shards=num_shards,
-            num_workers=num_workers,
-            prefetch_factor=prefetch_factor,
-            dataset_factory=dataset_factory,
-        )
 
 
 class AnyDataset(_Base, MapStyleABC):

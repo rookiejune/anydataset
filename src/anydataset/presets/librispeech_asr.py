@@ -3,12 +3,10 @@ from __future__ import annotations
 from functools import partial
 from typing import Any
 
-from ..types import AudioView, Lang, TextMeta, TextView
 from ..dataset.abc import AnyDataset
-from ..types import Preset
-from ..types.item import Transforms
 from ..rowmap import sample_from_row
-from .registry import preset_spec
+from ..types import AudioView, Lang, Source, Spec, TextMeta, TextView
+from ..types.item import Transforms
 
 
 class LibriSpeechASR(AnyDataset):
@@ -20,7 +18,7 @@ class LibriSpeechASR(AnyDataset):
         **load_options: Any,
     ) -> None:
         super().__init__(
-            spec=preset_spec(Preset.LIBRISPEECH_ASR, split=split, **load_options),
+            spec=create_spec(split=split, **load_options),
             parse_fn=partial(
                 sample_from_row,
                 audio={"audio": AudioView.WAVEFORM},
@@ -29,3 +27,12 @@ class LibriSpeechASR(AnyDataset):
             ),
             transforms=transforms,
         )
+
+
+def create_spec(split: str | None = None, **load_options: Any) -> Spec:
+    return Spec(
+        source=Source.HF,
+        path="openslr/librispeech_asr",
+        split="train.100" if split is None else split,
+        load_options={"config_name": "clean", **load_options},
+    )

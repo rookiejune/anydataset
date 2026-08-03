@@ -223,6 +223,11 @@ dataset = IterableAnyDataset(
 )
 ```
 
+Pass `operational_load_options=(...)` to `register_source` for source-specific
+options that do not change prepared physical data and should therefore be
+excluded from `Spec.id`; `prepare_workers` is already treated as operational
+for all sources.
+
 Iterable sources that can select rows without scanning the full stream may also
 implement `iter_shard(dataset, *, num_shards, shard_id)`. This source
 method must yield `(sample_index, row)` tuples for the exact dense global modulo

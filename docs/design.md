@@ -212,9 +212,10 @@ factory 标识会纳入函数代码、默认参数、closure 值和 callable 实
 server 进程只拥有 provider 和设备状态；materializer 进程只读 dataset、组 batch、
 通过 proxy provider 请求 server，并继续负责 fragment、resume 和 commit。需要隔离
 CUDA 与数据读取 worker 时，`Runtime(server_start_method="spawn")` 让调用方把 device 当作
-路由键，不在写入或过滤进程里设置 torch device；此时 reader worker 默认用 fork 以减少
-DataLoader 开销。后台 writer 默认使用 thread backend，让慢速判定或 provider 计算和
-落盘重叠，同时避免把 fragment job 通过 process pipe 序列化传输。filter cache 的写入仍由
+路由键，不在写入或过滤进程里设置 torch device。reader/writer 的 `auto` 默认始终解析为
+spawn；只在目标平台已验证 fork 安全时才显式选择 fork。后台 writer 默认使用 thread
+backend，让慢速判定或 provider 计算和落盘重叠，同时避免把 fragment job 通过 process
+pipe 序列化传输。filter cache 的写入仍由
 filter 层负责，predicate server 只负责慢速判定。
 
 ## 派生 Modality

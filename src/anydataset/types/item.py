@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import auto
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Generic, TypeVar, Union, cast
 
 from typing_extensions import TypedDict
@@ -63,13 +64,21 @@ class _Requirement(Immutable, Generic[ViewT, MetaT]):
         )
 
 
-@dataclass(unsafe_hash=True)
+@dataclass
 class _Item(Immutable, Generic[ViewT, MetaT]):
     views: Mapping[ViewT, Any] = field(default_factory=dict)
     meta: Mapping[MetaT, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
+        self.views = _mapping("item.views", self.views)
+        self.meta = _mapping("item.meta", self.meta)
         self.seal()
+
+    def __getstate__(self) -> dict[str, Any]:
+        state = dict(vars(self))
+        state["views"] = dict(self.views)
+        state["meta"] = dict(self.meta)
+        return state
 
     def __setstate__(self, state: object) -> None:
         _restore_state(self, state, "item")
@@ -111,7 +120,7 @@ class SemanticAcousticView(TypedDict):
     acoustic: Tensor
 
 
-@dataclass(unsafe_hash=True)
+@dataclass
 class AudioItem(_Item[AudioView, AudioMeta]):
     def __post_init__(self) -> None:
         self.views = _enum_mapping("AudioItem.views", self.views, AudioView)
@@ -127,7 +136,7 @@ class ImageView(StrEnum):
     PIXEL = auto()
 
 
-@dataclass(unsafe_hash=True)
+@dataclass
 class ImageItem(_Item[ImageView, ImageMeta]):
     def __post_init__(self) -> None:
         self.views = _enum_mapping("ImageItem.views", self.views, ImageView)
@@ -145,7 +154,7 @@ class TextView(StrEnum):
     SPEAKERS = auto()
 
 
-@dataclass(unsafe_hash=True)
+@dataclass
 class TextItem(_Item[TextView, TextMeta]):
     def __post_init__(self) -> None:
         self.views = _enum_mapping("TextItem.views", self.views, TextView)
@@ -198,7 +207,13 @@ def _enum_mapping(name: str, value: object, key_type: type[KeyT]) -> Mapping[Key
     output = dict(value)
     if any(not isinstance(key, key_type) for key in output):
         raise TypeError(f"{name} keys must be {key_type.__name__} values.")
-    return output
+    return MappingProxyType(output)
+
+
+def _mapping(name: str, value: object) -> Mapping[Any, Any]:
+    if not isinstance(value, Mapping):
+        raise TypeError(f"{name} must be a mapping.")
+    return MappingProxyType(dict(value))
 
 
 def _text_meta_mapping(name: str, value: object) -> Mapping[TextMeta, Any]:

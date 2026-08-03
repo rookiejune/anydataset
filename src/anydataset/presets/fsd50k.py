@@ -19,23 +19,22 @@ class FSD50K(AnyDataset):
         transforms: Transforms | None = None,
         **load_options: Any,
     ) -> None:
-        if split is not None and split not in _VALID_SPLITS:
-            raise ValueError("FSD50K split must be 'dev' or 'eval'.")
-        extra = set(load_options) - {"revision"}
-        if extra:
-            name = min(extra)
-            raise TypeError(f"Unexpected FSD50K load option: {name}.")
-        revision = load_options.get("revision", "main")
-        if not isinstance(revision, str) or not revision:
-            raise ValueError("FSD50K revision must be a non-empty string.")
         super().__init__(
-            spec=_fsd50k_spec(split=split, revision=revision),
+            spec=create_spec(split=split, **load_options),
             parse_fn=_parse_fsd50k_row,
             transforms=transforms,
         )
 
 
-def _fsd50k_spec(split: str | None = None, *, revision: str = "main") -> Spec:
+def create_spec(
+    split: str | None = None,
+    *,
+    revision: str = "main",
+    **load_options: Any,
+) -> Spec:
+    if load_options:
+        name = min(load_options)
+        raise TypeError(f"Unexpected FSD50K load option: {name}.")
     resolved_split = "dev" if split is None else split
     if resolved_split not in _VALID_SPLITS:
         raise ValueError("FSD50K split must be 'dev' or 'eval'.")

@@ -3,12 +3,10 @@ from __future__ import annotations
 from functools import partial
 from typing import Any
 
-from ..types import AudioView
 from ..dataset.abc import AnyDataset
-from ..types import Preset
-from ..types.item import Transforms
 from ..rowmap import labels, sample_from_row
-from .registry import preset_spec
+from ..types import AudioView, Source, Spec
+from ..types.item import Transforms
 
 
 class NSynth(AnyDataset):
@@ -20,7 +18,7 @@ class NSynth(AnyDataset):
         **load_options: Any,
     ) -> None:
         super().__init__(
-            spec=preset_spec(Preset.NSYNTH, split=split, **load_options),
+            spec=create_spec(split=split, **load_options),
             parse_fn=partial(
                 sample_from_row,
                 audio={
@@ -33,3 +31,12 @@ class NSynth(AnyDataset):
             ),
             transforms=transforms,
         )
+
+
+def create_spec(split: str | None = None, **load_options: Any) -> Spec:
+    return Spec(
+        source=Source.HF,
+        path="confit/nsynth-parquet",
+        split="train" if split is None else split,
+        load_options={"config_name": "instrument", **load_options},
+    )

@@ -1,4 +1,5 @@
 import json
+import pickle
 from pathlib import Path
 import tempfile
 import unittest
@@ -54,6 +55,87 @@ class SourceRegistryTest(unittest.TestCase):
     def test_rejects_non_callable_source_factory(self):
         with self.assertRaisesRegex(TypeError, "factory must be callable"):
             register_source("unit_test_invalid_factory", None)
+
+    def test_custom_source_declares_operational_identity_options(self):
+        register_source(
+            "unit_test_operational_options",
+            ListSource,
+            operational_load_options=("worker_count",),
+        )
+
+        base = Spec(source="unit_test_operational_options", path="/tmp/custom")
+        operational = Spec(
+            source="unit_test_operational_options",
+            path="/tmp/custom",
+            load_options={"worker_count": 4},
+        )
+        physical = Spec(
+            source="unit_test_operational_options",
+            path="/tmp/custom",
+            load_options={"format": "jsonl"},
+        )
+
+        self.assertEqual(base.id, operational.id)
+        self.assertNotEqual(base.id, physical.id)
+        self.assertNotIn("worker_count", operational.to_dict()["load_options"])
+        self.assertEqual(physical.to_dict()["load_options"]["format"], "jsonl")
+
+    def test_prepare_workers_remains_globally_operational(self):
+        for source in (*Source, "unit_test_unregistered_identity"):
+            with self.subTest(source=source):
+                base = Spec(source=source, path="/tmp/custom")
+                with_workers = Spec(
+                    source=source,
+                    path="/tmp/custom",
+                    load_options={"prepare_workers": 4},
+                )
+
+                self.assertEqual(base.id, with_workers.id)
+                self.assertNotIn(
+                    "prepare_workers",
+                    with_workers.to_dict()["load_options"],
+                )
+
+    def test_spec_identity_is_stable_across_late_source_registration(self):
+        source = "unit_test_late_identity_registration"
+        existing = Spec(
+            source=source,
+            path="/tmp/custom",
+            load_options={"worker_count": 4},
+        )
+        before = existing.to_dict()
+
+        register_source(
+            source,
+            ListSource,
+            operational_load_options=("worker_count",),
+        )
+        later = Spec(
+            source=source,
+            path="/tmp/custom",
+            load_options={"worker_count": 4},
+        )
+        restored = pickle.loads(pickle.dumps(existing))
+
+        self.assertEqual(existing.to_dict(), before)
+        self.assertEqual(restored, existing)
+        self.assertEqual(restored.id, existing.id)
+        self.assertNotEqual(later.id, existing.id)
+        self.assertNotEqual(later, existing)
+
+    def test_rejects_invalid_operational_identity_options(self):
+        with self.assertRaisesRegex(TypeError, "collection of strings"):
+            register_source(
+                "unit_test_string_operational_options",
+                ListSource,
+                operational_load_options="worker_count",
+            )
+        with self.assertRaisesRegex(ValueError, "empty strings"):
+            register_source(
+                "unit_test_empty_operational_option",
+                ListSource,
+                operational_load_options=("",),
+            )
 
     def test_unknown_source_fails_when_resolved(self):
         with self.assertRaises(KeyError):

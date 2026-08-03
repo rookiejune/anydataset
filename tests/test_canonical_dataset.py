@@ -16,6 +16,7 @@ from anydataset import (
     resolve_dataset,
 )
 from anydataset._runtime.sharding import runtime_shard
+from anydataset.dataset import MapStyleABC
 from anydataset.dataset.collate import FieldGroup, FieldRef, collate_fn
 from anydataset.types import (
     AudioItem,
@@ -112,15 +113,26 @@ class CanonicalDatasetTest(unittest.TestCase):
             TextItem(meta={TextMeta.LANG: [Lang.EN, "de"]})
 
     def test_items_and_requirements_are_immutable(self):
-        item = TextItem(views={TextView.TEXT: "before"})
+        source_views = {TextView.TEXT: "before"}
+        source_meta = {TextMeta.LANG: Lang.EN}
+        item = TextItem(views=source_views, meta=source_meta)
         requirement = TextReq(views={TextView.TEXT})
 
+        source_views[TextView.TEXT] = "after"
+        source_meta.clear()
         with self.assertRaises(FrozenInstanceError):
             item.views = {TextView.TEXT: "after"}
+        with self.assertRaises(TypeError):
+            item.views[TextView.TEXT] = "after"
+        with self.assertRaises(TypeError):
+            del item.meta[TextMeta.LANG]
         with self.assertRaises(FrozenInstanceError):
             requirement.views = frozenset()
         with self.assertRaises(FrozenInstanceError):
             del item.meta
+        restored_item = pickle.loads(pickle.dumps(item))
+        with self.assertRaises(TypeError):
+            restored_item.views[TextView.TEXT] = "after"
         restored = pickle.loads(pickle.dumps(requirement))
         with self.assertRaises(FrozenInstanceError):
             restored.meta = frozenset()
@@ -160,13 +172,38 @@ class CanonicalDatasetTest(unittest.TestCase):
                     "meta": {},
                 }
             )
+        with self.assertRaises(TypeError):
+            legacy_item.views[TextView.TEXT] = "changed"
+        with self.assertRaises(TypeError):
+            hash(item)
 
         self.assertEqual(item.views[TextView.TEXT], "before")
+        self.assertEqual(item.meta[TextMeta.LANG], Lang.EN)
+        self.assertEqual(restored_item, item)
         self.assertEqual(requirement.views, frozenset({TextView.TEXT}))
         self.assertEqual(hash(requirement), hash(TextReq(views={TextView.TEXT})))
         self.assertEqual(legacy_item.views[TextView.TEXT], "legacy")
         self.assertEqual(hash(legacy_requirement), hash(requirement))
         self.assertEqual(extended_requirement.tag, "preserved")
+
+    def test_dataset_write_uses_dataset_specific_default_split(self):
+        canonical = AnyDataset(Spec(source=Source.HF, path="unused", split="train"))
+        generic = _EmptyMapDataset()
+
+        with mock.patch(
+            "anydataset.dataset.abc._write_dataset",
+            return_value=Path("output"),
+        ) as write_dataset:
+            canonical.write("output")
+            canonical_split = write_dataset.call_args.kwargs["split"]
+            generic.write("output")
+            generic_split = write_dataset.call_args.kwargs["split"]
+            canonical.write("output", split="validation")
+            explicit_split = write_dataset.call_args.kwargs["split"]
+
+        self.assertEqual(canonical_split, "train")
+        self.assertIsNone(generic_split)
+        self.assertEqual(explicit_split, "validation")
 
     def test_resolves_preset_to_spec(self):
         spec = resolve_dataset("fleurs:validation")
@@ -1199,6 +1236,14 @@ class _FalseyParser:
 
 class _StatefulAnyDataset(AnyDataset):
     pass
+
+
+class _EmptyMapDataset(MapStyleABC):
+    def __len__(self):
+        return 0
+
+    def __getitem__(self, index):
+        raise IndexError(index)
 
 
 def _map_dataset(rows):

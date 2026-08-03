@@ -228,9 +228,10 @@ csv_spec = resolve_dataset("sharded_csv:///data/bitext:train")
 ```
 
 `Spec.source`、`path`、`split`、`version` 和物理 `load_options` 都参与
-`Spec.id`。不改变源内容的 operational 选项（当前为 `prepare_workers`）不进入
-`Spec.id` / prepare cache 身份。同一路径改指向另一个物理快照时，应更新 `version`
-或对应物理 load option；source prepare cache 只会在最终 identity 相同时复用。
+`Spec.id`。不改变 prepared 物理数据的 operational 选项不进入 `Spec.id` / prepare
+cache 身份；`prepare_workers` 是所有 source 的默认 operational 选项。同一路径改指向
+另一个物理快照时，应更新 `version` 或对应物理 load option；source prepare cache 只会在
+最终 identity 相同时复用。
 
 新增物理 source 类型时，注册一个工厂即可；`AnyDataset` 会按 `Spec.source` 从注册器取 source：
 
@@ -249,6 +250,10 @@ dataset = IterableAnyDataset(
     parse_fn=parse,
 )
 ```
+
+source 特有的 operational 选项可通过
+`register_source(..., operational_load_options=(...))` 声明，例如只影响读取时字段注入、
+不改变 prepared 物理数据的选项。
 
 能够跳过全流扫描的 iterable source 可以额外实现
 `iter_shard(dataset, *, num_shards, shard_id)`。该 source 方法必须为精确的

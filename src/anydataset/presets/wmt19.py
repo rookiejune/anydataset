@@ -3,12 +3,10 @@ from __future__ import annotations
 from functools import partial
 from typing import Any
 
-from ..types import Modality, Role, TextMeta, TextView
 from ..dataset.abc import AnyDataset
-from ..types import Preset
-from ..types.item import Transforms
 from ..rowmap import sample_from_row, text_map
-from .registry import preset_spec
+from ..types import Modality, Role, Source, Spec, TextMeta, TextView
+from ..types.item import Transforms
 
 
 class WMT19(AnyDataset):
@@ -31,7 +29,7 @@ class WMT19(AnyDataset):
         )
         load_options["config_name"] = f"{source_lang}-{target_lang}"
         super().__init__(
-            spec=preset_spec(Preset.WMT19, split=split, **load_options),
+            spec=create_spec(split=split, **load_options),
             parse_fn=partial(
                 sample_from_row,
                 items={
@@ -47,6 +45,15 @@ class WMT19(AnyDataset):
             ),
             transforms=transforms,
         )
+
+
+def create_spec(split: str | None = None, **load_options: Any) -> Spec:
+    return Spec(
+        source=Source.HF,
+        path="wmt/wmt19",
+        split="train" if split is None else split,
+        load_options={"config_name": "cs-en", **load_options},
+    )
 
 
 def _langs(

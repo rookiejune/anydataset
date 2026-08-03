@@ -5,6 +5,7 @@ import unittest
 from dataclasses import FrozenInstanceError
 from unittest import mock
 
+from anydataset.filter import FilterDecision
 from anydataset.quality.rules import QualityChain, QualityLabel, Rule
 from anydataset.quality.text import (
     ChineseGEC,
@@ -310,6 +311,24 @@ class TranslationQualityTest(unittest.TestCase):
         self.assertEqual(decision.metrics["rules"][2]["label"], "reject")
         self.assertIn("model:bicleaner_reject", decision.metrics["flags"])
         self.assertEqual(decision.metrics["transitions"][-1]["to"], "reject")
+
+    def test_chain_rejects_invalid_rule_flags(self):
+        for flags in ("not-a-list", ["valid", 1]):
+            with self.subTest(flags=flags):
+                predicate = QualityChain(
+                    (
+                        Rule(
+                            "invalid",
+                            lambda _sample, flags=flags: FilterDecision(
+                                label=True,
+                                metrics={"flags": flags},
+                            ),
+                        ),
+                    )
+                )
+
+                with self.assertRaisesRegex(TypeError, "flags.*list of strings"):
+                    predicate(_text_pair("hello", "bonjour"))
 
     def test_rejects_html_tag_mismatch(self):
         predicate = TranslationQuality(

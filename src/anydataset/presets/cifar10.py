@@ -5,11 +5,9 @@ from typing import Any
 
 import torch
 
-from ..types import ImageItem, ImageMeta, ImageView, Modality, Role
 from ..dataset.abc import AnyDataset
-from ..types import Preset
+from ..types import ImageItem, ImageMeta, ImageView, Modality, Role, Source, Spec
 from ..types.item import Sample, Transforms
-from .registry import preset_spec
 
 
 class CIFAR10(AnyDataset):
@@ -21,10 +19,19 @@ class CIFAR10(AnyDataset):
         **load_options: Any,
     ) -> None:
         super().__init__(
-            spec=preset_spec(Preset.CIFAR10, split=split, **load_options),
+            spec=create_spec(split=split, **load_options),
             parse_fn=_parse,
             transforms=transforms,
         )
+
+
+def create_spec(split: str | None = None, **load_options: Any) -> Spec:
+    return Spec(
+        source=Source.HF,
+        path="uoft-cs/cifar10",
+        split="train" if split is None else split,
+        load_options=load_options,
+    )
 
 
 def _parse(row: Mapping[str, Any]) -> Sample:

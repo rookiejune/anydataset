@@ -58,7 +58,7 @@ from .batch import (
     with_resilient_batch_provider,
 )
 from ..config import DEFAULT_MAX_SHARD_SAMPLES
-from .fragments import FragmentBatchWriter, ProgressSink
+from .fragments import FragmentBatchConfig, FragmentBatchWriter, ProgressSink
 from .identity import callable_id, metadata_value, optional_semantic_id
 from .resume import (
     materializer_lock_path,
@@ -893,6 +893,9 @@ class ViewMaterializer:
         progress: ProgressSink | None = None,
         worker_id: int = 0,
     ) -> None:
+        commit_samples = self.commit_samples
+        if commit_samples is None:
+            raise RuntimeError("materializer commit_samples was not initialized.")
         completed = set(
             validate_completed_indexes(
                 completed_fragment_indexes(
@@ -904,7 +907,16 @@ class ViewMaterializer:
             )
         )
         writer = FragmentBatchWriter(
-            materializer=self,
+            strategy=_FragmentStrategy(self),
+            config=FragmentBatchConfig(
+                dataset_id=self._dataset_id,
+                split=self.split,
+                max_shard_samples=self.max_shard_samples,
+                commit_samples=commit_samples,
+                write_workers=self.write_workers,
+                write_prefetch=self.write_prefetch,
+                writer_start_method=self.runtime.writer_worker_start_method,
+            ),
             fragments_dir=fragments_dir,
             completed=completed,
             provider=provider,
@@ -978,6 +990,36 @@ class ViewMaterializer:
 
     def _uses_batch_provider(self, provider: MaterializerProvider) -> bool:
         return self.batch_size > 1 or bool(getattr(provider, "batch_only", False))
+
+
+@dataclass(frozen=True)
+class _FragmentStrategy:
+    materializer: ViewMaterializer
+
+    def uses_batch_provider(self, provider: MaterializerProvider) -> bool:
+        return self.materializer._uses_batch_provider(provider)
+
+    def materialize_sample(
+        self,
+        sample: Sample,
+        provider: MaterializerProvider,
+    ) -> Sample:
+        return self.materializer._sample_with_provider(sample, provider)
+
+    def materialize_batch(
+        self,
+        samples: Sequence[Sample],
+        provider: MaterializerProvider,
+        *,
+        worker_id: int,
+    ) -> Sequence[Sample]:
+        return tuple(
+            self.materializer._resilient_samples_with_batch_provider(
+                samples,
+                provider,
+                worker_id=worker_id,
+            )
+        )
 
 
 @dataclass
@@ -1074,6 +1116,42 @@ class ModalityMaterializer(ViewMaterializer):
                 cast(ModalityProviderLike, provider),
                 selected_roles=self.roles,
             ),
+        )
+
+
+@dataclass(frozen=True)
+class MaterializerWorker:
+    """Explicit adapter used by materializer subprocess entry points."""
+
+    materializer: ViewMaterializer
+
+    @property
+    def dataset_id(self) -> str:
+        return self.materializer._dataset_id
+
+    def write_batches(
+        self,
+        provider: MaterializerProvider,
+        *,
+        dataset_factory: DatasetFactory,
+        sample_count: int,
+        use_map_style_loader: bool,
+        sample_indexes: Sequence[int],
+        fragments_dir: Path,
+        expected: int,
+        progress: ProgressSink,
+        worker_id: int,
+    ) -> None:
+        self.materializer._write_resumable_loader_batches(
+            provider,
+            dataset_factory=dataset_factory,
+            sample_count=sample_count,
+            use_map_style_loader=use_map_style_loader,
+            sample_indexes=sample_indexes,
+            fragments_dir=fragments_dir,
+            expected=expected,
+            progress=progress,
+            worker_id=worker_id,
         )
 
 

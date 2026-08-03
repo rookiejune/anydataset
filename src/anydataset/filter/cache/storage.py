@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import heapq
 import json
-import math
 from array import array
 from bisect import bisect_right
 from collections.abc import Iterable, Iterator, Mapping, Sequence
@@ -15,7 +14,7 @@ from ..._io.parquet import read_rows, write_columns
 from ..._io.shard import BufferedShardWriter
 from ...store.jsonio import read_json, write_json
 from ..rules import label_file_id
-from ..types import JsonValue, _FilterMetricsRow, _Index
+from ..types import JsonValue, _FilterMetricsRow, _Index, validate_metrics
 
 _METRICS_SCHEMA_VERSION = 1
 
@@ -173,17 +172,6 @@ def merged_index(indexes: Sequence[_Index]) -> _Index:
     if len(indexes) == 1:
         return indexes[0]
     return _MergedIndex(indexes)
-
-
-def validate_metrics(metrics: Mapping[str, JsonValue]) -> Mapping[str, JsonValue]:
-    if not isinstance(metrics, Mapping):
-        raise TypeError("filter decision metrics must be a mapping.")
-    output: dict[str, JsonValue] = {}
-    for key, value in metrics.items():
-        if not isinstance(key, str):
-            raise TypeError("filter decision metrics keys must be strings.")
-        output[key] = _validate_json_value(value)
-    return output
 
 
 @dataclass(frozen=True)
@@ -431,7 +419,7 @@ def read_metric_rows(path: Path) -> Iterable[Mapping[str, Any]]:
         yield {
             "index": int(row["index"]),
             "label": str(row["label"]),
-            "metrics": json.loads(str(row["metrics"])),
+            "metrics": validate_metrics(json.loads(str(row["metrics"]))),
         }
 
 
@@ -451,35 +439,11 @@ def write_metric_rows(path: Path, rows: Sequence[_FilterMetricsRow]) -> None:
     )
 
 
-def _validate_json_value(value: Any) -> JsonValue:
-    if value is None or isinstance(value, (bool, int, str)):
-        return value
-    if isinstance(value, float):
-        if not math.isfinite(value):
-            raise ValueError(
-                "filter decision metrics must not contain NaN or infinity."
-            )
-        return value
-    if isinstance(value, list):
-        return [_validate_json_value(item) for item in value]
-    if isinstance(value, Mapping):
-        output: dict[str, JsonValue] = {}
-        for key, child in value.items():
-            if not isinstance(key, str):
-                raise TypeError("filter decision metrics keys must be strings.")
-            output[key] = _validate_json_value(child)
-        return output
-    raise TypeError("filter decision metrics must be JSON-serializable.")
-
-
 def _metrics_json(metrics: Mapping[str, JsonValue]) -> str:
-    try:
-        return json.dumps(
-            metrics,
-            allow_nan=False,
-            ensure_ascii=True,
-            sort_keys=True,
-            separators=(",", ":"),
-        )
-    except (TypeError, ValueError) as exc:
-        raise TypeError("filter decision metrics must be JSON-serializable.") from exc
+    return json.dumps(
+        validate_metrics(metrics),
+        allow_nan=False,
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    )

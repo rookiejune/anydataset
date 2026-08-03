@@ -1,13 +1,37 @@
 from __future__ import annotations
 
-from dataclasses import replace
-from typing import TYPE_CHECKING, Any
+from dataclasses import dataclass
+from importlib import import_module
+from types import ModuleType
+from typing import TYPE_CHECKING, Any, Callable, cast
 
-from ..types import Preset, Source, Spec
+from ..types import Preset, Spec
 
 if TYPE_CHECKING:
     from ..dataset.abc import AnyDataset, IterableAnyDataset
     from ..types.item import Transforms
+
+
+@dataclass(frozen=True)
+class _PresetRegistration:
+    module: str
+    dataset_type: str
+
+
+_PRESETS = {
+    Preset.MNIST: _PresetRegistration("mnist", "MNIST"),
+    Preset.CIFAR10: _PresetRegistration("cifar10", "CIFAR10"),
+    Preset.FLEURS: _PresetRegistration("fleurs", "Fleurs"),
+    Preset.LIBRISPEECH_ASR: _PresetRegistration(
+        "librispeech_asr",
+        "LibriSpeechASR",
+    ),
+    Preset.COMMON_VOICE: _PresetRegistration("common_voice", "CommonVoice"),
+    Preset.ESC50: _PresetRegistration("esc50", "ESC50"),
+    Preset.NSYNTH: _PresetRegistration("nsynth", "NSynth"),
+    Preset.FSD50K: _PresetRegistration("fsd50k", "FSD50K"),
+    Preset.WMT19: _PresetRegistration("wmt19", "WMT19"),
+}
 
 
 def preset_spec(
@@ -15,72 +39,9 @@ def preset_spec(
     split: str | None = None,
     **load_options: Any,
 ) -> Spec:
-    if preset is Preset.MNIST:
-        spec = Spec(source=Source.HF, path="ylecun/mnist", split="train")
-    elif preset is Preset.CIFAR10:
-        spec = Spec(source=Source.HF, path="uoft-cs/cifar10", split="train")
-    elif preset is Preset.FLEURS:
-        spec = Spec(
-            source=Source.HF,
-            path="google/fleurs",
-            split="train",
-            load_options={
-                "config_name": "en_us",
-            },
-        )
-    elif preset is Preset.LIBRISPEECH_ASR:
-        spec = Spec(
-            source=Source.HF,
-            path="openslr/librispeech_asr",
-            split="train.100",
-            load_options={
-                "config_name": "clean",
-            },
-        )
-    elif preset is Preset.COMMON_VOICE:
-        from .common_voice import _common_voice_spec
-
-        return _common_voice_spec(split=split, **load_options)
-    elif preset is Preset.ESC50:
-        spec = Spec(
-            source=Source.HF,
-            path="ashraq/esc50",
-            split="train",
-        )
-    elif preset is Preset.NSYNTH:
-        spec = Spec(
-            source=Source.HF,
-            path="confit/nsynth-parquet",
-            split="train",
-            load_options={
-                "config_name": "instrument",
-            },
-        )
-    elif preset is Preset.FSD50K:
-        from .fsd50k import _fsd50k_spec
-
-        revision = load_options.pop("revision", "main")
-        if load_options:
-            name = min(load_options)
-            raise TypeError(f"Unexpected FSD50K load option: {name}.")
-        return _fsd50k_spec(split=split, revision=revision)
-    elif preset is Preset.WMT19:
-        spec = Spec(
-            source=Source.HF,
-            path="wmt/wmt19",
-            split="train",
-            load_options={
-                "config_name": "cs-en",
-            },
-        )
-    else:
-        raise ValueError(f"Unsupported preset: {preset!r}.")
-
-    return replace(
-        spec,
-        split=spec.split if split is None else split,
-        load_options={**spec.load_options, **load_options},
-    )
+    _, module = _load(preset)
+    create_spec = cast(Callable[..., Spec], getattr(module, "create_spec"))
+    return create_spec(split=split, **load_options)
 
 
 def create_map_preset(
@@ -89,43 +50,12 @@ def create_map_preset(
     transforms: Transforms | None = None,
     **load_options: Any,
 ) -> AnyDataset:
-    if preset is Preset.MNIST:
-        from .mnist import MNIST
-
-        return MNIST(split=split, transforms=transforms, **load_options)
-    if preset is Preset.CIFAR10:
-        from .cifar10 import CIFAR10
-
-        return CIFAR10(split=split, transforms=transforms, **load_options)
-    if preset is Preset.FSD50K:
-        from .fsd50k import FSD50K
-
-        return FSD50K(split=split, transforms=transforms, **load_options)
-    if preset is Preset.COMMON_VOICE:
-        from .common_voice import _create_common_voice
-
-        return _create_common_voice(split=split, transforms=transforms, **load_options)
-    if preset is Preset.FLEURS:
-        from .fleurs import Fleurs
-
-        return Fleurs(split=split, transforms=transforms, **load_options)
-    if preset is Preset.LIBRISPEECH_ASR:
-        from .librispeech_asr import LibriSpeechASR
-
-        return LibriSpeechASR(split=split, transforms=transforms, **load_options)
-    if preset is Preset.ESC50:
-        from .esc50 import ESC50
-
-        return ESC50(split=split, transforms=transforms, **load_options)
-    if preset is Preset.NSYNTH:
-        from .nsynth import NSynth
-
-        return NSynth(split=split, transforms=transforms, **load_options)
-    if preset is Preset.WMT19:
-        from .wmt19 import WMT19
-
-        return WMT19(split=split, transforms=transforms, **load_options)
-    raise ValueError(f"Unsupported preset: {preset.value!r}.")
+    registration, module = _load(preset)
+    dataset_type = cast(
+        Callable[..., Any],
+        getattr(module, registration.dataset_type),
+    )
+    return dataset_type(split=split, transforms=transforms, **load_options)
 
 
 def create_iterable_preset(
@@ -138,3 +68,10 @@ def create_iterable_preset(
     raise ValueError(
         f"Preset {preset.value!r} is map-style; use AnyDataset.preset()."
     )
+
+
+def _load(preset: Preset) -> tuple[_PresetRegistration, ModuleType]:
+    registration = _PRESETS.get(preset)
+    if registration is None:
+        raise ValueError(f"Unsupported preset: {preset!r}.")
+    return registration, import_module(f".{registration.module}", __package__)

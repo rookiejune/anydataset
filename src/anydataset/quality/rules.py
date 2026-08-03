@@ -14,7 +14,7 @@ from .._compat import StrEnum
 from .._immutable import Immutable
 from ..filter import FilterDecision
 from ..filter.rules import label as filter_label
-from ..filter.types import FilterOutput, JsonValue
+from ..filter.types import FilterOutput, JsonValue, validate_metrics
 from ..types import Sample
 
 
@@ -66,7 +66,7 @@ class QualityChain(Immutable):
             decision = _decision(rule.predicate(sample))
             current = _label(decision.label)
             label = _combine(label, current)
-            metrics = dict(decision.metrics)
+            metrics = validate_metrics(decision.metrics)
             rows.append(
                 {
                     "rule": rule.name,
@@ -125,10 +125,14 @@ def _combine(previous: QualityLabel, current: QualityLabel) -> QualityLabel:
 
 
 def _flags(rule: str, metrics: Mapping[str, JsonValue]) -> list[str]:
-    value = metrics.get("flags")
-    if not isinstance(value, list):
+    if "flags" not in metrics:
         return []
-    return [f"{rule}:{flag}" for flag in value if isinstance(flag, str)]
+    value = metrics["flags"]
+    if not isinstance(value, list) or not all(isinstance(flag, str) for flag in value):
+        raise TypeError(
+            f"quality rule {rule!r} metrics 'flags' must be a list of strings."
+        )
+    return [f"{rule}:{flag}" for flag in value]
 
 
 __all__ = ["QualityChain", "QualityLabel", "QualityRule", "Rule"]

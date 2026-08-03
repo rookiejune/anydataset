@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from enum import Enum
 import math
 from pathlib import Path
-from typing import TYPE_CHECKING, Protocol, TypedDict, Union, runtime_checkable
+from typing import Any, TYPE_CHECKING, Protocol, TypedDict, Union, runtime_checkable
 
 from .._compat import NotRequired
 from .._runtime.devices import Devices
@@ -13,23 +13,55 @@ from ..dataset.abc import MapStyleABC
 from ..runtime import Runtime
 from ..types.item import Sample
 
+# Runtime validation keeps array elements recursive without making valid
+# ``list[str]`` values fail static checks because mutable lists are invariant.
 JsonValue = Union[
     None,
     bool,
     int,
     float,
     str,
-    Sequence["JsonValue"],
+    list[Any],
     Mapping[str, "JsonValue"],
 ]
 FilterLabel = Union[bool, str, Enum]
 _Index = Sequence[int]
 
 
+def validate_metrics(metrics: object) -> dict[str, JsonValue]:
+    if not isinstance(metrics, Mapping):
+        raise TypeError("filter decision metrics must be a mapping.")
+    output: dict[str, JsonValue] = {}
+    for key, value in metrics.items():
+        if not isinstance(key, str):
+            raise TypeError("filter decision metrics keys must be strings.")
+        output[key] = _json_value(value)
+    return output
+
+
+def _json_value(value: object) -> JsonValue:
+    if value is None or isinstance(value, (bool, int, str)):
+        return value
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError(
+                "filter decision metrics must not contain NaN or infinity."
+            )
+        return value
+    if isinstance(value, list):
+        return [_json_value(item) for item in value]
+    if isinstance(value, Mapping):
+        return validate_metrics(value)
+    raise TypeError("filter decision metrics must be JSON-serializable.")
+
+
 @dataclass(frozen=True)
 class FilterDecision:
     label: FilterLabel
     metrics: Mapping[str, JsonValue]
+
+    def __post_init__(self) -> None:
+        validate_metrics(self.metrics)
 
 
 @dataclass(frozen=True)

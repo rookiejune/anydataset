@@ -5,7 +5,7 @@ import traceback
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from ..._runtime.logging import use_run_logs_dir, worker_logger
 from ..._runtime.parallel import (
@@ -19,6 +19,9 @@ from ...runtime import Runtime
 from ...types.item import Role, Schema
 from .types import MaterializerProvider
 from ..part.commit import commit_fragment_part, store_fragments
+
+if TYPE_CHECKING:
+    from .materializer import MaterializerWorker
 
 DatasetFactory = Callable[[], Any]
 ProviderFactory = Callable[[str], MaterializerProvider]
@@ -90,7 +93,7 @@ def materialize_worker(
             logger.info("loaded provider on %s", config.device)
             materializer = worker_materializer(config)
             logger.info("starting materialization on %s", config.device)
-            materializer._write_resumable_loader_batches(
+            materializer.write_batches(
                 provider,
                 dataset_factory=dataset_factory,
                 sample_count=config.expected,
@@ -106,14 +109,14 @@ def materialize_worker(
                 barrier.wait()
                 fragments = store_fragments(
                     config.fragments_dir,
-                    dataset_id=materializer._dataset_id,
+                    dataset_id=materializer.dataset_id,
                     split=config.split,
                 )
                 assigned = fragments[config.shard_id :: config.num_shards]
                 commit_fragment_part(
                     config.parts_dir / f"part-{config.shard_id:05d}",
                     assigned,
-                    dataset_id=materializer._dataset_id,
+                    dataset_id=materializer.dataset_id,
                     split=config.split,
                     shard_id=config.shard_id,
                     num_shards=config.num_shards,
@@ -129,51 +132,39 @@ def materialize_worker(
         put_progress(progress, Progress(config.shard_id, 0, True, None))
 
 
-def worker_materializer(config: WorkerConfig):
-    from .materializer import ModalityMaterializer, SampleMaterializer, ViewMaterializer
+def worker_materializer(config: WorkerConfig) -> MaterializerWorker:
+    from .materializer import (
+        MaterializerWorker,
+        ModalityMaterializer,
+        SampleMaterializer,
+        ViewMaterializer,
+    )
 
+    options: dict[str, Any] = {
+        "output_dir": config.output_dir,
+        "split": config.split,
+        "max_shard_samples": config.max_shard_samples,
+        "batch_size": config.batch_size,
+        "commit_samples": config.commit_samples,
+        "num_workers": config.num_workers,
+        "prefetch_factor": config.prefetch_factor,
+        "write_workers": config.write_workers,
+        "write_prefetch": config.write_prefetch,
+        "keep_schema": config.keep_schema,
+        "runtime": config.runtime,
+    }
     if config.mode == "modality":
-        return ModalityMaterializer(
-            output_dir=config.output_dir,
-            split=config.split,
-            max_shard_samples=config.max_shard_samples,
-            batch_size=config.batch_size,
-            commit_samples=config.commit_samples,
-            num_workers=config.num_workers,
-            prefetch_factor=config.prefetch_factor,
-            write_workers=config.write_workers,
-            write_prefetch=config.write_prefetch,
-            keep_schema=config.keep_schema,
-            runtime=config.runtime,
+        materializer = ModalityMaterializer(
+            **options,
             roles=config.roles,
         )
-    if config.mode == "sample":
-        return SampleMaterializer(
-            output_dir=config.output_dir,
-            split=config.split,
-            max_shard_samples=config.max_shard_samples,
-            batch_size=config.batch_size,
-            commit_samples=config.commit_samples,
-            num_workers=config.num_workers,
-            prefetch_factor=config.prefetch_factor,
-            write_workers=config.write_workers,
-            write_prefetch=config.write_prefetch,
-            keep_schema=config.keep_schema,
-            runtime=config.runtime,
-        )
-    return ViewMaterializer(
-        output_dir=config.output_dir,
-        split=config.split,
-        max_shard_samples=config.max_shard_samples,
-        batch_size=config.batch_size,
-        commit_samples=config.commit_samples,
-        num_workers=config.num_workers,
-        prefetch_factor=config.prefetch_factor,
-        write_workers=config.write_workers,
-        write_prefetch=config.write_prefetch,
-        keep_schema=config.keep_schema,
-        runtime=config.runtime,
-    )
+    elif config.mode == "sample":
+        materializer = SampleMaterializer(**options)
+    elif config.mode == "view":
+        materializer = ViewMaterializer(**options)
+    else:
+        raise ValueError(f"Unsupported materializer mode: {config.mode!r}.")
+    return MaterializerWorker(materializer)
 
 
 def shard_missing_count(indexes: Sequence[int], num_shards: int, shard_id: int) -> int:

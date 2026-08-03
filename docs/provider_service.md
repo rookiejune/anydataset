@@ -18,9 +18,10 @@ The public boundary is:
 server. The caller must manage every `ProviderServer` explicitly. A non-`None`
 `server_start_method` tells the materializer or filter that the remote server
 owns device state, so the local scan process does not set the torch device. It
-also makes `reader_start_method="auto"` and `writer_start_method="auto"`
-resolve to `fork`; without a server declaration they resolve to `spawn`.
-Explicit reader or writer settings override `auto`.
+does not change worker start-method defaults: `reader_start_method="auto"` and
+`writer_start_method="auto"` always resolve to `spawn`. Explicit reader or
+writer settings override `auto`; select `fork` only after validating the target
+platform and objects involved.
 
 Built-in background writers currently use threads by default, so
 `writer_start_method` matters only when a process-backed writer is selected.
@@ -36,15 +37,15 @@ The server process and the dataset-wide outer workers are separate concerns:
 - Multiple resolved devices start one outer worker per device using
   `Runtime.process_start_method`, which defaults to `spawn`.
 - `num_workers` controls the DataLoader readers inside the calling process or
-  each outer device worker. With a server declaration, their `auto` start
-  method is `fork`.
+  each outer device worker. Their `auto` start method is `spawn` with or without
+  a server declaration.
 
 Set `Runtime.server_start_method` to the method used by the separately managed
 server. The value records the topology; it is not a server launcher.
 
 ## Remote Materializer
 
-This example keeps a LongCat provider on `cuda:0` while two forked DataLoader
+This example keeps a LongCat provider on `cuda:0` while two spawned DataLoader
 workers read a canonical map-style store. Because only one materializer device
 is selected, the materializer itself remains in the calling process.
 
@@ -114,7 +115,7 @@ match the output view produced by the provider in the server. Device keys in
 
 Filters require a map-style dataset. This example assumes WMT19 has already
 been materialized as a canonical store, then keeps the translation predicate in
-its own CPU process while one forked DataLoader worker reads the store.
+its own CPU process while one spawned DataLoader worker reads the store.
 
 ```python
 from __future__ import annotations

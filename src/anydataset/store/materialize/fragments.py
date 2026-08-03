@@ -7,9 +7,10 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from itertools import islice
 from pathlib import Path
-from typing import TYPE_CHECKING, Deque, Union
+from typing import Deque, Protocol, Union
 
 from ..._compat import strict_zip
+from ..._runtime.parallel import StartMethod
 from ..._runtime.progress import Progress, ProgressDashboard, put_progress
 from ..._runtime.resume import append_completed_index_cache, index_batch_id, pending_batch
 from ..._runtime.write_pipeline import BackgroundWriteSink
@@ -18,16 +19,43 @@ from .batch import validate_batch_outputs
 from .types import MaterializerProvider
 from ..part.writer import DatasetFragmentWriter
 
-if TYPE_CHECKING:
-    from .materializer import ViewMaterializer
-
 
 ProgressSink = Union[multiprocessing.Queue, ProgressDashboard]
 
 
+class FragmentStrategy(Protocol):
+    def uses_batch_provider(self, provider: MaterializerProvider) -> bool: ...
+
+    def materialize_sample(
+        self,
+        sample: Sample,
+        provider: MaterializerProvider,
+    ) -> Sample: ...
+
+    def materialize_batch(
+        self,
+        samples: Sequence[Sample],
+        provider: MaterializerProvider,
+        *,
+        worker_id: int,
+    ) -> Sequence[Sample]: ...
+
+
+@dataclass(frozen=True)
+class FragmentBatchConfig:
+    dataset_id: str
+    split: str | None
+    max_shard_samples: int
+    commit_samples: int
+    write_workers: int
+    write_prefetch: int | None
+    writer_start_method: StartMethod
+
+
 @dataclass
 class FragmentBatchWriter:
-    materializer: ViewMaterializer
+    strategy: FragmentStrategy
+    config: FragmentBatchConfig
     fragments_dir: Path
     completed: set[int]
     provider: MaterializerProvider
@@ -85,11 +113,11 @@ class FragmentBatchWriter:
         self,
         batch: Sequence[tuple[int, Sample]],
     ) -> tuple[tuple[int, Sample], ...]:
-        if not self.materializer._uses_batch_provider(self.provider):
+        if not self.strategy.uses_batch_provider(self.provider):
             return tuple(
                 (
                     index,
-                    self.materializer._sample_with_provider(sample, self.provider),
+                    self.strategy.materialize_sample(sample, self.provider),
                 )
                 for index, sample in batch
             )
@@ -97,7 +125,7 @@ class FragmentBatchWriter:
         indexes = tuple(index for index, _sample in batch)
         samples = tuple(sample for _index, sample in batch)
         outputs = tuple(
-            self.materializer._resilient_samples_with_batch_provider(
+            self.strategy.materialize_batch(
                 samples,
                 self.provider,
                 worker_id=self.worker_id,
@@ -111,9 +139,7 @@ class FragmentBatchWriter:
         sink: BackgroundWriteSink[FragmentWriteJob],
         pending_outputs: Deque[tuple[int, Sample]],
     ) -> None:
-        commit_samples = self.materializer.commit_samples
-        if commit_samples is None:
-            raise RuntimeError("materializer commit_samples was not initialized.")
+        commit_samples = self.config.commit_samples
         while len(pending_outputs) >= commit_samples:
             samples = tuple(islice(pending_outputs, commit_samples))
             self._submit(sink, samples)
@@ -138,9 +164,9 @@ class FragmentBatchWriter:
         sink.submit(
             FragmentWriteJob(
                 fragments_dir=self.fragments_dir,
-                dataset_id=self.materializer._dataset_id,
-                split=self.materializer.split,
-                max_shard_samples=self.materializer.max_shard_samples,
+                dataset_id=self.config.dataset_id,
+                split=self.config.split,
+                max_shard_samples=self.config.max_shard_samples,
                 indexes=indexes,
                 samples=indexed,
             )
@@ -150,9 +176,9 @@ class FragmentBatchWriter:
     def _sink(self) -> BackgroundWriteSink[FragmentWriteJob]:
         return BackgroundWriteSink(
             write_fragment,
-            workers=self.materializer.write_workers,
-            max_pending=self.materializer.write_prefetch,
-            start_method=self.materializer.runtime.writer_worker_start_method,
+            workers=self.config.write_workers,
+            max_pending=self.config.write_prefetch,
+            start_method=self.config.writer_start_method,
             on_submit=lambda job, pending: put_stage_progress(
                 self.progress,
                 worker_id=self.worker_id,

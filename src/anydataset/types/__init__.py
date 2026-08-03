@@ -10,6 +10,9 @@ from typing import Any, Mapping, Union
 from . import item
 from .._compat import StrEnum
 from .._immutable import Immutable
+from .._source_identity import (
+    physical_load_options as _source_physical_load_options,
+)
 from .item import (
     AudioItem,
     AudioMeta,
@@ -60,6 +63,10 @@ class Spec(Immutable):
     split: str | None
     version: str | None
     load_options: Mapping[str, Any]
+    _identity_load_options: Mapping[str, Any] = field(
+        init=False,
+        repr=False,
+    )
     _id: str = field(init=False, repr=False, compare=False)
 
     def __init__(
@@ -69,6 +76,8 @@ class Spec(Immutable):
         split: str | None = None,
         version: str | None = None,
         load_options: Mapping[str, Any] = _EMPTY_LOAD_OPTIONS,
+        *,
+        _identity_load_options: Mapping[str, Any] | None = None,
     ) -> None:
         if not isinstance(source, (Source, str)):
             raise TypeError("Spec.source must be a Source or string source key.")
@@ -89,6 +98,15 @@ class Spec(Immutable):
         self.split = split
         self.version = version
         self.load_options = _freeze_mapping(load_options)
+        physical_load_options = (
+            _source_physical_load_options(
+                source_key(self.source),
+                self.load_options,
+            )
+            if _identity_load_options is None
+            else _identity_load_options
+        )
+        self._identity_load_options = _freeze_mapping(physical_load_options)
         identity = _identity_payload(self)
         self._id = _stable_hash(identity)
         self.seal()
@@ -109,13 +127,14 @@ class Spec(Immutable):
 
     def __reduce__(self):
         return (
-            type(self),
+            _restore_spec,
             (
                 self.source,
                 self.path,
                 self.split,
                 self.version,
                 _thaw(self.load_options),
+                _thaw(self._identity_load_options),
             ),
         )
 
@@ -126,23 +145,26 @@ def _identity_payload(spec: Spec) -> dict[str, Any]:
         "path": spec.path,
         "split": spec.split,
         "version": spec.version,
-        "load_options": _payload_value(_physical_load_options(spec)),
+        "load_options": _payload_value(spec._identity_load_options),
     }
 
 
-_OPERATIONAL_LOAD_OPTIONS = frozenset({"prepare_workers"})
-_TSV_OPERATIONAL_LOAD_OPTIONS = frozenset({"root_field"})
-
-
-def _physical_load_options(spec: Spec) -> dict[str, Any]:
-    operational = set(_OPERATIONAL_LOAD_OPTIONS)
-    if source_key(spec.source) == "tsv":
-        operational.update(_TSV_OPERATIONAL_LOAD_OPTIONS)
-    return {
-        key: value
-        for key, value in spec.load_options.items()
-        if key not in operational
-    }
+def _restore_spec(
+    source: SourceKey,
+    path: str,
+    split: str | None,
+    version: str | None,
+    load_options: Mapping[str, Any],
+    identity_load_options: Mapping[str, Any],
+) -> Spec:
+    return Spec(
+        source,
+        path,
+        split,
+        version,
+        load_options,
+        _identity_load_options=identity_load_options,
+    )
 
 
 def _stable_hash(value: Any) -> str:

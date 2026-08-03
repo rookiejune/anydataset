@@ -55,7 +55,12 @@ from anydataset.types import (
 )
 from anydataset.filter.runtime.collect import collect_ranges_parallel
 from anydataset.filter.runtime.collect import _read_worker_message as read_worker_message
-from anydataset.filter.cache.storage import metrics_ready, read_index_rows, write_index_rows
+from anydataset.filter.cache.storage import (
+    metrics_ready,
+    read_index_rows,
+    read_metric_rows,
+    write_index_rows,
+)
 from anydataset.store import DatasetWriter
 from anydataset.store.jsonio import (
     read_json as read_store_json,
@@ -1985,6 +1990,22 @@ class FilteredDatasetTest(unittest.TestCase):
 
             with self.assertRaises(ValueError):
                 rule.apply(dataset_factory=lambda: dataset, metrics=True, device="cpu")
+
+    def test_filter_decision_rejects_non_json_sequence_metrics(self):
+        with self.assertRaisesRegex(TypeError, "JSON-serializable"):
+            FilterDecision(
+                label=True,
+                metrics={"tags": ("tuple", "is", "not", "json")},
+            )
+
+    def test_metric_rows_validate_deserialized_metrics(self):
+        rows = ({"index": 0, "label": "accept", "metrics": '{"score":NaN}'},)
+        with mock.patch(
+            "anydataset.filter.cache.storage.read_rows",
+            return_value=rows,
+        ):
+            with self.assertRaisesRegex(ValueError, "NaN or infinity"):
+                list(read_metric_rows(Path("unused")))
 
     def test_filter_metrics_keys_must_be_strings(self):
         _register_rows_source("unit_test_filter_metrics_keys")

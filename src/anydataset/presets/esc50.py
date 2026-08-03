@@ -3,12 +3,10 @@ from __future__ import annotations
 from functools import partial
 from typing import Any
 
-from ..types import AudioMeta, AudioView
 from ..dataset.abc import AnyDataset
-from ..types import Preset
-from ..types.item import Transforms
 from ..rowmap import labels, sample_from_row
-from .registry import preset_spec
+from ..types import AudioMeta, AudioView, Source, Spec
+from ..types.item import Transforms
 
 
 class ESC50(AnyDataset):
@@ -20,7 +18,7 @@ class ESC50(AnyDataset):
         **load_options: Any,
     ) -> None:
         super().__init__(
-            spec=preset_spec(Preset.ESC50, split=split, **load_options),
+            spec=create_spec(split=split, **load_options),
             parse_fn=partial(
                 sample_from_row,
                 audio={
@@ -32,3 +30,12 @@ class ESC50(AnyDataset):
             ),
             transforms=transforms,
         )
+
+
+def create_spec(split: str | None = None, **load_options: Any) -> Spec:
+    return Spec(
+        source=Source.HF,
+        path="ashraq/esc50",
+        split="train" if split is None else split,
+        load_options=load_options,
+    )
