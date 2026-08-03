@@ -241,6 +241,27 @@ class StoreTest(unittest.TestCase):
         self.assertEqual(sample_index, ((0, "sample-0"),))
         self.assertEqual(view_indexes, (0,))
 
+    def test_sample_manifest_rejects_invalid_items_json(self):
+        cases = (
+            ("{", "valid JSON"),
+            ("{}", "must be a JSON array"),
+            ("[1]", "item entries"),
+            ('[[["default"], {}]]', "item refs"),
+            ('[[["unknown", "text"], {}]]', "invalid role or modality"),
+            ('[[["default", "text"], 42]]', "metadata must be a JSON object"),
+        )
+        for payload, message in cases:
+            with self.subTest(payload=payload), tempfile.TemporaryDirectory() as tmpdir:
+                root = Path(tmpdir)
+                write_samples_manifest(
+                    root,
+                    [SampleManifestEntry(sample_id="sample-0", sample_index=0)],
+                )
+                _rewrite_sample_items(root, payload)
+
+                with self.assertRaisesRegex(ValueError, message):
+                    tuple(read_samples_manifest(root))
+
     def test_manifest_cache_reuses_handles_until_fingerprint_changes(self):
         import pyarrow.parquet as parquet
 
@@ -301,6 +322,17 @@ class StoreTest(unittest.TestCase):
             self.assertEqual(open_parquet.call_count, 1)
             self.assertEqual(len(cache._files), 1)
             cache.close()
+
+
+def _rewrite_sample_items(root: Path, payload: str) -> None:
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    path = samples_parquet_path(root)
+    table = pq.read_table(path)
+    column = table.schema.get_field_index("items")
+    items = pa.array([payload], type=pa.string())
+    pq.write_table(table.set_column(column, "items", items), path)
 
 
 if __name__ == "__main__":

@@ -1810,6 +1810,24 @@ class StoreSourceTest(unittest.TestCase):
             ):
                 read_store_dataset(output)
 
+    def test_reader_rejects_invalid_sample_metadata_at_lazy_row_boundary(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output = Path(tmpdir) / "dataset"
+            DatasetWriter(output, dataset_id="toy-audio").write(
+                [_audio_sample(waveform=torch.tensor([[1.0]]))]
+            )
+            _rewrite_sample_items(
+                output,
+                '[[["default", "audio"], 42]]',
+            )
+            dataset = read_store_dataset(output)
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "Sample manifest item metadata must be a JSON object",
+            ):
+                dataset[0]
+
 
 def _audio_sample(
     waveform=None,
@@ -1950,6 +1968,17 @@ def _rewrite_sample_indexes_as_float(root: Path) -> None:
     column = table.schema.get_field_index("sample_index")
     indexes = pa.array(table["sample_index"].to_pylist(), type=pa.float64())
     pq.write_table(table.set_column(column, "sample_index", indexes), path)
+
+
+def _rewrite_sample_items(root: Path, payload: str) -> None:
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    path = samples_parquet_path(root)
+    table = pq.read_table(path)
+    column = table.schema.get_field_index("items")
+    items = pa.array([payload], type=pa.string())
+    pq.write_table(table.set_column(column, "items", items), path)
 
 
 if __name__ == "__main__":

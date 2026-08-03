@@ -4,7 +4,7 @@ import json
 import os
 import threading
 from collections import OrderedDict
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
 from pathlib import Path
@@ -19,6 +19,7 @@ from ..._io.files import StatFingerprint as _StatFingerprint
 from ..._io.files import stat_fingerprint as _stat_fingerprint
 from ...types.item import Modality, Role, View
 from .schema import (
+    SampleItem,
     SampleManifestEntry,
     STORE_SCHEMA_VERSION,
     ViewManifestEntry,
@@ -378,15 +379,46 @@ def _sample_entry(row: dict[str, Any]) -> SampleManifestEntry:
     return SampleManifestEntry(
         **{
             **row,
-            "items": tuple(
-                (
-                    (Role(item[0][0]), Modality(item[0][1])),
-                    item[1],
-                )
-                for item in row["items"]
-            ),
+            "items": _sample_items(row.get("items")),
         }
     )
+
+
+def _sample_items(value: object) -> tuple[SampleItem, ...]:
+    if not isinstance(value, str):
+        raise ValueError("Sample manifest items must be a JSON string.")
+    try:
+        decoded = json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise ValueError("Sample manifest items must contain valid JSON.") from exc
+    if not isinstance(decoded, list):
+        raise ValueError("Sample manifest items must be a JSON array.")
+
+    items: list[SampleItem] = []
+    for item in decoded:
+        if not isinstance(item, list) or len(item) != 2:
+            raise ValueError(
+                "Sample manifest item entries must be [ref, metadata] pairs."
+            )
+        ref, metadata = item
+        if not isinstance(ref, list) or len(ref) != 2:
+            raise ValueError(
+                "Sample manifest item refs must be [role, modality] pairs."
+            )
+        try:
+            role, modality = Role(ref[0]), Modality(ref[1])
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "Sample manifest item ref has an invalid role or modality."
+            ) from exc
+        if not isinstance(metadata, Mapping) or any(
+            not isinstance(key, str) for key in metadata
+        ):
+            raise ValueError(
+                "Sample manifest item metadata must be a JSON object."
+            )
+        items.append(((role, modality), dict(metadata)))
+    return tuple(items)
 
 
 def _view_entry(row: dict[str, Any]) -> ViewManifestEntry:
@@ -399,14 +431,6 @@ def _view_entry(row: dict[str, Any]) -> ViewManifestEntry:
             "view": view,
         }
     )
-
-
-def _decode_row(row: dict[str, Any]) -> dict[str, Any]:
-    for key in ("items",):
-        value = row.get(key)
-        if isinstance(value, str):
-            row[key] = json.loads(value)
-    return row
 
 
 def _json_text(value: Any) -> str:
@@ -498,8 +522,7 @@ def _read_manifest_rows(
         )
     else:
         rows = iter(parquet.read_row_group(row_group).to_pylist())
-    for row in rows:
-        yield _decode_row(row)
+    yield from rows
 
 
 _SAMPLE_SCHEMA = (
