@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import multiprocessing
 import traceback
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -14,7 +13,7 @@ from ..._runtime.parallel import (
     set_torch_device,
     set_worker_environment,
 )
-from ..._runtime.progress import Progress, put_progress
+from ..._runtime.progress import Progress, ProgressWriter, put_progress
 from ...runtime import Runtime
 from ...types.item import Role, Schema
 from .types import MaterializerProvider
@@ -64,7 +63,7 @@ def materialize_worker(
     config: WorkerConfig,
     dataset_factory: DatasetFactory,
     provider_factory: ProviderFactory,
-    progress: multiprocessing.Queue,
+    progress: ProgressWriter[Progress],
     barrier: Any,
 ) -> None:
     with use_run_logs_dir(config.logs_dir):

@@ -23,9 +23,10 @@ PYTHON=/path/to/python3.9
 PYTHONPYCACHEPREFIX=/tmp/anydataset-pycache "$PYTHON" -m compileall -q src tests examples
 "$PYTHON" -m ruff check src tests scripts examples
 "$PYTHON" -m basedpyright --pythonpath "$PYTHON"
+"$PYTHON" scripts/check_type_completeness.py
 PYTHONPYCACHEPREFIX=/tmp/anydataset-pycache PYTHONPATH=src "$PYTHON" -m pytest -q
 ```
 
 `pyproject.toml` 的 `requires-python >= 3.9` 是安装下限；classifiers 当前列出
 Python 3.9-3.12。发布前至少验证 3.9，并在声称某个版本已验证时使用对应 interpreter
-重复以上两条命令。
+重复以上完整门禁。

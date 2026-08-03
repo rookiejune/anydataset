@@ -12,6 +12,7 @@ import time
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from queue import Empty
+from types import TracebackType
 from typing import Any, Protocol, TypeVar, cast
 
 from .parallel import ProcessHandle
@@ -165,7 +166,7 @@ class ProgressDashboard:
         self._bar: _ProgressBar | None = None
         self._stage_bars: dict[str, _ProgressBar] = {}
 
-    def __enter__(self):
+    def __enter__(self) -> ProgressDashboard:
         self._bar = _progress_bar(desc=self.desc, total=self.total, position=0)
         self._bar.__enter__()
         if self.initial:
@@ -181,7 +182,12 @@ class ProgressDashboard:
             self._stage_bars[stage] = bar
         return self
 
-    def __exit__(self, exc_type, exc_value, traceback) -> None:
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
         for stage in reversed(self.stages):
             bar = self._stage_bars.get(stage)
             if bar is not None:

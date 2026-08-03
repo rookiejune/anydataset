@@ -57,7 +57,7 @@ class _Requirement(Immutable, Generic[ViewT, MetaT]):
         cls,
         views: Iterable[ViewT],
         meta: Iterable[MetaT],
-    ):
+    ) -> Self:
         return cls(
             views=frozenset(views),
             meta=frozenset(meta),
@@ -86,7 +86,7 @@ class _Item(Immutable, Generic[ViewT, MetaT]):
 
     def select_by(
         self,
-        requirement,
+        requirement: _Requirement[ViewT, MetaT],
     ) -> Self:
         return type(self)(
             views=_select(self.views, requirement.views),
@@ -122,6 +122,9 @@ class SemanticAcousticView(TypedDict):
 
 @dataclass
 class AudioItem(_Item[AudioView, AudioMeta]):
+    views: Mapping[AudioView, Any] = field(default_factory=dict)
+    meta: Mapping[AudioMeta, Any] = field(default_factory=dict)
+
     def __post_init__(self) -> None:
         self.views = _enum_mapping("AudioItem.views", self.views, AudioView)
         self.meta = _enum_mapping("AudioItem.meta", self.meta, AudioMeta)
@@ -138,6 +141,9 @@ class ImageView(StrEnum):
 
 @dataclass
 class ImageItem(_Item[ImageView, ImageMeta]):
+    views: Mapping[ImageView, Any] = field(default_factory=dict)
+    meta: Mapping[ImageMeta, Any] = field(default_factory=dict)
+
     def __post_init__(self) -> None:
         self.views = _enum_mapping("ImageItem.views", self.views, ImageView)
         self.meta = _enum_mapping("ImageItem.meta", self.meta, ImageMeta)
@@ -156,6 +162,9 @@ class TextView(StrEnum):
 
 @dataclass
 class TextItem(_Item[TextView, TextMeta]):
+    views: Mapping[TextView, Any] = field(default_factory=dict)
+    meta: Mapping[TextMeta, Any] = field(default_factory=dict)
+
     def __post_init__(self) -> None:
         self.views = _enum_mapping("TextItem.views", self.views, TextView)
         self.meta = _text_meta_mapping("TextItem.meta", self.meta)
@@ -169,6 +178,9 @@ class AudioReq(
         AudioMeta,
     ]
 ):
+    views: frozenset[AudioView] = frozenset()
+    meta: frozenset[AudioMeta] = frozenset()
+
     def __post_init__(self) -> None:
         self.views = _enum_keys("AudioReq.views", self.views, AudioView)
         self.meta = _enum_keys("AudioReq.meta", self.meta, AudioMeta)
@@ -182,6 +194,9 @@ class ImageReq(
         ImageMeta,
     ]
 ):
+    views: frozenset[ImageView] = frozenset()
+    meta: frozenset[ImageMeta] = frozenset()
+
     def __post_init__(self) -> None:
         self.views = _enum_keys("ImageReq.views", self.views, ImageView)
         self.meta = _enum_keys("ImageReq.meta", self.meta, ImageMeta)
@@ -195,6 +210,9 @@ class TextReq(
         TextMeta,
     ]
 ):
+    views: frozenset[TextView] = frozenset()
+    meta: frozenset[TextMeta] = frozenset()
+
     def __post_init__(self) -> None:
         self.views = _enum_keys("TextReq.views", self.views, TextView)
         self.meta = _enum_keys("TextReq.meta", self.meta, TextMeta)

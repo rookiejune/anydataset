@@ -1094,6 +1094,7 @@ dataset = AnyDataset(
 python -m compileall -q src tests examples
 python -m ruff check src tests scripts examples
 python -m basedpyright --pythonpath "$(python -c 'import sys; print(sys.executable)')"
+python scripts/check_type_completeness.py
 python -m pytest -q
 ```
 
@@ -1114,6 +1115,6 @@ python scripts/check_release.py
 `anydataset` v1 把 canonical `Sample` 映射、source registry、filter cache
 布局、store schema 和 materializer API 作为公开稳定面。包会暴露
 `anydataset.__version__`，发布检查会先确认它和 `pyproject.toml` 版本一致，
-再清理旧构建产物、运行 pytest、构建 sdist/wheel、执行 `twine check`，并在
-隔离虚拟环境里安装 wheel 做 smoke test。只想检查版本和测试门禁时，可以加
-`--skip-build`。
+再运行 pytest、Ruff、BasedPyright 和导出类型完整度 ratchet，然后构建
+sdist/wheel、执行 `twine check`，并在隔离虚拟环境里安装 wheel 做 smoke test。
+只想检查版本和测试门禁时，可以加 `--skip-build`。

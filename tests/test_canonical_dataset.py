@@ -557,6 +557,24 @@ class CanonicalDatasetTest(unittest.TestCase):
         with self.assertRaises(KeyError):
             AnyDataset.resolve_sample(sample, schema)
 
+    def test_resolve_sample_rejects_mismatched_requirement_type(self):
+        sample = {
+            (Role.DEFAULT, Modality.AUDIO): AudioItem(
+                views={AudioView.WAVEFORM: ([0.0], 16000)},
+            )
+        }
+        schema = {
+            (Role.DEFAULT, Modality.AUDIO): TextReq(
+                views=frozenset({TextView.TEXT}),
+            )
+        }
+
+        with self.assertRaisesRegex(
+            TypeError,
+            "item and schema requirement types must match",
+        ):
+            AnyDataset.resolve_sample(sample, schema)
+
     def test_map_preset_accepts_transforms(self):
         ref = (Role.DEFAULT, Modality.IMAGE)
         dataset = AnyDataset.preset(

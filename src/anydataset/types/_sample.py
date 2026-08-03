@@ -6,7 +6,19 @@ from typing import Any, TypeVar
 import torch
 
 from .._compat import StrEnum
-from .item import AudioItem, ImageItem, Item, Sample, Schema, TextItem, _Item
+from .item import (
+    AudioItem,
+    AudioReq,
+    ImageItem,
+    ImageReq,
+    Item,
+    Requirement,
+    Sample,
+    Schema,
+    TextItem,
+    TextReq,
+    _Item,
+)
 
 ViewT = TypeVar("ViewT", bound=StrEnum)
 MetaT = TypeVar("MetaT", bound=StrEnum)
@@ -15,9 +27,19 @@ ItemT = TypeVar("ItemT", bound=Item)
 
 def select(sample: Sample, schema: Schema) -> Sample:
     return {
-        reference: sample[reference].select_by(requirement)
+        reference: _select_item(sample[reference], requirement)
         for reference, requirement in schema.items()
     }
+
+
+def _select_item(item: Item, requirement: Requirement) -> Item:
+    if isinstance(item, AudioItem) and isinstance(requirement, AudioReq):
+        return item.select_by(requirement)
+    if isinstance(item, ImageItem) and isinstance(requirement, ImageReq):
+        return item.select_by(requirement)
+    if isinstance(item, TextItem) and isinstance(requirement, TextReq):
+        return item.select_by(requirement)
+    raise TypeError("Sample item and schema requirement types must match.")
 
 
 def combine(left: Sample, right: Sample, *, context: str) -> Sample:

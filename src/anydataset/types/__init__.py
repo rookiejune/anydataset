@@ -5,7 +5,7 @@ import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, Mapping, Union
+from typing import Any, Callable, Mapping, Union
 
 from . import item
 from .._compat import StrEnum
@@ -101,7 +101,19 @@ class Spec(Immutable):
     def to_dict(self) -> dict[str, Any]:
         return {"id": self.id, **_identity_payload(self)}
 
-    def __reduce__(self):
+    def __reduce__(
+        self,
+    ) -> tuple[
+        Callable[..., Spec],
+        tuple[
+            SourceKey,
+            str,
+            str | None,
+            str | None,
+            Mapping[str, Any],
+            Mapping[str, Any],
+        ],
+    ]:
         return (
             _restore_spec,
             (

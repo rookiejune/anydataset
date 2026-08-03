@@ -5,6 +5,7 @@ import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from multiprocessing import current_process
+from types import TracebackType
 from typing import TYPE_CHECKING, Any
 
 from .._runtime.logging import write_info, write_warning
@@ -248,7 +249,12 @@ class ProviderServer:
     def __enter__(self) -> ProviderServer:
         return self.start()
 
-    def __exit__(self, exc_type, exc, tb) -> None:
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
         self.stop()
 
     def _wait_ready(self) -> None:

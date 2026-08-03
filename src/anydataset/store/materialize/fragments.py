@@ -1,17 +1,16 @@
 from __future__ import annotations
 
-import multiprocessing
 import time
 from collections import deque
 from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from itertools import islice
 from pathlib import Path
-from typing import Deque, Protocol, Union
+from typing import Deque, Protocol
 
 from ..._compat import strict_zip
 from ..._runtime.parallel import StartMethod
-from ..._runtime.progress import Progress, ProgressDashboard, put_progress
+from ..._runtime.progress import Progress, ProgressWriter, put_progress
 from ..._runtime.resume import index_batch_id
 from ..._runtime.write_pipeline import BackgroundWriteSink
 from ...types.item import Sample
@@ -20,7 +19,7 @@ from .types import MaterializerProvider
 from ..part.writer import DatasetFragmentWriter
 
 
-ProgressSink = Union[multiprocessing.Queue, ProgressDashboard]
+ProgressSink = ProgressWriter[Progress]
 
 
 class FragmentStrategy(Protocol):

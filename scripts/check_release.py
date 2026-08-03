@@ -50,6 +50,7 @@ def main() -> None:
             ],
             root,
         )
+        _run([sys.executable, "scripts/check_type_completeness.py"], root)
 
     if args.skip_build:
         return

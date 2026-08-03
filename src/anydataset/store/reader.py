@@ -6,6 +6,7 @@ import tempfile
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import TracebackType
 from typing import Any, cast
 
 from .._legacy import legacy
@@ -199,7 +200,12 @@ class StoreDataset(MapStyleABC):
         self._ensure_open()
         return self
 
-    def __exit__(self, exc_type, exc, traceback) -> None:
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
         self.close()
 
     def __getstate__(self) -> dict[str, Any]:

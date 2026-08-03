@@ -5,10 +5,12 @@ import json
 import os
 import threading
 import time
+from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from types import TracebackType
+from typing import TYPE_CHECKING, Any, TextIO
 
 from ._validation import optional_positive_float, positive_float
 
@@ -36,7 +38,7 @@ class CacheManifest:
 
 class CacheManager:
     def __init__(self) -> None:
-        self.root = _cache_dir()
+        self.root: Path = _cache_dir()
 
     def prepare(self, spec: Spec) -> CacheManifest:
         cache_path = self._cache_path(spec)
@@ -60,7 +62,7 @@ class CacheManager:
         cache.ready_path.write_text("ready\n", encoding="utf-8")
 
     @contextmanager
-    def prepare_lock(self, cache: CacheManifest):
+    def prepare_lock(self, cache: CacheManifest) -> Iterator[None]:
         with FileLock(cache.lock_path):
             yield
 
@@ -84,12 +86,18 @@ class FileLock:
         wait_timeout: float | None = None,
         poll_interval: float = 0.2,
     ) -> None:
-        self.path = path
-        self.wait_timeout = optional_positive_float("wait_timeout", wait_timeout)
-        self.poll_interval = positive_float("poll_interval", poll_interval)
-        self.file = None
+        self.path: Path = path
+        self.wait_timeout: float | None = optional_positive_float(
+            "wait_timeout",
+            wait_timeout,
+        )
+        self.poll_interval: float = positive_float(
+            "poll_interval",
+            poll_interval,
+        )
+        self.file: TextIO | None = None
 
-    def __enter__(self):
+    def __enter__(self) -> FileLock:
         deadline = (
             None
             if self.wait_timeout is None
@@ -108,7 +116,7 @@ class FileLock:
                     ) from exc
                 time.sleep(min(self.poll_interval, remaining))
 
-    def _acquire(self):
+    def _acquire(self) -> FileLock:
         lock = _thread_lock(self.path)
         if not lock.acquire(blocking=False):
             raise FileLockError(f"File lock is already held: {self.path}")
@@ -132,7 +140,12 @@ class FileLock:
             lock.release()
             raise
 
-    def __exit__(self, exc_type, exc, traceback) -> None:
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
         if self.file is not None:
             fcntl.flock(self.file.fileno(), fcntl.LOCK_UN)
             self.file.close()

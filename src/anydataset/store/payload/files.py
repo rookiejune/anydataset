@@ -6,6 +6,7 @@ import os
 import shutil
 import threading
 from pathlib import Path
+from types import TracebackType
 from typing import Any
 
 from ..._io.files import stat_fingerprint
@@ -49,7 +50,12 @@ class StoreFilesLease:
             raise RuntimeError("Store files lease is closed.")
         return self
 
-    def __exit__(self, exc_type, exc, traceback) -> None:
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
         self.close()
 
     def __getstate__(self) -> dict[str, Any]:

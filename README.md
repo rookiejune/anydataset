@@ -1055,6 +1055,7 @@ to each other role's single input modality.
 python -m compileall -q src tests examples
 python -m ruff check src tests scripts examples
 python -m basedpyright --pythonpath "$(python -c 'import sys; print(sys.executable)')"
+python scripts/check_type_completeness.py
 python -m pytest -q
 ```
 
@@ -1071,7 +1072,8 @@ python scripts/check_release.py
 ```
 
 The package exposes `anydataset.__version__`, and the release check verifies
-that it matches the `pyproject.toml` version before building. The release check
-cleans old build artifacts, runs pytest, builds sdist/wheel, runs `twine check`,
-and smoke-installs the wheel in an isolated virtual environment. Use
-`--skip-build` when only the version and test gate should run.
+that it matches the `pyproject.toml` version before building. It runs pytest,
+Ruff, BasedPyright, and the exported-type completeness ratchet, then builds the
+sdist/wheel, runs `twine check`, and smoke-installs the wheel in an isolated
+virtual environment. Use `--skip-build` when only the version and test gate
+should run.
