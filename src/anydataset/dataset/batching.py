@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import operator
+from bisect import bisect_left
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from math import isfinite
@@ -71,6 +72,15 @@ class _Plan:
 @dataclass(frozen=True)
 class _Candidate:
     records: tuple[_PendingRecord, ...]
+    cost: int
+    padding_ratio: float
+    arrival: int
+
+
+@dataclass(frozen=True)
+class _CandidateRange:
+    start: int
+    stop: int
     cost: int
     padding_ratio: float
     arrival: int
@@ -330,58 +340,170 @@ def _select_candidate(
         pending,
         key=lambda item: (item.record.cost, item.arrival),
     )
-    multi_candidates: list[_Candidate] = []
-    single_candidates: list[_Candidate] = []
-    for start in range(len(sorted_pending)):
-        total = 0
-        max_cost = 0
-        for stop in range(start, len(sorted_pending)):
-            count = stop - start + 1
-            if max_batch_samples is not None and count > max_batch_samples:
-                break
-            item = sorted_pending[stop]
-            total += item.record.cost
-            if total > max_batch_memory:
-                break
-            max_cost = max(max_cost, item.record.cost)
-            records = tuple(sorted_pending[start : stop + 1])
-            candidate = _Candidate(
-                records=records,
-                cost=total,
-                padding_ratio=_padding_ratio(total, max_cost, count),
-                arrival=min(record.arrival for record in records),
-            )
-            if count == 1:
-                single_candidates.append(candidate)
-            else:
-                multi_candidates.append(candidate)
-    if multi_candidates:
-        threshold_candidates = [
-            candidate
-            for candidate in multi_candidates
-            if candidate.padding_ratio <= max_padding_ratio
-        ]
-        if threshold_candidates:
-            return max(
-                threshold_candidates,
-                key=lambda candidate: (
-                    candidate.cost,
-                    -candidate.padding_ratio,
-                    -candidate.arrival,
-                ),
-            )
-        return max(
-            multi_candidates,
-            key=lambda candidate: (
-                -candidate.padding_ratio,
-                candidate.cost,
-                -candidate.arrival,
-            ),
+    prefix_costs = [0]
+    for item in sorted_pending:
+        prefix_costs.append(prefix_costs[-1] + item.record.cost)
+
+    tree_size = 1 << (len(sorted_pending) - 1).bit_length()
+    arrival_sentinel = max(item.arrival for item in sorted_pending) + 1
+    arrival_tree = [arrival_sentinel] * (tree_size * 2)
+    for offset, item in enumerate(sorted_pending):
+        arrival_tree[tree_size + offset] = item.arrival
+    for offset in range(tree_size - 1, 0, -1):
+        arrival_tree[offset] = min(
+            arrival_tree[offset * 2], arrival_tree[offset * 2 + 1]
         )
-    if single_candidates:
-        return max(
-            single_candidates,
-            key=lambda candidate: (candidate.cost, -candidate.arrival),
+
+    def minimum_arrival(start: int, stop: int) -> int:
+        left = tree_size + start
+        right = tree_size + stop + 1
+        result = arrival_sentinel
+        while left < right:
+            if left & 1:
+                result = min(result, arrival_tree[left])
+                left += 1
+            if right & 1:
+                right -= 1
+                result = min(result, arrival_tree[right])
+            left //= 2
+            right //= 2
+        return result
+
+    def first_start_with_padding_at_most(
+        start: int,
+        stop: int,
+        maximum: float,
+    ) -> int:
+        left = start
+        right = stop - 1
+        while left < right:
+            middle = (left + right) // 2
+            count = stop - middle + 1
+            cost = prefix_costs[stop + 1] - prefix_costs[middle]
+            if (
+                _padding_ratio(
+                    cost,
+                    sorted_pending[stop].record.cost,
+                    count,
+                )
+                <= maximum
+            ):
+                right = middle
+            else:
+                left = middle + 1
+        return left
+
+    def candidate_range(start: int, stop: int) -> _CandidateRange:
+        cost = prefix_costs[stop + 1] - prefix_costs[start]
+        return _CandidateRange(
+            start=start,
+            stop=stop,
+            cost=cost,
+            padding_ratio=_padding_ratio(
+                cost,
+                sorted_pending[stop].record.cost,
+                stop - start + 1,
+            ),
+            arrival=minimum_arrival(start, stop),
+        )
+
+    best_threshold: _CandidateRange | None = None
+    feasible_ranges: list[tuple[int, int, float]] = []
+    if max_batch_samples is None or max_batch_samples >= 2:
+        for stop in range(1, len(sorted_pending)):
+            # For a fixed maximum cost, both budget feasibility and padding
+            # improve monotonically as the range start moves right.
+            start = bisect_left(
+                prefix_costs,
+                prefix_costs[stop + 1] - max_batch_memory,
+                0,
+                stop,
+            )
+            if max_batch_samples is not None:
+                start = max(start, stop - max_batch_samples + 1)
+            if start >= stop:
+                continue
+
+            pair_start = stop - 1
+            pair_cost = prefix_costs[stop + 1] - prefix_costs[pair_start]
+            pair_padding = _padding_ratio(
+                pair_cost,
+                sorted_pending[stop].record.cost,
+                2,
+            )
+            feasible_ranges.append((start, stop, pair_padding))
+            if pair_padding > max_padding_ratio:
+                continue
+            threshold = candidate_range(
+                first_start_with_padding_at_most(
+                    start,
+                    stop,
+                    max_padding_ratio,
+                ),
+                stop,
+            )
+            if best_threshold is None or (
+                threshold.cost,
+                -threshold.padding_ratio,
+                -threshold.arrival,
+                -threshold.start,
+                -threshold.stop,
+            ) > (
+                best_threshold.cost,
+                -best_threshold.padding_ratio,
+                -best_threshold.arrival,
+                -best_threshold.start,
+                -best_threshold.stop,
+            ):
+                best_threshold = threshold
+
+    best_fallback: _CandidateRange | None = None
+    if best_threshold is None:
+        for start, stop, pair_padding in feasible_ranges:
+            # Preserve the largest cost on a rounded minimum-padding plateau.
+            fallback = candidate_range(
+                first_start_with_padding_at_most(start, stop, pair_padding),
+                stop,
+            )
+            if best_fallback is None or (
+                -fallback.padding_ratio,
+                fallback.cost,
+                -fallback.arrival,
+                -fallback.start,
+                -fallback.stop,
+            ) > (
+                -best_fallback.padding_ratio,
+                best_fallback.cost,
+                -best_fallback.arrival,
+                -best_fallback.start,
+                -best_fallback.stop,
+            ):
+                best_fallback = fallback
+
+    selected = best_threshold if best_threshold is not None else best_fallback
+    if selected is not None:
+        return _Candidate(
+            records=tuple(sorted_pending[selected.start : selected.stop + 1]),
+            cost=selected.cost,
+            padding_ratio=selected.padding_ratio,
+            arrival=selected.arrival,
+        )
+
+    single = max(
+        (
+            item
+            for item in sorted_pending
+            if item.record.cost <= max_batch_memory
+        ),
+        key=lambda item: (item.record.cost, -item.arrival),
+        default=None,
+    )
+    if single is not None:
+        return _Candidate(
+            records=(single,),
+            cost=single.record.cost,
+            padding_ratio=0.0,
+            arrival=single.arrival,
         )
     oldest = min(pending, key=lambda item: item.arrival)
     raise ValueError(

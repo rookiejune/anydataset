@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import random
 from collections.abc import Sequence
 from unittest import mock
 
@@ -572,6 +573,56 @@ def test_streaming_planner_matches_reference_bucket_order(
     )
 
 
+def test_streaming_planner_matches_randomized_reference() -> None:
+    randomizer = random.Random(0)
+    for _ in range(500):
+        costs = [
+            randomizer.randint(1, 20)
+            for _ in range(randomizer.randint(1, 30))
+        ]
+        budget = randomizer.randint(max(costs), max(costs) * 5)
+        window = randomizer.randint(1, min(len(costs), 12))
+        max_samples = randomizer.choice((None, 1, 2, 3, 5, 8))
+        max_padding_ratio = randomizer.choice((0.0, 0.05, 0.2, 0.5, 1.0))
+        actual = [
+            [record.index for record in plan.records]
+            for plan in _plans(
+                (_Record(index, cost) for index, cost in enumerate(costs)),
+                max_batch_memory=budget,
+                planning_window=window,
+                max_batch_samples=max_samples,
+                max_padding_ratio=max_padding_ratio,
+            )
+        ]
+
+        assert actual == _reference_plans(
+            costs,
+            budget=budget,
+            window=window,
+            max_samples=max_samples,
+            max_padding_ratio=max_padding_ratio,
+        )
+
+
+def test_streaming_planner_preserves_fallback_float_plateau() -> None:
+    largest_cost = 15 * 10**322
+    costs = [largest_cost - 2, largest_cost - 1, largest_cost]
+
+    plans = list(
+        _plans(
+            (_Record(index, cost) for index, cost in enumerate(costs)),
+            max_batch_memory=sum(costs),
+            planning_window=3,
+            max_batch_samples=3,
+            max_padding_ratio=0.0,
+        )
+    )
+
+    assert [[record.index for record in plan.records] for plan in plans] == [
+        [0, 1, 2]
+    ]
+
+
 def test_loader_class_is_not_public_api() -> None:
     assert callable(MapStyleABC.dataloader)
     assert "AnyDataset" in anydataset.__all__
@@ -629,6 +680,7 @@ def _reference_plans(
     budget: int,
     window: int,
     max_samples: int | None,
+    max_padding_ratio: float = 0.2,
 ) -> list[list[int]]:
     pending: list[tuple[int, _Record]] = []
     source = iter(enumerate(costs))
@@ -657,7 +709,7 @@ def _reference_plans(
             threshold = [
                 candidate
                 for candidate in candidates
-                if candidate[2] <= 0.2
+                if candidate[2] <= max_padding_ratio
             ]
             if threshold:
                 selected = max(
