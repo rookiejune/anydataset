@@ -107,7 +107,7 @@ fleurs = AnyDataset.preset("fleurs", split="train", config_name="en_us")
 
 内置 preset 全部是 map-style：`MNIST`、`CIFAR10`、`FSD50K`、`COMMON_VOICE`、
 `FLEURS`、`LIBRISPEECH_ASR`、`ESC50`、`NSYNTH` 和 `WMT19`。
-`IterableAnyDataset.preset()` 会显式报错；自定义真正只能流式读取的 source 仍可直接
+`IterableAnyDataset` 不提供 preset 构造器；自定义真正只能流式读取的 source 仍可直接
 构造 `IterableAnyDataset`。两个入口都接受
 `transforms=...`，在 parse 后执行 item 级 transform。
 
@@ -229,9 +229,9 @@ csv_spec = resolve_dataset("sharded_csv:///data/bitext:train")
 
 `Spec.source`、`path`、`split`、`version` 和物理 `load_options` 都参与
 `Spec.id`。不改变 prepared 物理数据的 operational 选项不进入 `Spec.id` / prepare
-cache 身份；`prepare_workers` 是所有 source 的默认 operational 选项。同一路径改指向
-另一个物理快照时，应更新 `version` 或对应物理 load option；source prepare cache 只会在
-最终 identity 相同时复用。
+cache 身份；全局 `prepare_workers` 以及 source 声明的选项（例如 TSV `root_field`）
+都属于 operational 选项。同一路径改指向另一个物理快照时，应更新 `version` 或对应物理
+load option；source prepare cache 只会在最终 identity 相同时复用。
 
 新增物理 source 类型时，注册一个工厂即可；`AnyDataset` 会按 `Spec.source` 从注册器取 source：
 
@@ -253,7 +253,8 @@ dataset = IterableAnyDataset(
 
 source 特有的 operational 选项可通过
 `register_source(..., operational_load_options=(...))` 声明，例如只影响读取时字段注入、
-不改变 prepared 物理数据的选项。
+不改变 prepared 物理数据的选项。自定义 source 必须先注册，再用该 source key 构造
+`Spec`，从而在首次使用前固定 identity policy。
 
 能够跳过全流扫描的 iterable source 可以额外实现
 `iter_shard(dataset, *, num_shards, shard_id)`。该 source 方法必须为精确的

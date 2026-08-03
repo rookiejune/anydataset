@@ -29,9 +29,8 @@ from .manifest.schema import (
     LEGACY_STORE_SCHEMA_VERSION,
     DatasetManifest,
     SampleManifestEntry,
-    STORE_SCHEMA_VERSION,
     ViewManifestEntry,
-    normalize_provenance,
+    dataset_manifest_from_dict,
     view_from_dict,
 )
 from .manifest.io import (
@@ -55,9 +54,6 @@ from .payload.archive import PayloadCache, payload_value, read_payload_bytes
 
 _SAMPLE_INDEX_VALIDATION_VERSION = 2
 _SAMPLE_ID_SET_LIMIT = 1_000_000
-_BASE_DATASET_MANIFEST_FIELDS = frozenset(
-    {"dataset_id", "sample_count", "schema_version", "split"}
-)
 
 # Pickles written before the payload grouping code moved out of this module refer
 # to this private symbol. Keep it bound to the replacement class during loading.
@@ -288,25 +284,8 @@ def read_store_manifest(
 ) -> DatasetManifest:
     root = Path(root).expanduser()
     _validate_dataset_root(root)
-    data = read_json(dataset_json_path(root))
-    if not isinstance(data, Mapping):
-        raise ValueError("Store dataset manifest must be a JSON object.")
-    version = data.get("schema_version")
-    if type(version) is not int or version not in {
-        LEGACY_STORE_SCHEMA_VERSION,
-        STORE_SCHEMA_VERSION,
-    }:
-        migration = (
-            " Use anydataset.store.migrate_store(source, output) for a schema-v1 store."
-            if version is None or (type(version) is int and version == 1)
-            else ""
-        )
-        raise ValueError(
-            "Unsupported store schema_version: "
-            f"{version!r}; expected {LEGACY_STORE_SCHEMA_VERSION} or "
-            f"{STORE_SCHEMA_VERSION}.{migration}"
-        )
-    if version == LEGACY_STORE_SCHEMA_VERSION:
+    manifest = dataset_manifest_from_dict(read_json(dataset_json_path(root)))
+    if manifest.schema_version == LEGACY_STORE_SCHEMA_VERSION:
         legacy(
             "store schema_version 2",
             legacy_policy=legacy_policy,
@@ -323,51 +302,7 @@ def read_store_manifest(
             ),
             stacklevel=2,
         )
-    return _dataset_manifest(data, schema_version=version)
-
-
-def _dataset_manifest(
-    data: Mapping[str, Any],
-    *,
-    schema_version: int,
-) -> DatasetManifest:
-    fields = frozenset(data)
-    required = _BASE_DATASET_MANIFEST_FIELDS
-    if schema_version == STORE_SCHEMA_VERSION:
-        required = required | {"provenance"}
-    missing = required - fields
-    if missing:
-        raise ValueError(
-            f"Store dataset manifest is missing field {sorted(missing)[0]!r}."
-        )
-    allowed = required
-    unsupported = fields - allowed
-    if unsupported:
-        raise ValueError(
-            f"Store dataset manifest has unsupported field {sorted(unsupported)[0]!r}."
-        )
-
-    dataset_id = data["dataset_id"]
-    if not isinstance(dataset_id, str):
-        raise ValueError("Store dataset_id must be a string.")
-    sample_count = data["sample_count"]
-    if type(sample_count) is not int or sample_count < 0:
-        raise ValueError("Store sample_count must be a non-negative integer.")
-    split = data["split"]
-    if split is not None and not isinstance(split, str):
-        raise ValueError("Store split must be a string or None.")
-    provenance = (
-        normalize_provenance(data["provenance"])
-        if schema_version == STORE_SCHEMA_VERSION
-        else {}
-    )
-    return DatasetManifest(
-        dataset_id=dataset_id,
-        sample_count=sample_count,
-        schema_version=schema_version,
-        split=split,
-        provenance=provenance,
-    )
+    return manifest
 
 
 def read_store_views(

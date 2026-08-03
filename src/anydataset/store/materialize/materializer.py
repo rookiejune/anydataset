@@ -737,6 +737,7 @@ class ViewMaterializer:
                     WorkerConfig(
                         output_dir=Path(self.output_dir),
                         split=self.split,
+                        provenance=self._provenance,
                         max_shard_samples=self.max_shard_samples,
                         batch_size=self.batch_size,
                         commit_samples=commit_samples,
@@ -856,33 +857,6 @@ class ViewMaterializer:
             with_view_provider(sample, cast(Provider, provider)),
         )
 
-    def _sample_records_with_provider(
-        self,
-        dataset: Any,
-        provider: MaterializerProvider,
-        *,
-        num_shards: int,
-        shard_id: int,
-    ) -> Iterator[tuple[int, Sample]]:
-        records = iter_shard(dataset, num_shards, shard_id)
-        if not self._uses_batch_provider(provider):
-            for index, sample in records:
-                yield index, self._sample_with_provider(sample, provider)
-            return
-
-        for batch in sample_index_batches(records, self.batch_size):
-            indexes = tuple(index for index, _sample in batch)
-            samples = tuple(sample for _index, sample in batch)
-            outputs = tuple(
-                self._resilient_samples_with_batch_provider(
-                    samples,
-                    provider,
-                    worker_id=shard_id,
-                )
-            )
-            validate_batch_outputs(outputs, len(samples))
-            yield from strict_zip(indexes, outputs)
-
     def _write_resumable_indexed_batches(
         self,
         batches: Iterable[Sequence[tuple[int, Sample]]],
@@ -911,6 +885,7 @@ class ViewMaterializer:
             config=FragmentBatchConfig(
                 dataset_id=self._dataset_id,
                 split=self.split,
+                provenance=self._provenance,
                 max_shard_samples=self.max_shard_samples,
                 commit_samples=commit_samples,
                 write_workers=self.write_workers,

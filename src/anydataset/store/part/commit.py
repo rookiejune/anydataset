@@ -31,6 +31,7 @@ from ..manifest.schema import (
     STORE_SCHEMA_VERSION,
     ViewManifestEntry,
     dataset_manifest_dict,
+    normalize_provenance,
 )
 from ..manifest.io import (
     ManifestParquetCache,
@@ -60,6 +61,40 @@ _PROGRESS_BATCH_SIZE = 1024
 class _FragmentInfo:
     path: Path
     indexes: tuple[int, ...]
+    provenance: Mapping[str, str]
+
+
+def _common_provenance(
+    inputs: Iterable[tuple[Path, Mapping[str, str]]],
+    *,
+    kind: str,
+) -> dict[str, str] | None:
+    expected: dict[str, str] | None = None
+    expected_path: Path | None = None
+    for path, provenance in inputs:
+        current = dict(provenance)
+        if expected is None:
+            expected = current
+            expected_path = path
+        elif current != expected:
+            raise ValueError(
+                f"{kind} {path} provenance does not match {expected_path}."
+            )
+    return expected
+
+
+def _commit_provenance(
+    input_provenance: Mapping[str, str] | None,
+    explicit: Mapping[str, str] | None,
+) -> dict[str, str]:
+    if explicit is None:
+        return {} if input_provenance is None else dict(input_provenance)
+    normalized = normalize_provenance(explicit)
+    if input_provenance is not None and normalized != input_provenance:
+        raise ValueError(
+            "Explicit commit provenance does not match input provenance."
+        )
+    return normalized
 
 
 class _IndexRuns:
@@ -98,7 +133,8 @@ def commit_store_parts(
     _put_progress(progress, "scan", len(parts))
     if not parts:
         raise ValueError(f"No materialized parts found: {parts_dir}")
-    _validate_parts(parts, dataset_id, split, progress=progress)
+    input_provenance = _validate_parts(parts, dataset_id, split, progress=progress)
+    commit_provenance = _commit_provenance(input_provenance, provenance)
     views = _store_views(parts)
     validate_store_payloads(parts)
     with _bounded_store_roots(
@@ -106,6 +142,7 @@ def commit_store_parts(
         parts,
         dataset_id=dataset_id,
         split=split,
+        provenance=commit_provenance,
         progress=progress,
     ) as roots:
         return replace_dir(
@@ -116,7 +153,7 @@ def commit_store_parts(
                 dataset_id=dataset_id,
                 split=split,
                 views=views,
-                provenance=provenance,
+                provenance=commit_provenance,
                 progress=progress,
             ),
         )
@@ -134,14 +171,25 @@ def commit_store_fragments(
 ) -> Path:
     if expected_sample_count is not None and expected_sample_count < 0:
         raise ValueError("expected_sample_count must be non-negative.")
-    fragments = _fragment_roots(
-        fragments_dir,
-        dataset_id=dataset_id,
-        split=split,
-        progress=progress,
+    fragments_root = Path(fragments_dir).expanduser()
+    fragment_infos = (
+        _fragment_infos(
+            fragments_root,
+            dataset_id=dataset_id,
+            split=split,
+            progress=progress,
+        )
+        if fragments_root.is_dir()
+        else ()
     )
+    fragments = tuple(info.path for info in fragment_infos)
     if not fragments:
         raise ValueError(f"No materialized fragments found: {fragments_dir}")
+    input_provenance = _common_provenance(
+        ((info.path, info.provenance) for info in fragment_infos),
+        kind="Fragment",
+    )
+    commit_provenance = _commit_provenance(input_provenance, provenance)
     views = _store_views(fragments)
     validate_store_payloads(fragments)
     with _bounded_store_roots(
@@ -149,6 +197,7 @@ def commit_store_fragments(
         fragments,
         dataset_id=dataset_id,
         split=split,
+        provenance=commit_provenance,
         progress=progress,
     ) as roots:
         return replace_dir(
@@ -160,7 +209,7 @@ def commit_store_fragments(
                 split=split,
                 expected_sample_count=expected_sample_count,
                 views=views,
-                provenance=provenance,
+                provenance=commit_provenance,
                 progress=progress,
             ),
         )
@@ -174,6 +223,7 @@ def commit_fragment_part(
     shard_id: int,
     num_shards: int,
     split: str | None = None,
+    provenance: Mapping[str, str] | None = None,
     progress: CommitProgress | None = None,
 ) -> Path:
     validate_shard(num_shards, shard_id)
@@ -183,6 +233,11 @@ def commit_fragment_part(
         split=split,
         progress=progress,
     )
+    input_provenance = _common_provenance(
+        ((info.path, info.provenance) for info in fragment_infos),
+        kind="Fragment",
+    )
+    commit_provenance = _commit_provenance(input_provenance, provenance)
     if not roots:
         return DatasetPartWriter(
             output_dir,
@@ -190,6 +245,7 @@ def commit_fragment_part(
             shard_id=shard_id,
             num_shards=num_shards,
             split=split,
+            provenance=commit_provenance,
         ).write(())
     views = _store_views(roots)
     validate_store_payloads(roots)
@@ -200,6 +256,7 @@ def commit_fragment_part(
         roots,
         dataset_id=dataset_id,
         split=split,
+        provenance=commit_provenance,
         progress=progress,
     ) as merged:
         def write(root: Path) -> Path:
@@ -210,6 +267,7 @@ def commit_fragment_part(
                 split=split,
                 views=views,
                 dense=False,
+                provenance=commit_provenance,
                 progress=progress,
             )
             write_json(
@@ -277,6 +335,7 @@ def _bounded_store_roots(
     *,
     dataset_id: str,
     split: str | None,
+    provenance: Mapping[str, str],
     progress: CommitProgress | None,
 ) -> Iterator[tuple[Path, ...]]:
     if len(stores) <= _MERGE_FAN_IN:
@@ -305,7 +364,7 @@ def _bounded_store_roots(
                         split=split,
                         views=_store_views(batch),
                         dense=False,
-                        provenance=None,
+                        provenance=provenance,
                         progress=progress,
                     )
 
@@ -322,10 +381,10 @@ def _commit_roots_to_tmp(
     *,
     dataset_id: str,
     split: str | None,
+    provenance: Mapping[str, str],
     expected_sample_count: int | None = None,
     views: tuple[tuple[Role, Modality, View], ...] | None = None,
     dense: bool = True,
-    provenance: Mapping[str, str] | None = None,
     progress: CommitProgress | None = None,
 ) -> Path:
     selected_views = views if views is not None else _store_views(stores)
@@ -397,7 +456,7 @@ def _write_committed_dataset_manifest(
     dataset_id: str,
     split: str | None,
     sample_count: int,
-    provenance: Mapping[str, str] | None,
+    provenance: Mapping[str, str],
 ) -> None:
     write_json(
         dataset_json_path(root),
@@ -407,7 +466,7 @@ def _write_committed_dataset_manifest(
                 schema_version=STORE_SCHEMA_VERSION,
                 split=split,
                 sample_count=sample_count,
-                provenance={} if provenance is None else provenance,
+                provenance=provenance,
             )
         ),
     )
@@ -448,8 +507,8 @@ def _write_ordered_samples_manifest(
                     )
                 raise ValueError(
                     "Sample manifests must be dense by sample_index: "
-                        f"missing sample_index {expected_index}."
-                    )
+                    f"missing sample_index {expected_index}."
+                )
             previous_index = entry.sample_index
             writer.write(
                 SampleManifestEntry(
@@ -527,15 +586,6 @@ def _write_ordered_view_manifest(
         writer.abort()
         raise
     return count, expected_count, frozenset(shards)
-
-
-def _sample_indexes_for_ref(
-    root: Path,
-    ref: tuple[Role, Modality],
-) -> Iterator[int]:
-    for entry in read_samples_manifest(root):
-        if any(item_ref == ref for item_ref, _meta in entry.items):
-            yield entry.sample_index
 
 
 def _sample_indexes_by_ref(
@@ -801,12 +851,14 @@ def _validate_parts(
     split: str | None,
     *,
     progress: CommitProgress | None = None,
-) -> None:
+) -> dict[str, str]:
     num_shards: int | None = None
     shard_ids: set[int] = set()
+    provenances: list[tuple[Path, Mapping[str, str]]] = []
     for part in parts:
         data = _read_metadata(_part_json_path(part), "Part")
         manifest = read_store_manifest(part, legacy_policy="reject")
+        provenances.append((part, manifest.provenance))
         if data.get("dataset_id") != dataset_id:
             raise ValueError(f"Part {part} dataset_id does not match {dataset_id!r}.")
         if data.get("split") != split:
@@ -839,6 +891,10 @@ def _validate_parts(
     if num_shards is not None and shard_ids != set(range(num_shards)):
         missing = sorted(set(range(num_shards)) - shard_ids)
         raise ValueError(f"Missing materialized part for shard_id {missing[0]}.")
+    provenance = _common_provenance(provenances, kind="Part")
+    if provenance is None:
+        raise RuntimeError("Part validation requires at least one input.")
+    return provenance
 
 
 def _read_fragment_info(
@@ -868,7 +924,11 @@ def _read_fragment_info(
         raise ValueError(f"Fragment {path} sample indexes do not match its metadata.")
     _validate_manifest_sample_count(path, manifest.sample_count, kind="Fragment")
     _validate_fragment_sample_manifest(path, indexes)
-    return _FragmentInfo(path=path, indexes=indexes)
+    return _FragmentInfo(
+        path=path,
+        indexes=indexes,
+        provenance=manifest.provenance,
+    )
 
 
 def _validate_manifest_sample_count(path: Path, expected: int, *, kind: str) -> None:

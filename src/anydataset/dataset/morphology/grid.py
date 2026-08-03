@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+from operator import index as integer_index
 from typing import Any, cast
 
 import torch
@@ -97,7 +98,10 @@ class SpeechGridView:
     def _text_row(self, text: int):
         if isinstance(text, bool):
             raise TypeError("text must be a text row index.")
-        index = int(text)
+        try:
+            index = integer_index(text)
+        except TypeError as exc:
+            raise TypeError("text must be a text row index.") from exc
         if index < 0:
             index += len(self.grid.row_specs)
         if index < 0 or index >= len(self.grid.row_specs):

@@ -194,6 +194,25 @@ class CacheManagerTest(unittest.TestCase):
         self.assertIn("worker log:", stdout.getvalue())
         self.assertIn("started", stdout.getvalue())
 
+    def test_worker_logger_closes_handlers_before_replacing_them(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            logs_dir = Path(tmpdir)
+            logger = worker_logger("replacement-test", logs_dir, 1)
+            old_handler = logger.handlers[0]
+
+            with mock.patch.object(
+                old_handler,
+                "close",
+                wraps=old_handler.close,
+            ) as close:
+                replacement = worker_logger("replacement-test", logs_dir, 1)
+
+            close.assert_called_once_with()
+            self.assertNotIn(old_handler, replacement.handlers)
+            for handler in replacement.handlers:
+                handler.close()
+            replacement.handlers.clear()
+
 
 if __name__ == "__main__":
     unittest.main()

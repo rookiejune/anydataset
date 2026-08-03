@@ -5,7 +5,7 @@ import pickle
 import shutil
 import tempfile
 import unittest
-from dataclasses import asdict, dataclass, replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from unittest import mock
 
@@ -32,6 +32,7 @@ from anydataset.store.manifest.schema import (
     DatasetManifest,
     SampleManifestEntry,
     STORE_SCHEMA_VERSION,
+    dataset_manifest_dict,
 )
 from anydataset.store.manifest.io import (
     read_sample_manifest_index,
@@ -1314,17 +1315,20 @@ class StoreSourceTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             output = root / "parallel"
+            provenance = {"input_id": "parallel-source-v1"}
             DatasetWriter(
                 output,
                 dataset_id="parallel",
                 split="train",
                 num_shards=2,
                 num_workers=2,
+                provenance=provenance,
             ).write(
                 dataset_factory=_RangeAudioFactory(5),
             )
             dataset = read_store_dataset(output)
             self.assertEqual(len(dataset), 5)
+            self.assertEqual(dict(dataset.manifest.provenance), provenance)
             values = [
                 float(
                     dataset[index][Role.DEFAULT, Modality.AUDIO]
@@ -1453,7 +1457,7 @@ class StoreSourceTest(unittest.TestCase):
             output.mkdir()
             write_json(
                 output / "dataset.json",
-                asdict(
+                dataset_manifest_dict(
                     DatasetManifest(
                         dataset_id="toy-audio",
                         schema_version=STORE_SCHEMA_VERSION,
@@ -1652,7 +1656,7 @@ def _write_empty_dataset(path: Path) -> None:
     path.mkdir()
     write_json(
         path / "dataset.json",
-        asdict(
+        dataset_manifest_dict(
             DatasetManifest(
                 dataset_id="toy-audio",
                 schema_version=STORE_SCHEMA_VERSION,

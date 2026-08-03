@@ -4,7 +4,10 @@ import unittest
 
 import torch
 from anydataset.dataset.morphology import (
+    AudioBatch,
     Morphology,
+    SpeechBatch,
+    SpeechGridBatch,
     audio_collate,
     build_toy_audio_dataset,
     build_toy_speech_dataset,
@@ -22,6 +25,49 @@ from anydataset.types import (
 
 
 class MorphologyContractTest(unittest.TestCase):
+    def test_audio_batch_validates_padded_tensor_contract(self) -> None:
+        waveform = torch.zeros(2, 1, 4)
+        AudioBatch(waveform=waveform, lengths=torch.tensor([4, 3]))
+
+        with self.assertRaisesRegex(TypeError, "waveform must be a Tensor"):
+            AudioBatch(waveform=[[0.0]], lengths=torch.tensor([1]))
+        with self.assertRaisesRegex(ValueError, r"\[batch, channels, time\]"):
+            AudioBatch(waveform=torch.zeros(2, 4), lengths=torch.tensor([4, 4]))
+        with self.assertRaisesRegex(ValueError, r"lengths must have shape \[batch\]"):
+            AudioBatch(waveform=waveform, lengths=torch.tensor([[4, 3]]))
+        with self.assertRaisesRegex(TypeError, "dtype torch.int64"):
+            AudioBatch(waveform=waveform, lengths=torch.tensor([4.0, 3.0]))
+        with self.assertRaisesRegex(ValueError, "must be non-negative"):
+            AudioBatch(waveform=waveform, lengths=torch.tensor([4, -1]))
+        with self.assertRaisesRegex(ValueError, "must not exceed"):
+            AudioBatch(waveform=waveform, lengths=torch.tensor([5, 3]))
+
+    def test_speech_batch_validates_text_and_speaker_axes(self) -> None:
+        waveform = torch.zeros(2, 1, 4)
+        lengths = torch.tensor([4, 3])
+        SpeechBatch(
+            waveform=waveform,
+            lengths=lengths,
+            texts=("hello", "world"),
+            speaker_ids=("a", "b"),
+        )
+
+        with self.assertRaisesRegex(TypeError, "texts must be a tuple"):
+            SpeechBatch(waveform=waveform, lengths=lengths, texts=["hello", "world"])
+        with self.assertRaisesRegex(
+            ValueError, "texts must have length equal to batch"
+        ):
+            SpeechBatch(waveform=waveform, lengths=lengths, texts=("hello",))
+        with self.assertRaisesRegex(TypeError, "texts entries must be str"):
+            SpeechBatch(waveform=waveform, lengths=lengths, texts=("hello", None))
+        with self.assertRaisesRegex(ValueError, "speaker_ids must have length"):
+            SpeechBatch(
+                waveform=waveform,
+                lengths=lengths,
+                texts=("hello", "world"),
+                speaker_ids=("a",),
+            )
+
     def test_audio_collate_pads_waveforms(self) -> None:
         dataset = build_toy_audio_dataset(samples=2, seconds=0.01, sample_rate=16000)
         batch = audio_collate(dataset)
@@ -64,7 +110,16 @@ class MorphologyContractTest(unittest.TestCase):
         self.assertEqual(full.texts, (("hello", "world"),))
         self.assertEqual(view.by_speaker("speaker-a").shape, (1, 1, 2))
         self.assertEqual(view.by_text(0).shape, (1, 2, 1))
+        self.assertEqual(view.by_text(-1).texts, (("world",),))
         self.assertEqual(Morphology.SPEECH_GRID.name, "SPEECH_GRID")
+
+    def test_speech_grid_text_index_requires_an_integer(self) -> None:
+        view = build_toy_speech_grid()
+
+        for text in (True, 0.0, 1.9, "0"):
+            with self.subTest(text=text):
+                with self.assertRaisesRegex(TypeError, "text row index"):
+                    view.by_text(text)
 
     def test_speech_grid_collate_pads_independent_axes(self) -> None:
         left = build_toy_speech_grid(
@@ -86,8 +141,6 @@ class MorphologyContractTest(unittest.TestCase):
         self.assertEqual(int(batch.lengths[1, 1, 0].item()), 0)
 
     def test_speech_grid_allows_unknown_axis_labels(self) -> None:
-        from anydataset.dataset.morphology import SpeechGridBatch
-
         known = build_toy_speech_grid(
             texts=("hello", "world"),
             speakers=("speaker-a", "speaker-b"),
@@ -110,6 +163,33 @@ class MorphologyContractTest(unittest.TestCase):
             batch.texts,
             (("hello", "world"), ("hello", None)),
         )
+
+    def test_speech_grid_validates_nested_axes_and_padding(self) -> None:
+        waveforms = torch.zeros(1, 2, 2, 1, 4)
+        lengths = torch.tensor([[[4, 0], [3, 0]]])
+        SpeechGridBatch(
+            waveforms=waveforms,
+            lengths=lengths,
+            speaker_ids=(("a", "b"),),
+            texts=(("hello",),),
+        )
+
+        with self.assertRaisesRegex(TypeError, "speaker_ids must be a tuple"):
+            SpeechGridBatch(
+                waveforms=waveforms,
+                lengths=lengths,
+                speaker_ids=(["a", "b"],),
+                texts=(("hello",),),
+            )
+        invalid_lengths = lengths.clone()
+        invalid_lengths[0, 0, 1] = 1
+        with self.assertRaisesRegex(ValueError, "outside its labeled axes"):
+            SpeechGridBatch(
+                waveforms=waveforms,
+                lengths=invalid_lengths,
+                speaker_ids=(("a", "b"),),
+                texts=(("hello",),),
+            )
 
 
 if __name__ == "__main__":

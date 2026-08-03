@@ -39,6 +39,10 @@ Use these paths for application code:
 - `anydataset.quality`: quality rule-building utilities for text,
   translation, and speech filters.
 
+Built-in presets are map-style and are constructed through
+`AnyDataset.preset()`. `IterableAnyDataset` is constructed directly for custom
+streaming sources; it does not expose a preset constructor.
+
 `anydataset.provider` and `anydataset.provider_service` are intentionally
 separate public surfaces. Provider modules define model/data transformation
 objects; provider service defines process isolation, server lifecycle, and

@@ -44,7 +44,7 @@ evaluator, `anydataset[text]` for `TextAcceptability` and `ChineseGEC`, or
 Use `AnyDataset.preset()` when a built-in dataset already knows both its source
 and parser. Built-in presets are all map-style: `MNIST`, `CIFAR10`, `FSD50K`,
 `COMMON_VOICE`, `FLEURS`, `LIBRISPEECH_ASR`, `ESC50`, `NSYNTH`, and `WMT19`.
-`IterableAnyDataset.preset()` raises; use `IterableAnyDataset` only for custom
+Built-in presets are not exposed on `IterableAnyDataset`; use it only for custom
 sources that are truly stream-only. Both constructors accept `transforms=...`
 for item-level transforms after parsing.
 
@@ -226,7 +226,8 @@ dataset = IterableAnyDataset(
 Pass `operational_load_options=(...)` to `register_source` for source-specific
 options that do not change prepared physical data and should therefore be
 excluded from `Spec.id`; `prepare_workers` is already treated as operational
-for all sources.
+for all sources. Register a custom source before constructing any `Spec` with
+that source key so its identity policy is fixed before use.
 
 Iterable sources that can select rows without scanning the full stream may also
 implement `iter_shard(dataset, *, num_shards, shard_id)`. This source
@@ -254,10 +255,11 @@ Runtime warnings and worker logs live under
 
 Every physical `Spec` field participates in `Spec.id`: `source`, `path`,
 `split`, `version`, and physical `load_options`. Operational options that do not
-change source content—currently `prepare_workers`—are excluded from `Spec.id` /
-prepare cache identity. Change `version` or a physical load option when the same
-path denotes a different physical snapshot; source prepare caches are reused only
-for the resulting identity.
+change source content are excluded from `Spec.id` / prepare cache identity. This
+includes the global `prepare_workers` option and source-declared options such as
+TSV `root_field`. Change `version` or a physical load option when the same path
+denotes a different physical snapshot; source prepare caches are reused only for
+the resulting identity.
 
 The built-in `tsv` and `sharded_csv` sources keep delimited text files as the
 readable source of truth and prepare one Parquet cache part per source file under

@@ -6,9 +6,9 @@ from array import array
 from bisect import bisect_right
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from threading import Lock
-from typing import Any, overload
+from typing import Any, cast, overload
 
 from ..._io.parquet import read_rows, write_columns
 from ..._io.shard import BufferedShardWriter
@@ -19,26 +19,181 @@ from ..types import JsonValue, _FilterMetricsRow, _Index, validate_metrics
 _METRICS_SCHEMA_VERSION = 1
 
 
+@dataclass(frozen=True)
+class _ManifestFile:
+    path: str
+    count: int
+
+
+@dataclass(frozen=True)
+class _Partition:
+    label: str
+    count: int
+    files: tuple[_ManifestFile, ...]
+
+
+@dataclass(frozen=True)
+class PartitionManifest:
+    partitions: tuple[_Partition, ...]
+
+    @property
+    def count(self) -> int:
+        return sum(partition.count for partition in self.partitions)
+
+    @property
+    def files(self) -> tuple[_ManifestFile, ...]:
+        return tuple(file for partition in self.partitions for file in partition.files)
+
+
+@dataclass(frozen=True)
+class MetricsManifest:
+    count: int
+    files: tuple[_ManifestFile, ...]
+
+
+def load_partition_manifest(path: Path) -> PartitionManifest:
+    data = _manifest_mapping(read_json(path), "Filter partition manifest")
+    _manifest_fields(data, ("partitions",), "Filter partition manifest")
+    raw_partitions = _manifest_list(
+        data["partitions"],
+        "Filter partition manifest partitions",
+    )
+    partitions: list[_Partition] = []
+    labels: set[str] = set()
+    file_paths: set[str] = set()
+    for index, raw_partition in enumerate(raw_partitions):
+        context = f"Filter partition manifest partition {index}"
+        partition = _manifest_mapping(raw_partition, context)
+        _manifest_fields(partition, ("label", "count", "files"), context)
+        label = _manifest_string(partition["label"], f"{context} label")
+        if label in labels:
+            raise ValueError(f"Duplicate filter partition label: {label!r}.")
+        labels.add(label)
+        count = _manifest_count(partition["count"], f"{context} count")
+        raw_files = _manifest_list(partition["files"], f"{context} files")
+        files = tuple(
+            _manifest_file(raw_file, f"{context} file {file_index}")
+            for file_index, raw_file in enumerate(raw_files)
+        )
+        for file in files:
+            if file.path in file_paths:
+                raise ValueError(
+                    f"Duplicate filter partition file reference: {file.path!r}."
+                )
+            file_paths.add(file.path)
+        if sum(file.count for file in files) != count:
+            raise ValueError(
+                "Filter partition manifest count does not match shard counts."
+            )
+        partitions.append(_Partition(label=label, count=count, files=files))
+    return PartitionManifest(tuple(partitions))
+
+
+def load_metrics_manifest(path: Path) -> MetricsManifest:
+    context = "Filter metrics manifest"
+    data = _manifest_mapping(read_json(path), context)
+    _manifest_fields(data, ("schema_version", "count", "files"), context)
+    version = data["schema_version"]
+    if type(version) is not int or version != _METRICS_SCHEMA_VERSION:
+        raise ValueError("Filter metrics manifest schema_version mismatch.")
+    count = _manifest_count(data["count"], f"{context} count")
+    raw_files = _manifest_list(data["files"], f"{context} files")
+    files = tuple(
+        _manifest_file(raw_file, f"{context} file {index}")
+        for index, raw_file in enumerate(raw_files)
+    )
+    file_paths: set[str] = set()
+    for file in files:
+        if file.path in file_paths:
+            raise ValueError(f"Duplicate filter metrics file reference: {file.path!r}.")
+        file_paths.add(file.path)
+    if sum(file.count for file in files) != count:
+        raise ValueError("Filter metrics manifest count does not match shard counts.")
+    return MetricsManifest(count=count, files=files)
+
+
+def _manifest_mapping(
+    value: object,
+    context: str,
+) -> Mapping[object, object]:
+    if not isinstance(value, Mapping):
+        raise TypeError(f"{context} must be a mapping.")
+    return cast(Mapping[object, object], value)
+
+
+def _manifest_fields(
+    data: Mapping[object, object],
+    expected: tuple[str, ...],
+    context: str,
+) -> None:
+    for field in expected:
+        if field not in data:
+            raise ValueError(f"{context} is missing required field {field!r}.")
+    for field in data:
+        if field not in expected:
+            raise ValueError(f"{context} has unsupported field {field!r}.")
+
+
+def _manifest_list(value: object, context: str) -> list[object]:
+    if not isinstance(value, list):
+        raise TypeError(f"{context} must be a list.")
+    return cast(list[object], value)
+
+
+def _manifest_string(value: object, context: str) -> str:
+    if not isinstance(value, str):
+        raise TypeError(f"{context} must be a string.")
+    return value
+
+
+def _manifest_relative_path(value: object, context: str) -> str:
+    path = _manifest_string(value, context)
+    parts = path.replace("\\", "/").split("/")
+    if (
+        not path
+        or Path(path).is_absolute()
+        or PureWindowsPath(path).is_absolute()
+        or PureWindowsPath(path).drive
+        or any(part in {"", ".", ".."} for part in parts)
+    ):
+        raise ValueError(f"{context} must be a normalized relative path.")
+    return path
+
+
+def _manifest_count(value: object, context: str) -> int:
+    if type(value) is not int:
+        raise TypeError(f"{context} must be an integer.")
+    if value < 0:
+        raise ValueError(f"{context} must be non-negative.")
+    return value
+
+
+def _manifest_file(value: object, context: str) -> _ManifestFile:
+    data = _manifest_mapping(value, context)
+    _manifest_fields(data, ("file", "count"), context)
+    return _ManifestFile(
+        path=_manifest_relative_path(data["file"], f"{context} path"),
+        count=_manifest_count(data["count"], f"{context} count"),
+    )
+
+
 def read_partitions(path: Path) -> dict[str, _Index]:
     path = Path(path)
     try:
         before = _partition_snapshot(path)
-        manifest = read_json(path / "partitions.json")
+        manifest = load_partition_manifest(path / "partitions.json")
         partitions: dict[str, _Index] = {}
-        for item in manifest["partitions"]:
-            label = str(item["label"])
-            if label in partitions:
-                raise ValueError(f"Duplicate filter partition label: {label!r}.")
-            partitions[label] = _FileIndex(
+        for partition in manifest.partitions:
+            partitions[partition.label] = _FileIndex(
                 tuple(
                     _IndexFile(
-                        path / file["file"],
-                        int(file["count"]),
-                        _fingerprint(path / file["file"]),
+                        path / file.path,
+                        file.count,
+                        _fingerprint(path / file.path),
                     )
-                    for file in item["files"]
+                    for file in partition.files
                 ),
-                int(item["count"]),
+                partition.count,
             )
         after = _partition_snapshot(path)
     except FileNotFoundError as exc:
@@ -48,48 +203,21 @@ def read_partitions(path: Path) -> dict[str, _Index]:
     return partitions
 
 
-def partition_files(manifest: Mapping[str, Any]) -> Iterable[str]:
-    for item in manifest["partitions"]:
-        files = item["files"]
-        if not isinstance(files, list):
-            raise TypeError("partition files must be a list.")
-        for file in files:
-            yield str(file["file"])
-
-
-def partition_count(manifest: Mapping[str, Any]) -> int:
-    return sum(int(item["count"]) for item in manifest["partitions"])
-
-
 def metrics_ready(path: Path, *, expected_count: int) -> bool:
     manifest_path = path / "metrics.json"
     if not manifest_path.is_file():
         return False
-    manifest = read_json(manifest_path)
-    version = manifest.get("schema_version")
-    if type(version) is not int or version != _METRICS_SCHEMA_VERSION:
+    manifest = load_metrics_manifest(manifest_path)
+    if manifest.count != expected_count:
         return False
-    files = list(metrics_files(manifest))
-    file_count = sum(int(file["count"]) for file in manifest["files"])
-    count = int(manifest["count"])
-    if file_count != count or count != expected_count:
-        return False
-    return all((path / relpath).is_file() for relpath in files)
+    return all((path / file.path).is_file() for file in manifest.files)
 
 
 def read_metrics(path: Path) -> Iterable[Mapping[str, Any]]:
-    manifest = read_json(path / "metrics.json")
-    for relpath in metrics_files(manifest):
-        for row in read_metric_rows(path / relpath):
+    manifest = load_metrics_manifest(path / "metrics.json")
+    for file in manifest.files:
+        for row in read_metric_rows(path / file.path):
             yield row
-
-
-def metrics_files(manifest: Mapping[str, Any]) -> Iterable[str]:
-    files = manifest["files"]
-    if not isinstance(files, list):
-        raise TypeError("metrics files must be a list.")
-    for file in files:
-        yield str(file["file"])
 
 
 class PartitionWriter:

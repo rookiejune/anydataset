@@ -11,14 +11,15 @@ from collections.abc import Collection, Iterable, Iterator
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
-from ..._runtime.sharding import validate_shard
+from ..._runtime.sharding import validated_shard_rows
 
 if TYPE_CHECKING:
     from ...types import Spec
 
 
+@runtime_checkable
 class DatasetSource(Protocol):
-    def prepare(self, spec: Spec, cache_path: Path) -> Iterable[Any]:
+    def prepare(self, spec: Spec, cache_path: Path) -> Any:
         raise NotImplementedError
 
 
@@ -56,7 +57,6 @@ def _native_shard(
     ``ShardingSource`` may supply indexed rows.
     """
 
-    validate_shard(num_shards, shard_id)
     if not isinstance(source, ShardingSource):
         return None
 
@@ -65,39 +65,12 @@ def _native_shard(
         num_shards=num_shards,
         shard_id=shard_id,
     )
-    try:
-        iterator = iter(rows)
-    except TypeError as exc:
-        raise TypeError("Source shard must return an iterable.") from exc
-    return _validated_shard_rows(
-        iterator,
+    return validated_shard_rows(
+        rows,
         num_shards=num_shards,
         shard_id=shard_id,
+        label="Source shard",
     )
-
-
-def _validated_shard_rows(
-    rows: Iterator[Any],
-    *,
-    num_shards: int,
-    shard_id: int,
-) -> Iterator[tuple[int, Any]]:
-    expected = shard_id
-    for entry in rows:
-        if not isinstance(entry, tuple) or len(entry) != 2:
-            raise TypeError(
-                "Source shard must yield (sample_index, row) tuples."
-            )
-        sample_index, row = entry
-        if isinstance(sample_index, bool) or not isinstance(sample_index, int):
-            raise TypeError("Source sample_index values must be integers.")
-        if sample_index != expected:
-            raise ValueError(
-                "Source shard must yield dense global sample indexes: "
-                f"expected {expected}, got {sample_index}."
-            )
-        yield sample_index, row
-        expected += num_shards
 
 
 def _validate_load_options(

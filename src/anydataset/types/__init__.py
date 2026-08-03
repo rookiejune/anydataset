@@ -76,40 +76,16 @@ class Spec(Immutable):
         split: str | None = None,
         version: str | None = None,
         load_options: Mapping[str, Any] = _EMPTY_LOAD_OPTIONS,
-        *,
-        _identity_load_options: Mapping[str, Any] | None = None,
     ) -> None:
-        if not isinstance(source, (Source, str)):
-            raise TypeError("Spec.source must be a Source or string source key.")
-        if not isinstance(path, str):
-            raise TypeError("Spec.path must be a string.")
-        if not path:
-            raise ValueError("Spec.path must not be empty.")
-        for name, value in (("split", split), ("version", version)):
-            if value is not None and not isinstance(value, str):
-                raise TypeError(f"Spec.{name} must be a string or None.")
-            if value == "":
-                raise ValueError(f"Spec.{name} must not be empty.")
-        if not isinstance(load_options, Mapping):
-            raise TypeError("Spec.load_options must be a mapping.")
-
-        self.source = source
-        self.path = path
-        self.split = split
-        self.version = version
-        self.load_options = _freeze_mapping(load_options)
-        physical_load_options = (
-            _source_physical_load_options(
-                source_key(self.source),
-                self.load_options,
-            )
-            if _identity_load_options is None
-            else _identity_load_options
+        _initialize_spec(
+            self,
+            source,
+            path,
+            split,
+            version,
+            load_options,
+            identity_load_options=None,
         )
-        self._identity_load_options = _freeze_mapping(physical_load_options)
-        identity = _identity_payload(self)
-        self._id = _stable_hash(identity)
-        self.seal()
 
     @property
     def id(self) -> str:
@@ -139,6 +115,45 @@ class Spec(Immutable):
         )
 
 
+def _initialize_spec(
+    spec: Spec,
+    source: SourceKey,
+    path: str,
+    split: str | None,
+    version: str | None,
+    load_options: Mapping[str, Any],
+    *,
+    identity_load_options: Mapping[str, Any] | None,
+) -> None:
+    if not isinstance(source, (Source, str)):
+        raise TypeError("Spec.source must be a Source or string source key.")
+    if not isinstance(path, str):
+        raise TypeError("Spec.path must be a string.")
+    if not path:
+        raise ValueError("Spec.path must not be empty.")
+    for name, value in (("split", split), ("version", version)):
+        if value is not None and not isinstance(value, str):
+            raise TypeError(f"Spec.{name} must be a string or None.")
+        if value == "":
+            raise ValueError(f"Spec.{name} must not be empty.")
+    if not isinstance(load_options, Mapping):
+        raise TypeError("Spec.load_options must be a mapping.")
+
+    spec.source = source
+    spec.path = path
+    spec.split = split
+    spec.version = version
+    spec.load_options = _freeze_mapping(load_options)
+    if identity_load_options is None:
+        identity_load_options = _source_physical_load_options(
+            source_key(spec.source),
+            spec.load_options,
+        )
+    spec._identity_load_options = _freeze_mapping(identity_load_options)
+    spec._id = _stable_hash(_identity_payload(spec))
+    spec.seal()
+
+
 def _identity_payload(spec: Spec) -> dict[str, Any]:
     return {
         "source": source_key(spec.source),
@@ -157,14 +172,17 @@ def _restore_spec(
     load_options: Mapping[str, Any],
     identity_load_options: Mapping[str, Any],
 ) -> Spec:
-    return Spec(
+    spec = Spec.__new__(Spec)
+    _initialize_spec(
+        spec,
         source,
         path,
         split,
         version,
         load_options,
-        _identity_load_options=identity_load_options,
+        identity_load_options=identity_load_options,
     )
+    return spec
 
 
 def _stable_hash(value: Any) -> str:

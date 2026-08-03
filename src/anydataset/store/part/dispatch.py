@@ -68,6 +68,7 @@ def write_dataset_parts(
             num_shards=num_shards,
             num_workers=num_workers,
             prefetch_factor=prefetch_factor,
+            provenance=provenance,
             dataset_factory=dataset_factory,
         )
         return commit_store_parts(
@@ -89,6 +90,7 @@ def _run_parts(
     num_shards: int,
     num_workers: int,
     prefetch_factor: int | None,
+    provenance: Mapping[str, str],
     dataset_factory: DatasetFactory,
 ) -> None:
     context = multiprocessing_context()
@@ -109,6 +111,7 @@ def _run_parts(
                         shard_id=shard_id,
                         num_workers=num_workers,
                         prefetch_factor=prefetch_factor,
+                        provenance=provenance,
                         parts_dir=parts_dir,
                         master_addr=master_addr,
                         master_port=master_port,
@@ -181,6 +184,7 @@ class _WorkerConfig:
     shard_id: int
     num_workers: int
     prefetch_factor: int | None
+    provenance: Mapping[str, str]
     parts_dir: Path
     master_addr: str
     master_port: str
@@ -210,6 +214,7 @@ def _write_worker(
             num_shards=config.num_shards,
             views=config.views,
             max_shard_samples=config.max_shard_samples,
+            provenance=config.provenance,
         )
         writer.write(
             iter_with_progress(

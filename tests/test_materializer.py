@@ -11,6 +11,7 @@ from pathlib import Path
 from unittest import mock
 
 import torch
+import anydataset.store.materialize.fragments as materialize_fragments
 
 from anydataset import AnyDataset, Source, Spec
 from anydataset.dataset.collate import FieldGroup, FieldRef
@@ -43,6 +44,142 @@ from anydataset._runtime.resume import resume_dir
 
 
 class ViewMaterializerTest(unittest.TestCase):
+    def test_fragment_writer_skips_previously_completed_indexes(self):
+        sample = _audio_sample(torch.tensor([[1.0]]))
+        strategy = mock.Mock()
+        strategy.uses_batch_provider.return_value = False
+        strategy.materialize_sample.side_effect = lambda value, _provider: value
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fragments_dir = Path(tmpdir) / "fragments"
+            fragments_dir.mkdir()
+            writer = materialize_fragments.FragmentBatchWriter(
+                strategy=strategy,
+                config=materialize_fragments.FragmentBatchConfig(
+                    dataset_id="toy-audio",
+                    split="train",
+                    provenance={},
+                    max_shard_samples=10,
+                    commit_samples=1,
+                    write_workers=0,
+                    write_prefetch=None,
+                    writer_start_method="spawn",
+                ),
+                fragments_dir=fragments_dir,
+                completed=frozenset({0}),
+                provider=mock.Mock(),
+            )
+            with mock.patch.object(
+                materialize_fragments,
+                "write_fragment",
+                wraps=materialize_fragments.write_fragment,
+            ) as write_fragment:
+                writer.write((((0, sample),),))
+
+        strategy.materialize_sample.assert_not_called()
+        write_fragment.assert_not_called()
+
+    def test_fragment_writer_accepts_interleaved_batches(self):
+        sample = _audio_sample(torch.tensor([[1.0]]))
+        strategy = mock.Mock()
+        strategy.uses_batch_provider.return_value = False
+        strategy.materialize_sample.side_effect = lambda value, _provider: value
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fragments_dir = Path(tmpdir) / "fragments"
+            fragments_dir.mkdir()
+            writer = materialize_fragments.FragmentBatchWriter(
+                strategy=strategy,
+                config=materialize_fragments.FragmentBatchConfig(
+                    dataset_id="toy-audio",
+                    split="train",
+                    provenance={},
+                    max_shard_samples=10,
+                    commit_samples=2,
+                    write_workers=0,
+                    write_prefetch=None,
+                    writer_start_method="spawn",
+                ),
+                fragments_dir=fragments_dir,
+                completed=frozenset(),
+                provider=mock.Mock(),
+            )
+
+            writer.write(
+                (
+                    ((0, sample), (2, sample)),
+                    ((1, sample), (3, sample)),
+                )
+            )
+
+        self.assertEqual(strategy.materialize_sample.call_count, 4)
+
+    def test_fragment_writer_rejects_repeated_indexes_across_batches(self):
+        sample = _audio_sample(torch.tensor([[1.0]]))
+        strategy = mock.Mock()
+        strategy.uses_batch_provider.return_value = False
+        strategy.materialize_sample.side_effect = lambda value, _provider: value
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fragments_dir = Path(tmpdir) / "fragments"
+            fragments_dir.mkdir()
+            writer = materialize_fragments.FragmentBatchWriter(
+                strategy=strategy,
+                config=materialize_fragments.FragmentBatchConfig(
+                    dataset_id="toy-audio",
+                    split="train",
+                    provenance={},
+                    max_shard_samples=10,
+                    commit_samples=2,
+                    write_workers=0,
+                    write_prefetch=None,
+                    writer_start_method="spawn",
+                ),
+                fragments_dir=fragments_dir,
+                completed=frozenset(),
+                provider=mock.Mock(),
+            )
+
+            with self.assertRaisesRegex(ValueError, "unique within a run"):
+                writer.write(
+                    (
+                        ((0, sample), (2, sample)),
+                        ((2, sample),),
+                    )
+                )
+
+        self.assertEqual(strategy.materialize_sample.call_count, 2)
+
+    def test_fragment_writer_rejects_descending_indexes(self):
+        sample = _audio_sample(torch.tensor([[1.0]]))
+        strategy = mock.Mock()
+        strategy.uses_batch_provider.return_value = False
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fragments_dir = Path(tmpdir) / "fragments"
+            fragments_dir.mkdir()
+            writer = materialize_fragments.FragmentBatchWriter(
+                strategy=strategy,
+                config=materialize_fragments.FragmentBatchConfig(
+                    dataset_id="toy-audio",
+                    split="train",
+                    provenance={},
+                    max_shard_samples=10,
+                    commit_samples=2,
+                    write_workers=0,
+                    write_prefetch=None,
+                    writer_start_method="spawn",
+                ),
+                fragments_dir=fragments_dir,
+                completed=frozenset(),
+                provider=mock.Mock(),
+            )
+
+            with self.assertRaisesRegex(ValueError, "within each batch"):
+                writer.write((((1, sample), (0, sample)),))
+
+        strategy.materialize_sample.assert_not_called()
+
     def test_callable_id_ignores_function_memory_address(self):
         first = partial(_factory_identity_target, 1, option="value")
         second = partial(_factory_identity_target, 1, option="value")
@@ -1373,8 +1510,17 @@ class ViewMaterializerTest(unittest.TestCase):
             root = Path(tmpdir)
             target = root / "target"
             samples = tuple(_text_sample(f"text-{index}") for index in range(5))
+            provenance = {
+                "input_id": "parallel-input-v1",
+                "provider_id": "parallel-provider-v1",
+            }
 
-            ViewMaterializer(target, split="train").write(
+            ViewMaterializer(
+                target,
+                split="train",
+                input_id=provenance["input_id"],
+                provider_id=provenance["provider_id"],
+            ).write(
                 dataset_factory=_DatasetFactory(samples),
                 provider_factory=_IndependentTextProviderFactory(),
                 devices=("cpu:0", "cpu:1", "cpu:2"),
@@ -1382,6 +1528,7 @@ class ViewMaterializerTest(unittest.TestCase):
 
             stored = read_store_dataset(target)
             self.assertEqual(len(stored), 5)
+            self.assertEqual(dict(stored.manifest.provenance), provenance)
             for index in range(5):
                 self.assertEqual(
                     stored[index][Role.DEFAULT, Modality.TEXT].views[TextView.TEXT],

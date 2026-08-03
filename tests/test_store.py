@@ -1,7 +1,8 @@
 import os
+import pickle
 import tempfile
 import unittest
-from dataclasses import asdict
+from dataclasses import FrozenInstanceError, asdict
 from pathlib import Path
 from unittest import mock
 
@@ -12,6 +13,8 @@ from anydataset.store.manifest.schema import (
     SampleManifestEntry,
     STORE_SCHEMA_VERSION,
     ViewManifestEntry,
+    dataset_manifest_dict,
+    dataset_manifest_from_dict,
 )
 from anydataset.store.manifest.io import (
     ManifestParquetCache,
@@ -65,12 +68,15 @@ class StoreTest(unittest.TestCase):
         )
 
     def test_manifest_dataclasses_round_trip(self):
+        provenance = {"input_id": "input-v1"}
         manifest = DatasetManifest(
             dataset_id="toy-audio",
             schema_version=STORE_SCHEMA_VERSION,
             split="train",
             sample_count=2,
+            provenance=provenance,
         )
+        provenance["input_id"] = "changed"
         sample = SampleManifestEntry(
             sample_id="toy-audio-000000",
             sample_index=3,
@@ -87,7 +93,16 @@ class StoreTest(unittest.TestCase):
             key="000000.pt",
         )
 
-        self.assertEqual(DatasetManifest(**asdict(manifest)), manifest)
+        self.assertEqual(
+            DatasetManifest(**dataset_manifest_dict(manifest)),
+            manifest,
+        )
+        self.assertEqual(manifest.provenance, {"input_id": "input-v1"})
+        self.assertEqual(pickle.loads(pickle.dumps(manifest)), manifest)
+        with self.assertRaises(FrozenInstanceError):
+            manifest.dataset_id = "changed"
+        with self.assertRaises(TypeError):
+            manifest.provenance["input_id"] = "changed"
         self.assertEqual(ViewManifestEntry(**asdict(payload)), payload)
         self.assertEqual(asdict(sample)["items"][0][1], {"label": "speech"})
         self.assertEqual(
@@ -101,6 +116,50 @@ class StoreTest(unittest.TestCase):
                 "key",
             },
         )
+
+    def test_dataset_manifest_owns_its_schema_contract(self):
+        cases = (
+            (
+                {"dataset_id": 1, "sample_count": 0},
+                "dataset_id must be a string",
+            ),
+            (
+                {"dataset_id": "toy", "sample_count": True},
+                "sample_count must be a non-negative integer",
+            ),
+            (
+                {"dataset_id": "toy", "sample_count": -1},
+                "sample_count must be a non-negative integer",
+            ),
+            (
+                {"dataset_id": "toy", "sample_count": 0, "split": 1},
+                "split must be a string or None",
+            ),
+        )
+        for values, error in cases:
+            with self.subTest(values=values):
+                with self.assertRaisesRegex(ValueError, error):
+                    DatasetManifest(
+                        schema_version=STORE_SCHEMA_VERSION,
+                        **values,
+                    )
+
+    def test_dataset_manifest_parser_owns_fields_and_version(self):
+        base = {
+            "dataset_id": "toy",
+            "sample_count": 0,
+            "schema_version": STORE_SCHEMA_VERSION,
+            "split": None,
+            "provenance": {},
+        }
+        with self.assertRaisesRegex(ValueError, "missing field 'split'"):
+            dataset_manifest_from_dict(
+                {key: value for key, value in base.items() if key != "split"}
+            )
+        with self.assertRaisesRegex(ValueError, "unsupported field 'extra'"):
+            dataset_manifest_from_dict({**base, "extra": True})
+        with self.assertRaisesRegex(ValueError, "Unsupported store schema_version"):
+            dataset_manifest_from_dict({**base, "schema_version": 1})
 
     def test_json_and_manifest_helpers_round_trip(self):
         with tempfile.TemporaryDirectory() as tmpdir:

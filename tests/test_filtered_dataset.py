@@ -56,9 +56,12 @@ from anydataset.types import (
 from anydataset.filter.runtime.collect import collect_ranges_parallel
 from anydataset.filter.runtime.collect import _read_worker_message as read_worker_message
 from anydataset.filter.cache.storage import (
+    load_metrics_manifest,
+    load_partition_manifest,
     metrics_ready,
     read_index_rows,
     read_metric_rows,
+    read_partitions,
     write_index_rows,
 )
 from anydataset.store import DatasetWriter
@@ -747,6 +750,46 @@ class FilteredDatasetTest(unittest.TestCase):
         self.assertEqual(restored.counts, {"accept": 2})
         self.assertEqual(calls, [0, 1, 0, 1])
 
+    def test_rule_apply_rebuilds_invalid_rule_metadata(self):
+        cases = {
+            "invalid_json": "{",
+            "wrong_top_level_shape": json.dumps([]),
+        }
+        for name, serialized in cases.items():
+            with self.subTest(name=name):
+                self._assert_corrupt_filter_cache_rebuilds(
+                    f"rule_metadata_{name}",
+                    "rule.json",
+                    serialized,
+                )
+
+    def test_rule_apply_rebuilds_invalid_partition_manifest(self):
+        cases = {
+            "invalid_json": "{",
+            "wrong_partitions_type": json.dumps({"partitions": {}}),
+            "missing_files": json.dumps(
+                {"partitions": [{"label": "accept", "count": 1}]}
+            ),
+            "invalid_nested_count": json.dumps(
+                {
+                    "partitions": [
+                        {
+                            "label": "accept",
+                            "count": 1,
+                            "files": [{"file": "part.parquet", "count": True}],
+                        }
+                    ]
+                }
+            ),
+        }
+        for name, serialized in cases.items():
+            with self.subTest(name=name):
+                self._assert_corrupt_filter_cache_rebuilds(
+                    f"partition_manifest_{name}",
+                    "partitions.json",
+                    serialized,
+                )
+
     def test_rule_apply_rebuilds_metrics_count_mismatch(self):
         _register_rows_source("unit_test_filter_metrics_count")
         dataset = _dataset("unit_test_filter_metrics_count", [0, 1])
@@ -783,6 +826,67 @@ class FilteredDatasetTest(unittest.TestCase):
         self.assertEqual(len(rows), 2)
         self.assertEqual(calls, [0, 1, 0, 1])
 
+    def test_rule_apply_rebuilds_invalid_metrics_manifest(self):
+        cases = {
+            "invalid_json": "{",
+            "wrong_top_level_shape": json.dumps([]),
+            "wrong_count_type": json.dumps(
+                {"schema_version": 1, "count": True, "files": []}
+            ),
+            "wrong_schema_version": json.dumps(
+                {"schema_version": 2, "count": 0, "files": []}
+            ),
+        }
+        for name, serialized in cases.items():
+            with self.subTest(name=name):
+                self._assert_corrupt_filter_cache_rebuilds(
+                    f"metrics_manifest_{name}",
+                    "metrics/metrics.json",
+                    serialized,
+                    metrics=True,
+                )
+
+    def test_filter_manifests_reject_non_relative_shard_paths(self):
+        candidates = (
+            "",
+            ".",
+            "../outside.parquet",
+            "/tmp/outside.parquet",
+            r"C:outside.parquet",
+            r"C:\\outside.parquet",
+        )
+        for candidate in candidates:
+            with self.subTest(candidate=candidate):
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    root = Path(tmpdir)
+                    partition_path = root / "partitions.json"
+                    write_store_json(
+                        partition_path,
+                        {
+                            "partitions": [
+                                {
+                                    "label": "accept",
+                                    "count": 0,
+                                    "files": [{"file": candidate, "count": 0}],
+                                }
+                            ]
+                        },
+                    )
+                    with self.assertRaisesRegex(ValueError, "relative path"):
+                        load_partition_manifest(partition_path)
+
+                    metrics_path = root / "metrics.json"
+                    write_store_json(
+                        metrics_path,
+                        {
+                            "schema_version": 1,
+                            "count": 0,
+                            "files": [{"file": candidate, "count": 0}],
+                        },
+                    )
+                    with self.assertRaisesRegex(ValueError, "relative path"):
+                        load_metrics_manifest(metrics_path)
+
     def test_metrics_manifest_rejects_non_integer_schema_version(self):
         for version in (True, 1.0):
             with self.subTest(version=version):
@@ -797,7 +901,52 @@ class FilteredDatasetTest(unittest.TestCase):
                         },
                     )
 
-                    self.assertFalse(metrics_ready(path, expected_count=0))
+                    with self.assertRaisesRegex(ValueError, "schema_version mismatch"):
+                        metrics_ready(path, expected_count=0)
+
+    def _assert_corrupt_filter_cache_rebuilds(
+        self,
+        name,
+        relative_path,
+        serialized,
+        *,
+        metrics=False,
+    ):
+        source = f"unit_test_filter_corrupt_{name}"
+        dataset = _dataset(source, [0])
+        calls = []
+
+        def predicate(sample):
+            value = _value(sample)
+            calls.append(value)
+            if metrics:
+                return FilterDecision(label=True, metrics={"score": value})
+            return True
+
+        rule = FilterRule(name, lambda: predicate)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with mock.patch.dict(os.environ, {"ANYDATASET_HOME": tmpdir}):
+                first = rule.apply(
+                    dataset_factory=lambda: dataset,
+                    metrics=metrics,
+                    device="cpu",
+                )
+                (first.cache_path / relative_path).write_text(
+                    serialized,
+                    encoding="utf-8",
+                )
+
+                restored = rule.apply(
+                    dataset_factory=lambda: dataset,
+                    metrics=metrics,
+                    device="cpu",
+                )
+                metric_rows = list(restored.iter_metrics()) if metrics else []
+
+        self.assertNotEqual(restored.cache_path, first.cache_path)
+        self.assertEqual(restored.counts, {"accept": 1})
+        self.assertEqual(len(metric_rows), 1 if metrics else 0)
+        self.assertEqual(calls, [0, 0])
 
     def test_filter_resume_rejects_duplicate_partition_labels(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1613,20 +1762,23 @@ class FilteredDatasetTest(unittest.TestCase):
         self.assertEqual([file["count"] for file in files], [2, 2, 1])
         self.assertEqual(selected.indices, (0, 1, 2, 3, 4))
 
-    def test_rule_apply_rejects_duplicate_partition_labels(self):
+    def test_read_partitions_rejects_malformed_leased_manifest(self):
         _register_rows_source("unit_test_filter_duplicate_partition")
         dataset = _dataset("unit_test_filter_duplicate_partition", [0])
         rule = FilterRule("all", _true_factory)
-        result = rule.apply(dataset_factory=lambda: dataset, device="cpu")
-        path = result.cache_path / "partitions.json"
-        manifest = json.loads(path.read_text(encoding="utf-8"))
-        duplicate = dict(manifest["partitions"][0])
-        duplicate["count"] = 0
-        manifest["partitions"].append(duplicate)
-        path.write_text(json.dumps(manifest), encoding="utf-8")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with mock.patch.dict(os.environ, {"ANYDATASET_HOME": tmpdir}):
+                result = rule.apply(dataset_factory=lambda: dataset, device="cpu")
+                path = result.cache_path / "partitions.json"
+                manifest = json.loads(path.read_text(encoding="utf-8"))
+                manifest["partitions"].append(dict(manifest["partitions"][0]))
+                path.write_text(json.dumps(manifest), encoding="utf-8")
 
-        with self.assertRaisesRegex(ValueError, "Duplicate filter partition label"):
-            rule.apply(dataset_factory=lambda: dataset, device="cpu")
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "Duplicate filter partition label",
+                ):
+                    read_partitions(result.cache_path)
 
     def test_rule_apply_filters_with_workers(self):
         with tempfile.TemporaryDirectory():

@@ -514,15 +514,8 @@ class CanonicalDatasetTest(unittest.TestCase):
         )
         self.assertNotIn("transforms", dataset.spec.load_options)
 
-    def test_preset_requires_matching_dataset_type(self):
-        with self.assertRaisesRegex(ValueError, "AnyDataset.preset"):
-            IterableAnyDataset.preset("wmt19")
-        with self.assertRaisesRegex(ValueError, "AnyDataset.preset"):
-            IterableAnyDataset.preset("mnist")
-        with self.assertRaisesRegex(ValueError, "AnyDataset.preset"):
-            IterableAnyDataset.preset("common_voice")
-        with self.assertRaisesRegex(ValueError, "AnyDataset.preset"):
-            IterableAnyDataset.preset("fleurs")
+    def test_presets_are_map_style_only(self):
+        self.assertFalse(hasattr(IterableAnyDataset, "preset"))
         dataset = AnyDataset.preset("wmt19")
         self.assertIsInstance(dataset, AnyDataset)
 

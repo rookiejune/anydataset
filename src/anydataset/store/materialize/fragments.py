@@ -3,7 +3,7 @@ from __future__ import annotations
 import multiprocessing
 import time
 from collections import deque
-from collections.abc import Iterable, Sequence
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from itertools import islice
 from pathlib import Path
@@ -12,7 +12,7 @@ from typing import Deque, Protocol, Union
 from ..._compat import strict_zip
 from ..._runtime.parallel import StartMethod
 from ..._runtime.progress import Progress, ProgressDashboard, put_progress
-from ..._runtime.resume import append_completed_index_cache, index_batch_id, pending_batch
+from ..._runtime.resume import append_completed_index_cache, index_batch_id
 from ..._runtime.write_pipeline import BackgroundWriteSink
 from ...types.item import Sample
 from .batch import validate_batch_outputs
@@ -45,6 +45,7 @@ class FragmentStrategy(Protocol):
 class FragmentBatchConfig:
     dataset_id: str
     split: str | None
+    provenance: Mapping[str, str]
     max_shard_samples: int
     commit_samples: int
     write_workers: int
@@ -57,13 +58,13 @@ class FragmentBatchWriter:
     strategy: FragmentStrategy
     config: FragmentBatchConfig
     fragments_dir: Path
-    completed: set[int]
+    completed: Collection[int]
     provider: MaterializerProvider
     progress: ProgressSink | None = None
     worker_id: int = 0
 
     def __post_init__(self) -> None:
-        self._inflight: set[int] = set()
+        self._submitted_indexes: set[int] = set()
 
     def write(self, batches: Iterable[Sequence[tuple[int, Sample]]]) -> None:
         with self._sink() as sink:
@@ -71,7 +72,7 @@ class FragmentBatchWriter:
             read_start = time.perf_counter()
             for batch in batches:
                 self._record_read(batch, read_start)
-                pending = pending_batch(batch, self.completed | self._inflight)
+                pending = self._pending_batch(batch)
                 if not pending:
                     read_start = time.perf_counter()
                     continue
@@ -80,6 +81,30 @@ class FragmentBatchWriter:
                 self._flush_ready(sink, pending_outputs)
                 read_start = time.perf_counter()
             self._flush_remaining(sink, pending_outputs)
+
+    def _pending_batch(
+        self,
+        batch: Sequence[tuple[int, Sample]],
+    ) -> tuple[tuple[int, Sample], ...]:
+        pending: list[tuple[int, Sample]] = []
+        previous: int | None = None
+        for index, sample in batch:
+            if previous is not None:
+                if index <= previous:
+                    raise ValueError(
+                        "Materializer sample indexes must be in increasing order "
+                        "within each batch."
+                    )
+            previous = index
+            if index in self.completed:
+                continue
+            if index in self._submitted_indexes:
+                raise ValueError(
+                    "Materializer sample indexes must be unique within a run."
+                )
+            pending.append((index, sample))
+        self._submitted_indexes.update(index for index, _sample in pending)
+        return tuple(pending)
 
     def _record_read(
         self,
@@ -161,17 +186,16 @@ class FragmentBatchWriter:
     ) -> None:
         indexed = tuple(samples)
         indexes = tuple(sorted(index for index, _ in indexed))
-        sink.submit(
-            FragmentWriteJob(
-                fragments_dir=self.fragments_dir,
-                dataset_id=self.config.dataset_id,
-                split=self.config.split,
-                max_shard_samples=self.config.max_shard_samples,
-                indexes=indexes,
-                samples=indexed,
-            )
+        job = FragmentWriteJob(
+            fragments_dir=self.fragments_dir,
+            dataset_id=self.config.dataset_id,
+            split=self.config.split,
+            provenance=self.config.provenance,
+            max_shard_samples=self.config.max_shard_samples,
+            indexes=indexes,
+            samples=indexed,
         )
-        self._inflight.update(indexes)
+        sink.submit(job)
 
     def _sink(self) -> BackgroundWriteSink[FragmentWriteJob]:
         return BackgroundWriteSink(
@@ -194,8 +218,6 @@ class FragmentBatchWriter:
         pending: int,
         elapsed: float,
     ) -> None:
-        self.completed.update(job.indexes)
-        self._inflight.difference_update(job.indexes)
         put_stage_progress(
             self.progress,
             worker_id=self.worker_id,
@@ -211,6 +233,7 @@ class FragmentWriteJob:
     fragments_dir: Path
     dataset_id: str
     split: str | None
+    provenance: Mapping[str, str]
     max_shard_samples: int
     indexes: tuple[int, ...]
     samples: tuple[tuple[int, Sample], ...]
@@ -223,6 +246,7 @@ def write_fragment(job: FragmentWriteJob) -> None:
         dataset_id=job.dataset_id,
         split=job.split,
         fragment_id=fragment_id,
+        provenance=job.provenance,
         max_shard_samples=job.max_shard_samples,
     ).write(job.samples)
     append_completed_index_cache(job.fragments_dir, fragment_id, job.indexes)

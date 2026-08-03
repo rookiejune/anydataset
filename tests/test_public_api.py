@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import json
+import subprocess
+import sys
+
 import anydataset
 import anydataset.dataset as dataset
 import anydataset.dataset.source as source
@@ -147,6 +151,31 @@ def test_presets_public_api_boundary() -> None:
         ],
     )
     _assert_not_exported(presets, ["preset_spec", "create_map_preset"])
+
+
+def test_presets_load_concrete_modules_lazily() -> None:
+    code = """
+import json
+import sys
+import anydataset.presets as presets
+
+prefix = "anydataset.presets."
+before = sorted(
+    name for name in sys.modules
+    if name.startswith(prefix) and name != f"{prefix}registry"
+)
+presets.MNIST
+after = sorted(
+    name for name in sys.modules
+    if name.startswith(prefix) and name != f"{prefix}registry"
+)
+print(json.dumps({"before": before, "after": after}))
+"""
+    output = subprocess.check_output([sys.executable, "-c", code], text=True)
+    loaded = json.loads(output)
+
+    assert loaded["before"] == []
+    assert loaded["after"] == ["anydataset.presets.mnist"]
 
 
 def test_dataset_public_api_boundary() -> None:

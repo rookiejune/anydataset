@@ -52,7 +52,7 @@ from anydataset.store.paths import (
     view_shard_path,
     view_shard_index_path,
 )
-from anydataset.store.reader import read_store_dataset
+from anydataset.store.reader import read_store_dataset, read_store_manifest
 
 
 class DatasetWriterTest(unittest.TestCase):
@@ -290,9 +290,9 @@ class DatasetWriterTest(unittest.TestCase):
 
             with mock.patch.object(
                 store_parts,
-                "_sample_indexes_for_ref",
-                side_effect=AssertionError("sample manifest was scanned per view"),
-            ):
+                "read_samples_manifest",
+                wraps=read_samples_manifest,
+            ) as read_samples:
                 commit_store_fragments(
                     output,
                     fragments,
@@ -300,6 +300,13 @@ class DatasetWriterTest(unittest.TestCase):
                     split="train",
                     expected_sample_count=3,
                 )
+
+            merged_scans = [
+                call
+                for call in read_samples.call_args_list
+                if Path(call.args[0]).parent == root
+            ]
+            self.assertEqual(len(merged_scans), 1)
 
             indexes = [entry.sample_index for entry in read_samples_manifest(output)]
             self.assertEqual(indexes, [0, 1, 2])
@@ -452,12 +459,14 @@ class DatasetWriterTest(unittest.TestCase):
             fragments = root / "fragments"
             output = root / "dataset"
             view = (Role.DEFAULT, Modality.AUDIO, AudioView.WAVEFORM)
+            provenance = {"input_id": "source-v1", "provider_id": "codec-v1"}
             for index in range(5):
                 fragment = fragments / f"batch-{index:012d}-{index:012d}-a"
                 DatasetFragmentWriter(
                     fragment,
                     dataset_id="toy-audio",
                     fragment_id=fragment.name,
+                    provenance=provenance,
                 ).write(
                     [
                         (
@@ -470,7 +479,25 @@ class DatasetWriterTest(unittest.TestCase):
                     ]
                 )
 
-            with mock.patch.object(store_parts, "_MERGE_FAN_IN", 2):
+            intermediate_provenance = []
+            commit_roots = store_parts._commit_roots_to_tmp
+
+            def capture_provenance(*args, **kwargs):
+                merged = commit_roots(*args, **kwargs)
+                if kwargs.get("dense") is False:
+                    intermediate_provenance.append(
+                        dict(read_store_manifest(merged).provenance)
+                    )
+                return merged
+
+            with (
+                mock.patch.object(store_parts, "_MERGE_FAN_IN", 2),
+                mock.patch.object(
+                    store_parts,
+                    "_commit_roots_to_tmp",
+                    side_effect=capture_provenance,
+                ),
+            ):
                 commit_store_fragments(
                     output,
                     fragments,
@@ -486,7 +513,156 @@ class DatasetWriterTest(unittest.TestCase):
                 [entry.sample_index for entry in read_view_manifest(output, view)],
                 list(range(5)),
             )
+            self.assertTrue(intermediate_provenance)
+            self.assertTrue(
+                all(item == provenance for item in intermediate_provenance)
+            )
+            self.assertEqual(dict(read_store_manifest(output).provenance), provenance)
             self.assertFalse(any(root.glob(".dataset-merge-*")))
+
+    def test_commit_parts_derives_matching_input_provenance(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            provenance = {"input_id": "source-v1", "provider_id": "codec-v1"}
+            parts = _audio_parts(root, (provenance, provenance))
+            output = root / "dataset"
+
+            commit_store_parts(output, parts, dataset_id="toy-audio")
+
+            self.assertEqual(dict(read_store_manifest(output).provenance), provenance)
+
+    def test_commit_parts_rejects_provenance_conflicts(self):
+        first = {"input_id": "source-v1"}
+        second = {"input_id": "source-v2"}
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            conflicting = _audio_parts(root / "conflicting", (first, second))
+            matching = _audio_parts(root / "matching", (first, first))
+
+            with self.subTest(conflict="inputs"):
+                with self.assertRaisesRegex(ValueError, "provenance does not match"):
+                    commit_store_parts(
+                        root / "input-conflict",
+                        conflicting,
+                        dataset_id="toy-audio",
+                    )
+            with self.subTest(conflict="explicit"):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "Explicit commit provenance",
+                ):
+                    commit_store_parts(
+                        root / "explicit-conflict",
+                        matching,
+                        dataset_id="toy-audio",
+                        provenance=second,
+                    )
+
+    def test_fragment_commits_derive_matching_input_provenance(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            provenance = {"input_id": "source-v1", "provider_id": "codec-v1"}
+            fragments_dir, fragments = _audio_fragments(
+                root,
+                (provenance, provenance),
+            )
+            output = root / "dataset"
+            part = root / "part"
+
+            commit_store_fragments(
+                output,
+                fragments_dir,
+                dataset_id="toy-audio",
+                expected_sample_count=2,
+            )
+            commit_fragment_part(
+                part,
+                fragments,
+                dataset_id="toy-audio",
+                shard_id=0,
+                num_shards=1,
+            )
+
+            self.assertEqual(dict(read_store_manifest(output).provenance), provenance)
+            self.assertEqual(dict(read_store_manifest(part).provenance), provenance)
+
+    def test_fragment_commits_reject_provenance_conflicts(self):
+        first = {"provider_id": "codec-v1"}
+        second = {"provider_id": "codec-v2"}
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            conflicting_dir, conflicting = _audio_fragments(
+                root / "conflicting",
+                (first, second),
+            )
+            matching_dir, matching = _audio_fragments(
+                root / "matching",
+                (first, first),
+            )
+
+            with self.subTest(entrypoint="commit_store_fragments", conflict="inputs"):
+                with self.assertRaisesRegex(ValueError, "provenance does not match"):
+                    commit_store_fragments(
+                        root / "fragment-input-conflict",
+                        conflicting_dir,
+                        dataset_id="toy-audio",
+                        expected_sample_count=2,
+                    )
+            with self.subTest(entrypoint="commit_fragment_part", conflict="inputs"):
+                with self.assertRaisesRegex(ValueError, "provenance does not match"):
+                    commit_fragment_part(
+                        root / "part-input-conflict",
+                        conflicting,
+                        dataset_id="toy-audio",
+                        shard_id=0,
+                        num_shards=1,
+                    )
+            with self.subTest(
+                entrypoint="commit_store_fragments",
+                conflict="explicit",
+            ):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "Explicit commit provenance",
+                ):
+                    commit_store_fragments(
+                        root / "fragment-explicit-conflict",
+                        matching_dir,
+                        dataset_id="toy-audio",
+                        expected_sample_count=2,
+                        provenance=second,
+                    )
+            with self.subTest(entrypoint="commit_fragment_part", conflict="explicit"):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "Explicit commit provenance",
+                ):
+                    commit_fragment_part(
+                        root / "part-explicit-conflict",
+                        matching,
+                        dataset_id="toy-audio",
+                        shard_id=0,
+                        num_shards=1,
+                        provenance=second,
+                    )
+
+    def test_empty_fragment_part_preserves_explicit_provenance(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output = Path(tmpdir) / "part"
+            provenance = {"input_id": "source-v1", "provider_id": "codec-v1"}
+
+            commit_fragment_part(
+                output,
+                (),
+                dataset_id="toy-audio",
+                shard_id=1,
+                num_shards=2,
+                provenance=provenance,
+            )
+
+            manifest = read_store_manifest(output)
+            self.assertEqual(manifest.sample_count, 0)
+            self.assertEqual(dict(manifest.provenance), provenance)
 
     def test_fragment_commits_preserve_views_from_all_fragments(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1140,6 +1316,56 @@ class DatasetWriterTest(unittest.TestCase):
                 sorted(sorted(group) for group in groups),
                 [[0, 4], [1, 5], [2, 6], [3, 7]],
             )
+
+
+def _audio_parts(root: Path, provenances):
+    parts = root / "parts"
+    num_shards = len(provenances)
+    for shard_id, provenance in enumerate(provenances):
+        DatasetPartWriter(
+            parts / f"part-{shard_id:05d}",
+            dataset_id="toy-audio",
+            shard_id=shard_id,
+            num_shards=num_shards,
+            provenance=provenance,
+        ).write(
+            [
+                (
+                    shard_id,
+                    audio_sample(
+                        waveform=torch.tensor([[float(shard_id)]]),
+                        sample_rate=4,
+                    ),
+                )
+            ]
+        )
+    return parts
+
+
+def _audio_fragments(root: Path, provenances):
+    fragments = root / "fragments"
+    paths = []
+    for index, provenance in enumerate(provenances):
+        name = f"batch-{index:012d}-{index:012d}-{index}"
+        path = fragments / name
+        DatasetFragmentWriter(
+            path,
+            dataset_id="toy-audio",
+            fragment_id=name,
+            provenance=provenance,
+        ).write(
+            [
+                (
+                    index,
+                    audio_sample(
+                        waveform=torch.tensor([[float(index)]]),
+                        sample_rate=4,
+                    ),
+                )
+            ]
+        )
+        paths.append(path)
+    return fragments, tuple(paths)
 
 
 def _single_audio_part(root: Path):

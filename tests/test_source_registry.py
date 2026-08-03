@@ -1,7 +1,11 @@
+import base64
 import json
+import inspect
 import pickle
 from pathlib import Path
 import tempfile
+import subprocess
+import sys
 import unittest
 
 from anydataset import (
@@ -96,32 +100,88 @@ class SourceRegistryTest(unittest.TestCase):
                     with_workers.to_dict()["load_options"],
                 )
 
-    def test_spec_identity_is_stable_across_late_source_registration(self):
+    def test_source_identity_policy_must_be_registered_before_spec(self):
         source = "unit_test_late_identity_registration"
-        existing = Spec(
+        Spec(
             source=source,
             path="/tmp/custom",
             load_options={"worker_count": 4},
         )
-        before = existing.to_dict()
 
+        with self.assertRaisesRegex(RuntimeError, "before constructing its Spec"):
+            register_source(
+                source,
+                ListSource,
+                operational_load_options=("worker_count",),
+            )
+
+    def test_spec_pickle_preserves_frozen_identity_without_public_override(self):
+        source = "unit_test_pickle_identity"
         register_source(
             source,
             ListSource,
             operational_load_options=("worker_count",),
         )
-        later = Spec(
+        spec = Spec(
+            source=source,
+            path="/tmp/custom",
+            load_options={"worker_count": 4, "format": "jsonl"},
+        )
+
+        restored = pickle.loads(pickle.dumps(spec))
+
+        self.assertNotIn("_identity_load_options", inspect.signature(Spec).parameters)
+        self.assertEqual(restored, spec)
+        self.assertEqual(restored.id, spec.id)
+        self.assertNotIn("worker_count", restored.to_dict()["load_options"])
+
+    def test_spec_pickle_can_be_registered_after_fresh_process_restore(self):
+        source = "unit_test_pickle_fresh_identity"
+        spec = Spec(
             source=source,
             path="/tmp/custom",
             load_options={"worker_count": 4},
         )
-        restored = pickle.loads(pickle.dumps(existing))
+        payload = base64.b64encode(pickle.dumps(spec)).decode("ascii")
+        code = f"""
+import base64
+import pickle
+from pathlib import Path
 
-        self.assertEqual(existing.to_dict(), before)
-        self.assertEqual(restored, existing)
-        self.assertEqual(restored.id, existing.id)
-        self.assertNotEqual(later.id, existing.id)
-        self.assertNotEqual(later, existing)
+from anydataset import register_source
+
+
+class FreshSource:
+    def prepare(self, spec, cache_path):
+        return []
+
+
+pickle.loads(base64.b64decode({payload!r}))
+register_source(
+    {source!r},
+    FreshSource,
+    operational_load_options=("worker_count",),
+)
+print("ok")
+"""
+
+        output = subprocess.check_output([sys.executable, "-c", code], text=True)
+        self.assertEqual(output.strip(), "ok")
+
+    def test_spec_rejects_identity_override_keyword(self):
+        with self.assertRaisesRegex(TypeError, "_identity_load_options"):
+            Spec(
+                source="unit_test_identity_override",
+                path="/tmp/custom",
+                _identity_load_options={},
+            )
+
+    def test_rejects_factory_that_does_not_return_source(self):
+        source = "unit_test_invalid_factory_result"
+        register_source(source, lambda: object())
+
+        with self.assertRaisesRegex(TypeError, "must return a DatasetSource"):
+            create_source(source)
 
     def test_rejects_invalid_operational_identity_options(self):
         with self.assertRaisesRegex(TypeError, "collection of strings"):

@@ -24,26 +24,30 @@ class SourceIdentityPolicy:
 
 _DEFAULT_POLICY = SourceIdentityPolicy(frozenset({"prepare_workers"}))
 _POLICIES: dict[str, SourceIdentityPolicy] = {}
+_RESOLVED_SOURCES: set[str] = set()
 
 
 def register_source_identity(
     source: str,
     operational_load_options: Collection[str],
-) -> SourceIdentityPolicy:
+) -> None:
     if source in _POLICIES:
         raise ValueError(f"Dataset source identity {source!r} is already registered.")
-    policy = SourceIdentityPolicy(
+    if source in _RESOLVED_SOURCES:
+        raise RuntimeError(
+            f"Register dataset source {source!r} before constructing its Spec."
+        )
+    _POLICIES[source] = SourceIdentityPolicy(
         _DEFAULT_POLICY.operational_load_options
         | _option_names(operational_load_options)
     )
-    _POLICIES[source] = policy
-    return policy
 
 
 def physical_load_options(
     source: str,
     load_options: Mapping[str, Any],
 ) -> dict[str, Any]:
+    _RESOLVED_SOURCES.add(source)
     return _POLICIES.get(source, _DEFAULT_POLICY).physical_load_options(load_options)
 
 

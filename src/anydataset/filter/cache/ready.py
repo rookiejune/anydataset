@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -16,7 +17,7 @@ from .generations import (
 )
 from .identity import FilterBase, filter_identity_key
 from .resume import cleanup_filter_resume_dir
-from .storage import metrics_ready, partition_count, partition_files
+from .storage import load_partition_manifest, metrics_ready
 from ..types import DatasetFactory
 
 if TYPE_CHECKING:
@@ -70,23 +71,34 @@ def not_ready_reason(
         return "partition manifest is missing"
     try:
         actual = read_json(metadata_path)
-        manifest = read_json(manifest_path)
     except FileNotFoundError:
         return "cache snapshot changed during readiness check"
+    except (json.JSONDecodeError, UnicodeError) as exc:
+        return f"rule metadata is invalid: {exc}"
+    if not isinstance(actual, Mapping):
+        return "rule metadata is invalid: expected a JSON object"
     if metadata_mismatch(actual, expected):
         return "rule metadata does not match current dataset identity"
+    try:
+        manifest = load_partition_manifest(manifest_path)
+    except FileNotFoundError:
+        return "cache snapshot changed during readiness check"
+    except (UnicodeError, TypeError, ValueError) as exc:
+        return f"partition manifest is invalid: {exc}"
     expected_count = int(expected["base"]["sample_count"])
-    if partition_count(manifest) != expected_count:
+    if manifest.count != expected_count:
         return "partition sample count does not match current dataset"
-    for relpath in partition_files(manifest):
-        if not (path / relpath).is_file():
-            return f"partition shard is missing: {relpath}"
+    for file in manifest.files:
+        if not (path / file.path).is_file():
+            return f"partition shard is missing: {file.path}"
     if metrics:
         try:
             if not metrics_ready(metrics_path(path), expected_count=expected_count):
                 return "metrics cache is missing or incomplete"
         except FileNotFoundError:
             return "cache snapshot changed during readiness check"
+        except (UnicodeError, TypeError, ValueError) as exc:
+            return f"metrics manifest is invalid: {exc}"
     return None
 
 

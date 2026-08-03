@@ -32,7 +32,12 @@ from torch.utils.data import DataLoader, Dataset, IterableDataset, Sampler
 
 from .logging import run_logs_dir, set_run_logs_dir
 from .resume import ComplementIndexes
-from .sharding import iter_map_style_shard, runtime_shard, validate_shard
+from .sharding import (
+    iter_map_style_shard,
+    runtime_shard,
+    validate_shard,
+    validated_shard_rows,
+)
 
 DatasetFactory = Callable[[], Any]
 StartMethod = Literal["fork", "spawn", "forkserver"]
@@ -169,10 +174,15 @@ def iter_shard(
     iter_shard = getattr(dataset, "iter_shard", None)
     if callable(iter_shard):
         method = cast(
-            Callable[[int, int], Iterator[tuple[int, Any]]],
+            Callable[[int, int], Any],
             iter_shard,
         )
-        yield from method(num_shards, shard_id)
+        yield from validated_shard_rows(
+            method(num_shards, shard_id),
+            num_shards=num_shards,
+            shard_id=shard_id,
+            label="dataset iter_shard()",
+        )
         return
 
     if hasattr(dataset, "__len__") and hasattr(dataset, "__getitem__"):

@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Any, Callable, cast
 from ..types import Preset, Spec
 
 if TYPE_CHECKING:
-    from ..dataset.abc import AnyDataset, IterableAnyDataset
+    from ..dataset.abc import AnyDataset
     from ..types.item import Transforms
 
 
@@ -32,6 +32,9 @@ _PRESETS = {
     Preset.FSD50K: _PresetRegistration("fsd50k", "FSD50K"),
     Preset.WMT19: _PresetRegistration("wmt19", "WMT19"),
 }
+
+if set(_PRESETS) != set(Preset):
+    raise RuntimeError("Preset registry must contain every Preset member.")
 
 
 def preset_spec(
@@ -58,20 +61,16 @@ def create_map_preset(
     return dataset_type(split=split, transforms=transforms, **load_options)
 
 
-def create_iterable_preset(
-    preset: Preset,
-    split: str | None = None,
-    transforms: Transforms | None = None,
-    **load_options: Any,
-) -> IterableAnyDataset:
-    del split, transforms, load_options
-    raise ValueError(
-        f"Preset {preset.value!r} is map-style; use AnyDataset.preset()."
-    )
-
-
 def _load(preset: Preset) -> tuple[_PresetRegistration, ModuleType]:
     registration = _PRESETS.get(preset)
     if registration is None:
         raise ValueError(f"Unsupported preset: {preset!r}.")
     return registration, import_module(f".{registration.module}", __package__)
+
+
+def load_export(name: str) -> Any:
+    for registration in _PRESETS.values():
+        if registration.dataset_type == name:
+            module = import_module(f".{registration.module}", __package__)
+            return getattr(module, name)
+    raise AttributeError(f"module 'anydataset.presets' has no attribute {name!r}")

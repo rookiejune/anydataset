@@ -16,6 +16,34 @@ def validate_shard(num_shards: int, shard_id: int) -> None:
         raise ValueError("shard_id must satisfy 0 <= shard_id < num_shards.")
 
 
+def validated_shard_rows(
+    rows: Any,
+    *,
+    num_shards: int,
+    shard_id: int,
+    label: str,
+) -> Iterator[tuple[int, Any]]:
+    validate_shard(num_shards, shard_id)
+    try:
+        iterator = iter(rows)
+    except TypeError as exc:
+        raise TypeError(f"{label} must return an iterable.") from exc
+    expected = shard_id
+    for entry in iterator:
+        if not isinstance(entry, tuple) or len(entry) != 2:
+            raise TypeError(f"{label} must yield (sample_index, value) tuples.")
+        sample_index, value = entry
+        if isinstance(sample_index, bool) or not isinstance(sample_index, int):
+            raise TypeError(f"{label} sample indexes must be integers.")
+        if sample_index != expected:
+            raise ValueError(
+                f"{label} must yield dense global sample indexes: "
+                f"expected {expected}, got {sample_index}."
+            )
+        yield sample_index, value
+        expected += num_shards
+
+
 def validate_range(sample_count: int, start: int, stop: int) -> None:
     if start < 0 or stop < start or stop > sample_count:
         raise ValueError("range must satisfy 0 <= start <= stop <= len(dataset).")

@@ -1,24 +1,17 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Collection
-from dataclasses import dataclass
-from typing import Any, ClassVar, cast
+from typing import ClassVar
 
-from ..._source_identity import SourceIdentityPolicy, register_source_identity
+from ..._source_identity import register_source_identity
 from ...types import Source, SourceKey, source_key
 from .protocol import DatasetSource
 
-DatasetSourceFactory = Callable[[], Any]
-
-
-@dataclass(frozen=True)
-class _SourceRegistration:
-    factory: DatasetSourceFactory
-    identity: SourceIdentityPolicy
+DatasetSourceFactory = Callable[[], DatasetSource]
 
 
 class SourceFactory:
-    _registrations: ClassVar[dict[str, _SourceRegistration]] = {}
+    _factories: ClassVar[dict[str, DatasetSourceFactory]] = {}
 
     @classmethod
     def register(
@@ -29,26 +22,29 @@ class SourceFactory:
         operational_load_options: Collection[str] = (),
     ) -> None:
         key = source_key(source)
-        if key in cls._registrations:
+        if key in cls._factories:
             raise ValueError(f"Dataset source {key!r} is already registered.")
         if not callable(factory):
             raise TypeError("Dataset source factory must be callable.")
-        cls._registrations[key] = _SourceRegistration(
-            factory=factory,
-            identity=register_source_identity(key, operational_load_options),
-        )
+        register_source_identity(key, operational_load_options)
+        cls._factories[key] = factory
 
     @classmethod
     def create(cls, source: SourceKey) -> DatasetSource:
         key = source_key(source)
-        registration = cls._registrations.get(key)
-        if registration is None:
+        factory = cls._factories.get(key)
+        if factory is None:
             raise KeyError(f"Unknown dataset source: {key!r}.")
-        return cast(DatasetSource, registration.factory())
+        instance = factory()
+        if isinstance(instance, type) or not isinstance(instance, DatasetSource):
+            raise TypeError(
+                f"Dataset source factory for {key!r} must return a DatasetSource."
+            )
+        return instance
 
     @classmethod
     def exist(cls, source: SourceKey) -> bool:
-        return source_key(source) in cls._registrations
+        return source_key(source) in cls._factories
 
 
 def register_source(

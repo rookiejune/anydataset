@@ -153,6 +153,7 @@ class DatasetWriteTest(unittest.TestCase):
             num_shards=1,
             num_workers=0,
             prefetch_factor=None,
+            provenance={},
             dataset_factory=_dataset_factory,
         )
 

@@ -10,6 +10,7 @@ from anydataset._runtime.parallel import (
     GlobalIndexSampler,
     MapStyleSampleIndexDataset,
     SelectedIndexSampler,
+    iter_shard,
     map_style_sample_index_loader,
     restore_environment,
     set_single_worker_environment,
@@ -19,6 +20,29 @@ from anydataset._runtime.resume import missing_indexes
 
 
 class ParallelRuntimeTest(unittest.TestCase):
+    def test_iter_shard_accepts_dense_global_indexes(self):
+        rows = ((1, "one"), (3, "three"))
+
+        self.assertEqual(list(iter_shard(_ShardedDataset(rows), 2, 1)), list(rows))
+
+    def test_iter_shard_rejects_malformed_global_indexes(self):
+        cases = (
+            (None, TypeError, "return an iterable"),
+            (([1, "one"],), TypeError, "tuples"),
+            (((True, "one"),), TypeError, "integers"),
+            (((3, "three"),), ValueError, "expected 1, got 3"),
+            (
+                ((1, "one"), (1, "duplicate")),
+                ValueError,
+                "expected 3, got 1",
+            ),
+        )
+
+        for rows, error, message in cases:
+            with self.subTest(rows=rows):
+                with self.assertRaisesRegex(error, message):
+                    list(iter_shard(_ShardedDataset(rows), 2, 1))
+
     def test_global_index_sampler_shards_by_rank(self):
         sampler = GlobalIndexSampler(sample_count=8, num_shards=3, shard_id=1)
 
@@ -177,6 +201,15 @@ class _TrackedDataset:
     def __getitem__(self, index: int) -> int:
         self.calls.append(index)
         return index
+
+
+@dataclass(frozen=True)
+class _ShardedDataset:
+    rows: object
+
+    def iter_shard(self, num_shards: int, shard_id: int):
+        del num_shards, shard_id
+        return self.rows
 
 
 if __name__ == "__main__":

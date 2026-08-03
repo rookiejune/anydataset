@@ -176,24 +176,6 @@ class _Base(_DatasetOperations, ABC):
 
 
 class IterableAnyDataset(_Base, IterableDataset):
-    @classmethod
-    def preset(
-        cls,
-        preset: str | Preset,
-        split: str | None = None,
-        *,
-        transforms: Transforms | None = None,
-        **load_options: Any,
-    ) -> IterableAnyDataset:
-        from ..presets.registry import create_iterable_preset
-
-        return create_iterable_preset(
-            Preset(preset),
-            split=split,
-            transforms=transforms,
-            **load_options,
-        )
-
     def iter_rows(self) -> Iterator[Any]:
         yield from self.dataset
 

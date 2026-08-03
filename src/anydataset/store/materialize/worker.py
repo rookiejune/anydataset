@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import multiprocessing
 import traceback
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
@@ -32,6 +32,7 @@ MaterializerMode = Literal["view", "modality", "sample"]
 class WorkerConfig:
     output_dir: Path
     split: str | None
+    provenance: Mapping[str, str]
     max_shard_samples: int
     batch_size: int
     commit_samples: int
@@ -120,6 +121,7 @@ def materialize_worker(
                     split=config.split,
                     shard_id=config.shard_id,
                     num_shards=config.num_shards,
+                    provenance=config.provenance,
                 )
         except Exception:
             error = traceback.format_exc()
@@ -143,6 +145,8 @@ def worker_materializer(config: WorkerConfig) -> MaterializerWorker:
     options: dict[str, Any] = {
         "output_dir": config.output_dir,
         "split": config.split,
+        "input_id": config.provenance.get("input_id"),
+        "provider_id": config.provenance.get("provider_id"),
         "max_shard_samples": config.max_shard_samples,
         "batch_size": config.batch_size,
         "commit_samples": config.commit_samples,
