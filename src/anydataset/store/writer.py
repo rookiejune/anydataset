@@ -116,7 +116,7 @@ class DatasetWriter:
 
     def write(
         self,
-        samples: Any | None = None,
+        samples: Iterable[Sample] | None = None,
         *,
         dataset_factory: DatasetFactory | None = None,
     ) -> Path:
