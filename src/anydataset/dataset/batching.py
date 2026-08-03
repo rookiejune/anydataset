@@ -3,10 +3,9 @@
 from __future__ import annotations
 
 import operator
-from bisect import bisect_left, bisect_right, insort
-from collections import OrderedDict
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass
+from math import isfinite
 from typing import Any, Optional, overload
 
 from torch.utils.data import Sampler
@@ -58,47 +57,23 @@ class _Record:
 
 
 @dataclass(frozen=True)
+class _PendingRecord:
+    arrival: int
+    record: _Record
+
+
+@dataclass(frozen=True)
 class _Plan:
     records: tuple[_Record, ...]
     cost: int
 
 
-class _Pending:
-    def __init__(self, records: Iterable[_Record]) -> None:
-        self._source = iter(records)
-        self._order: OrderedDict[int, _Record] = OrderedDict()
-        self._costs: list[tuple[int, int, int]] = []
-        self._arrival = 0
-
-    def __bool__(self) -> bool:
-        return bool(self._order)
-
-    def fill(self, limit: int) -> None:
-        while len(self._order) < limit:
-            try:
-                record = next(self._source)
-            except StopIteration:
-                return
-            arrival = self._arrival
-            self._arrival += 1
-            self._order[arrival] = record
-            insort(self._costs, (record.cost, -arrival, arrival))
-
-    def pop_first(self) -> _Record:
-        arrival, record = self._order.popitem(last=False)
-        key = (record.cost, -arrival, arrival)
-        offset = bisect_left(self._costs, key)
-        if offset >= len(self._costs) or self._costs[offset] != key:
-            raise RuntimeError("batch planner pending cost index is inconsistent.")
-        self._costs.pop(offset)
-        return record
-
-    def pop_fitting(self, budget: int) -> _Record | None:
-        offset = bisect_right(self._costs, (budget, self._arrival, self._arrival)) - 1
-        if offset < 0:
-            return None
-        _cost, _reverse_arrival, arrival = self._costs.pop(offset)
-        return self._order.pop(arrival)
+@dataclass(frozen=True)
+class _Candidate:
+    records: tuple[_PendingRecord, ...]
+    cost: int
+    padding_ratio: float
+    arrival: int
 
 
 class _DatasetSampler(Sampler[int]):
@@ -131,6 +106,7 @@ class _BatchSampler(Sampler[list[int]]):
         planning_window: int = 256,
         distributed_plan_window: int = 32,
         max_batch_samples: int | None = None,
+        max_padding_ratio: float = 0.2,
         drop_distributed_tail: bool = True,
     ) -> None:
         if not isinstance(dataset, MapStyleABC):
@@ -152,6 +128,9 @@ class _BatchSampler(Sampler[list[int]]):
             None
             if max_batch_samples is None
             else _positive_int("max_batch_samples", max_batch_samples)
+        )
+        self.max_padding_ratio = _non_negative_float(
+            "max_padding_ratio", max_padding_ratio
         )
         if not isinstance(drop_distributed_tail, bool):
             raise TypeError("drop_distributed_tail must be a bool.")
@@ -177,6 +156,7 @@ class _BatchSampler(Sampler[list[int]]):
                 max_batch_memory=self.max_batch_memory,
                 planning_window=self.planning_window,
                 max_batch_samples=self.max_batch_samples,
+                max_padding_ratio=self.max_padding_ratio,
             )
 
     def __len__(self) -> int:
@@ -259,6 +239,7 @@ class _DataLoader(TorchDataLoader):
         planning_window: int = 256,
         distributed_plan_window: int = 32,
         max_batch_samples: int | None = None,
+        max_padding_ratio: float = 0.2,
         drop_distributed_tail: bool = True,
         **loader_kwargs: Any,
     ) -> None:
@@ -279,6 +260,7 @@ class _DataLoader(TorchDataLoader):
             planning_window=planning_window,
             distributed_plan_window=distributed_plan_window,
             max_batch_samples=max_batch_samples,
+            max_padding_ratio=max_padding_ratio,
             drop_distributed_tail=drop_distributed_tail,
         )
         self._batch_sampler = batch_sampler
@@ -298,28 +280,120 @@ def _plans(
     max_batch_memory: int,
     planning_window: int,
     max_batch_samples: int | None,
+    max_padding_ratio: float = 0.2,
 ) -> Iterator[_Plan]:
-    pending = _Pending(records)
+    source = iter(records)
+    pending: list[_PendingRecord] = []
+    next_arrival = 0
+    source_exhausted = False
+    window = 1 if max_batch_samples == 1 else planning_window
     while True:
-        pending.fill(1)
+        while len(pending) < window and not source_exhausted:
+            try:
+                record = next(source)
+            except StopIteration:
+                source_exhausted = True
+                break
+            pending.append(_PendingRecord(arrival=next_arrival, record=record))
+            next_arrival += 1
         if not pending:
             return
-        selected = [pending.pop_first()]
-        cost = selected[0].cost
-        if cost > max_batch_memory:
+        oldest = min(pending, key=lambda item: item.arrival)
+        if oldest.record.cost > max_batch_memory:
             raise ValueError(
                 "A sample exceeds max_batch_memory: "
-                f"index={selected[0].index} memory={cost} "
+                f"index={oldest.record.index} memory={oldest.record.cost} "
                 f"budget={max_batch_memory}."
             )
-        while max_batch_samples is None or len(selected) < max_batch_samples:
-            pending.fill(planning_window)
-            candidate = pending.pop_fitting(max_batch_memory - cost)
-            if candidate is None:
+        candidate = _select_candidate(
+            pending,
+            max_batch_memory=max_batch_memory,
+            max_batch_samples=max_batch_samples,
+            max_padding_ratio=max_padding_ratio,
+        )
+        selected_arrivals = {item.arrival for item in candidate.records}
+        pending = [item for item in pending if item.arrival not in selected_arrivals]
+        selected = tuple(
+            item.record for item in sorted(candidate.records, key=lambda item: item.arrival)
+        )
+        yield _Plan(records=selected, cost=candidate.cost)
+
+
+def _select_candidate(
+    pending: Sequence[_PendingRecord],
+    *,
+    max_batch_memory: int,
+    max_batch_samples: int | None,
+    max_padding_ratio: float,
+) -> _Candidate:
+    sorted_pending = sorted(
+        pending,
+        key=lambda item: (item.record.cost, item.arrival),
+    )
+    multi_candidates: list[_Candidate] = []
+    single_candidates: list[_Candidate] = []
+    for start in range(len(sorted_pending)):
+        total = 0
+        max_cost = 0
+        for stop in range(start, len(sorted_pending)):
+            count = stop - start + 1
+            if max_batch_samples is not None and count > max_batch_samples:
                 break
-            selected.append(candidate)
-            cost += candidate.cost
-        yield _Plan(records=tuple(selected), cost=cost)
+            item = sorted_pending[stop]
+            total += item.record.cost
+            if total > max_batch_memory:
+                break
+            max_cost = max(max_cost, item.record.cost)
+            records = tuple(sorted_pending[start : stop + 1])
+            candidate = _Candidate(
+                records=records,
+                cost=total,
+                padding_ratio=_padding_ratio(total, max_cost, count),
+                arrival=min(record.arrival for record in records),
+            )
+            if count == 1:
+                single_candidates.append(candidate)
+            else:
+                multi_candidates.append(candidate)
+    if multi_candidates:
+        threshold_candidates = [
+            candidate
+            for candidate in multi_candidates
+            if candidate.padding_ratio <= max_padding_ratio
+        ]
+        if threshold_candidates:
+            return max(
+                threshold_candidates,
+                key=lambda candidate: (
+                    candidate.cost,
+                    -candidate.padding_ratio,
+                    -candidate.arrival,
+                ),
+            )
+        return max(
+            multi_candidates,
+            key=lambda candidate: (
+                -candidate.padding_ratio,
+                candidate.cost,
+                -candidate.arrival,
+            ),
+        )
+    if single_candidates:
+        return max(
+            single_candidates,
+            key=lambda candidate: (candidate.cost, -candidate.arrival),
+        )
+    oldest = min(pending, key=lambda item: item.arrival)
+    raise ValueError(
+        "A sample exceeds max_batch_memory: "
+        f"index={oldest.record.index} memory={oldest.record.cost} "
+        f"budget={max_batch_memory}."
+    )
+
+
+def _padding_ratio(cost: int, max_cost: int, count: int) -> float:
+    padded = max_cost * count
+    return 0.0 if padded == 0 else (padded - cost) / padded
 
 
 def _int(name: str, value: int) -> int:
@@ -332,6 +406,15 @@ def _non_negative_int(name: str, value: int) -> int:
     resolved = _int(name, value)
     if resolved < 0:
         raise ValueError(f"{name} must be non-negative.")
+    return resolved
+
+
+def _non_negative_float(name: str, value: float) -> float:
+    if isinstance(value, bool):
+        raise TypeError(f"{name} must be a number.")
+    resolved = float(value)
+    if not isfinite(resolved) or resolved < 0:
+        raise ValueError(f"{name} must be a finite non-negative number.")
     return resolved
 
 

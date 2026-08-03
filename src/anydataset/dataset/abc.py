@@ -238,6 +238,7 @@ class MapStyleABC(Dataset, ABC):
         planning_window: int = 256,
         distributed_plan_window: int = 32,
         max_batch_samples: int | None = None,
+        max_padding_ratio: float = 0.2,
         drop_distributed_tail: bool = True,
         **loader_kwargs: Any,
     ) -> DataLoader[Any]:
@@ -254,6 +255,7 @@ class MapStyleABC(Dataset, ABC):
             planning_window=planning_window,
             distributed_plan_window=distributed_plan_window,
             max_batch_samples=max_batch_samples,
+            max_padding_ratio=max_padding_ratio,
             drop_distributed_tail=drop_distributed_tail,
             **loader_kwargs,
         )

@@ -51,7 +51,7 @@ def test_cost_does_not_parse_sample() -> None:
 
     assert measured == [4, 1, 3, 2]
     assert parsed == [4, 3, 1, 2]
-    assert batches == [[40, 30, 10], [20]]
+    assert batches == [[40, 30], [10, 20]]
 
 
 def test_accepts_plain_iterable_costs() -> None:
@@ -62,7 +62,7 @@ def test_accepts_plain_iterable_costs() -> None:
         collate_fn=list,
     )
 
-    assert list(loader) == [[4, 3, 1], [2]]
+    assert list(loader) == [[4, 3], [1, 2]]
 
 
 def test_requires_supported_costs() -> None:
@@ -202,7 +202,7 @@ def test_map_style_abc_can_use_dataloader() -> None:
         collate_fn=list,
     )
 
-    assert list(loader) == [[40, 30, 10], [20]]
+    assert list(loader) == [[40, 30], [10, 20]]
 
 
 def test_callable_costs_use_map_style_cost_row() -> None:
@@ -215,7 +215,7 @@ def test_callable_costs_use_map_style_cost_row() -> None:
         collate_fn=list,
     )
 
-    assert list(loader) == [[40, 30, 10], [20]]
+    assert list(loader) == [[40, 30], [10, 20]]
     assert dataset.cost_rows == [0, 1, 2, 3]
 
 
@@ -285,6 +285,17 @@ def test_cost_planning_is_lazy() -> None:
 
     assert first == [1]
     assert measured == [0]
+
+
+def test_bucket_planner_selects_sorted_length_window() -> None:
+    loader = _dataset([100, 1, 100, 1, 100, 1]).dataloader(
+        costs=[100, 1, 100, 1, 100, 1],
+        max_batch_memory=201,
+        planning_window=6,
+        collate_fn=list,
+    )
+
+    assert next(iter(loader)) == [100, 100]
 
 
 def test_distributed_planning_sync_is_bounded() -> None:
@@ -537,7 +548,7 @@ def test_distributed_plan_counts_use_cuda_device_for_nccl() -> None:
     ("budget", "window", "max_samples"),
     [(97, 1, None), (128, 7, 4), (256, 32, 8), (512, 256, None)],
 )
-def test_streaming_planner_matches_reference_greedy_order(
+def test_streaming_planner_matches_reference_bucket_order(
     budget: int,
     window: int,
     max_samples: int | None,
@@ -619,25 +630,110 @@ def _reference_plans(
     window: int,
     max_samples: int | None,
 ) -> list[list[int]]:
-    pending = [_Record(index, cost) for index, cost in enumerate(costs)]
+    pending: list[tuple[int, _Record]] = []
+    source = iter(enumerate(costs))
+    next_arrival = 0
+    source_exhausted = False
+    fill_window = 1 if max_samples == 1 else window
     plans = []
-    while pending:
-        selected = [pending.pop(0)]
-        selected_cost = selected[0].cost
-        while max_samples is None or len(selected) < max_samples:
-            best: tuple[int, int] | None = None
-            for offset, record in enumerate(pending[:window]):
-                candidate_cost = selected_cost + record.cost
-                if candidate_cost > budget:
-                    continue
-                if best is None or candidate_cost > best[1]:
-                    best = offset, candidate_cost
-            if best is None:
+    while True:
+        while len(pending) < fill_window and not source_exhausted:
+            try:
+                index, cost = next(source)
+            except StopIteration:
+                source_exhausted = True
                 break
-            offset, selected_cost = best
-            selected.append(pending.pop(offset))
-        plans.append([record.index for record in selected])
+            pending.append((next_arrival, _Record(index, cost)))
+            next_arrival += 1
+        if not pending:
+            return plans
+        candidates = _reference_candidates(
+            pending,
+            budget=budget,
+            max_samples=max_samples,
+            min_count=2,
+        )
+        if candidates:
+            threshold = [
+                candidate
+                for candidate in candidates
+                if candidate[2] <= 0.2
+            ]
+            if threshold:
+                selected = max(
+                    threshold,
+                    key=lambda candidate: (
+                        candidate[1],
+                        -candidate[2],
+                        -candidate[3],
+                    ),
+                )
+            else:
+                selected = max(
+                    candidates,
+                    key=lambda candidate: (
+                        -candidate[2],
+                        candidate[1],
+                        -candidate[3],
+                    ),
+                )
+        else:
+            selected = max(
+                _reference_candidates(
+                    pending,
+                    budget=budget,
+                    max_samples=max_samples,
+                    min_count=1,
+                    max_count=1,
+                ),
+                key=lambda candidate: (candidate[1], -candidate[3]),
+            )
+        selected_arrivals = {arrival for arrival, _record in selected[0]}
+        pending = [
+            item for item in pending if item[0] not in selected_arrivals
+        ]
+        plans.append(
+            [
+                record.index
+                for _arrival, record in sorted(selected[0], key=lambda item: item[0])
+            ]
+        )
     return plans
+
+
+def _reference_candidates(
+    pending: Sequence[tuple[int, _Record]],
+    *,
+    budget: int,
+    max_samples: int | None,
+    min_count: int,
+    max_count: int | None = None,
+) -> list[tuple[tuple[tuple[int, _Record], ...], int, float, int]]:
+    sorted_pending = sorted(pending, key=lambda item: (item[1].cost, item[0]))
+    candidates = []
+    for start in range(len(sorted_pending)):
+        total = 0
+        max_cost = 0
+        for stop in range(start, len(sorted_pending)):
+            count = stop - start + 1
+            if max_samples is not None and count > max_samples:
+                break
+            if max_count is not None and count > max_count:
+                break
+            _arrival, record = sorted_pending[stop]
+            total += record.cost
+            if total > budget:
+                break
+            max_cost = max(max_cost, record.cost)
+            if count < min_count:
+                continue
+            records = tuple(sorted_pending[start : stop + 1])
+            padded = max_cost * count
+            padding_ratio = 0.0 if padded == 0 else (padded - total) / padded
+            candidates.append(
+                (records, total, padding_ratio, min(item[0] for item in records))
+            )
+    return candidates
 
 
 class _GroupedDataset(MapStyleABC):
