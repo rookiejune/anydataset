@@ -8,6 +8,7 @@ from ..._io.atomic import replace_dir
 from ..._runtime.sharding import validate_shard
 from ..._validation import positive_int, validate_path_segment
 from ...types.item import Modality, Role, Sample, View
+from .._refs import view_path
 from ..config import DEFAULT_MAX_SHARD_SAMPLES
 from .sample_write import (
     explicit_views,
@@ -18,7 +19,6 @@ from .sample_write import (
     sample_view_value,
     validate_sample,
     validate_view_sets,
-    view_path,
 )
 from ..jsonio import write_json
 from ..manifest.schema import (

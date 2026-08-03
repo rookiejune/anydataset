@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest import mock
 
 from anydataset.types import AudioView, Modality, Role
+from anydataset.store._refs import sample_ref_path, validate_entry_ref, view_path
 from anydataset.store.jsonio import read_json, write_json
 from anydataset.store.manifest.schema import (
     DatasetManifest,
@@ -42,6 +43,25 @@ from anydataset.store.paths import (
 
 
 class StoreTest(unittest.TestCase):
+    def test_store_ref_paths_use_manifest_order(self):
+        view = (Role.DEFAULT, Modality.AUDIO, AudioView.WAVEFORM)
+
+        self.assertEqual(view_path(view), ("default", "audio", "waveform"))
+        self.assertEqual(sample_ref_path(view[:2]), ("default", "audio"))
+
+    def test_store_entry_ref_must_match_path(self):
+        entry = (Role.DEFAULT, Modality.AUDIO, AudioView.WAVEFORM)
+
+        validate_entry_ref(entry, entry)
+        with self.assertRaisesRegex(
+            ValueError,
+            r"^View manifest entry ref must match its path\.$",
+        ):
+            validate_entry_ref(
+                entry,
+                (Role.DEFAULT, Modality.AUDIO, AudioView.FILE),
+            )
+
     def test_view_paths_use_role_modality_view(self):
         root = Path("/tmp/dataset")
         view = (Role.DEFAULT, Modality.AUDIO, AudioView.WAVEFORM)

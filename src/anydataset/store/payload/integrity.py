@@ -8,6 +8,7 @@ from typing import Literal
 
 from ..._validation import validate_path_segment
 from ...types.item import Modality, Role, View
+from .._refs import validate_entry_ref, view_path
 from ..manifest.io import read_view_manifest
 from ..paths import view_shard_path
 from ..reader import read_store_views
@@ -36,19 +37,18 @@ def validate_store_view_payloads(
     _validate_level(level)
     with _ExpectedPayloads() as expected:
         for entry in read_view_manifest(root, view):
-            if (entry.role, entry.modality, entry.view) != view:
-                raise ValueError("View manifest entry ref must match its path.")
+            validate_entry_ref((entry.role, entry.modality, entry.view), view)
             if not _path_segment("shard", entry.shard):
                 raise ValueError(
-                    f"View {_view_path(view)} has invalid shard name {entry.shard!r}."
+                    f"View {view_path(view)} has invalid shard name {entry.shard!r}."
                 )
             if not _path_segment("payload key", entry.key):
                 raise ValueError(
-                    f"View {_view_path(view)} has invalid payload key {entry.key!r}."
+                    f"View {view_path(view)} has invalid payload key {entry.key!r}."
                 )
             if not expected.add(entry.shard, entry.key):
                 raise ValueError(
-                    f"View {_view_path(view)} shard {entry.shard!r} "
+                    f"View {view_path(view)} shard {entry.shard!r} "
                     f"has duplicate payload key {entry.key!r}."
                 )
 
@@ -56,7 +56,7 @@ def validate_store_view_payloads(
             path = view_shard_path(root, view, shard)
             if not path.is_file():
                 raise FileNotFoundError(
-                    f"View {_view_path(view)} is missing referenced shard {path}."
+                    f"View {view_path(view)} is missing referenced shard {path}."
                 )
             if level == "fast":
                 continue
@@ -69,13 +69,13 @@ def validate_store_view_payloads(
                             continue
                         if member.name in members:
                             raise ValueError(
-                                f"View {_view_path(view)} shard {shard!r} "
+                                f"View {view_path(view)} shard {shard!r} "
                                 f"has duplicate payload key {member.name!r}."
                             )
                         members.add(member.name)
                         if not _path_segment("payload key", member.name):
                             raise ValueError(
-                                f"View {_view_path(view)} shard {shard!r} "
+                                f"View {view_path(view)} shard {shard!r} "
                                 f"has invalid payload key {member.name!r}."
                             )
             except tarfile.TarError as exc:
@@ -88,13 +88,13 @@ def validate_store_view_payloads(
                 missing = expected_keys - members
                 if missing:
                     raise ValueError(
-                        f"View {_view_path(view)} shard {shard!r} "
+                        f"View {view_path(view)} shard {shard!r} "
                         f"is missing payload {min(missing)!r}."
                     )
                 extra = members - expected_keys
                 if extra:
                     raise ValueError(
-                        f"View {_view_path(view)} shard {shard!r} "
+                        f"View {view_path(view)} shard {shard!r} "
                         f"has extra payload {min(extra)!r}."
                     )
                 try:
@@ -234,8 +234,3 @@ def _path_segment(name: str, value: str) -> bool:
     except (TypeError, ValueError):
         return False
     return True
-
-
-def _view_path(view: tuple[Role, Modality, View]) -> tuple[str, str, str]:
-    role, modality, key = view
-    return role.value, modality.value, key.value

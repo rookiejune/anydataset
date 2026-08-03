@@ -11,6 +11,7 @@ from ..._io.atomic import replace_dir
 from ..._io.parquet import parquet_schema, pyarrow
 from ..._validation import validate_path_segment
 from ...types.item import Modality, Role, View
+from .._refs import validate_entry_ref, view_path
 from ..payload.integrity import validate_store_payloads
 from ..jsonio import read_json, write_json
 from .schema import (
@@ -233,7 +234,7 @@ def _v1_view_entries(
             yield entry
     if count != expected_count:
         raise ValueError(
-            f"View {_view_path(view)} sample count {count} "
+            f"View {view_path(view)} sample count {count} "
             f"does not match item count {expected_count}."
         )
 
@@ -249,8 +250,7 @@ def _v1_view_entry(
         raise ValueError(
             "Store schema v1 view manifest has an invalid view ref."
         ) from exc
-    if row_view != view:
-        raise ValueError("View manifest entry ref must match its path.")
+    validate_entry_ref(row_view, view)
     sample_id = row.get("sample_id")
     if not isinstance(sample_id, str) or not sample_id:
         raise ValueError("Store schema v1 view sample_id must be a non-empty string.")
@@ -262,7 +262,7 @@ def _v1_view_entry(
     sample_index, refs = sample
     if view[:2] not in refs:
         raise ValueError(
-            f"View {_view_path(view)} has an entry for sample_index {sample_index} "
+            f"View {view_path(view)} has an entry for sample_index {sample_index} "
             "without a matching sample item."
         )
     shard = row.get("shard")
@@ -295,11 +295,6 @@ def _copy_shards(
         output_path.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source_path, output_path)
         write_payload_index(output, view, shard)
-
-
-def _view_path(view: tuple[Role, Modality, View]) -> tuple[str, str, str]:
-    role, modality, key = view
-    return role.value, modality.value, key.value
 
 
 def _path_name(value: object) -> TypeGuard[str]:

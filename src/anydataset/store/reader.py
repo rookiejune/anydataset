@@ -18,13 +18,13 @@ from ..dataset._shuffle import shuffle_index_groups
 from ..types import item
 from ..types.language import remap_lang
 from ._pickle_state import decode_pickle_state, validate_pickle_fields
+from ._refs import view_path
 from .payload.files import StoreFilesLease, lease_store_files, payload_path, store_id
 from .manifest.index import (
     SampleManifestSequence,
     StoreView,
     StoreViews,
     ViewEntryIndex as ViewEntryIndex,
-    view_path as _view_path,
 )
 from .jsonio import read_json
 from .manifest.schema import (
@@ -447,9 +447,9 @@ def _select_views(
     for view in selected:
         _validate_view_ref(view)
         if view in seen:
-            raise ValueError(f"Duplicate requested store view: {_view_path(view)}.")
+            raise ValueError(f"Duplicate requested store view: {view_path(view)}.")
         if view not in available_set:
-            raise KeyError(f"Store dataset does not contain view {_view_path(view)}.")
+            raise KeyError(f"Store dataset does not contain view {view_path(view)}.")
         seen.add(view)
     return selected
 
@@ -462,7 +462,7 @@ def _discover_views(
         view = _view_from_dir(root, path)
         _validate_view_dir(path, view)
         views.append(view)
-    return tuple(sorted(views, key=_view_path))
+    return tuple(sorted(views, key=view_path))
 
 
 def _view_from_dir(
@@ -504,7 +504,7 @@ def _validate_view_dir(
     view: tuple[item.Role, item.Modality, item.View],
 ) -> None:
     if not (path / ".ready").is_file():
-        raise ValueError(f"Store dataset view is not ready: {_view_path(view)}.")
+        raise ValueError(f"Store dataset view is not ready: {view_path(view)}.")
     if not (path / "manifest.parquet").is_file():
         raise FileNotFoundError(path / "manifest.parquet")
 
@@ -643,7 +643,7 @@ def _sample_for_entry(
             entry = view.entries_by_index[index]
             if entry is None:
                 raise ValueError(
-                    f"View {_view_path(view_entry)} is missing sample_index {index}."
+                    f"View {view_path(view_entry)} is missing sample_index {index}."
                 )
             views[view_entry[2]] = _view_value(dataset, view, entry)
         result[sample_ref] = _item_from_entry(sample_ref, item_entry, views)

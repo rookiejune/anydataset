@@ -17,7 +17,8 @@ from ..._io.files import (
     stat_fingerprint,
 )
 from ...types.item import Modality, Role, View
-from ..manifest.index import SampleManifestSequence, StoreViews, view_path
+from .._refs import validate_entry_ref, view_path
+from ..manifest.index import SampleManifestSequence, StoreViews
 from ..jsonio import read_json, write_json
 from ..manifest.schema import ViewManifestEntry
 from ..manifest.io import (
@@ -346,8 +347,7 @@ def _manifest_groups(
                     f"Store view {view_path(view)} is missing sample_index "
                     f"{sample.sample_index}."
                 )
-            if (entry.role, entry.modality, entry.view) != view:
-                raise ValueError("View manifest entry ref must match its path.")
+            validate_entry_ref((entry.role, entry.modality, entry.view), view)
             key.append((view, entry.shard))
             current[view] = next(iterators[view], None)
         if not key:

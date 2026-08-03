@@ -20,15 +20,13 @@ from ..._runtime.resume import (
 from ..._runtime.sharding import validate_shard
 from ..._validation import positive_int
 from ...types.item import Modality, Role, View
+from .._refs import validate_entry_ref, view_path
 from ..payload.integrity import validate_store_payloads
 from ..payload.groups import write_payload_groups
 from .writer import (
     DatasetPartWriter,
     fragment_json_path as _fragment_json_path,
     part_json_path as _part_json_path,
-)
-from .sample_write import (
-    view_path,
 )
 from ..jsonio import read_json, write_json
 from ..manifest.schema import (
@@ -898,7 +896,7 @@ def _validated_view_entries(
     view: tuple[Role, Modality, View],
 ) -> Iterator[ViewManifestEntry]:
     for entry in entries:
-        _validate_view_entry(entry, view)
+        validate_entry_ref((entry.role, entry.modality, entry.view), view)
         yield entry
 
 
@@ -924,14 +922,6 @@ def _next_sourced_entry(
         return next(entries)
     except StopIteration:
         return None
-
-
-def _validate_view_entry(
-    entry: ViewManifestEntry,
-    view: tuple[Role, Modality, View],
-) -> None:
-    if (entry.role, entry.modality, entry.view) != view:
-        raise ValueError("View manifest entry ref must match its path.")
 
 
 def _store_views(stores: tuple[Path, ...]) -> tuple[tuple[Role, Modality, View], ...]:

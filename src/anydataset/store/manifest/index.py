@@ -12,7 +12,8 @@ from typing import Any, overload
 
 from ..._io.files import stat_fingerprint
 from ...types import item
-from .schema import SampleManifestEntry, ViewManifestEntry
+from .._refs import validate_entry_ref, view_path
+from ..paths import view_manifest_parquet_path, view_ready_path
 from .io import (
     ManifestParquetCache,
     manifest_parquet_cache,
@@ -21,7 +22,7 @@ from .io import (
     read_view_manifest_row_group,
     view_manifest_layout,
 )
-from ..paths import view_manifest_parquet_path, view_ready_path
+from .schema import SampleManifestEntry, ViewManifestEntry
 
 
 class SampleManifestSequence(Sequence[SampleManifestEntry]):
@@ -242,8 +243,10 @@ class ViewEntryIndex:
             rows = read_view_manifest_row_group(self.root, self.view, row_group)
         start = self._offsets[row_group]
         for offset, entry in enumerate(rows):
-            if entry_view(entry) != self.view:
-                raise ValueError("View manifest entry ref must match its path.")
+            validate_entry_ref(
+                (entry.role, entry.modality, entry.view),
+                self.view,
+            )
             if entry.sample_index != self._sample_indexes[start + offset]:
                 raise ValueError(
                     f"View {view_path(self.view)} index changed while reading."
@@ -422,16 +425,3 @@ def raise_view_coverage_error(
         details.append(f"unexpected sample_index {extra}")
     detail = ", ".join(details)
     raise ValueError(f"View {view_path(view)} sample coverage mismatch: {detail}.")
-
-
-def entry_view(
-    entry: ViewManifestEntry,
-) -> tuple[item.Role, item.Modality, item.View]:
-    return entry.role, entry.modality, entry.view
-
-
-def view_path(
-    view: tuple[item.Role, item.Modality, item.View],
-) -> tuple[str, str, str]:
-    role, modality, key = view
-    return role.value, modality.value, key.value

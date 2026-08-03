@@ -11,6 +11,7 @@ from ...types.item import (
     Sample,
     View,
 )
+from .._refs import sample_ref_path, view_path
 from ..manifest.schema import SampleItem, SampleManifestEntry, string_key_dict
 
 
@@ -133,13 +134,3 @@ def sample_id(dataset: str, index: int) -> str:
 def slug(value: str) -> str:
     text = re.sub(r"[^0-9A-Za-z._-]+", "-", value).strip("-")
     return text or "sample"
-
-
-def view_path(view: tuple[Role, Modality, View]) -> tuple[str, str, str]:
-    role, modality, key = view
-    return role.value, modality.value, key.value
-
-
-def sample_ref_path(ref: tuple[Role, Modality]) -> tuple[str, str]:
-    role, modality = ref
-    return role.value, modality.value
