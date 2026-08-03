@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from typing import Any, Generic, Protocol, TypeVar, Union
 
 from .dataset.collate import Batch
-from .types.item import AudioView, ImageView, Reference, Role, TextView, View
+from .types.item import AudioView, ImageView, Reference, Role, Sample, TextView, View
 
 ViewT = TypeVar("ViewT", bound=View)
 
@@ -51,6 +51,14 @@ class BatchModalityProvider(Protocol[ViewT]):
     def __call__(self, views: Mapping[View, Any]) -> Any: ...
 
     def call_batch(self, batch: Batch) -> BatchOutput: ...
+
+
+class SampleProvider(Protocol):
+    def __call__(self, sample: Sample) -> Sample: ...
+
+
+class BatchSampleProvider(SampleProvider, Protocol):
+    def call_batch(self, samples: Sequence[Sample]) -> Sequence[Sample]: ...
 
 
 Provider = Union[

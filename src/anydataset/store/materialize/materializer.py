@@ -48,7 +48,7 @@ from ...runtime import Runtime
 from ...types._sample import combine as combine_samples
 from ...types._sample import select as select_sample
 from ...types.item import Role, Sample, Schema
-from ...view import Provider
+from ...view import BatchSampleProvider, Provider, SampleProvider
 from .batch import (
     sample_index_batches,
     validate_batch_outputs,
@@ -68,11 +68,9 @@ from .worker import WorkerConfig, materialize_worker
 from .modality import with_modality_provider
 from .types import (
     BatchModalityProviderLike,
-    BatchSampleProviderLike,
     BatchViewProviderLike,
     MaterializerProvider,
     ModalityProviderLike,
-    SampleProviderLike,
 )
 from .view import with_view_provider
 from ..part.commit import (
@@ -1022,7 +1020,7 @@ class SampleMaterializer(ViewMaterializer):
         return self._output_sample(
             sample,
             _validated_sample_provider_output(
-                cast(SampleProviderLike, provider)(sample),
+                cast(SampleProvider, provider)(sample),
             ),
         )
 
@@ -1032,7 +1030,7 @@ class SampleMaterializer(ViewMaterializer):
         provider: MaterializerProvider,
     ) -> Iterator[Sample]:
         try:
-            call_batch = cast(BatchSampleProviderLike, provider).call_batch
+            call_batch = cast(BatchSampleProvider, provider).call_batch
         except AttributeError as exc:
             raise TypeError(
                 "batch_size > 1 requires sample provider.call_batch()."

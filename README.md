@@ -995,6 +995,48 @@ output = ModalityMaterializer(
 )
 ```
 
+`SampleMaterializer` delegates the complete output sample to a
+`SampleProvider`. Use it when related fields must be generated and published
+together instead of materializing one view or modality at a time. The provider
+returns the canonical sample mapping directly:
+
+```python
+from anydataset.store import SampleMaterializer
+from anydataset.types import AudioItem, AudioView, Modality, Role
+
+
+class TTSReferencePair:
+    def __call__(self, sample):
+        source_waveform, sample_rate = synthesize_source(sample)
+        target_waveform = synthesize_target(
+            sample,
+            reference=source_waveform,
+        )
+        return {
+            (Role.SOURCE, Modality.AUDIO): AudioItem(
+                views={AudioView.WAVEFORM: (source_waveform, sample_rate)},
+            ),
+            (Role.TARGET, Modality.AUDIO): AudioItem(
+                views={AudioView.WAVEFORM: (target_waveform, sample_rate)},
+            ),
+        }
+
+
+def paired_tts_factory(_device: str):
+    return TTSReferencePair()
+
+
+output = SampleMaterializer("/data/my_anydataset_tts_pair").write(
+    dataset_factory=dataset_factory,
+    provider_factory=paired_tts_factory,
+    devices="cpu",
+)
+```
+
+For spawn-based parallel execution, define both factories at module scope. A
+batch sample provider implements `call_batch(samples)` and returns one
+canonical sample mapping per input sample.
+
 Built-in providers follow the model/backend name, for example
 `MossTTSProvider` for text-to-audio and `WhisperASRProvider` for
 audio-to-text. A provider may set `reference_role` when generation also needs an

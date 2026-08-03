@@ -1000,6 +1000,47 @@ output = ModalityMaterializer(
 )
 ```
 
+`SampleMaterializer` 把完整输出 sample 交给 `SampleProvider` 生成。相关字段必须一次
+生成并共同发布时，用它替代逐个 materialize view 或 modality。provider 直接返回
+canonical sample mapping：
+
+```python
+from anydataset.store import SampleMaterializer
+from anydataset.types import AudioItem, AudioView, Modality, Role
+
+
+class TTSReferencePair:
+    def __call__(self, sample):
+        source_waveform, sample_rate = synthesize_source(sample)
+        target_waveform = synthesize_target(
+            sample,
+            reference=source_waveform,
+        )
+        return {
+            (Role.SOURCE, Modality.AUDIO): AudioItem(
+                views={AudioView.WAVEFORM: (source_waveform, sample_rate)},
+            ),
+            (Role.TARGET, Modality.AUDIO): AudioItem(
+                views={AudioView.WAVEFORM: (target_waveform, sample_rate)},
+            ),
+        }
+
+
+def paired_tts_factory(_device: str):
+    return TTSReferencePair()
+
+
+output = SampleMaterializer("/data/my_anydataset_tts_pair").write(
+    dataset_factory=dataset_factory,
+    provider_factory=paired_tts_factory,
+    devices="cpu",
+)
+```
+
+使用基于 spawn 的并行执行时，两个 factory 都应定义在模块顶层。batch sample
+provider 实现 `call_batch(samples)`，并为每条输入返回一个 canonical sample
+mapping。
+
 `MossTTSProvider` 用于 text-to-audio，`WhisperASRProvider` 用于 audio-to-text。
 provider 还可以设置 `reference_role`，表示生成时需要该 role 已经存在的输出 modality，
 例如 TTS 的参考音频。reference role 不再作为输出目标，其 view 会与其他 role 唯一的输入

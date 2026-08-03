@@ -30,9 +30,10 @@ Use these paths for application code:
 - `anydataset.filter`: cached filter rules, filtered datasets, scalar and batch
   filter predicate contracts, explicit filter apply reports, online reject /
   replace filtering, filter decisions, and filter cleanup entry points.
-- `anydataset.store`: canonical store writing, view/materialization providers,
-  scalar and batch transform types, explicit store migration, payload integrity
-  checks, and retained-file cleanup.
+- `anydataset.store`: canonical store writing; view, modality, and complete-sample
+  materializers and provider protocols; scalar and batch transform types;
+  materialization status; explicit store migration; payload integrity checks;
+  and retained-file leasing and cleanup.
 - `anydataset.runtime`: process/device runtime configuration.
 - `anydataset.provider`: built-in model/provider classes.
 - `anydataset.provider_service`: provider process server and remote provider /
@@ -55,8 +56,9 @@ helpers live under private implementation modules such as
 Batch-aware integrations can type their filter predicates with
 `anydataset.filter.BatchFilterPredicate`. Store providers can import
 `BatchOutput`, `BatchViewTransform`, and `BatchModalityTransform` directly from
-`anydataset.store`; callers do not need to depend on the internal materializer
-modules that consume those contracts.
+`anydataset.store`. Complete-sample integrations can type providers with
+`SampleProvider` and `BatchSampleProvider`; callers do not need to depend on
+the internal materializer modules that consume those contracts.
 
 ## Extension API
 
@@ -81,7 +83,7 @@ These paths are intended for users extending anydataset:
 - `anydataset.rowmap` contains helpers for mapping raw rows to canonical
   samples in presets and user-defined parsers.
 - Provider protocols and wrapper classes exported from `anydataset.store`
-  define view and modality materialization contracts.
+  define view, modality, and complete-sample materialization contracts.
 - Quality rule classes should be imported from `anydataset.quality` by default.
   Focused submodules such as `anydataset.quality.rules`,
   `anydataset.quality.text`, `anydataset.quality.translation`, and

@@ -11,9 +11,10 @@
 - `Preset` 负责把内置数据集映射到具体 `Spec`，并通过 `parse_fn` 把 raw row 转成 canonical `Sample`。
 - `Sample` 统一使用 `Mapping[tuple[Role, Modality], Item]`，不要恢复旧的 wrapper / `.data` 结构。
 - `AnyDataset` 表示 map-style 数据集；`IterableAnyDataset` 表示 iterable 数据集。
-- store 的公开入口是 `DatasetWriter`、`ViewMaterializer`、
-  `ModalityMaterializer`、provider 类型和 `Source.STORE`。part、fragment、manifest
-  读写与 commit helper 都是内部实现。
+- store 的公开入口是 `DatasetWriter`，view / modality / complete-sample 三类
+  materializer，provider 类型，`MaterializationStatus`，migration / integrity /
+  retained-file maintenance facade 和 `Source.STORE`。part、fragment、manifest、
+  payload 读写与 commit helper 都是内部实现。
 - `dataset.morphology` 提供跨下游复用的 audio 样本形态契约：`audio` / `speech` /
   `speech_grid` 的 batch、utterance collate 和 grid view。它不持有 Lightning
   DataModule、Hydra、LBA 或 teacher 训练附件；那些留在 anycodec / speech-to-speech。
