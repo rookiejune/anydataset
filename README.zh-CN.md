@@ -709,6 +709,10 @@ dataset = AnyDataset.from_store(
 `AnyDataset.from_store(..., views=...)` 只加载所选 view 的 manifest 和 payload；选择会在
 pickle/spawn 后保留，并参与 filter cache identity，而物理 `Spec` 仍只标识 store 本身。
 
+store 目录 schema 才是长期持久化的磁盘格式。`StoreDataset` 和 `DatasetWriter` 另有独立
+版本的 pickle state，只用于 spawn 和 `DataLoader` worker 之间的短期 runtime transport，
+不应作为持久化数据集格式保存；不支持的 runtime pickle 版本会显式报错。
+
 store payload 按 view 写入 tar shard。普通 `DataLoader(shuffle=True)` 会在样本级打散，
 一个 batch 可能频繁跨 tar 读取。训练 store 时使用同一个
 `dataset.dataloader(..., shuffle=True)` 入口即可保持 local-aware：

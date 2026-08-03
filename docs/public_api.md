@@ -124,6 +124,15 @@ must be rematerialized to schema-v3; `migrate_store` does not upgrade them.
 Store internals such as manifest readers, payload index writers, part commit
 helpers, and JSON path helpers remain private implementation details.
 
+## Runtime pickle policy
+
+The store directory schema is the long-lived persisted data format. In
+contrast, the versioned pickle states used by `StoreDataset` and
+`DatasetWriter` are runtime transport contracts for process spawn and
+`DataLoader` workers. Do not retain those pickles as durable dataset assets.
+Unversioned legacy runtime states follow the explicit v0 migration path;
+unsupported versions, fields, and field types fail instead of being guessed.
+
 ## Adding public names
 
 When promoting a helper to public API:

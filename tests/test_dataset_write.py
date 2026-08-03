@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import pickle
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -13,6 +14,29 @@ def _dataset_factory() -> tuple[()]:
 
 
 class DatasetWriteTest(unittest.TestCase):
+    def test_dataset_writer_pickle_state_is_explicit_and_versioned(self):
+        writer = DatasetWriter("output", dataset_id="dataset", split="train")
+
+        state = writer.__getstate__()
+
+        self.assertEqual(state["pickle_schema_version"], 1)
+        self.assertEqual(
+            set(state),
+            {
+                "pickle_schema_version",
+                "output_dir",
+                "dataset_id",
+                "split",
+                "views",
+                "max_shard_samples",
+                "provenance",
+                "num_shards",
+                "num_workers",
+                "prefetch_factor",
+            },
+        )
+        self.assertEqual(pickle.loads(pickle.dumps(writer)), writer)
+
     def test_dataset_writer_restores_pre_parallel_pickle_state(self):
         restored = DatasetWriter.__new__(DatasetWriter)
 
@@ -31,6 +55,49 @@ class DatasetWriteTest(unittest.TestCase):
         self.assertEqual(restored.num_shards, 1)
         self.assertEqual(restored.num_workers, 0)
         self.assertIsNone(restored.prefetch_factor)
+
+    def test_dataset_writer_rejects_unknown_pickle_schema(self):
+        state = DatasetWriter("output").__getstate__()
+        restored = DatasetWriter.__new__(DatasetWriter)
+
+        for version in (0, 2):
+            with self.subTest(version=version):
+                state["pickle_schema_version"] = version
+                with self.assertRaisesRegex(
+                    ValueError,
+                    f"Unsupported DatasetWriter pickle_schema_version {version}",
+                ):
+                    restored.__setstate__(state)
+
+        for version in (True, "1"):
+            with self.subTest(version=version):
+                state["pickle_schema_version"] = version
+                with self.assertRaisesRegex(
+                    TypeError,
+                    "pickle_schema_version must be an integer",
+                ):
+                    restored.__setstate__(state)
+
+    def test_dataset_writer_rejects_invalid_pickle_fields(self):
+        state = DatasetWriter("output").__getstate__()
+        state["output_dir"] = object()
+        restored = DatasetWriter.__new__(DatasetWriter)
+
+        with self.assertRaisesRegex(
+            TypeError,
+            "field 'output_dir' must be a string or Path",
+        ):
+            restored.__setstate__(state)
+
+        state = DatasetWriter("output").__getstate__()
+        state["unexpected"] = True
+        with self.assertRaisesRegex(ValueError, "unsupported field 'unexpected'"):
+            restored.__setstate__(state)
+
+        state = DatasetWriter("output").__getstate__()
+        state.pop("views")
+        with self.assertRaisesRegex(ValueError, "missing required field 'views'"):
+            restored.__setstate__(state)
 
     def test_run_parts_closes_parent_queue_after_success_and_worker_error(self):
         for error in (None, RuntimeError("worker monitoring failed")):

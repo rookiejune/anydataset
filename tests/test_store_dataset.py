@@ -708,6 +708,7 @@ class StoreSourceTest(unittest.TestCase):
             views.__setstate__(views_state)
 
             dataset_state = dataset.__getstate__()
+            dataset_state.pop("pickle_schema_version")
             dataset_state.pop("_manifest_cache")
             dataset_state.pop("_resource_state")
             dataset_state.pop("_unsafe_pickle_payloads")
@@ -730,6 +731,109 @@ class StoreSourceTest(unittest.TestCase):
             )
             restored.close()
 
+    def test_store_dataset_pickle_state_is_explicit_and_versioned(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output = Path(tmpdir) / "dataset"
+            DatasetWriter(output, dataset_id="toy-audio").write(
+                [_audio_sample(waveform=torch.tensor([[1.0]]))]
+            )
+            dataset = read_store_dataset(output)
+
+            state = dataset.__getstate__()
+
+            self.assertEqual(state["pickle_schema_version"], 1)
+            self.assertEqual(
+                set(state),
+                {
+                    "pickle_schema_version",
+                    "root",
+                    "manifest",
+                    "samples",
+                    "views",
+                    "_file_lease",
+                    "_payloads",
+                    "_unsafe_pickle_payloads",
+                    "_payload_group_cache",
+                    "_manifest_cache",
+                    "_resource_state",
+                },
+            )
+            dataset.close()
+
+    def test_store_dataset_direct_pickle_preserves_selected_views(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            source = root / "source.wav"
+            source.write_bytes(b"RIFF-data")
+            output = root / "dataset"
+            waveform = torch.tensor([[1.0, 2.0]])
+            DatasetWriter(output, dataset_id="multi-view").write(
+                [
+                    _audio_sample(
+                        waveform=waveform,
+                        file=str(source),
+                        sample_rate=16000,
+                    )
+                ]
+            )
+            waveform_view = (Role.DEFAULT, Modality.AUDIO, AudioView.WAVEFORM)
+            dataset = read_store_dataset(output, views=(waveform_view,))
+
+            restored = pickle.loads(pickle.dumps(dataset))
+            try:
+                audio = restored[0][Role.DEFAULT, Modality.AUDIO]
+                self.assertEqual(set(audio.views), {AudioView.WAVEFORM})
+                self.assertTrue(
+                    torch.equal(audio.views[AudioView.WAVEFORM][0], waveform)
+                )
+            finally:
+                dataset.close()
+                restored.close()
+
+    def test_store_dataset_rejects_unknown_pickle_schema_and_fields(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output = Path(tmpdir) / "dataset"
+            DatasetWriter(output, dataset_id="toy-audio").write(
+                [_audio_sample(waveform=torch.tensor([[1.0]]))]
+            )
+            dataset = read_store_dataset(output)
+            state = dataset.__getstate__()
+            restored = StoreDataset.__new__(StoreDataset)
+
+            for version in (0, 2):
+                with self.subTest(version=version):
+                    state["pickle_schema_version"] = version
+                    with self.assertRaisesRegex(
+                        ValueError,
+                        f"Unsupported StoreDataset pickle_schema_version {version}",
+                    ):
+                        restored.__setstate__(state)
+
+            for version in (True, "1"):
+                with self.subTest(version=version):
+                    state["pickle_schema_version"] = version
+                    with self.assertRaisesRegex(
+                        TypeError,
+                        "pickle_schema_version must be an integer",
+                    ):
+                        restored.__setstate__(state)
+
+            state = dataset.__getstate__()
+            state["root"] = str(output)
+            with self.assertRaisesRegex(TypeError, "field 'root' must be a Path"):
+                restored.__setstate__(state)
+
+            state = dataset.__getstate__()
+            state["unexpected"] = True
+            with self.assertRaisesRegex(ValueError, "unsupported field 'unexpected'"):
+                restored.__setstate__(state)
+
+            state = dataset.__getstate__()
+            state.pop("views")
+            with self.assertRaisesRegex(ValueError, "missing required field 'views'"):
+                restored.__setstate__(state)
+            dataset.close()
+
     def test_store_dataset_restores_legacy_payload_group_cache_pickle(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             output = Path(tmpdir) / "dataset"
@@ -749,6 +853,10 @@ class StoreSourceTest(unittest.TestCase):
                 store_reader,
                 "_PayloadGroupCache",
                 legacy_cache_type,
+            ), mock.patch.object(
+                StoreDataset,
+                "__getstate__",
+                _legacy_store_dataset_pickle_state,
             ):
                 legacy = replace(
                     dataset,
@@ -1734,6 +1842,10 @@ def _audio_sample(
 
 def _empty_pickle_state(_instance):
     return {}
+
+
+def _legacy_store_dataset_pickle_state(instance):
+    return dict(instance.__dict__)
 
 
 def _sample_indexes(samples):

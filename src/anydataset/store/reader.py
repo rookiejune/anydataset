@@ -16,6 +16,7 @@ from ..dataset.abc import MapStyleABC
 from ..dataset._shuffle import shuffle_index_groups
 from ..types import item
 from ..types.language import remap_lang
+from ._pickle_state import decode_pickle_state, validate_pickle_fields
 from .payload.files import StoreFilesLease, lease_store_files, payload_path, store_id
 from .manifest.index import (
     SampleManifestSequence,
@@ -54,9 +55,31 @@ from .payload.archive import PayloadCache, payload_value, read_payload_bytes
 
 _SAMPLE_INDEX_VALIDATION_VERSION = 2
 _SAMPLE_ID_SET_LIMIT = 1_000_000
+STORE_DATASET_PICKLE_VERSION = 1
 
-# Pickles written before the payload grouping code moved out of this module refer
-# to this private symbol. Keep it bound to the replacement class during loading.
+_STORE_DATASET_PICKLE_FIELDS = frozenset(
+    {
+        "root",
+        "manifest",
+        "samples",
+        "views",
+        "_file_lease",
+        "_payloads",
+        "_unsafe_pickle_payloads",
+        "_payload_group_cache",
+        "_manifest_cache",
+        "_resource_state",
+    }
+)
+_STORE_DATASET_LEGACY_OPTIONAL_FIELDS = frozenset(
+    {"_unsafe_pickle_payloads", "_manifest_cache", "_resource_state"}
+)
+_STORE_DATASET_LEGACY_REQUIRED_FIELDS = (
+    _STORE_DATASET_PICKLE_FIELDS - _STORE_DATASET_LEGACY_OPTIONAL_FIELDS
+)
+
+# Legacy-v0 pickles written before payload grouping moved out of this module
+# refer to this private class path. Keep it resolvable during v0 migration.
 _PayloadGroupCache = PayloadGroupCache
 
 
@@ -83,7 +106,7 @@ class StoreDataset(MapStyleABC):
     )
     _unsafe_pickle_payloads: bool = field(default=False, compare=False, repr=False)
     _payload_group_cache: PayloadGroupCache = field(
-        default_factory=_PayloadGroupCache,
+        default_factory=PayloadGroupCache,
         compare=False,
         repr=False,
     )
@@ -180,20 +203,38 @@ class StoreDataset(MapStyleABC):
         self.close()
 
     def __getstate__(self) -> dict[str, Any]:
-        return dict(self.__dict__)
+        return {
+            "pickle_schema_version": STORE_DATASET_PICKLE_VERSION,
+            "root": self.root,
+            "manifest": self.manifest,
+            "samples": self.samples,
+            "views": self.views,
+            "_file_lease": self._file_lease,
+            "_payloads": self._payloads,
+            "_unsafe_pickle_payloads": self._unsafe_pickle_payloads,
+            "_payload_group_cache": self._payload_group_cache,
+            "_manifest_cache": self._manifest_cache,
+            "_resource_state": self._resource_state,
+        }
 
-    def __setstate__(self, state: dict[str, Any]) -> None:
+    def __setstate__(self, state: object) -> None:
+        legacy, values = decode_pickle_state(
+            state,
+            kind="StoreDataset",
+            current_version=STORE_DATASET_PICKLE_VERSION,
+        )
+        if legacy:
+            values = _migrate_store_dataset_pickle_v0(values)
+        else:
+            validate_pickle_fields(
+                values,
+                kind="StoreDataset",
+                required=_STORE_DATASET_PICKLE_FIELDS,
+            )
+        _validate_store_dataset_pickle_state(values)
         attributes = cast(dict[str, Any], self.__dict__)
-        attributes.update(state)
-        attributes.setdefault("_unsafe_pickle_payloads", False)
-        manifest_cache = state.get("_manifest_cache")
-        if not isinstance(manifest_cache, ManifestParquetCache):
-            manifest_cache = ManifestParquetCache()
-            attributes["_manifest_cache"] = manifest_cache
-        resource_state = state.get("_resource_state")
-        if not isinstance(resource_state, _DatasetResourceState):
-            attributes["_resource_state"] = _DatasetResourceState()
-        self.views.bind_manifest_cache(manifest_cache)
+        attributes.update(values)
+        self.views.bind_manifest_cache(self._manifest_cache)
 
     def __del__(self) -> None:
         try:
@@ -204,6 +245,70 @@ class StoreDataset(MapStyleABC):
     def _ensure_open(self) -> None:
         if self._resource_state.closed:
             raise RuntimeError("StoreDataset is closed.")
+
+
+def _migrate_store_dataset_pickle_v0(
+    state: dict[str, Any],
+) -> dict[str, Any]:
+    validate_pickle_fields(
+        state,
+        kind="StoreDataset",
+        required=_STORE_DATASET_LEGACY_REQUIRED_FIELDS,
+        optional=_STORE_DATASET_LEGACY_OPTIONAL_FIELDS,
+    )
+    values = dict(state)
+    values.setdefault("_unsafe_pickle_payloads", False)
+    values.setdefault("_manifest_cache", ManifestParquetCache())
+    values.setdefault("_resource_state", _DatasetResourceState())
+    return values
+
+
+def _validate_store_dataset_pickle_state(state: Mapping[str, Any]) -> None:
+    expected = {
+        "root": Path,
+        "manifest": DatasetManifest,
+        "samples": SampleManifestSequence,
+        "views": StoreViews,
+        "_payloads": PayloadCache,
+        "_payload_group_cache": PayloadGroupCache,
+        "_manifest_cache": ManifestParquetCache,
+        "_resource_state": _DatasetResourceState,
+    }
+    for name, field_type in expected.items():
+        if not isinstance(state[name], field_type):
+            raise TypeError(
+                f"StoreDataset pickle field {name!r} must be a "
+                f"{field_type.__name__}."
+            )
+    file_lease = state["_file_lease"]
+    if file_lease is not None and not isinstance(file_lease, StoreFilesLease):
+        raise TypeError(
+            "StoreDataset pickle field '_file_lease' must be a "
+            "StoreFilesLease or None."
+        )
+    if type(state["_unsafe_pickle_payloads"]) is not bool:
+        raise TypeError(
+            "StoreDataset pickle field '_unsafe_pickle_payloads' must be a boolean."
+        )
+    if type(state["_resource_state"].closed) is not bool:
+        raise TypeError(
+            "StoreDataset pickle resource closed state must be a boolean."
+        )
+    root = state["root"]
+    samples = state["samples"]
+    views = state["views"]
+    manifest = state["manifest"]
+    file_lease = state["_file_lease"]
+    if samples.root != root or views.root != root:
+        raise ValueError("StoreDataset pickle roots must match.")
+    if views.samples is not samples:
+        raise ValueError("StoreDataset pickle views must reference its samples.")
+    if len(samples) != manifest.sample_count:
+        raise ValueError(
+            "StoreDataset pickle sample count must match its manifest."
+        )
+    if file_lease is not None and file_lease.root != root:
+        raise ValueError("StoreDataset pickle file lease root must match.")
 
 
 def read_store_dataset(

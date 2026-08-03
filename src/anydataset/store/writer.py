@@ -9,6 +9,7 @@ from typing import Any
 
 from .._io.atomic import replace_dir
 from .._validation import non_negative_int, optional_positive_int, positive_int
+from ._pickle_state import decode_pickle_state, validate_pickle_fields
 from .part.dispatch import DatasetFactory, ordered_samples, write_dataset_parts
 from ..types.item import Modality, Role, Sample, View
 from .config import DEFAULT_MAX_SHARD_SAMPLES
@@ -17,6 +18,28 @@ from .payload.groups import write_payload_groups
 from .part.sample_write import explicit_views
 from .manifest.schema import normalize_provenance
 from .paths import dataset_ready_path
+
+DATASET_WRITER_PICKLE_VERSION = 1
+
+_DATASET_WRITER_PICKLE_FIELDS = frozenset(
+    {
+        "output_dir",
+        "dataset_id",
+        "split",
+        "views",
+        "max_shard_samples",
+        "provenance",
+        "num_shards",
+        "num_workers",
+        "prefetch_factor",
+    }
+)
+_DATASET_WRITER_LEGACY_REQUIRED_FIELDS = frozenset(
+    {"output_dir", "dataset_id", "split", "views", "max_shard_samples"}
+)
+_DATASET_WRITER_LEGACY_OPTIONAL_FIELDS = (
+    _DATASET_WRITER_PICKLE_FIELDS - _DATASET_WRITER_LEGACY_REQUIRED_FIELDS
+)
 
 
 @dataclass
@@ -48,17 +71,48 @@ class DatasetWriter:
             self.prefetch_factor,
         )
 
-    def __setstate__(self, state: dict[str, Any]) -> None:
-        self.__dict__.update(state)
-        if "provenance" not in state:
-            self.provenance = None
-        if "num_shards" not in state:
-            self.num_shards = 1
-        if "num_workers" not in state:
-            self.num_workers = 0
-        if "prefetch_factor" not in state:
-            self.prefetch_factor = None
-        self.__post_init__()
+    def __getstate__(self) -> dict[str, Any]:
+        return {
+            "pickle_schema_version": DATASET_WRITER_PICKLE_VERSION,
+            "output_dir": self.output_dir,
+            "dataset_id": self.dataset_id,
+            "split": self.split,
+            "views": self.views,
+            "max_shard_samples": self.max_shard_samples,
+            "provenance": self.provenance,
+            "num_shards": self.num_shards,
+            "num_workers": self.num_workers,
+            "prefetch_factor": self.prefetch_factor,
+        }
+
+    def __setstate__(self, state: object) -> None:
+        legacy, values = decode_pickle_state(
+            state,
+            kind="DatasetWriter",
+            current_version=DATASET_WRITER_PICKLE_VERSION,
+        )
+        if legacy:
+            values = _migrate_dataset_writer_pickle_v0(values)
+        else:
+            validate_pickle_fields(
+                values,
+                kind="DatasetWriter",
+                required=_DATASET_WRITER_PICKLE_FIELDS,
+            )
+        _validate_dataset_writer_pickle_state(values)
+        restored = DatasetWriter(
+            output_dir=values["output_dir"],
+            dataset_id=values["dataset_id"],
+            split=values["split"],
+            views=values["views"],
+            max_shard_samples=values["max_shard_samples"],
+            provenance=values["provenance"],
+            num_shards=values["num_shards"],
+            num_workers=values["num_workers"],
+            prefetch_factor=values["prefetch_factor"],
+        )
+        self.__dict__.clear()
+        self.__dict__.update(restored.__dict__)
 
     def write(
         self,
@@ -121,3 +175,40 @@ class DatasetWriter:
         if self.dataset_id is None or self.provenance is None:
             raise RuntimeError("writer metadata was not initialized.")
         return self.dataset_id, self.provenance
+
+
+def _migrate_dataset_writer_pickle_v0(
+    state: dict[str, Any],
+) -> dict[str, Any]:
+    validate_pickle_fields(
+        state,
+        kind="DatasetWriter",
+        required=_DATASET_WRITER_LEGACY_REQUIRED_FIELDS,
+        optional=_DATASET_WRITER_LEGACY_OPTIONAL_FIELDS,
+    )
+    values = dict(state)
+    values.setdefault("provenance", None)
+    values.setdefault("num_shards", 1)
+    values.setdefault("num_workers", 0)
+    values.setdefault("prefetch_factor", None)
+    return values
+
+
+def _validate_dataset_writer_pickle_state(
+    state: Mapping[str, Any],
+) -> None:
+    output_dir = state["output_dir"]
+    if not isinstance(output_dir, (str, Path)):
+        raise TypeError(
+            "DatasetWriter pickle field 'output_dir' must be a string or Path."
+        )
+    dataset_id = state["dataset_id"]
+    if dataset_id is not None and not isinstance(dataset_id, str):
+        raise TypeError(
+            "DatasetWriter pickle field 'dataset_id' must be a string or None."
+        )
+    split = state["split"]
+    if split is not None and not isinstance(split, str):
+        raise TypeError(
+            "DatasetWriter pickle field 'split' must be a string or None."
+        )
