@@ -248,6 +248,75 @@ def test_callable_costs_use_map_style_cost_row() -> None:
     assert dataset.cost_rows == [0, 1, 2, 3]
 
 
+def test_callable_costs_materialize_in_global_index_order_once() -> None:
+    dataset = _CostRowDataset([4, 1, 3, 2])
+    loader = dataset.dataloader(
+        costs=lambda row: row["cost"],
+        max_batch_memory=8,
+        max_batch_samples=1,
+        materialize_callable_costs=True,
+    )
+
+    def shuffled(**_kwargs: object):
+        return iter(([3, 1, 2, 0],))
+
+    with mock.patch.object(dataset, "_shuffle", side_effect=shuffled):
+        iterator = iter(loader.batch_sampler)
+        assert dataset.cost_rows == []
+
+        assert next(iterator) == [3]
+        assert dataset.cost_rows == [0, 1, 2, 3]
+        assert list(iterator) == [[1], [2], [0]]
+
+        loader.set_epoch(1)
+        assert list(loader.batch_sampler) == [[3], [1], [2], [0]]
+
+    assert dataset.cost_rows == [0, 1, 2, 3]
+
+
+def test_callable_cost_materialization_is_atomic_after_failure() -> None:
+    dataset = _CostRowDataset([1, 2, 3, 4])
+    calls: list[int] = []
+    fail = True
+
+    def cost(row: dict[str, int]) -> int:
+        nonlocal fail
+        value = row["cost"]
+        calls.append(value)
+        if fail and value == 3:
+            fail = False
+            raise ValueError("boom")
+        return value
+
+    loader = dataset.dataloader(
+        costs=cost,
+        max_batch_memory=4,
+        max_batch_samples=1,
+        materialize_callable_costs=True,
+    )
+
+    with pytest.raises(ValueError, match="boom"):
+        list(loader.batch_sampler)
+
+    assert calls == [1, 2, 3]
+    assert dataset.cost_rows == [0, 1, 2]
+    assert list(loader.batch_sampler) == [[0], [1], [2], [3]]
+    assert calls == [1, 2, 3, 1, 2, 3, 4]
+    assert dataset.cost_rows == [0, 1, 2, 0, 1, 2, 3]
+
+
+def test_callable_costs_remain_lazy_without_materialization() -> None:
+    dataset = _CostRowDataset([1] * 100)
+    loader = dataset.dataloader(
+        costs=lambda row: row["cost"],
+        max_batch_memory=1,
+        max_batch_samples=1,
+    )
+
+    assert next(iter(loader.batch_sampler)) == [0]
+    assert dataset.cost_rows == [0]
+
+
 def test_map_style_shuffle_strides_flattened_groups_across_ranks() -> None:
     dataset = _IndexDataset(list(range(10)))
     shuffled = [
@@ -327,7 +396,59 @@ def test_bucket_planner_selects_sorted_length_window() -> None:
     assert next(iter(loader)) == [100, 100]
 
 
-def test_distributed_planning_sync_is_bounded() -> None:
+def test_distributed_planning_syncs_once_before_first_yield() -> None:
+    consumed: list[int] = []
+
+    def plans():
+        for index in range(65):
+            consumed.append(index)
+            yield _Plan(records=(_Record(index=index, cost=1),), cost=1)
+
+    with (
+        mock.patch("anydataset.dataset._ddp.dist.is_available", return_value=True),
+        mock.patch("anydataset.dataset._ddp.dist.is_initialized", return_value=True),
+        mock.patch("anydataset.dataset._ddp.dist.get_world_size", return_value=2),
+        mock.patch("anydataset.dataset._ddp.dist.get_rank", return_value=0),
+        mock.patch(
+            "anydataset.dataset._ddp.plan_counts",
+            return_value=(65, 65),
+        ) as collective,
+    ):
+        synchronized = iter(synchronized_plans(plans(), drop_tail=True))
+
+        first = next(synchronized)
+        assert consumed == list(range(65))
+        collective.assert_called_once_with(65, 2)
+
+        remaining = list(synchronized)
+        collective.assert_called_once()
+
+    assert first.records[0].index == 0
+    assert [plan.records[0].index for plan in remaining] == list(range(1, 65))
+
+
+def test_single_rank_process_group_keeps_planning_lazy() -> None:
+    consumed: list[int] = []
+
+    def plans():
+        for index in range(10):
+            consumed.append(index)
+            yield index
+
+    with (
+        mock.patch("anydataset.dataset._ddp.dist.is_available", return_value=True),
+        mock.patch("anydataset.dataset._ddp.dist.is_initialized", return_value=True),
+        mock.patch("anydataset.dataset._ddp.dist.get_world_size", return_value=1),
+        mock.patch("anydataset.dataset._ddp.plan_counts") as collective,
+    ):
+        synchronized = iter(synchronized_plans(plans(), drop_tail=True))
+
+        assert next(synchronized) == 0
+        assert consumed == [0]
+        collective.assert_not_called()
+
+
+def test_window_distributed_planning_keeps_bounded_legacy_mode() -> None:
     consumed: list[int] = []
 
     def plans():
@@ -346,7 +467,12 @@ def test_distributed_planning_sync_is_bounded() -> None:
         pytest.warns(RuntimeWarning, match="dropped rank-local final batches"),
     ):
         synchronized = list(
-            synchronized_plans(plans(), drop_tail=True, plan_window=8)
+            synchronized_plans(
+                plans(),
+                drop_tail=True,
+                mode="window",
+                plan_window=8,
+            )
         )
 
     assert len(synchronized) == 7
@@ -380,7 +506,7 @@ def test_distributed_planning_fails_fast_on_empty_rank() -> None:
     assert consumed == list(range(8))
 
 
-def test_distributed_planning_fails_fast_on_invalid_counts() -> None:
+def test_distributed_planning_propagates_remote_failure_before_yield() -> None:
     consumed: list[int] = []
 
     def plans():
@@ -399,6 +525,33 @@ def test_distributed_planning_fails_fast_on_invalid_counts() -> None:
         ),
         pytest.raises(
             RuntimeError,
+            match="remote planning failure",
+        ),
+    ):
+        list(synchronized_plans(plans(), drop_tail=True, plan_window=8))
+
+    assert consumed == list(range(8))
+
+
+def test_distributed_planning_rejects_invalid_negative_counts() -> None:
+    consumed: list[int] = []
+
+    def plans():
+        for index in range(8):
+            consumed.append(index)
+            yield _Plan(records=(_Record(index=index, cost=1),), cost=1)
+
+    with (
+        mock.patch("anydataset.dataset._ddp.dist.is_available", return_value=True),
+        mock.patch("anydataset.dataset._ddp.dist.is_initialized", return_value=True),
+        mock.patch("anydataset.dataset._ddp.dist.get_world_size", return_value=2),
+        mock.patch("anydataset.dataset._ddp.dist.get_rank", return_value=0),
+        mock.patch(
+            "anydataset.dataset._ddp.plan_counts",
+            return_value=(8, -2),
+        ),
+        pytest.raises(
+            RuntimeError,
             match="invalid rank-local plan counts",
         ),
     ):
@@ -407,7 +560,7 @@ def test_distributed_planning_fails_fast_on_invalid_counts() -> None:
     assert consumed == list(range(8))
 
 
-def test_distributed_planning_fails_fast_on_too_large_counts() -> None:
+def test_window_distributed_planning_rejects_counts_above_window() -> None:
     consumed: list[int] = []
 
     def plans():
@@ -424,14 +577,81 @@ def test_distributed_planning_fails_fast_on_too_large_counts() -> None:
             "anydataset.dataset._ddp.plan_counts",
             return_value=(8, 999),
         ),
-        pytest.raises(
-            RuntimeError,
-            match="invalid rank-local plan counts",
-        ),
+        pytest.raises(RuntimeError, match="invalid rank-local plan counts"),
     ):
-        list(synchronized_plans(plans(), drop_tail=True, plan_window=8))
+        list(
+            synchronized_plans(
+                plans(),
+                drop_tail=True,
+                mode="window",
+                plan_window=8,
+            )
+        )
 
     assert consumed == list(range(8))
+
+
+def test_distributed_planning_rethrows_local_error_after_count_sync() -> None:
+    consumed: list[int] = []
+
+    def plans():
+        for index in range(2):
+            consumed.append(index)
+            yield _Plan(records=(_Record(index=index, cost=1),), cost=1)
+        raise ValueError("boom")
+
+    with (
+        mock.patch("anydataset.dataset._ddp.dist.is_available", return_value=True),
+        mock.patch("anydataset.dataset._ddp.dist.is_initialized", return_value=True),
+        mock.patch("anydataset.dataset._ddp.dist.get_world_size", return_value=2),
+        mock.patch("anydataset.dataset._ddp.dist.get_rank", return_value=0),
+        mock.patch(
+            "anydataset.dataset._ddp.plan_counts",
+            return_value=(-1, 5),
+        ) as collective,
+        pytest.raises(ValueError, match="boom"),
+    ):
+        next(iter(synchronized_plans(plans(), drop_tail=True)))
+
+    assert consumed == [0, 1]
+    collective.assert_called_once_with(-1, 2)
+
+
+def test_distributed_planning_allows_all_empty_ranks() -> None:
+    with (
+        mock.patch("anydataset.dataset._ddp.dist.is_available", return_value=True),
+        mock.patch("anydataset.dataset._ddp.dist.is_initialized", return_value=True),
+        mock.patch("anydataset.dataset._ddp.dist.get_world_size", return_value=2),
+        mock.patch("anydataset.dataset._ddp.dist.get_rank", return_value=0),
+        mock.patch(
+            "anydataset.dataset._ddp.plan_counts",
+            return_value=(0, 0),
+        ) as collective,
+    ):
+        assert list(synchronized_plans((), drop_tail=True)) == []
+
+    collective.assert_called_once_with(0, 2)
+
+
+def test_distributed_planning_drops_only_the_local_final_suffix() -> None:
+    plans = [
+        _Plan(records=(_Record(index=index, cost=1),), cost=1) for index in range(5)
+    ]
+
+    with (
+        mock.patch("anydataset.dataset._ddp.dist.is_available", return_value=True),
+        mock.patch("anydataset.dataset._ddp.dist.is_initialized", return_value=True),
+        mock.patch("anydataset.dataset._ddp.dist.get_world_size", return_value=2),
+        mock.patch("anydataset.dataset._ddp.dist.get_rank", return_value=0),
+        mock.patch(
+            "anydataset.dataset._ddp.plan_counts",
+            return_value=(5, 3),
+        ),
+        pytest.warns(RuntimeWarning, match="dropped rank-local final batches"),
+    ):
+        kept = list(synchronized_plans(plans, drop_tail=True))
+
+    assert [plan.records[0].index for plan in kept] == [0, 1, 2]
 
 
 def test_distributed_planning_requires_equal_counts_without_tail_drop() -> None:
@@ -443,6 +663,7 @@ def test_distributed_planning_requires_equal_counts_without_tail_drop() -> None:
         mock.patch("anydataset.dataset._ddp.dist.is_available", return_value=True),
         mock.patch("anydataset.dataset._ddp.dist.is_initialized", return_value=True),
         mock.patch("anydataset.dataset._ddp.dist.get_world_size", return_value=2),
+        mock.patch("anydataset.dataset._ddp.dist.get_rank", return_value=0),
         mock.patch(
             "anydataset.dataset._ddp.plan_counts",
             return_value=(8, 7),
@@ -460,6 +681,16 @@ def test_distributed_plan_window_is_loader_configurable() -> None:
     )
 
     assert loader.batch_sampler.distributed_plan_window == 4
+
+
+def test_distributed_plan_sync_is_loader_configurable() -> None:
+    loader = _dataset([1]).dataloader(
+        costs=None,
+        max_batch_memory=1,
+        distributed_plan_sync="window",
+    )
+
+    assert loader.batch_sampler.distributed_plan_sync == "window"
 
 
 def test_debug_rank_local_index_groups() -> None:
@@ -485,7 +716,9 @@ def test_debug_rank_local_index_groups() -> None:
 
     assert groups == [[1, 0], [3, 2]]
     messages = [call.args[0] for call in debug.call_args_list]
-    assert any("rank=1 world_size=2 dataset_length=4" in message for message in messages)
+    assert any(
+        "rank=1 world_size=2 dataset_length=4" in message for message in messages
+    )
     assert any("shuffle=True seed=7 epoch=2" in message for message in messages)
     assert any("group=0 length=2 head=(1, 0)" in message for message in messages)
 
@@ -496,6 +729,34 @@ def test_requires_positive_distributed_plan_window() -> None:
             costs=None,
             max_batch_memory=1,
             distributed_plan_window=0,
+        )
+
+
+def test_requires_boolean_callable_cost_materialization() -> None:
+    with pytest.raises(TypeError, match="materialize_callable_costs"):
+        _dataset([1]).dataloader(
+            costs=None,
+            max_batch_memory=1,
+            materialize_callable_costs=1,  # type: ignore[arg-type]
+        )
+
+
+@pytest.mark.parametrize("value", [None, 1, True])
+def test_requires_string_distributed_plan_sync(value: object) -> None:
+    with pytest.raises(TypeError, match="distributed_plan_sync"):
+        _dataset([1]).dataloader(
+            costs=None,
+            max_batch_memory=1,
+            distributed_plan_sync=value,  # type: ignore[arg-type]
+        )
+
+
+def test_requires_supported_distributed_plan_sync() -> None:
+    with pytest.raises(ValueError, match="distributed_plan_sync"):
+        _dataset([1]).dataloader(
+            costs=None,
+            max_batch_memory=1,
+            distributed_plan_sync="batch",  # type: ignore[arg-type]
         )
 
 
@@ -604,10 +865,7 @@ def test_streaming_planner_matches_reference_bucket_order(
 def test_streaming_planner_matches_randomized_reference() -> None:
     randomizer = random.Random(0)
     for _ in range(500):
-        costs = [
-            randomizer.randint(1, 20)
-            for _ in range(randomizer.randint(1, 30))
-        ]
+        costs = [randomizer.randint(1, 20) for _ in range(randomizer.randint(1, 30))]
         budget = randomizer.randint(max(costs), max(costs) * 5)
         window = randomizer.randint(1, min(len(costs), 12))
         max_samples = randomizer.choice((None, 1, 2, 3, 5, 8))
@@ -646,9 +904,7 @@ def test_streaming_planner_preserves_fallback_float_plateau() -> None:
         )
     )
 
-    assert [[record.index for record in plan.records] for plan in plans] == [
-        [0, 1, 2]
-    ]
+    assert [[record.index for record in plan.records] for plan in plans] == [[0, 1, 2]]
 
 
 def test_loader_class_is_not_public_api() -> None:
@@ -661,8 +917,7 @@ def test_loader_class_is_not_public_api() -> None:
     assert "FieldRef" in anydataset.dataset.__all__
     assert all(not name.endswith(("Loader", "Sampler")) for name in anydataset.__all__)
     assert all(
-        not name.endswith(("Loader", "Sampler"))
-        for name in anydataset.dataset.__all__
+        not name.endswith(("Loader", "Sampler")) for name in anydataset.dataset.__all__
     )
 
 
@@ -769,9 +1024,7 @@ def _reference_plans(
                 key=lambda candidate: (candidate[1], -candidate[3]),
             )
         selected_arrivals = {arrival for arrival, _record in selected[0]}
-        pending = [
-            item for item in pending if item[0] not in selected_arrivals
-        ]
+        pending = [item for item in pending if item[0] not in selected_arrivals]
         plans.append(
             [
                 record.index

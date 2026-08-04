@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
+import logging
+import os
 import warnings
 from collections.abc import Iterable, Iterator
 from itertools import islice
-import logging
-import os
 from time import perf_counter
-from typing import TypeVar
+from typing import Literal, TypeVar
 
 import torch
 import torch.distributed as dist
@@ -27,15 +27,115 @@ def synchronized_plans(
     plans: Iterable[_T],
     *,
     drop_tail: bool,
+    mode: Literal["epoch", "window"] = "epoch",
     plan_window: int = _DEFAULT_PLAN_WINDOW,
 ) -> Iterator[_T]:
     if not dist.is_available() or not dist.is_initialized():
         yield from plans
         return
 
-    source = iter(plans)
+    sync_mode = _plan_sync_mode(mode)
     world_size = dist.get_world_size()
+    if world_size == 1:
+        yield from plans
+        return
     window = _positive_plan_window(plan_window)
+    if sync_mode == "epoch":
+        yield from _synchronized_epoch(
+            plans,
+            drop_tail=drop_tail,
+            world_size=world_size,
+        )
+        return
+
+    yield from _synchronized_windows(
+        plans,
+        drop_tail=drop_tail,
+        world_size=world_size,
+        window=window,
+    )
+
+
+def _synchronized_epoch(
+    plans: Iterable[_T],
+    *,
+    drop_tail: bool,
+    world_size: int,
+) -> Iterator[_T]:
+    rank_id = _rank_id()
+    if debug_plans_enabled():
+        log_debug_plan(f"epoch planning start rank={rank_id}")
+
+    started = perf_counter()
+    local: list[_T] = []
+    local_error: Exception | None = None
+    try:
+        local.extend(plans)
+    except Exception as error:
+        local_error = error
+        local.clear()
+    planning_elapsed = perf_counter() - started
+
+    local_count = -1 if local_error is not None else len(local)
+    sync_started = perf_counter()
+    counts = plan_counts(local_count, world_size)
+    sync_elapsed = perf_counter() - sync_started
+    kept = None if any(count < 0 for count in counts) else min(counts)
+    if debug_plans_enabled():
+        log_debug_plan(
+            "epoch planning completion "
+            f"rank={rank_id} local_count={local_count} counts={counts} kept={kept} "
+            f"planning_seconds={planning_elapsed:.3f} "
+            f"sync_seconds={sync_elapsed:.3f}"
+        )
+
+    if local_error is not None:
+        raise local_error
+    if -1 in counts:
+        raise RuntimeError(
+            "dataloader detected a remote planning failure: "
+            f"rank={rank_id} local_count={local_count} counts={counts}. "
+            f"Enable {PLAN_DEBUG_ENV}=1 and inspect dataset planning errors."
+        )
+    if any(count < 0 for count in counts):
+        raise RuntimeError(
+            "dataloader received invalid rank-local plan counts: "
+            f"rank={rank_id} local_count={local_count} counts={counts}. "
+            f"Enable {PLAN_DEBUG_ENV}=1 and inspect dataset length/index groups."
+        )
+
+    kept_count = min(counts)
+    if kept_count == 0:
+        if any(count > 0 for count in counts):
+            raise RuntimeError(
+                "dataloader rank-local planning produced zero batches on at least "
+                "one DDP rank: "
+                f"rank={rank_id} local_count={local_count} counts={counts} "
+                f"kept={kept_count}. "
+                f"Enable {PLAN_DEBUG_ENV}=1 and inspect dataset length/index groups."
+            )
+        return
+
+    if any(count != kept_count for count in counts):
+        if not drop_tail:
+            raise RuntimeError("dataloader cannot keep equal rank-local batch counts.")
+        if len(local) > kept_count:
+            warnings.warn(
+                "dataloader dropped rank-local final batches for equal DDP steps.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+    yield from local[:kept_count]
+
+
+def _synchronized_windows(
+    plans: Iterable[_T],
+    *,
+    drop_tail: bool,
+    world_size: int,
+    window: int,
+) -> Iterator[_T]:
+    source = iter(plans)
     chunk = 0
     while True:
         if debug_plans_enabled():
@@ -85,6 +185,14 @@ def synchronized_plans(
         if kept < window:
             return
         chunk += 1
+
+
+def _plan_sync_mode(value: str) -> Literal["epoch", "window"]:
+    if value == "epoch":
+        return "epoch"
+    if value == "window":
+        return "window"
+    raise ValueError("distributed plan sync mode must be 'epoch' or 'window'.")
 
 
 def _positive_plan_window(value: int) -> int:

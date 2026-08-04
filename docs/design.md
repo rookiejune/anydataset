@@ -149,10 +149,19 @@ store 的 map-style `__getitem__` 保持全局下标随机访问语义，不隐�
 shuffle，再在 group 内 shuffle 样本；batch planner 只在同一个 group 内组 batch。
 `sharded_csv` 和 `tsv` 使用 Parquet row group 作为同类 index group，避免全量样本
 index list 和跨 row group 随机读取；其他 map-style dataset 使用有界连续 index group。planner
-只维护 `planning_window` 个候选，DDP 按 `distributed_plan_window` 个 plan 的有界 chunk
-同步并只裁剪 rank-local 最终 batch 尾部，不修改通用 `iter_shard()` 的 modulo 契约。
-默认 DDP 同步窗口保持较小，以降低 cost lookup 或 batch packing 较重时的 first-batch
-等待；需要定位卡点时可用 `ANYDATASET_DEBUG_DDP_PLANS=1` 打开 chunk 级日志。
+只维护 `planning_window` 个候选。callable cost 默认按采样顺序 lazy 读取；显式开启
+`materialize_callable_costs` 时，第一个 iterator 先按全局下标 `0..N-1` 顺序物化整数
+cost sequence，后续 shuffle 只随机访问内存中的 cost，训练 payload 顺序不变，且 cost
+sequence 跨 iterator/epoch 复用。
+
+DDP 默认使用 `distributed_plan_sync="epoch"`：首个 batch yield 前完成当前 rank、当前
+iterator 的全部 plan，只同步一次 plan count，再裁剪 rank-local 最终 batch 尾部；首个
+yield 后 anydataset 不再进入 collective。规划异常以失败 sentinel 参加这次同步，失败
+rank 随后重抛本地异常，其他 rank 显式报告远端规划失败。该模式要求 sampler 有限，并
+持有当前 iterator 的 rank-local plans。`distributed_plan_sync="window"` 仅保留原有有界
+chunk 语义供兼容和诊断，`distributed_plan_window` 只对该模式生效。两种模式都不修改
+通用 `iter_shard()` 的 modulo 契约；定位规划问题时使用
+`ANYDATASET_DEBUG_DDP_PLANS=1`。
 reader 默认只接受字段和 Parquet manifest 结构完整的 `schema_version: 3` store；
 v2 store 没有 provenance，属于 legacy compatibility 格式，只能通过显式
 `legacy_policy="warn"` 或 `"allow"` 读取。`warn` 会发出明确的

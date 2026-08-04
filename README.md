@@ -143,10 +143,11 @@ from anydataset import AnyDataset
 
 dataset = AnyDataset(spec, parse_fn=parse)
 loader = dataset.dataloader(
-    costs=lengths,
+    costs=lambda row: row["frames"],
     max_batch_memory=64_000,
     planning_window=256,
-    distributed_plan_window=32,
+    materialize_callable_costs=True,
+    distributed_plan_sync="epoch",
     shuffle=True,
     collate_fn=collate,
     num_workers=4,
@@ -165,20 +166,30 @@ number of samples per planned batch. Planning keeps only a bounded lookahead;
 stopping an epoch early does not read costs for the unseen tail. A complete
 epoch necessarily reads every selected sample cost once, so expensive lengths
 should be persisted in row metadata instead of derived by materializing samples.
+Callable costs remain lazy by default. For manifests whose random row access is
+expensive, `materialize_callable_costs=True` makes the first iterator scan
+global indexes `0..N-1` once, stores the resulting integer cost sequence, and
+reuses it across later iterators and epochs. Training payload order still follows
+the sampler/shuffle plan; only metadata cost lookup is sequential. This trades
+`O(N)` cost storage and higher first-batch latency for locality and stable lookup
+time.
+
 With no custom sampler, the dataset builds the rank-local read plan behind the
 single `shuffle` flag, and distributed planning never reassigns a planned batch
 to a different rank. `StoreDataset` overrides that private plan to shuffle
 payload shard groups first and then shuffle sample indexes inside each group.
-In DDP, `distributed_plan_window` bounds how many rank-local batch plans are
-generated before synchronizing step counts; lower values reduce first-batch
-latency when cost lookup or packing is expensive.
-Set `ANYDATASET_DEBUG_DDP_PLANS=1` to log each DDP planning chunk before and
-after synchronization.
 Every group is sliced across ranks, so a store with one payload shard still
-feeds every rank while planned batches remain shard-local. DDP synchronizes
-plan counts with tensor collectives over bounded windows and only trims
-rank-local final batches so all ranks take the same number of steps. Call
-`loader.set_epoch(epoch)` before each
+feeds every rank while planned batches remain shard-local. In DDP,
+`distributed_plan_sync="epoch"` is the default: each iterator completes its
+rank-local plans before the first batch, synchronizes plan counts exactly once,
+and only trims a final local suffix so all ranks take the same number of steps.
+No anydataset collective occurs after the first batch is yielded. This mode
+requires a finite sampler and keeps the current iterator's plans in memory.
+`distributed_plan_sync="window"` retains the legacy bounded mode;
+`distributed_plan_window` only controls that mode and can insert later planning
+collectives into training, so it is intended for compatibility and diagnostics.
+Set `ANYDATASET_DEBUG_DDP_PLANS=1` to log rank-local planning and synchronization.
+Call `loader.set_epoch(epoch)` before each
 distributed epoch to advance the shuffle. The loader also exposes this through
 PyTorch's `batch_sampler.sampler.set_epoch(epoch)` contract so trainer frameworks
 can advance dataset-owned ordering automatically.

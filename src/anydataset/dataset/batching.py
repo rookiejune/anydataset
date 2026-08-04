@@ -8,7 +8,7 @@ from collections import OrderedDict
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from math import isfinite
-from typing import Any, Optional, overload
+from typing import Any, Literal, Optional, overload
 
 from torch.utils.data import Sampler
 from torch.utils.data import DataLoader as TorchDataLoader
@@ -19,6 +19,7 @@ from .abc import MapStyleABC
 
 _CostFn = Callable[[Any], int]
 _Costs = Optional[Sequence[int]]
+_DistributedPlanSync = Literal["epoch", "window"]
 _MAX_CALLABLE_COST_CACHE = 4096
 
 
@@ -27,6 +28,7 @@ class _CallableCosts(Sequence[int]):
         self.dataset = dataset
         self.cost_fn = cost_fn
         self._cache: OrderedDict[int, int] = OrderedDict()
+        self._materialized: tuple[int, ...] | None = None
 
     def __len__(self) -> int:
         return len(self.dataset)
@@ -45,6 +47,8 @@ class _CallableCosts(Sequence[int]):
             resolved += len(self)
         if resolved < 0 or resolved >= len(self):
             raise IndexError("cost index out of range.")
+        if self._materialized is not None:
+            return self._materialized[resolved]
         cached = self._cache.get(resolved)
         if cached is None:
             row = self.dataset.cost_row(resolved)
@@ -55,6 +59,17 @@ class _CallableCosts(Sequence[int]):
         else:
             self._cache.move_to_end(resolved)
         return cached
+
+    def materialize(self) -> tuple[int, ...]:
+        if self._materialized is not None:
+            return self._materialized
+        materialized = tuple(
+            operator.index(self.cost_fn(self.dataset.cost_row(index)))
+            for index in range(len(self))
+        )
+        self._cache.clear()
+        self._materialized = materialized
+        return materialized
 
 
 @dataclass(frozen=True)
@@ -119,8 +134,10 @@ class _BatchSampler(Sampler[list[int]]):
         shuffle: bool,
         seed: int,
         epoch: int,
+        materialize_callable_costs: bool = False,
         planning_window: int = 256,
         distributed_plan_window: int = 32,
+        distributed_plan_sync: _DistributedPlanSync = "epoch",
         max_batch_samples: int | None = None,
         max_padding_ratio: float = 0.2,
         drop_distributed_tail: bool = True,
@@ -130,6 +147,9 @@ class _BatchSampler(Sampler[list[int]]):
         self.dataset = dataset
         self.costs = _costs(costs, dataset=dataset, sample_count=len(dataset))
         self.max_batch_memory = _positive_int("max_batch_memory", max_batch_memory)
+        if not isinstance(materialize_callable_costs, bool):
+            raise TypeError("materialize_callable_costs must be a bool.")
+        self.materialize_callable_costs = materialize_callable_costs
         self._source_sampler = sampler
         if not isinstance(shuffle, bool):
             raise TypeError("shuffle must be a bool.")
@@ -139,6 +159,9 @@ class _BatchSampler(Sampler[list[int]]):
         self.planning_window = _positive_int("planning_window", planning_window)
         self.distributed_plan_window = _positive_int(
             "distributed_plan_window", distributed_plan_window
+        )
+        self.distributed_plan_sync: _DistributedPlanSync = _distributed_plan_sync(
+            distributed_plan_sync
         )
         self.max_batch_samples = (
             None
@@ -160,13 +183,17 @@ class _BatchSampler(Sampler[list[int]]):
         for plan in synchronized_plans(
             plans,
             drop_tail=self.drop_distributed_tail,
+            mode=self.distributed_plan_sync,
             plan_window=self.distributed_plan_window,
         ):
             yield [record.index for record in plan.records]
 
     def _iter_plans(self) -> Iterator[_Plan]:
+        costs = self.costs
+        if self.materialize_callable_costs and isinstance(costs, _CallableCosts):
+            costs = costs.materialize()
         for indexes in self._index_groups():
-            records = (_record(self.costs, index) for index in indexes)
+            records = (_record(costs, index) for index in indexes)
             yield from _plans(
                 records,
                 max_batch_memory=self.max_batch_memory,
@@ -248,12 +275,14 @@ class _DataLoader(TorchDataLoader):
         *,
         costs: None | Iterable[int] | _CostFn,
         max_batch_memory: int,
+        materialize_callable_costs: bool = False,
         shuffle: bool = False,
         sampler: Sampler[int] | None = None,
         seed: int = 0,
         epoch: int = 0,
         planning_window: int = 256,
         distributed_plan_window: int = 32,
+        distributed_plan_sync: _DistributedPlanSync = "epoch",
         max_batch_samples: int | None = None,
         max_padding_ratio: float = 0.2,
         drop_distributed_tail: bool = True,
@@ -269,12 +298,14 @@ class _DataLoader(TorchDataLoader):
             dataset,
             costs=costs,
             max_batch_memory=max_batch_memory,
+            materialize_callable_costs=materialize_callable_costs,
             sampler=sampler,
             shuffle=shuffle,
             seed=seed,
             epoch=epoch,
             planning_window=planning_window,
             distributed_plan_window=distributed_plan_window,
+            distributed_plan_sync=distributed_plan_sync,
             max_batch_samples=max_batch_samples,
             max_padding_ratio=max_padding_ratio,
             drop_distributed_tail=drop_distributed_tail,
@@ -330,7 +361,8 @@ def _plans(
         selected_arrivals = {item.arrival for item in candidate.records}
         pending = [item for item in pending if item.arrival not in selected_arrivals]
         selected = tuple(
-            item.record for item in sorted(candidate.records, key=lambda item: item.arrival)
+            item.record
+            for item in sorted(candidate.records, key=lambda item: item.arrival)
         )
         yield _Plan(records=selected, cost=candidate.cost)
 
@@ -496,11 +528,7 @@ def _select_candidate(
         )
 
     single = max(
-        (
-            item
-            for item in sorted_pending
-            if item.record.cost <= max_batch_memory
-        ),
+        (item for item in sorted_pending if item.record.cost <= max_batch_memory),
         key=lambda item: (item.record.cost, -item.arrival),
         default=None,
     )
@@ -553,6 +581,16 @@ def _positive_int(name: str, value: int) -> int:
     return resolved
 
 
+def _distributed_plan_sync(value: object) -> _DistributedPlanSync:
+    if not isinstance(value, str):
+        raise TypeError("distributed_plan_sync must be a string.")
+    if value == "epoch":
+        return "epoch"
+    if value == "window":
+        return "window"
+    raise ValueError("distributed_plan_sync must be 'epoch' or 'window'.")
+
+
 def _costs(
     costs: None | Iterable[int] | _CostFn,
     *,
@@ -560,17 +598,13 @@ def _costs(
     sample_count: int,
 ) -> _Costs:
     if isinstance(costs, bool) or isinstance(costs, int):
-        raise TypeError(
-            "costs must be None, an iterable of integers, or a callable."
-        )
+        raise TypeError("costs must be None, an iterable of integers, or a callable.")
     if costs is None:
         return None
     if callable(costs):
         return _CallableCosts(dataset, costs)
     if isinstance(costs, (str, bytes, bytearray)) or not isinstance(costs, Iterable):
-        raise TypeError(
-            "costs must be None, an iterable of integers, or a callable."
-        )
+        raise TypeError("costs must be None, an iterable of integers, or a callable.")
     if not isinstance(costs, Sequence):
         costs = tuple(costs)
     if len(costs) != sample_count:

@@ -3,7 +3,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Protocol, cast, runtime_checkable
+from typing import TYPE_CHECKING, Any, Literal, Protocol, cast, runtime_checkable
 
 from torch.utils.data import Dataset, IterableDataset
 
@@ -231,12 +231,14 @@ class MapStyleABC(_DatasetOperations, Dataset, ABC):
         *,
         costs: None | Iterable[int] | Callable[[Any], int],
         max_batch_memory: int,
+        materialize_callable_costs: bool = False,
         shuffle: bool = False,
         sampler: Sampler[int] | None = None,
         seed: int = 0,
         epoch: int = 0,
         planning_window: int = 256,
         distributed_plan_window: int = 32,
+        distributed_plan_sync: Literal["epoch", "window"] = "epoch",
         max_batch_samples: int | None = None,
         max_padding_ratio: float = 0.2,
         drop_distributed_tail: bool = True,
@@ -248,12 +250,14 @@ class MapStyleABC(_DatasetOperations, Dataset, ABC):
             self,
             costs=costs,
             max_batch_memory=max_batch_memory,
+            materialize_callable_costs=materialize_callable_costs,
             shuffle=shuffle,
             sampler=sampler,
             seed=seed,
             epoch=epoch,
             planning_window=planning_window,
             distributed_plan_window=distributed_plan_window,
+            distributed_plan_sync=distributed_plan_sync,
             max_batch_samples=max_batch_samples,
             max_padding_ratio=max_padding_ratio,
             drop_distributed_tail=drop_distributed_tail,
