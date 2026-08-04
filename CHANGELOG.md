@@ -4,7 +4,8 @@
 
 - Add opt-in `cost_aggregation="padded_max"` dynamic batches with the hard
   bound `len(batch) * max(sample_cost) <= max_batch_memory`, while preserving
-  additive `"sum"` aggregation by default.
+  additive `"sum"` aggregation by default; DDP now aligns padded-cost
+  quantiles within each bounded plan window to reduce cross-rank shape spread.
 - Add `RejectReplaceDataset` for low reject-rate online CPU safety nets that
   replace rejects via sequential look-ahead and a worker-local accept buffer.
 - Add explicit filter apply reports via `FilterRule.apply_with_report(...)`,

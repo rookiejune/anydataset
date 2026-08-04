@@ -164,6 +164,11 @@ class _BatchSampler(Sampler[list[int]]):
             plans,
             drop_tail=self.drop_distributed_tail,
             plan_window=self.distributed_plan_window,
+            balance_key=(
+                _padded_plan_cost
+                if self.cost_aggregation == "padded_max"
+                else None
+            ),
         ):
             yield [record.index for record in plan.records]
 
@@ -532,6 +537,10 @@ def _select_candidate(
         f"index={oldest.record.index} memory={oldest.record.cost} "
         f"budget={max_batch_memory}."
     )
+
+
+def _padded_plan_cost(plan: _Plan) -> int:
+    return len(plan.records) * max(record.cost for record in plan.records)
 
 
 def _padding_ratio(cost: int, max_cost: int, count: int) -> float:

@@ -97,6 +97,8 @@ materialize 完整样本临时推导。没有自定义 sampler 时，dataset 会
 切分到各 rank 后分别 shuffle，因此即使 store 只有一个 payload shard，也不会让其他 rank
 空转；planner 仍只在同一个 shard group 内组 batch。DDP 通过 tensor collective 按有界
 plan window 同步，只裁掉 rank-local 的最终 batch 尾部，保证所有 rank step 数一致。
+`padded_max` 会在裁尾后按 padded cost 对窗口内 plan 做稳定排序，让各 rank 的相同 cost
+分位数落到同一步，同时不改变 batch 所属 rank；默认 `sum` 保持 rank-local plan 原顺序。
 分布式训练每个 epoch 前调用 `loader.set_epoch(epoch)` 推进 shuffle。
 
 ## 加载任意数据集
@@ -745,7 +747,8 @@ shuffle；`StoreDataset.__getitem__` 和全局 index shard 语义不变。外层
 `dataset.dataloader(..., shuffle=...)` 这一处
 shuffle 配置，不再需要单独导入 store 专用 sampler。
 DDP 下 `distributed_plan_window` 控制每次同步前各 rank 需要先生成多少个本地 batch plan；
-当 cost lookup 或 packing 较重时，可以调小它来降低 first-batch 等待。
+当 cost lookup 或 packing 较重时，可以调小它来降低 first-batch 等待。`padded_max` 还会在
+这个窗口内按 padded cost 稳定配平各 rank 的执行顺序；`sum` 不重排。
 设置 `ANYDATASET_DEBUG_DDP_PLANS=1` 可以在每个 DDP planning chunk 同步前后输出
 rank、窗口和 plan count。
 

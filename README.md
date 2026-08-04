@@ -178,7 +178,10 @@ to a different rank. `StoreDataset` overrides that private plan to shuffle
 payload shard groups first and then shuffle sample indexes inside each group.
 In DDP, `distributed_plan_window` bounds how many rank-local batch plans are
 generated before synchronizing step counts; lower values reduce first-batch
-latency when cost lookup or packing is expensive.
+latency when cost lookup or packing is expensive. For `padded_max`, retained
+plans are also stably sorted by padded cost inside each window, so equal
+cost quantiles run on the same step across ranks without moving a batch to a
+different rank. The default `sum` mode preserves rank-local plan order.
 Set `ANYDATASET_DEBUG_DDP_PLANS=1` to log each DDP planning chunk before and
 after synchronization.
 Every group is sliced across ranks, so a store with one payload shard still

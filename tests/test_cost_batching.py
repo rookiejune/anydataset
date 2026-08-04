@@ -415,6 +415,180 @@ def test_distributed_planning_sync_is_bounded() -> None:
     assert consumed == list(range(8))
 
 
+def test_distributed_planning_balance_matches_order_statistics() -> None:
+    left = [
+        _Plan(records=(_Record(index, cost),), cost=cost)
+        for index, cost in enumerate([8, 6, 4, 2])
+    ]
+    right = [
+        _Plan(records=(_Record(index, cost),), cost=cost)
+        for index, cost in enumerate([2, 4, 6, 8])
+    ]
+
+    def synchronize(plans: list[_Plan]) -> list[_Plan]:
+        with (
+            mock.patch(
+                "anydataset.dataset._ddp.dist.is_available", return_value=True
+            ),
+            mock.patch(
+                "anydataset.dataset._ddp.dist.is_initialized", return_value=True
+            ),
+            mock.patch(
+                "anydataset.dataset._ddp.dist.get_world_size", return_value=2
+            ),
+            mock.patch(
+                "anydataset.dataset._ddp.plan_counts",
+                side_effect=lambda local, _world_size: (local, local),
+            ),
+        ):
+            return list(
+                synchronized_plans(
+                    plans,
+                    drop_tail=True,
+                    plan_window=4,
+                    balance_key=lambda plan: plan.cost,
+                )
+            )
+
+    balanced_left = synchronize(left)
+    balanced_right = synchronize(right)
+    original_spread = max(
+        abs(left_plan.cost - right_plan.cost)
+        for left_plan, right_plan in zip(left, right)
+    )
+    balanced_spread = max(
+        abs(left_plan.cost - right_plan.cost)
+        for left_plan, right_plan in zip(balanced_left, balanced_right)
+    )
+
+    assert original_spread == 6
+    assert balanced_spread == 0
+
+
+def test_distributed_planning_balances_after_tail_truncation() -> None:
+    plans = [
+        _Plan(records=(_Record(index, cost),), cost=cost)
+        for index, cost in enumerate([30, 10, 20])
+    ]
+
+    with (
+        mock.patch("anydataset.dataset._ddp.dist.is_available", return_value=True),
+        mock.patch("anydataset.dataset._ddp.dist.is_initialized", return_value=True),
+        mock.patch("anydataset.dataset._ddp.dist.get_world_size", return_value=2),
+        mock.patch(
+            "anydataset.dataset._ddp.plan_counts",
+            side_effect=lambda local, _world_size: (local, 2),
+        ),
+        pytest.warns(RuntimeWarning, match="dropped rank-local final batches"),
+    ):
+        synchronized = list(
+            synchronized_plans(
+                plans,
+                drop_tail=True,
+                plan_window=3,
+                balance_key=lambda plan: plan.cost,
+            )
+        )
+
+    assert [plan.records[0].index for plan in synchronized] == [1, 0]
+    assert {plan.records[0].index for plan in synchronized} == {0, 1}
+
+
+def test_distributed_planning_balance_is_stable_with_multiple_chunks() -> None:
+    plans = [
+        _Plan(records=(_Record(index, cost),), cost=cost)
+        for index, cost in enumerate([2, 1, 2, 3, 1, 3])
+    ]
+
+    with (
+        mock.patch("anydataset.dataset._ddp.dist.is_available", return_value=True),
+        mock.patch("anydataset.dataset._ddp.dist.is_initialized", return_value=True),
+        mock.patch("anydataset.dataset._ddp.dist.get_world_size", return_value=2),
+        mock.patch(
+            "anydataset.dataset._ddp.plan_counts",
+            side_effect=lambda local, _world_size: (local, local),
+        ),
+    ):
+        synchronized = list(
+            synchronized_plans(
+                plans,
+                drop_tail=True,
+                plan_window=3,
+                balance_key=lambda plan: plan.cost,
+            )
+        )
+
+    assert [plan.records[0].index for plan in synchronized] == [1, 0, 2, 4, 3, 5]
+
+
+def test_distributed_planning_default_preserves_local_order() -> None:
+    plans = [
+        _Plan(records=(_Record(index, cost),), cost=cost)
+        for index, cost in enumerate([3, 1, 2])
+    ]
+
+    with (
+        mock.patch("anydataset.dataset._ddp.dist.is_available", return_value=True),
+        mock.patch("anydataset.dataset._ddp.dist.is_initialized", return_value=True),
+        mock.patch("anydataset.dataset._ddp.dist.get_world_size", return_value=2),
+        mock.patch(
+            "anydataset.dataset._ddp.plan_counts",
+            side_effect=lambda local, _world_size: (local, local),
+        ),
+    ):
+        synchronized = list(
+            synchronized_plans(plans, drop_tail=True, plan_window=3)
+        )
+
+    assert synchronized == plans
+
+
+def test_distributed_planning_does_not_balance_without_ddp() -> None:
+    plans = [3, 1, 2]
+    balance_key = mock.Mock(side_effect=lambda value: value)
+
+    with mock.patch(
+        "anydataset.dataset._ddp.dist.is_available", return_value=False
+    ):
+        synchronized = list(
+            synchronized_plans(
+                plans,
+                drop_tail=True,
+                plan_window=3,
+                balance_key=balance_key,
+            )
+        )
+
+    assert synchronized == plans
+    balance_key.assert_not_called()
+
+
+def test_distributed_planning_does_not_balance_single_rank() -> None:
+    plans = [3, 1, 2]
+    balance_key = mock.Mock(side_effect=lambda value: value)
+
+    with (
+        mock.patch("anydataset.dataset._ddp.dist.is_available", return_value=True),
+        mock.patch("anydataset.dataset._ddp.dist.is_initialized", return_value=True),
+        mock.patch("anydataset.dataset._ddp.dist.get_world_size", return_value=1),
+        mock.patch(
+            "anydataset.dataset._ddp.plan_counts",
+            side_effect=lambda local, _world_size: (local,),
+        ),
+    ):
+        synchronized = list(
+            synchronized_plans(
+                plans,
+                drop_tail=True,
+                plan_window=3,
+                balance_key=balance_key,
+            )
+        )
+
+    assert synchronized == plans
+    balance_key.assert_not_called()
+
+
 def test_distributed_planning_fails_fast_on_empty_rank() -> None:
     consumed: list[int] = []
 
@@ -522,6 +696,50 @@ def test_distributed_plan_window_is_loader_configurable() -> None:
     )
 
     assert loader.batch_sampler.distributed_plan_window == 4
+
+
+@pytest.mark.parametrize(
+    ("cost_aggregation", "expected"),
+    [("sum", [[0, 1], [2]]), ("padded_max", [[2], [0, 1]])],
+)
+def test_batch_sampler_only_balances_padded_max_by_padded_cost(
+    cost_aggregation: str,
+    expected: list[list[int]],
+) -> None:
+    from anydataset.dataset.batching import _BatchSampler
+
+    plans = [
+        _Plan(
+            records=(_Record(index=0, cost=6), _Record(index=1, cost=4)),
+            cost=10,
+        ),
+        _Plan(records=(_Record(index=2, cost=11),), cost=11),
+    ]
+    sampler = _BatchSampler(
+        _dataset([0, 1, 2]),
+        costs=[6, 4, 11],
+        max_batch_memory=12,
+        cost_aggregation=cost_aggregation,  # type: ignore[arg-type]
+        sampler=None,
+        shuffle=False,
+        seed=0,
+        epoch=0,
+        distributed_plan_window=2,
+    )
+
+    with (
+        mock.patch.object(sampler, "_iter_plans", return_value=iter(plans)),
+        mock.patch("anydataset.dataset._ddp.dist.is_available", return_value=True),
+        mock.patch("anydataset.dataset._ddp.dist.is_initialized", return_value=True),
+        mock.patch("anydataset.dataset._ddp.dist.get_world_size", return_value=2),
+        mock.patch(
+            "anydataset.dataset._ddp.plan_counts",
+            side_effect=lambda local, _world_size: (local, local),
+        ),
+    ):
+        batches = list(sampler)
+
+    assert batches == expected
 
 
 def test_debug_rank_local_index_groups() -> None:

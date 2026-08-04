@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import warnings
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from itertools import islice
 import logging
 import os
@@ -28,6 +28,7 @@ def synchronized_plans(
     *,
     drop_tail: bool,
     plan_window: int = _DEFAULT_PLAN_WINDOW,
+    balance_key: Callable[[_T], int] | None = None,
 ) -> Iterator[_T]:
     if not dist.is_available() or not dist.is_initialized():
         yield from plans
@@ -81,7 +82,10 @@ def synchronized_plans(
                     RuntimeWarning,
                     stacklevel=2,
                 )
-        yield from local[:kept]
+        balanced = local[:kept]
+        if balance_key is not None and world_size > 1:
+            balanced.sort(key=balance_key)
+        yield from balanced
         if kept < window:
             return
         chunk += 1
