@@ -9,10 +9,8 @@ from __future__ import annotations
 from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
 from typing import Any
 
-import torch
-
 from ..._compat import strict_zip
-from ..._runtime.devices import clear_cuda_cache, release_exception
+from ..._runtime.oom import OomCallback, iter_resilient_batch_outputs
 from ...dataset.collate import Batch, collate_fn
 from ...types.item import Item, Modality, Requirement, Role, Sample
 from ...view import BatchOutput
@@ -24,8 +22,6 @@ from .types import (
     output_modality,
 )
 from .view import with_view
-
-OomCallback = Callable[[int, int, int], None]
 
 
 def sample_index_batches(
@@ -48,27 +44,7 @@ def with_resilient_batch_provider(
     *,
     on_oom: OomCallback | None = None,
 ) -> Iterator[Sample]:
-    try:
-        yield from call(samples)
-    except Exception as exc:
-        oom = _is_oom_error(exc)
-        if len(samples) <= 1 or not oom:
-            raise
-        release_exception(exc)
-        clear_cuda_cache()
-        midpoint = len(samples) // 2
-        if on_oom is not None:
-            on_oom(len(samples), midpoint, len(samples) - midpoint)
-        yield from with_resilient_batch_provider(
-            samples[:midpoint],
-            call,
-            on_oom=on_oom,
-        )
-        yield from with_resilient_batch_provider(
-            samples[midpoint:],
-            call,
-            on_oom=on_oom,
-        )
+    yield from iter_resilient_batch_outputs(samples, call, on_oom=on_oom)
 
 
 def with_batch_view_provider(
@@ -350,12 +326,3 @@ def validate_batch_outputs(values: Sequence[Any], expected: int) -> None:
         raise ValueError(
             f"Batch provider returned {len(values)} outputs for {expected} samples."
         )
-
-
-def _is_oom_error(error: BaseException) -> bool:
-    if isinstance(error, torch.OutOfMemoryError):
-        return True
-    if not isinstance(error, RuntimeError):
-        return False
-    message = str(error).lower()
-    return "out of memory" in message or "cuda error: out of memory" in message

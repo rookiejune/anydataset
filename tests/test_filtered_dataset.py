@@ -2150,6 +2150,201 @@ class FilteredDatasetTest(unittest.TestCase):
         self.assertEqual(result.select_by("one").indices, (1, 4))
         self.assertEqual(result.select_by("two").indices, (2, 5))
 
+    def test_rule_apply_splits_oom_predicate_batch_in_sample_order(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home = Path(tmpdir) / "home"
+            dataset = _dataset(
+                "unit_test_filter_predicate_oom_split",
+                [0, 1, 2, 3],
+            )
+            predicate = _SplitOnOomBatchFilter()
+            stdout = io.StringIO()
+
+            with (
+                mock.patch.dict(os.environ, {"ANYDATASET_HOME": str(home)}),
+                mock.patch("anydataset._runtime.oom.clear_cuda_cache") as clear,
+                redirect_stdout(stdout),
+            ):
+                result = FilterRule(
+                    name="batch_oom_split",
+                    factory=lambda: predicate,
+                ).apply(
+                    dataset_factory=lambda: dataset,
+                    device="cpu",
+                    batch_size=4,
+                    write_workers=0,
+                )
+                zero_indices = result.select_by("zero").indices
+                one_indices = result.select_by("one").indices
+                two_indices = result.select_by("two").indices
+                events = _read_events()
+
+        self.assertEqual(
+            predicate.batches,
+            [
+                (0, 1, 2, 3),
+                (0, 1),
+                (0,),
+                (1,),
+                (2, 3),
+                (2,),
+                (3,),
+            ],
+        )
+        self.assertEqual(zero_indices, (0, 3))
+        self.assertEqual(one_indices, (1,))
+        self.assertEqual(two_indices, (2,))
+        self.assertEqual(clear.call_count, 3)
+        self.assertIn(
+            "filter: predicate OOM: worker=0 "
+            "predicate=_SplitOnOomBatchFilter batch_size=4; "
+            "retrying as 2+2 after cache cleanup; "
+            "oom_count=1 predicate_calls=1 split/call=1.000000",
+            stdout.getvalue(),
+        )
+        oom_events = [
+            entry
+            for entry in events
+            if entry["event"] == "filter_predicate_oom_split"
+        ]
+        self.assertEqual(len(oom_events), 3)
+        self.assertEqual(oom_events[0]["fields"]["worker"], 0)
+        self.assertEqual(
+            oom_events[0]["fields"]["predicate"],
+            "_SplitOnOomBatchFilter",
+        )
+        self.assertEqual(oom_events[0]["fields"]["batch_size"], 4)
+        self.assertEqual(oom_events[0]["fields"]["left_size"], 2)
+        self.assertEqual(oom_events[0]["fields"]["right_size"], 2)
+        self.assertEqual(oom_events[0]["fields"]["oom_count"], 1)
+        self.assertEqual(oom_events[0]["fields"]["predicate_calls"], 1)
+        self.assertEqual(oom_events[0]["fields"]["split_call_ratio"], 1.0)
+        self.assertEqual(oom_events[-1]["fields"]["oom_count"], 3)
+        self.assertEqual(oom_events[-1]["fields"]["predicate_calls"], 5)
+        self.assertEqual(oom_events[-1]["fields"]["split_call_ratio"], 0.6)
+
+    def test_rule_apply_validates_each_oom_retry_output(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home = Path(tmpdir) / "home"
+            dataset = _dataset(
+                "unit_test_filter_predicate_oom_retry_validation",
+                [0, 1, 2, 3],
+            )
+            predicate = _SplitThenShortBatchFilter()
+
+            with (
+                mock.patch.dict(os.environ, {"ANYDATASET_HOME": str(home)}),
+                self.assertRaisesRegex(ValueError, "one output per input sample"),
+            ):
+                FilterRule(
+                    name="batch_oom_retry_validation",
+                    factory=lambda: predicate,
+                ).apply(
+                    dataset_factory=lambda: dataset,
+                    device="cpu",
+                    batch_size=4,
+                    write_workers=0,
+                )
+
+        self.assertEqual(predicate.batches, [(0, 1, 2, 3), (0, 1)])
+
+    def test_rule_apply_does_not_split_non_oom_predicate_errors(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home = Path(tmpdir) / "home"
+            dataset = _dataset(
+                "unit_test_filter_predicate_non_oom",
+                [0, 1, 2, 3],
+            )
+            predicate = _NonOomBatchFilter()
+
+            with (
+                mock.patch.dict(os.environ, {"ANYDATASET_HOME": str(home)}),
+                mock.patch("anydataset._runtime.oom.clear_cuda_cache") as clear,
+                self.assertRaisesRegex(RuntimeError, "bad batch"),
+            ):
+                FilterRule(
+                    name="batch_non_oom",
+                    factory=lambda: predicate,
+                ).apply(
+                    dataset_factory=lambda: dataset,
+                    device="cpu",
+                    batch_size=4,
+                    write_workers=0,
+                )
+
+        self.assertEqual(predicate.calls, 1)
+        clear.assert_not_called()
+
+    def test_rule_apply_reraises_single_sample_predicate_oom(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home = Path(tmpdir) / "home"
+            dataset = _dataset(
+                "unit_test_filter_predicate_single_oom",
+                [0],
+            )
+            predicate = _SingleOomBatchFilter()
+
+            with (
+                mock.patch.dict(os.environ, {"ANYDATASET_HOME": str(home)}),
+                mock.patch("anydataset._runtime.oom.clear_cuda_cache") as clear,
+                self.assertRaises(torch.OutOfMemoryError),
+            ):
+                FilterRule(
+                    name="batch_single_oom",
+                    factory=lambda: predicate,
+                ).apply(
+                    dataset_factory=lambda: dataset,
+                    device="cpu",
+                    batch_size=1,
+                    write_workers=0,
+                )
+
+        self.assertEqual(predicate.calls, 1)
+        clear.assert_not_called()
+
+    def test_rule_apply_parallel_splits_oom_predicate_batches(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home = Path(tmpdir) / "home"
+            dataset_factory = partial(
+                _dataset,
+                "unit_test_filter_predicate_parallel_oom",
+                [0, 1, 2, 3],
+            )
+
+            with mock.patch.dict(os.environ, {"ANYDATASET_HOME": str(home)}):
+                result = FilterRule(
+                    name="batch_parallel_oom",
+                    factory=_SplitOnOomBatchFilter,
+                ).apply(
+                    dataset_factory=dataset_factory,
+                    device=("cpu:0", "cpu:1"),
+                    batch_size=2,
+                    write_workers=0,
+                    runtime=Runtime(process_start_method="spawn"),
+                )
+                counts = result.counts
+                zero_indices = result.select_by("zero").indices
+                one_indices = result.select_by("one").indices
+                two_indices = result.select_by("two").indices
+                events = _read_events()
+
+        self.assertEqual(counts, {"one": 1, "two": 1, "zero": 2})
+        self.assertEqual(zero_indices, (0, 3))
+        self.assertEqual(one_indices, (1,))
+        self.assertEqual(two_indices, (2,))
+        oom_events = [
+            entry
+            for entry in events
+            if entry["event"] == "filter_predicate_oom_split"
+        ]
+        self.assertEqual(
+            {entry["fields"]["worker"] for entry in oom_events},
+            {0, 1},
+        )
+        self.assertTrue(
+            all(entry["fields"]["batch_size"] == 2 for entry in oom_events)
+        )
+
     def test_rule_apply_rejects_wrong_predicate_batch_output_count(self):
         with tempfile.TemporaryDirectory():
             dataset = _dataset(
@@ -3329,6 +3524,60 @@ class _BatchModThree:
 
     def call_batch(self, samples):
         return tuple(_mod_three(sample) for sample in samples)
+
+
+class _SplitOnOomBatchFilter:
+    def __init__(self) -> None:
+        self.batches: list[tuple[int, ...]] = []
+
+    def __call__(self, sample):
+        raise AssertionError("batched predicate should use call_batch()")
+
+    def call_batch(self, samples):
+        values = tuple(_value(sample) for sample in samples)
+        self.batches.append(values)
+        if len(samples) > 1:
+            raise RuntimeError("CUDA error: out of memory")
+        return tuple(_mod_three(sample) for sample in samples)
+
+
+class _SplitThenShortBatchFilter:
+    def __init__(self) -> None:
+        self.batches: list[tuple[int, ...]] = []
+
+    def __call__(self, sample):
+        raise AssertionError("batched predicate should use call_batch()")
+
+    def call_batch(self, samples):
+        values = tuple(_value(sample) for sample in samples)
+        self.batches.append(values)
+        if len(samples) > 2:
+            raise torch.OutOfMemoryError("CUDA out of memory")
+        return [True] * (len(samples) - 1)
+
+
+class _NonOomBatchFilter:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def __call__(self, sample):
+        raise AssertionError("batched predicate should use call_batch()")
+
+    def call_batch(self, samples):
+        self.calls += 1
+        raise RuntimeError("bad batch")
+
+
+class _SingleOomBatchFilter:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def __call__(self, sample):
+        raise AssertionError("batched predicate should use call_batch()")
+
+    def call_batch(self, samples):
+        self.calls += 1
+        raise torch.OutOfMemoryError("CUDA out of memory")
 
 
 class _ShortBatchFilter:

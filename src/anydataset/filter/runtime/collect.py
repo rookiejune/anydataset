@@ -16,6 +16,7 @@ from ..._runtime.logging import (
     worker_logger,
     write_warning,
 )
+from ..._runtime.oom import iter_resilient_batch_outputs
 from ..._runtime.parallel import (
     DeviceWorker,
     ProcessHandle,
@@ -27,6 +28,7 @@ from ..._runtime.parallel import (
     validate_process_value,
     worker_configs,
 )
+from ..._runtime.progress import write_progress_message
 from ...runtime import Runtime
 from ...types import Sample
 from ..rules import label
@@ -76,6 +78,18 @@ class _FilterWorkerConfig:
     sample_indexes: Sequence[int] | None
     logs_dir: Path
     worker_logs_dir: Path
+
+
+@dataclass
+class _BatchCallStats:
+    predicate_calls: int = 0
+    oom_splits: int = 0
+
+    @property
+    def split_call_ratio(self) -> float:
+        if self.predicate_calls == 0:
+            return 0.0
+        return self.oom_splits / self.predicate_calls
 
 
 def collect_ranges(
@@ -130,6 +144,7 @@ def collect_ranges_sequential(
     partitions: dict[str, array[int]] = {}
     metric_rows: list[_FilterMetricsRow] = []
     sample_count = 0
+    batch_stats = _BatchCallStats()
     loader = _filter_loader(
         dataset,
         dataset_factory=dataset_factory,
@@ -146,6 +161,8 @@ def collect_ranges_sequential(
         outputs = _predicate_outputs(
             predicate,
             tuple(sample for _index, sample in selected),
+            worker_id=0,
+            batch_stats=batch_stats,
         )
         for (index, _sample), value in zip(selected, outputs):
             output = decision(value, metrics=write_metrics)
@@ -386,6 +403,7 @@ def collect_shard(
     sample_indexes: Sequence[int] | None = None,
 ) -> Iterable[_IndexedFilterChunk]:
     rows: list[_FilterRow] = []
+    batch_stats = _BatchCallStats()
     dataset = None
     if use_map_style_loader is None or sample_count is None:
         dataset = dataset_factory()
@@ -406,6 +424,8 @@ def collect_shard(
         outputs = _predicate_outputs(
             predicate,
             tuple(sample for _index, sample in selected),
+            worker_id=int(os.environ["RANK"]),
+            batch_stats=batch_stats,
         )
         for (index, _sample), value in zip(selected, outputs):
             output = decision(value, metrics=write_metrics)
@@ -432,12 +452,68 @@ def collect_shard(
 def _predicate_outputs(
     predicate: FilterPredicate,
     samples: Sequence[Sample],
+    *,
+    worker_id: int,
+    batch_stats: _BatchCallStats,
 ) -> Sequence[FilterOutput]:
     if not samples:
         return ()
     if not isinstance(predicate, BatchFilterPredicate):
         return tuple(predicate(sample) for sample in samples)
 
+    predicate_name = type(predicate).__name__
+
+    def call(batch: Sequence[Sample]) -> Sequence[FilterOutput]:
+        batch_stats.predicate_calls += 1
+        return _validated_predicate_outputs(predicate, batch)
+
+    def on_oom(batch_size: int, left_size: int, right_size: int) -> None:
+        batch_stats.oom_splits += 1
+        ratio = batch_stats.split_call_ratio
+        write_progress_message(
+            "filter",
+            "predicate OOM: "
+            f"worker={worker_id} predicate={predicate_name} "
+            f"batch_size={batch_size}; retrying as {left_size}+{right_size} "
+            "after cache cleanup; "
+            f"oom_count={batch_stats.oom_splits} "
+            f"predicate_calls={batch_stats.predicate_calls} "
+            f"split/call={ratio:.6f}",
+        )
+        write_warning(
+            "filter",
+            "predicate OOM split: "
+            f"worker={worker_id} predicate={predicate_name} "
+            f"batch_size={batch_size} retry={left_size}+{right_size} "
+            f"oom_count={batch_stats.oom_splits} "
+            f"predicate_calls={batch_stats.predicate_calls} "
+            f"split/call={ratio:.6f}",
+            event="filter_predicate_oom_split",
+            fields={
+                "worker": worker_id,
+                "predicate": predicate_name,
+                "batch_size": batch_size,
+                "left_size": left_size,
+                "right_size": right_size,
+                "oom_count": batch_stats.oom_splits,
+                "predicate_calls": batch_stats.predicate_calls,
+                "split_call_ratio": ratio,
+            },
+        )
+
+    return tuple(
+        iter_resilient_batch_outputs(
+            samples,
+            call,
+            on_oom=on_oom,
+        )
+    )
+
+
+def _validated_predicate_outputs(
+    predicate: BatchFilterPredicate,
+    samples: Sequence[Sample],
+) -> Sequence[FilterOutput]:
     outputs = predicate.call_batch(samples)
     if isinstance(outputs, (str, bytes)) or not isinstance(outputs, Sequence):
         raise TypeError(

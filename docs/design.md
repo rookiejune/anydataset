@@ -287,7 +287,9 @@ predicate 直接作用在 dataset 产出的完整 canonical `Sample` 上，返�
 枚举值或带 metrics 的 `FilterDecision`。库统一归一化为字符串 label，并缓存每个
 label 对应的原始样本下标。
 predicate 可选实现 `call_batch(samples)`；返回值必须是与输入等长、按位置对应的有序
-sequence。未实现时仍逐样本调用 `__call__`。
+sequence。未实现时仍逐样本调用 `__call__`。batched predicate 遇到 CUDA OOM 时会先
+释放异常引用并清理 CUDA cache，再按原顺序递归二分 batch 重试；每个子 batch 都重新
+校验输出契约。非 OOM 不重试，单样本仍 OOM 时原样抛出。
 
 在线 `RejectReplaceDataset` 不是缓存分区的替代品。它只对已经物化的 map-style
 dataset 做廉价 CPU reject 替换：顺序 look-ahead，失败后再用 worker 本地 accept

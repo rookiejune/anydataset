@@ -751,7 +751,7 @@ class ViewMaterializerTest(unittest.TestCase):
             )
 
             with mock.patch(
-                "anydataset.store.materialize.batch.clear_cuda_cache"
+                "anydataset._runtime.oom.clear_cuda_cache"
             ) as clear:
                 ViewMaterializer(target, batch_size=2).write(
                     dataset_factory=_DatasetFactory(dataset),
