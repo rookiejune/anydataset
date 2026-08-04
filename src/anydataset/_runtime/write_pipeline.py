@@ -31,6 +31,7 @@ class BackgroundWriteSink(Generic[T]):
         max_pending: int | None = None,
         on_submit: Callable[[T, int], None] | None = None,
         on_complete: Callable[[T, int, float], None] | None = None,
+        on_backpressure: Callable[[float], None] | None = None,
     ) -> None:
         self.write = write
         self.workers = non_negative_int("write_workers", workers)
@@ -39,6 +40,7 @@ class BackgroundWriteSink(Generic[T]):
         self.backend = backend
         self.on_submit = on_submit
         self.on_complete = on_complete
+        self.on_backpressure = on_backpressure
         self._executor: Executor | None = None
         self._pending: dict[Future[None], tuple[T, float]] = {}
         self._ready_queue: SimpleQueue[Future[None]] = SimpleQueue()
@@ -82,8 +84,13 @@ class BackgroundWriteSink(Generic[T]):
             self._on_complete(job, 0, time.perf_counter() - start)
             return
         self._drain_ready()
+        backpressure_started: float | None = None
         while len(self._pending) >= self._pending_limit:
+            if backpressure_started is None:
+                backpressure_started = time.perf_counter()
             self._drain_one()
+        if backpressure_started is not None:
+            self._on_backpressure(time.perf_counter() - backpressure_started)
         future = executor.submit(self.write, job)
         self._pending[future] = (job, time.perf_counter())
         future.add_done_callback(self._mark_ready)
@@ -150,3 +157,7 @@ class BackgroundWriteSink(Generic[T]):
     def _on_complete(self, job: T, pending: int, elapsed: float) -> None:
         if self.on_complete is not None:
             self.on_complete(job, pending, elapsed)
+
+    def _on_backpressure(self, elapsed: float) -> None:
+        if self.on_backpressure is not None:
+            self.on_backpressure(elapsed)

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 from pathlib import Path
-from threading import Event
+from threading import Event, Thread
 
 from anydataset._runtime.write_pipeline import BackgroundWriteSink
 
@@ -91,6 +91,41 @@ class BackgroundWriteSinkTest(unittest.TestCase):
 
         self.assertEqual(completed[0], "second")
         self.assertCountEqual(completed, ["first", "second", "third"])
+
+    def test_reports_submit_backpressure(self):
+        first_started = Event()
+        release_first = Event()
+        second_submitted = Event()
+        blocked = []
+
+        def write(value: str) -> None:
+            if value == "first":
+                first_started.set()
+                release_first.wait()
+
+        with BackgroundWriteSink(
+            write,
+            workers=1,
+            max_pending=1,
+            start_method="spawn",
+            on_backpressure=blocked.append,
+        ) as sink:
+            sink.submit("first")
+            self.assertTrue(first_started.wait(timeout=5))
+
+            def submit_second() -> None:
+                sink.submit("second")
+                second_submitted.set()
+
+            submitter = Thread(target=submit_second)
+            submitter.start()
+            self.assertFalse(second_submitted.wait(timeout=0.05))
+            release_first.set()
+            self.assertTrue(second_submitted.wait(timeout=5))
+            submitter.join(timeout=5)
+
+        self.assertEqual(len(blocked), 1)
+        self.assertGreater(blocked[0], 0.0)
 
     def test_abort_preserves_body_error(self):
         def write(value: str) -> None:

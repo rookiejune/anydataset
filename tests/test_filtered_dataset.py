@@ -2150,6 +2150,69 @@ class FilteredDatasetTest(unittest.TestCase):
         self.assertEqual(result.select_by("one").indices, (1, 4))
         self.assertEqual(result.select_by("two").indices, (2, 5))
 
+    def test_rule_apply_logs_filter_performance_summaries(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home = Path(tmpdir) / "home"
+            dataset = _dataset(
+                "unit_test_filter_performance_summary",
+                list(range(7)),
+            )
+
+            with mock.patch.dict(os.environ, {"ANYDATASET_HOME": str(home)}):
+                result = FilterRule(
+                    name="batch_performance_summary",
+                    factory=_BatchModThree,
+                ).apply(
+                    dataset_factory=lambda: dataset,
+                    device="cpu",
+                    batch_size=3,
+                    write_workers=0,
+                )
+                events = _read_events()
+
+        self.assertEqual(result.counts, {"zero": 3, "one": 2, "two": 2})
+        worker = [
+            entry
+            for entry in events
+            if entry["event"] == "filter_worker_summary"
+        ][-1]["fields"]
+        self.assertEqual(worker["status"], "complete")
+        self.assertEqual(worker["worker"], 0)
+        self.assertEqual(worker["predicate"], "_BatchModThree")
+        self.assertEqual(worker["requested_batch_size"], 3)
+        self.assertEqual(worker["processed_samples"], 7)
+        self.assertEqual(worker["loader_batches"], 3)
+        self.assertEqual(worker["loader_samples"], 7)
+        self.assertEqual(worker["loader_batch_size_min"], 1)
+        self.assertEqual(worker["loader_batch_size_max"], 3)
+        self.assertEqual(worker["predicate_calls"], 3)
+        self.assertEqual(worker["predicate_samples"], 7)
+        self.assertEqual(worker["predicate_batch_size_min"], 1)
+        self.assertEqual(worker["predicate_batch_size_max"], 3)
+        self.assertEqual(worker["oom_count"], 0)
+        self.assertEqual(worker["split_call_ratio"], 0.0)
+        self.assertGreaterEqual(worker["loader_wait_seconds"], 0.0)
+        self.assertGreaterEqual(worker["predicate_seconds"], 0.0)
+
+        progress = [
+            entry for entry in events if entry["event"] == "filter_progress"
+        ][-1]["fields"]
+        self.assertEqual(progress["scan_samples"], 7)
+        self.assertEqual(progress["writer_samples"], 7)
+        self.assertEqual(progress["writer_pending"], 0)
+
+        run = [
+            entry for entry in events if entry["event"] == "filter_run_summary"
+        ][-1]["fields"]
+        self.assertEqual(run["status"], "complete")
+        self.assertEqual(run["worker_count"], 1)
+        self.assertEqual(run["scan_samples"], 7)
+        self.assertEqual(run["writer_samples"], 7)
+        self.assertEqual(run["predicate_calls"], 3)
+        self.assertEqual(run["oom_count"], 0)
+        self.assertEqual(run["split_call_ratio"], 0.0)
+        self.assertEqual(run["writer_backpressure_seconds"], 0.0)
+
     def test_rule_apply_splits_oom_predicate_batch_in_sample_order(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             home = Path(tmpdir) / "home"
@@ -2222,6 +2285,23 @@ class FilteredDatasetTest(unittest.TestCase):
         self.assertEqual(oom_events[-1]["fields"]["oom_count"], 3)
         self.assertEqual(oom_events[-1]["fields"]["predicate_calls"], 5)
         self.assertEqual(oom_events[-1]["fields"]["split_call_ratio"], 0.6)
+        worker_summary = [
+            entry
+            for entry in events
+            if entry["event"] == "filter_worker_summary"
+        ][-1]["fields"]
+        self.assertEqual(worker_summary["predicate_calls"], 7)
+        self.assertEqual(worker_summary["predicate_samples"], 12)
+        self.assertEqual(worker_summary["predicate_batch_size_min"], 1)
+        self.assertEqual(worker_summary["predicate_batch_size_max"], 4)
+        self.assertEqual(worker_summary["oom_count"], 3)
+        self.assertAlmostEqual(worker_summary["split_call_ratio"], 3 / 7)
+        run_summary = [
+            entry for entry in events if entry["event"] == "filter_run_summary"
+        ][-1]["fields"]
+        self.assertEqual(run_summary["predicate_calls"], 7)
+        self.assertEqual(run_summary["oom_count"], 3)
+        self.assertAlmostEqual(run_summary["split_call_ratio"], 3 / 7)
 
     def test_rule_apply_validates_each_oom_retry_output(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -2272,8 +2352,25 @@ class FilteredDatasetTest(unittest.TestCase):
                     write_workers=0,
                 )
 
+            with mock.patch.dict(os.environ, {"ANYDATASET_HOME": str(home)}):
+                events = _read_events()
+
         self.assertEqual(predicate.calls, 1)
         clear.assert_not_called()
+        worker_summary = [
+            entry
+            for entry in events
+            if entry["event"] == "filter_worker_summary"
+        ][-1]["fields"]
+        self.assertEqual(worker_summary["status"], "failed")
+        self.assertEqual(worker_summary["error_type"], "RuntimeError")
+        self.assertEqual(worker_summary["predicate_calls"], 1)
+        run_summary = [
+            entry for entry in events if entry["event"] == "filter_run_summary"
+        ][-1]["fields"]
+        self.assertEqual(run_summary["status"], "failed")
+        self.assertEqual(run_summary["error_type"], "RuntimeError")
+        self.assertEqual(run_summary["predicate_calls"], 1)
 
     def test_rule_apply_reraises_single_sample_predicate_oom(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -2344,6 +2441,25 @@ class FilteredDatasetTest(unittest.TestCase):
         self.assertTrue(
             all(entry["fields"]["batch_size"] == 2 for entry in oom_events)
         )
+        worker_summaries = [
+            entry["fields"]
+            for entry in events
+            if entry["event"] == "filter_worker_summary"
+        ]
+        self.assertEqual(
+            {summary["worker"] for summary in worker_summaries},
+            {0, 1},
+        )
+        self.assertTrue(
+            all(summary["status"] == "complete" for summary in worker_summaries)
+        )
+        run_summary = [
+            entry for entry in events if entry["event"] == "filter_run_summary"
+        ][-1]["fields"]
+        self.assertEqual(run_summary["worker_count"], 2)
+        self.assertEqual(run_summary["predicate_calls"], 6)
+        self.assertEqual(run_summary["oom_count"], 2)
+        self.assertAlmostEqual(run_summary["split_call_ratio"], 2 / 6)
 
     def test_rule_apply_rejects_wrong_predicate_batch_output_count(self):
         with tempfile.TemporaryDirectory():
