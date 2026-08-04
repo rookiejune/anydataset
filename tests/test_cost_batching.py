@@ -94,6 +94,68 @@ def test_accepts_plain_iterable_costs() -> None:
     assert list(loader) == [[4, 3], [1, 2]]
 
 
+def test_padded_max_enforces_padded_batch_cost() -> None:
+    summed = _dataset([60, 40]).dataloader(
+        costs=[60, 40],
+        max_batch_memory=100,
+        planning_window=2,
+        collate_fn=list,
+    )
+    padded = _dataset([60, 40]).dataloader(
+        costs=[60, 40],
+        max_batch_memory=100,
+        cost_aggregation="padded_max",
+        planning_window=2,
+        collate_fn=list,
+    )
+
+    assert list(summed) == [[60, 40]]
+    assert list(padded) == [[60], [40]]
+
+
+def test_padded_max_fallback_never_exceeds_budget() -> None:
+    loader = _dataset([100, 1]).dataloader(
+        costs=[100, 1],
+        max_batch_memory=101,
+        cost_aggregation="padded_max",
+        planning_window=2,
+        max_padding_ratio=0.0,
+        collate_fn=list,
+    )
+
+    assert list(loader) == [[100], [1]]
+
+
+def test_padded_max_still_maximizes_effective_sample_cost() -> None:
+    plans = list(
+        _plans(
+            (
+                _Record(index, cost)
+                for index, cost in enumerate([18, 18, 18, 30])
+            ),
+            max_batch_memory=60,
+            cost_aggregation="padded_max",
+            planning_window=4,
+            max_batch_samples=None,
+            max_padding_ratio=0.2,
+        )
+    )
+
+    assert [record.index for record in plans[0].records] == [0, 1, 2]
+    assert plans[0].cost == 54
+
+
+@pytest.mark.parametrize("cost_aggregation", [None, "mean"])
+def test_requires_supported_cost_aggregation(cost_aggregation: object) -> None:
+    error = TypeError if cost_aggregation is None else ValueError
+    with pytest.raises(error, match="cost_aggregation"):
+        _dataset([1]).dataloader(
+            costs=[1],
+            max_batch_memory=1,
+            cost_aggregation=cost_aggregation,  # type: ignore[arg-type]
+        )
+
+
 def test_requires_supported_costs() -> None:
     dataset = _dataset([1])
 
@@ -601,7 +663,10 @@ def test_streaming_planner_matches_reference_bucket_order(
     )
 
 
-def test_streaming_planner_matches_randomized_reference() -> None:
+@pytest.mark.parametrize("cost_aggregation", ["sum", "padded_max"])
+def test_streaming_planner_matches_randomized_reference(
+    cost_aggregation: str,
+) -> None:
     randomizer = random.Random(0)
     for _ in range(500):
         costs = [
@@ -612,20 +677,28 @@ def test_streaming_planner_matches_randomized_reference() -> None:
         window = randomizer.randint(1, min(len(costs), 12))
         max_samples = randomizer.choice((None, 1, 2, 3, 5, 8))
         max_padding_ratio = randomizer.choice((0.0, 0.05, 0.2, 0.5, 1.0))
-        actual = [
-            [record.index for record in plan.records]
-            for plan in _plans(
+        plans = list(
+            _plans(
                 (_Record(index, cost) for index, cost in enumerate(costs)),
                 max_batch_memory=budget,
+                cost_aggregation=cost_aggregation,  # type: ignore[arg-type]
                 planning_window=window,
                 max_batch_samples=max_samples,
                 max_padding_ratio=max_padding_ratio,
             )
-        ]
+        )
+        actual = [[record.index for record in plan.records] for plan in plans]
+
+        if cost_aggregation == "padded_max":
+            for plan in plans:
+                assert len(plan.records) * max(
+                    record.cost for record in plan.records
+                ) <= budget
 
         assert actual == _reference_plans(
             costs,
             budget=budget,
+            cost_aggregation=cost_aggregation,
             window=window,
             max_samples=max_samples,
             max_padding_ratio=max_padding_ratio,
@@ -706,6 +779,7 @@ def _reference_plans(
     costs: Sequence[int],
     *,
     budget: int,
+    cost_aggregation: str = "sum",
     window: int,
     max_samples: int | None,
     max_padding_ratio: float = 0.2,
@@ -730,6 +804,7 @@ def _reference_plans(
         candidates = _reference_candidates(
             pending,
             budget=budget,
+            cost_aggregation=cost_aggregation,
             max_samples=max_samples,
             min_count=2,
         )
@@ -762,6 +837,7 @@ def _reference_plans(
                 _reference_candidates(
                     pending,
                     budget=budget,
+                    cost_aggregation=cost_aggregation,
                     max_samples=max_samples,
                     min_count=1,
                     max_count=1,
@@ -785,6 +861,7 @@ def _reference_candidates(
     pending: Sequence[tuple[int, _Record]],
     *,
     budget: int,
+    cost_aggregation: str,
     max_samples: int | None,
     min_count: int,
     max_count: int | None = None,
@@ -802,9 +879,10 @@ def _reference_candidates(
                 break
             _arrival, record = sorted_pending[stop]
             total += record.cost
-            if total > budget:
-                break
             max_cost = max(max_cost, record.cost)
+            memory = total if cost_aggregation == "sum" else max_cost * count
+            if memory > budget:
+                break
             if count < min_count:
                 continue
             records = tuple(sorted_pending[start : stop + 1])

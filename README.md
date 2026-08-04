@@ -145,6 +145,7 @@ dataset = AnyDataset(spec, parse_fn=parse)
 loader = dataset.dataloader(
     costs=lengths,
     max_batch_memory=64_000,
+    cost_aggregation="padded_max",
     planning_window=256,
     distributed_plan_window=32,
     shuffle=True,
@@ -157,11 +158,17 @@ For store-backed datasets, callable costs receive a manifest row rather than a
 materialized payload sample, so length metadata can be read without loading
 audio tensors.
 
-The planner treats batch memory and distributed compute as the sum of selected
-sample costs. Each sample cost must be a positive integer. Within each planning
-window, it greedily adds the fitting sample that makes the batch as full as
-possible without exceeding `max_batch_memory`; `max_batch_samples` can cap the
-number of samples per planned batch. Planning keeps only a bounded lookahead;
+Each sample cost must be a positive integer. `cost_aggregation="sum"` is the
+default and constrains the sum of selected sample costs. The opt-in
+`cost_aggregation="padded_max"` mode instead enforces the hard bound
+`len(batch) * max(sample_cost) <= max_batch_memory` for workloads whose tensors
+are padded to the largest sample. `cost_aggregation` only defines budget
+feasibility: within that hard bound, the planner maximizes the sum of useful
+sample costs. `max_batch_samples` can cap the number of samples per planned
+batch. `max_padding_ratio` remains a packing-efficiency preference. If no
+multi-sample candidate meets it, fallback may choose the least-wasteful feasible
+batch, but it never exceeds the selected aggregation's hard budget.
+Planning keeps only a bounded lookahead;
 stopping an epoch early does not read costs for the unseen tail. A complete
 epoch necessarily reads every selected sample cost once, so expensive lengths
 should be persisted in row metadata instead of derived by materializing samples.

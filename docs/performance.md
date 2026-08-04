@@ -79,9 +79,11 @@
   Parquet row group，预计算每个文件的 row-group stop，并以 LRU 复用已打开的
   `ParquetFile`；动态 batch shuffle 直接按 row group 生成有界 index group，避免 rank 和
   DataLoader worker 重复解析全部 CSV，也不构造全数据集 Python index list。
-- cost-aware planner 接受稳定 cost sequence 或常量 cost，并以 bounded lookahead 流式
-  生成 batch；候选删除和 batch cost 更新不再随全量 pending list 或当前 batch size
-  重复放大。DDP 每 128 个 plan 通过 tensor collective 同步 plan count，只在最终不完整
+- cost-aware planner 接受稳定 cost sequence、callable 或 `None` unit cost，并以
+  bounded lookahead 流式生成 batch；batch budget 默认按 cost 求和，也可显式按
+  `count * max(cost)` 约束 padded
+  tensor 的硬上限。候选删除和 batch cost 更新不再随全量 pending list 或当前 batch size
+  重复放大。DDP 默认每 32 个 plan 通过 tensor collective 同步 plan count，只在最终不完整
   窗口裁剪 rank-local 尾部。
 - part/fragment commit 不再常驻保存 `item ref -> sample_index array`；提交时先写
   ordered sample manifest，再按 view 流式扫描 sample manifest 做覆盖校验。

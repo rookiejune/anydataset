@@ -80,9 +80,14 @@ map-style `AnyDataset` 可以用 `dataset.dataloader(...)` 做动态 batch。
 `costs` 接受 `None`、与 dataset 等长且按全局样本 index 对齐的稳定整数 iterable，
 或把 `parse_fn` 同层轻量 row 映射为整数 cost 的 callable。标量整数不接受，
 因为常量样本 cost 不携带额外信息；unit-cost batch 请用 `None`。loader 在执行完整 `parse_fn` 前按需读取这些 cost；单条样本 cost
-必须是正整数，batch 的 memory 和分布式 compute 都直接使用所选样本 cost 之和。
-每个 planning window 内，planner 会贪心选择仍不超过 `max_batch_memory`、且能让当前
-batch 尽量填满的样本；`max_batch_samples` 可以额外限制单个 batch 的样本数。
+必须是正整数。`cost_aggregation="sum"` 是默认行为，约束所选样本 cost 之和；对于
+tensor 会 pad 到 batch 内最长样本的任务，可以显式使用
+`cost_aggregation="padded_max"`，其硬约束为
+`len(batch) * max(sample_cost) <= max_batch_memory`。`cost_aggregation` 只决定预算
+可行性；在这个硬约束内，planner 仍优先最大化有效样本 cost 之和。
+`max_batch_samples` 可以额外限制单个 batch 的样本数。`max_padding_ratio` 仍只是装箱
+效率偏好；如果没有多样本候选满足它，fallback 可以选择 padding 最少的可行 batch，
+但不能突破所选聚合口径的硬预算。
 
 planner 只保留有界 lookahead，提前结束 epoch 时不会读取尚未看见的尾部 cost；完整遍历
 epoch 仍必然读取每条所选样本的 cost，因此昂贵长度应在预处理阶段计算并持久化，不能靠
@@ -724,6 +729,7 @@ from anydataset.dataset.collate import collate_fn
 loader = dataset.dataloader(
     costs=lengths,
     max_batch_memory=64_000,
+    cost_aggregation="padded_max",
     planning_window=256,
     distributed_plan_window=32,
     max_batch_samples=32,

@@ -8,7 +8,7 @@ from collections import OrderedDict
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from math import isfinite
-from typing import Any, Optional, overload
+from typing import Any, Literal, Optional, overload
 
 from torch.utils.data import Sampler
 from torch.utils.data import DataLoader as TorchDataLoader
@@ -19,6 +19,7 @@ from .abc import MapStyleABC
 
 _CostFn = Callable[[Any], int]
 _Costs = Optional[Sequence[int]]
+_CostAggregation = Literal["sum", "padded_max"]
 _MAX_CALLABLE_COST_CACHE = 4096
 
 
@@ -115,6 +116,7 @@ class _BatchSampler(Sampler[list[int]]):
         *,
         costs: None | Iterable[int] | _CostFn,
         max_batch_memory: int,
+        cost_aggregation: _CostAggregation = "sum",
         sampler: Sampler[int] | None,
         shuffle: bool,
         seed: int,
@@ -128,6 +130,7 @@ class _BatchSampler(Sampler[list[int]]):
         if not isinstance(dataset, MapStyleABC):
             raise TypeError("dataset must be a MapStyleABC.")
         self.dataset = dataset
+        self.cost_aggregation: _CostAggregation = _cost_aggregation(cost_aggregation)
         self.costs = _costs(costs, dataset=dataset, sample_count=len(dataset))
         self.max_batch_memory = _positive_int("max_batch_memory", max_batch_memory)
         self._source_sampler = sampler
@@ -170,6 +173,7 @@ class _BatchSampler(Sampler[list[int]]):
             yield from _plans(
                 records,
                 max_batch_memory=self.max_batch_memory,
+                cost_aggregation=self.cost_aggregation,
                 planning_window=self.planning_window,
                 max_batch_samples=self.max_batch_samples,
                 max_padding_ratio=self.max_padding_ratio,
@@ -248,6 +252,7 @@ class _DataLoader(TorchDataLoader):
         *,
         costs: None | Iterable[int] | _CostFn,
         max_batch_memory: int,
+        cost_aggregation: _CostAggregation = "sum",
         shuffle: bool = False,
         sampler: Sampler[int] | None = None,
         seed: int = 0,
@@ -269,6 +274,7 @@ class _DataLoader(TorchDataLoader):
             dataset,
             costs=costs,
             max_batch_memory=max_batch_memory,
+            cost_aggregation=cost_aggregation,
             sampler=sampler,
             shuffle=shuffle,
             seed=seed,
@@ -294,6 +300,7 @@ def _plans(
     records: Iterable[_Record],
     *,
     max_batch_memory: int,
+    cost_aggregation: _CostAggregation = "sum",
     planning_window: int,
     max_batch_samples: int | None,
     max_padding_ratio: float = 0.2,
@@ -324,6 +331,7 @@ def _plans(
         candidate = _select_candidate(
             pending,
             max_batch_memory=max_batch_memory,
+            cost_aggregation=cost_aggregation,
             max_batch_samples=max_batch_samples,
             max_padding_ratio=max_padding_ratio,
         )
@@ -339,6 +347,7 @@ def _select_candidate(
     pending: Sequence[_PendingRecord],
     *,
     max_batch_memory: int,
+    cost_aggregation: _CostAggregation,
     max_batch_samples: int | None,
     max_padding_ratio: float,
 ) -> _Candidate:
@@ -400,15 +409,17 @@ def _select_candidate(
         return left
 
     def candidate_range(start: int, stop: int) -> _CandidateRange:
-        cost = prefix_costs[stop + 1] - prefix_costs[start]
+        total_cost = prefix_costs[stop + 1] - prefix_costs[start]
+        count = stop - start + 1
+        max_cost = sorted_pending[stop].record.cost
         return _CandidateRange(
             start=start,
             stop=stop,
-            cost=cost,
+            cost=total_cost,
             padding_ratio=_padding_ratio(
-                cost,
-                sorted_pending[stop].record.cost,
-                stop - start + 1,
+                total_cost,
+                max_cost,
+                count,
             ),
             arrival=minimum_arrival(start, stop),
         )
@@ -419,12 +430,16 @@ def _select_candidate(
         for stop in range(1, len(sorted_pending)):
             # For a fixed maximum cost, both budget feasibility and padding
             # improve monotonically as the range start moves right.
-            start = bisect_left(
-                prefix_costs,
-                prefix_costs[stop + 1] - max_batch_memory,
-                0,
-                stop,
-            )
+            if cost_aggregation == "sum":
+                start = bisect_left(
+                    prefix_costs,
+                    prefix_costs[stop + 1] - max_batch_memory,
+                    0,
+                    stop,
+                )
+            else:
+                max_count = max_batch_memory // sorted_pending[stop].record.cost
+                start = max(0, stop - max_count + 1)
             if max_batch_samples is not None:
                 start = max(start, stop - max_batch_samples + 1)
             if start >= stop:
@@ -522,6 +537,14 @@ def _select_candidate(
 def _padding_ratio(cost: int, max_cost: int, count: int) -> float:
     padded = max_cost * count
     return 0.0 if padded == 0 else (padded - cost) / padded
+
+
+def _cost_aggregation(value: object) -> _CostAggregation:
+    if not isinstance(value, str):
+        raise TypeError("cost_aggregation must be a string.")
+    if value == "sum" or value == "padded_max":
+        return value
+    raise ValueError("cost_aggregation must be 'sum' or 'padded_max'.")
 
 
 def _int(name: str, value: int) -> int:

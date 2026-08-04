@@ -3,7 +3,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Protocol, cast, runtime_checkable
+from typing import TYPE_CHECKING, Any, Literal, Protocol, cast, runtime_checkable
 
 from torch.utils.data import Dataset, IterableDataset
 
@@ -231,6 +231,7 @@ class MapStyleABC(_DatasetOperations, Dataset, ABC):
         *,
         costs: None | Iterable[int] | Callable[[Any], int],
         max_batch_memory: int,
+        cost_aggregation: Literal["sum", "padded_max"] = "sum",
         shuffle: bool = False,
         sampler: Sampler[int] | None = None,
         seed: int = 0,
@@ -248,6 +249,7 @@ class MapStyleABC(_DatasetOperations, Dataset, ABC):
             self,
             costs=costs,
             max_batch_memory=max_batch_memory,
+            cost_aggregation=cost_aggregation,
             shuffle=shuffle,
             sampler=sampler,
             seed=seed,
