@@ -201,6 +201,11 @@ multiple devices start one worker per device using
 to force CPU execution. Pass an iterable such as `("cpu", "cpu")` or
 `("cuda:0", "cuda:1")` to explicitly parallelize cache construction across
 map-style index ranges.
+After every ordered row and worker completion marker has been received, the
+caller gives completed workers a bounded grace period to exit. A worker that
+remains in framework or accelerator finalization is terminated without
+invalidating the already completed filter result; this fallback is recorded in
+the run log.
 Pass `num_workers` to let each execution process read samples through a PyTorch
 `DataLoader`; `batch_size` controls that loader's sample batch size.
 `dataset_factory` is the only dataset entry point. This keeps single-device,

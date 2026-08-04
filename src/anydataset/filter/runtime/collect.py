@@ -10,7 +10,12 @@ from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from ..._runtime.logging import run_logs_dir, use_run_logs_dir, worker_logger
+from ..._runtime.logging import (
+    run_logs_dir,
+    use_run_logs_dir,
+    worker_logger,
+    write_warning,
+)
 from ..._runtime.parallel import (
     DeviceWorker,
     ProcessHandle,
@@ -42,6 +47,7 @@ from ..types import (
 _DONE = "__done__"
 _WORKER_QUEUE_SIZE = 2
 _PARALLEL_WORKER_COMMIT_SAMPLES = 8_192
+_WORKER_SHUTDOWN_TIMEOUT = 5.0
 
 
 @dataclass(frozen=True)
@@ -234,6 +240,7 @@ def collect_ranges_parallel(
     ]
     started: list[ProcessHandle] = []
     completed = False
+    forced: tuple[ProcessHandle, ...] = ()
     try:
         for process in processes:
             process.start()
@@ -254,14 +261,56 @@ def collect_ranges_parallel(
             for process in started:
                 if process.is_alive():
                     process.terminate()
-        for process in started:
-            process.join()
-    failed = [process for process in processes if process.exitcode != 0]
+            for process in started:
+                process.join()
+        else:
+            forced = _join_completed_workers(started)
+    failed = [
+        process
+        for process in processes
+        if process.exitcode != 0 and process not in forced
+    ]
     if failed:
         details = ", ".join(
             f"{process.name} exited with {process.exitcode}" for process in failed
         )
         raise RuntimeError(f"Filter workers failed: {details}.")
+
+
+def _join_completed_workers(
+    processes: Sequence[ProcessHandle],
+) -> tuple[ProcessHandle, ...]:
+    _join_until(processes, timeout=_WORKER_SHUTDOWN_TIMEOUT)
+    lingering = tuple(process for process in processes if process.is_alive())
+    for process in lingering:
+        write_warning(
+            "filter",
+            "terminating completed filter worker after shutdown timeout: "
+            f"name={process.name!r} pid={process.pid!r}",
+            event="filter_worker_terminated_after_completion",
+            fields={"name": process.name, "pid": process.pid},
+        )
+        process.terminate()
+    _join_until(lingering, timeout=_WORKER_SHUTDOWN_TIMEOUT)
+    stubborn = tuple(process for process in lingering if process.is_alive())
+    for process in stubborn:
+        write_warning(
+            "filter",
+            "killing completed filter worker after terminate timeout: "
+            f"name={process.name!r} pid={process.pid!r}",
+            event="filter_worker_killed_after_completion",
+            fields={"name": process.name, "pid": process.pid},
+        )
+        process.kill()
+    for process in stubborn:
+        process.join()
+    return lingering
+
+
+def _join_until(processes: Sequence[ProcessHandle], *, timeout: float) -> None:
+    deadline = time.monotonic() + timeout
+    for process in processes:
+        process.join(max(deadline - time.monotonic(), 0.0))
 
 
 def decision(value: FilterOutput, *, metrics: bool) -> _FilterDecision:

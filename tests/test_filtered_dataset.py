@@ -2633,6 +2633,59 @@ class FilteredDatasetTest(unittest.TestCase):
         first.join.assert_called_once_with()
         second.join.assert_not_called()
 
+    def test_collect_ranges_parallel_terminates_completed_lingering_worker(self):
+        context = mock.Mock()
+        process = mock.Mock()
+        process.name = "anydataset-filter-0"
+        process.pid = 123
+        process.exitcode = -15
+        process.is_alive.side_effect = (True, False)
+        context.Process.return_value = process
+        dataset_factory = partial(
+            _dataset,
+            "unit_test_filter_completed_lingering_worker",
+            [0],
+        )
+
+        with (
+            mock.patch(
+                "anydataset.filter.runtime.collect.multiprocessing_context",
+                return_value=context,
+            ),
+            mock.patch(
+                "anydataset.filter.runtime.collect._ordered_worker_chunks",
+                return_value=iter(()),
+            ),
+            mock.patch(
+                "anydataset.filter.runtime.collect._WORKER_SHUTDOWN_TIMEOUT",
+                0.01,
+            ),
+            mock.patch(
+                "anydataset.filter.runtime.collect.write_warning"
+            ) as write_warning,
+        ):
+            chunks = list(
+                collect_ranges_parallel(
+                    dataset_factory,
+                    _true_factory,
+                    ("cpu",),
+                    False,
+                    1,
+                    sample_count=1,
+                    batch_size=1,
+                    num_workers=0,
+                    prefetch_factor=None,
+                    runtime=Runtime(),
+                    use_map_style_loader=True,
+                )
+            )
+
+        self.assertEqual(chunks, [])
+        process.terminate.assert_called_once_with()
+        process.kill.assert_not_called()
+        self.assertEqual(process.join.call_count, 2)
+        write_warning.assert_called_once()
+
     def test_collect_ranges_parallel_keeps_compact_sample_indexes(self):
         context = mock.Mock()
         process = mock.Mock()
@@ -2725,6 +2778,48 @@ class FilteredDatasetTest(unittest.TestCase):
                         device=("cpu:0", "cpu:1"),
                         worker_timeout=0.1,
                     )
+
+    def test_rule_apply_parallel_publishes_cache_when_completed_workers_linger(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home = Path(tmpdir) / "home"
+            dataset_factory = partial(
+                _dataset,
+                "unit_test_filter_completed_workers_linger",
+                [0, 1],
+            )
+            rule = FilterRule(
+                name="completed_workers_linger",
+                factory=_LingeringFilterFactory(delay=30.0),
+            )
+
+            with (
+                mock.patch.dict(os.environ, {"ANYDATASET_HOME": str(home)}),
+                mock.patch(
+                    "anydataset.filter.runtime.collect._WORKER_SHUTDOWN_TIMEOUT",
+                    0.1,
+                ),
+            ):
+                applied = rule.apply_with_report(
+                    dataset_factory=dataset_factory,
+                    device=("cpu:0", "cpu:1"),
+                    write_workers=0,
+                    runtime=Runtime(process_start_method="spawn"),
+                )
+                events = _read_events()
+
+            result = applied.dataset
+            self.assertEqual(result.counts, {"accept": 2})
+            self.assertEqual(
+                current_filter_generation(result.cache_path),
+                result.cache_path,
+            )
+            self.assertTrue(
+                any(
+                    event.get("event")
+                    == "filter_worker_terminated_after_completion"
+                    for event in events
+                )
+            )
 
     def test_rule_apply_writes_empty_metrics_manifest(self):
         _register_rows_source("unit_test_filter_metrics_empty")
@@ -3212,6 +3307,20 @@ class _SlowFilterFactory:
 
     def __call__(self):
         return _SlowFilter(delay=self.delay)
+
+
+class _LingeringFilterFactory:
+    def __init__(self, *, delay: float) -> None:
+        self.delay = delay
+
+    def __call__(self):
+        threading.Thread(
+            target=time.sleep,
+            args=(self.delay,),
+            daemon=False,
+            name="anydataset-filter-test-linger",
+        ).start()
+        return _true_decision
 
 
 class _BatchModThree:
