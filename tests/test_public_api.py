@@ -119,7 +119,7 @@ def test_types_public_api_boundary() -> None:
             "Role",
             "Sample",
             "Schema",
-            "SemanticAcousticView",
+            "SemanticGlobalView",
             "Source",
             "SourceKey",
             "Spec",
@@ -132,6 +132,9 @@ def test_types_public_api_boundary() -> None:
             "item",
             "remap_lang",
         ],
+    )
+    assert any_types.SemanticGlobalView.__required_keys__ == frozenset(
+        {"semantic", "global"}
     )
 
 

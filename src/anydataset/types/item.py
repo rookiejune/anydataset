@@ -113,11 +113,15 @@ class AudioView(StrEnum):
     SPEAKER_LENGTHS = auto()
 
 
-class SemanticAcousticView(TypedDict):
-    """Structured semantic and acoustic unit tensors for one audio sample."""
-
-    semantic: Tensor
-    acoustic: Tensor
+# ``global`` is a Python keyword, so this public mapping contract requires the
+# functional TypedDict syntax to preserve the serialized key exactly.
+SemanticGlobalView = TypedDict(
+    "SemanticGlobalView",
+    {
+        "semantic": "Tensor",
+        "global": "Tensor",
+    },
+)
 
 
 @dataclass
