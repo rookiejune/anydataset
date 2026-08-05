@@ -33,6 +33,7 @@ class WorkerConfig:
     split: str | None
     provenance: Mapping[str, str]
     max_shard_samples: int
+    max_shard_bytes: int | None
     batch_size: int
     commit_samples: int
     num_workers: int
@@ -124,6 +125,7 @@ def materialize_worker(
                     shard_id=config.shard_id,
                     num_shards=config.num_shards,
                     max_shard_samples=config.max_shard_samples,
+                    max_shard_bytes=config.max_shard_bytes,
                     provenance=config.provenance,
                 )
         except Exception:
@@ -151,6 +153,7 @@ def worker_materializer(config: WorkerConfig) -> MaterializerWorker:
         "input_id": config.provenance.get("input_id"),
         "provider_id": config.provenance.get("provider_id"),
         "max_shard_samples": config.max_shard_samples,
+        "max_shard_bytes": config.max_shard_bytes,
         "batch_size": config.batch_size,
         "commit_samples": config.commit_samples,
         "num_workers": config.num_workers,

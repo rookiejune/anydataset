@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import auto
+from io import BytesIO
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Generic, TypeVar, Union, cast
 
@@ -111,6 +112,35 @@ class AudioView(StrEnum):
     UNICODEC = auto()
     SPEAKERS = auto()
     SPEAKER_LENGTHS = auto()
+
+
+@dataclass(frozen=True)
+class FileBytes:
+    """Immutable in-memory file contents with a preserved filename suffix."""
+
+    data: bytes = field(repr=False)
+    suffix: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.data, bytes):
+            raise TypeError("FileBytes.data must be bytes.")
+        if not isinstance(self.suffix, str):
+            raise TypeError("FileBytes.suffix must be a string.")
+        if (
+            len(self.suffix) < 2
+            or not self.suffix.startswith(".")
+            or "." in self.suffix[1:]
+            or "/" in self.suffix
+            or "\\" in self.suffix
+        ):
+            raise ValueError(
+                "FileBytes.suffix must be one filename suffix such as '.flac'."
+            )
+
+    def open(self) -> BytesIO:
+        """Return a fresh seekable in-memory stream for the file contents."""
+
+        return BytesIO(self.data)
 
 
 # ``global`` is a Python keyword, so this public mapping contract requires the

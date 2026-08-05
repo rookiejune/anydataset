@@ -104,6 +104,7 @@ def test_types_public_api_boundary() -> None:
             "AudioMeta",
             "AudioReq",
             "AudioView",
+            "FileBytes",
             "ImageItem",
             "ImageMeta",
             "ImageReq",

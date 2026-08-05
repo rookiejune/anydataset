@@ -20,6 +20,7 @@ from anydataset.types import (
     AudioMeta,
     AudioReq,
     AudioView,
+    FileBytes,
     ImageItem,
     ImageView,
     Modality,
@@ -41,6 +42,7 @@ from anydataset.store.manifest.io import (
     write_samples_manifest,
 )
 from anydataset.store.payload.groups import PayloadGroupCache, read_payload_groups
+from anydataset.store.payload.files import files_dir
 from anydataset.store.paths import (
     dataset_ready_path,
     payload_groups_path,
@@ -204,6 +206,23 @@ class StoreSourceTest(unittest.TestCase):
     def test_anydataset_from_store_rejects_non_bool_unsafe_pickle_payloads(self):
         with self.assertRaisesRegex(TypeError, "must be a boolean"):
             AnyDataset.from_store("unused", unsafe_pickle_payloads="true")  # type: ignore[arg-type]
+
+    def test_anydataset_from_store_validates_file_mode(self):
+        with self.assertRaisesRegex(TypeError, "file_mode must be a string"):
+            AnyDataset.from_store("unused", file_mode=True)  # type: ignore[arg-type]
+        with self.assertRaisesRegex(ValueError, "'path' or 'bytes'"):
+            AnyDataset.from_store("unused", file_mode="stream")  # type: ignore[arg-type]
+
+    def test_store_file_mode_is_operational_spec_state(self):
+        base = Spec(source=Source.STORE, path="/data/store")
+        in_memory = Spec(
+            source=Source.STORE,
+            path="/data/store",
+            load_options={"file_mode": "bytes"},
+        )
+
+        self.assertEqual(base.id, in_memory.id)
+        self.assertNotIn("file_mode", in_memory.to_dict()["load_options"])
 
     def test_store_dataset_cost_row_is_manifest_entry(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -510,6 +529,70 @@ class StoreSourceTest(unittest.TestCase):
             self.assertEqual(file_view.read_bytes(), b"RIFF-data")
             self.assertEqual(cached, file_view)
 
+    def test_file_view_bytes_mode_avoids_cache_and_lease(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            source = root / "source.flac"
+            source.write_bytes(b"fLaC-data")
+            output = root / "dataset"
+            DatasetWriter(output, dataset_id="file-audio").write(
+                [_audio_sample(file=str(source), sample_rate=16000)]
+            )
+
+            with mock.patch.object(
+                store_reader,
+                "lease_store_files",
+                side_effect=AssertionError("bytes mode acquired a file lease"),
+            ):
+                dataset = read_store_dataset(output, file_mode="bytes")
+                value = dataset[0][Role.DEFAULT, Modality.AUDIO].views[
+                    AudioView.FILE
+                ]
+
+            self.assertEqual(value, FileBytes(b"fLaC-data", ".flac"))
+            self.assertIsNone(dataset._file_lease)
+            self.assertFalse(files_dir(output).exists())
+            dataset.close()
+
+    def test_store_source_and_from_store_support_file_bytes(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            source = root / "source.ogg"
+            source.write_bytes(b"OggS-data")
+            output = root / "dataset"
+            DatasetWriter(output, dataset_id="file-audio").write(
+                [_audio_sample(file=str(source), sample_rate=16000)]
+            )
+
+            direct = AnyDataset(
+                Spec(
+                    source=Source.STORE,
+                    path=str(output),
+                    load_options={"file_mode": "bytes"},
+                )
+            )
+            from_store = AnyDataset.from_store(output, file_mode="bytes")
+
+            self.assertEqual(
+                direct[0][Role.DEFAULT, Modality.AUDIO].views[AudioView.FILE],
+                FileBytes(b"OggS-data", ".ogg"),
+            )
+            self.assertEqual(
+                from_store[0][Role.DEFAULT, Modality.AUDIO].views[AudioView.FILE],
+                FileBytes(b"OggS-data", ".ogg"),
+            )
+            self.assertEqual(from_store.spec.load_options["file_mode"], "bytes")
+
+    def test_read_store_dataset_validates_file_mode(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output = Path(tmpdir) / "dataset"
+            _write_empty_dataset(output)
+
+            with self.assertRaisesRegex(TypeError, "file_mode must be a string"):
+                read_store_dataset(output, file_mode=True)  # type: ignore[arg-type]
+            with self.assertRaisesRegex(ValueError, "'path' or 'bytes'"):
+                read_store_dataset(output, file_mode="stream")  # type: ignore[arg-type]
+
     def test_file_view_cache_recovers_after_cached_file_is_removed(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -712,6 +795,7 @@ class StoreSourceTest(unittest.TestCase):
             dataset_state.pop("_manifest_cache")
             dataset_state.pop("_resource_state")
             dataset_state.pop("_unsafe_pickle_payloads")
+            dataset_state.pop("_file_mode")
             dataset_state["samples"] = samples
             dataset_state["views"] = views
             restored = StoreDataset.__new__(StoreDataset)
@@ -741,7 +825,7 @@ class StoreSourceTest(unittest.TestCase):
 
             state = dataset.__getstate__()
 
-            self.assertEqual(state["pickle_schema_version"], 1)
+            self.assertEqual(state["pickle_schema_version"], 2)
             self.assertEqual(
                 set(state),
                 {
@@ -753,12 +837,54 @@ class StoreSourceTest(unittest.TestCase):
                     "_file_lease",
                     "_payloads",
                     "_unsafe_pickle_payloads",
+                    "_file_mode",
                     "_payload_group_cache",
                     "_manifest_cache",
                     "_resource_state",
                 },
             )
             dataset.close()
+
+    def test_store_dataset_pickle_preserves_bytes_mode(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            source = root / "source.flac"
+            source.write_bytes(b"fLaC-data")
+            output = root / "dataset"
+            DatasetWriter(output, dataset_id="file-audio").write(
+                [_audio_sample(file=str(source), sample_rate=16000)]
+            )
+            dataset = read_store_dataset(output, file_mode="bytes")
+
+            restored = pickle.loads(pickle.dumps(dataset))
+            try:
+                self.assertEqual(restored._file_mode, "bytes")
+                self.assertIsNone(restored._file_lease)
+                self.assertEqual(
+                    restored[0][Role.DEFAULT, Modality.AUDIO].views[AudioView.FILE],
+                    FileBytes(b"fLaC-data", ".flac"),
+                )
+            finally:
+                dataset.close()
+                restored.close()
+
+    def test_store_dataset_migrates_v1_pickle_to_path_mode(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output = Path(tmpdir) / "dataset"
+            DatasetWriter(output, dataset_id="toy-audio").write(
+                [_audio_sample(waveform=torch.tensor([[1.0]]))]
+            )
+            dataset = read_store_dataset(output)
+            state = dataset.__getstate__()
+            state["pickle_schema_version"] = 1
+            state.pop("_file_mode")
+            restored = StoreDataset.__new__(StoreDataset)
+
+            restored.__setstate__(state)
+
+            self.assertEqual(restored._file_mode, "path")
+            dataset.close()
+            restored.close()
 
     def test_store_dataset_direct_pickle_preserves_selected_views(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -800,7 +926,7 @@ class StoreSourceTest(unittest.TestCase):
             state = dataset.__getstate__()
             restored = StoreDataset.__new__(StoreDataset)
 
-            for version in (0, 2):
+            for version in (0, 3):
                 with self.subTest(version=version):
                     state["pickle_schema_version"] = version
                     with self.assertRaisesRegex(
@@ -1863,7 +1989,9 @@ def _empty_pickle_state(_instance):
 
 
 def _legacy_store_dataset_pickle_state(instance):
-    return dict(instance.__dict__)
+    state = dict(instance.__dict__)
+    state.pop("_file_mode")
+    return state
 
 
 def _sample_indexes(samples):

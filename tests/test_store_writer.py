@@ -14,6 +14,7 @@ from anydataset.types import (
     AudioItem,
     AudioMeta,
     AudioView,
+    FileBytes,
     ImageItem,
     ImageView,
     Modality,
@@ -166,6 +167,35 @@ class DatasetWriterTest(unittest.TestCase):
                 [entry.shard for entry in entries],
                 ["000000.tar", "000001.tar", "000002.tar"],
             )
+
+    def test_writer_rolls_file_payloads_by_closed_tar_size(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output = Path(tmpdir) / "dataset"
+            view = (Role.DEFAULT, Modality.AUDIO, AudioView.FILE)
+            samples = [
+                audio_sample(
+                    file=FileBytes(bytes([index]) * 6000, ".flac"),
+                    sample_rate=16000,
+                )
+                for index in range(2)
+            ]
+
+            DatasetWriter(
+                output,
+                dataset_id="file-audio",
+                max_shard_bytes=10_240,
+            ).write(samples)
+
+            entries = tuple(read_view_manifest(output, view))
+            self.assertEqual(
+                [entry.shard for entry in entries],
+                ["000000.tar", "000001.tar"],
+            )
+            for entry in entries:
+                self.assertLessEqual(
+                    view_shard_path(output, view, entry.shard).stat().st_size,
+                    10_240,
+                )
 
     def test_writer_defaults_to_100k_samples_per_shard(self):
         writer = DatasetWriter("unused", dataset_id="toy")
@@ -1180,6 +1210,49 @@ class DatasetWriterTest(unittest.TestCase):
                     torch.equal(waveform, torch.tensor([[float(index)]]))
                 )
                 self.assertEqual(sample_rate, 4)
+
+    def test_fragment_commit_repacks_to_target_byte_size(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            fragments = root / "fragments"
+            output = root / "dataset"
+            view = (Role.DEFAULT, Modality.AUDIO, AudioView.FILE)
+            for index in range(2):
+                name = f"batch-{index:012d}-{index:012d}-{index}"
+                DatasetFragmentWriter(
+                    fragments / name,
+                    dataset_id="file-audio",
+                    fragment_id=name,
+                ).write(
+                    [
+                        (
+                            index,
+                            audio_sample(
+                                file=FileBytes(bytes([index]) * 6000, ".flac"),
+                                sample_rate=16000,
+                            ),
+                        )
+                    ]
+                )
+
+            commit_store_fragments(
+                output,
+                fragments,
+                dataset_id="file-audio",
+                expected_sample_count=2,
+                max_shard_bytes=10_240,
+            )
+
+            entries = tuple(read_view_manifest(output, view))
+            self.assertEqual(
+                [entry.shard for entry in entries],
+                ["part-00000-000000.tar", "part-00000-000001.tar"],
+            )
+            for entry in entries:
+                self.assertLessEqual(
+                    view_shard_path(output, view, entry.shard).stat().st_size,
+                    10_240,
+                )
 
     def test_fragment_parts_repack_with_distinct_shard_prefixes(self):
         with tempfile.TemporaryDirectory() as tmpdir:

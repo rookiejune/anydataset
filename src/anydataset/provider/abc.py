@@ -9,7 +9,7 @@ from typing import Any
 import torch
 from torch import Tensor
 
-from ..types import AudioItem, AudioView
+from ..types import AudioItem, AudioView, FileBytes
 from ..dataset.collate import Batch, FieldGroup, FieldRef
 from ..types.item import Modality, Role
 
@@ -97,18 +97,22 @@ def _audio_path(value: Any) -> Path:
 
 
 def _audio_source(value: Any) -> BytesIO | str:
+    if isinstance(value, FileBytes):
+        return value.open()
     if isinstance(value, bytes):
         return BytesIO(value)
     if not isinstance(value, (str, Path)):
-        raise TypeError("input must be bytes or a filesystem path.")
+        raise TypeError("input must be FileBytes, bytes, or a filesystem path.")
     return str(_audio_path(value))
 
 
 def _audio_files(value: Any) -> list[Any]:
-    if isinstance(value, (str, Path, bytes)):
+    if isinstance(value, (str, Path, bytes, FileBytes)):
         return [value]
     if not isinstance(value, list):
-        raise TypeError("batched audio file view must be a list of paths or bytes.")
+        raise TypeError(
+            "batched audio file view must be a list of paths, FileBytes, or bytes."
+        )
     return value
 
 

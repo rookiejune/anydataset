@@ -56,7 +56,7 @@ from .batch import (
     with_batch_view_provider,
     with_resilient_batch_provider,
 )
-from ..config import DEFAULT_MAX_SHARD_SAMPLES
+from ..config import DEFAULT_MAX_SHARD_BYTES, DEFAULT_MAX_SHARD_SAMPLES
 from .fragments import FragmentBatchConfig, FragmentBatchWriter, ProgressSink
 from .identity import callable_id, metadata_value, optional_semantic_id
 from .resume import (
@@ -115,6 +115,7 @@ class ViewMaterializer:
     output_dir: str | Path
     split: str | None = None
     max_shard_samples: int = DEFAULT_MAX_SHARD_SAMPLES
+    max_shard_bytes: int | None = DEFAULT_MAX_SHARD_BYTES
     batch_size: int = 1
     commit_samples: int | None = None
     num_workers: int = 0
@@ -130,6 +131,10 @@ class ViewMaterializer:
         self.max_shard_samples = positive_int(
             "max_shard_samples",
             self.max_shard_samples,
+        )
+        self.max_shard_bytes = optional_positive_int(
+            "max_shard_bytes",
+            self.max_shard_bytes,
         )
         self.batch_size = positive_int("batch_size", self.batch_size)
         if self.commit_samples is None:
@@ -254,6 +259,7 @@ class ViewMaterializer:
                 split=self.split,
                 expected_sample_count=len(completed),
                 max_shard_samples=self.max_shard_samples,
+                max_shard_bytes=self.max_shard_bytes,
                 provenance=self._provenance,
             )
 
@@ -574,6 +580,7 @@ class ViewMaterializer:
                 "finalized": status.finalized,
                 "batch_size": self.batch_size,
                 "commit_samples": self.commit_samples,
+                "max_shard_bytes": self.max_shard_bytes,
                 "num_workers": self.num_workers,
                 "write_workers": self.write_workers,
             },
@@ -595,6 +602,7 @@ class ViewMaterializer:
                 "parts": parts,
                 "batch_size": self.batch_size,
                 "commit_samples": self.commit_samples,
+                "max_shard_bytes": self.max_shard_bytes,
                 "num_workers": self.num_workers,
                 "write_workers": self.write_workers,
             },
@@ -611,6 +619,7 @@ class ViewMaterializer:
                 dataset_id=self._dataset_id,
                 split=self.split,
                 max_shard_samples=self.max_shard_samples,
+                max_shard_bytes=self.max_shard_bytes,
                 provenance=self._provenance,
             ).write(())
             cleanup_resume_dir(self.output_dir)
@@ -628,6 +637,7 @@ class ViewMaterializer:
                 split=self.split,
                 expected_sample_count=expected,
                 max_shard_samples=self.max_shard_samples,
+                max_shard_bytes=self.max_shard_bytes,
                 provenance=self._provenance,
                 progress=_commit_progress(progress),
             )
@@ -740,6 +750,7 @@ class ViewMaterializer:
                         split=self.split,
                         provenance=self._provenance,
                         max_shard_samples=self.max_shard_samples,
+                        max_shard_bytes=self.max_shard_bytes,
                         batch_size=self.batch_size,
                         commit_samples=commit_samples,
                         num_workers=self.num_workers,
@@ -826,12 +837,13 @@ class ViewMaterializer:
         use_map_style_loader: bool,
     ) -> dict[str, object]:
         return {
-            "schema_version": 5,
+            "schema_version": 6,
             "materializer": {
                 "mode": self._materializer_mode,
                 "dataset_id": self._dataset_id,
                 "split": self.split,
                 "max_shard_samples": self.max_shard_samples,
+                "max_shard_bytes": self.max_shard_bytes,
                 "keep_schema": metadata_value(self.keep_schema),
                 "roles": metadata_value(self._materializer_roles),
             },
@@ -888,6 +900,7 @@ class ViewMaterializer:
                 split=self.split,
                 provenance=self._provenance,
                 max_shard_samples=self.max_shard_samples,
+                max_shard_bytes=self.max_shard_bytes,
                 commit_samples=commit_samples,
                 write_workers=self.write_workers,
                 write_prefetch=self.write_prefetch,

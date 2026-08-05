@@ -78,7 +78,11 @@ def _register_builtin_sources() -> None:
     SourceFactory.register(Source.HF, HuggingFaceSource)
     SourceFactory.register(Source.HF_DISK, HuggingFaceDiskSource)
     SourceFactory.register(Source.HF_FILES, HuggingFaceFilesSource)
-    SourceFactory.register(Source.STORE, StoreSource)
+    SourceFactory.register(
+        Source.STORE,
+        StoreSource,
+        operational_load_options=("file_mode",),
+    )
     SourceFactory.register("sharded_csv", ShardedCsvSource)
     SourceFactory.register(
         "tsv",

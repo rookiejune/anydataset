@@ -14,6 +14,7 @@ from ..payload.archive import (
     Payload,
     add_payload,
     payload_for_view,
+    payload_tar_span,
     write_payload_index,
 )
 
@@ -23,12 +24,14 @@ class ViewWriter:
         self,
         root: Path,
         view: tuple[Role, Modality, View],
-        max_shard_samples: int,
+        max_shard_samples: int | None,
+        max_shard_bytes: int | None = None,
         shard_prefix: str = "",
     ) -> None:
         self.root = root
         self.view = view
         self.max_shard_samples = max_shard_samples
+        self.max_shard_bytes = max_shard_bytes
         self.shard_prefix = shard_prefix
         self.shard_index = 0
         self.shard = _shard_name(self.shard_index, self.shard_prefix)
@@ -44,7 +47,7 @@ class ViewWriter:
         )
 
     def write_payload(self, sample_index: int, payload: Payload) -> None:
-        if self._should_roll():
+        if self._should_roll(payload):
             self._roll_shard()
         add_payload(self.tar, payload)
         self.shard_samples += 1
@@ -72,10 +75,18 @@ class ViewWriter:
         self._close_shard(write_index=False)
         self.manifest.abort()
 
-    def _should_roll(self) -> bool:
+    def _should_roll(self, payload: Payload) -> bool:
         if self.shard_samples == 0:
             return False
-        return self.shard_samples >= self.max_shard_samples
+        if (
+            self.max_shard_samples is not None
+            and self.shard_samples >= self.max_shard_samples
+        ):
+            return True
+        if self.max_shard_bytes is None:
+            return False
+        projected_offset = self.tar.offset + payload_tar_span(self.tar, payload)
+        return _closed_tar_size(projected_offset) > self.max_shard_bytes
 
     def _roll_shard(self) -> None:
         self._close_shard(write_index=True)
@@ -101,3 +112,12 @@ class ViewWriter:
 
 def _shard_name(index: int, prefix: str = "") -> str:
     return f"{prefix}{index:06d}.tar"
+
+
+def _closed_tar_size(offset: int) -> int:
+    with_end_blocks = offset + tarfile.BLOCKSIZE * 2
+    return (
+        (with_end_blocks + tarfile.RECORDSIZE - 1)
+        // tarfile.RECORDSIZE
+        * tarfile.RECORDSIZE
+    )

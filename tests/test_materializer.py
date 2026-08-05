@@ -27,6 +27,7 @@ from anydataset.types import (
     AudioMeta,
     AudioReq,
     AudioView,
+    FileBytes,
     ImageItem,
     ImageView,
     Lang,
@@ -73,6 +74,7 @@ class ViewMaterializerTest(unittest.TestCase):
                     split="train",
                     provenance={},
                     max_shard_samples=10,
+                    max_shard_bytes=None,
                     commit_samples=1,
                     write_workers=0,
                     write_prefetch=None,
@@ -108,6 +110,7 @@ class ViewMaterializerTest(unittest.TestCase):
                     split="train",
                     provenance={},
                     max_shard_samples=10,
+                    max_shard_bytes=None,
                     commit_samples=2,
                     write_workers=0,
                     write_prefetch=None,
@@ -143,6 +146,7 @@ class ViewMaterializerTest(unittest.TestCase):
                     split="train",
                     provenance={},
                     max_shard_samples=10,
+                    max_shard_bytes=None,
                     commit_samples=2,
                     write_workers=0,
                     write_prefetch=None,
@@ -178,6 +182,7 @@ class ViewMaterializerTest(unittest.TestCase):
                     split="train",
                     provenance={},
                     max_shard_samples=10,
+                    max_shard_bytes=None,
                     commit_samples=2,
                     write_workers=0,
                     write_prefetch=None,
@@ -241,6 +246,35 @@ class ViewMaterializerTest(unittest.TestCase):
                 expected=4,
                 use_map_style_loader=True,
             ),
+        )
+
+    def test_resume_metadata_includes_byte_shard_limit(self):
+        dataset_factory = _UnpicklableDatasetFactory(1)
+        provider_factory = _ProviderFactory()
+        dataset = dataset_factory()
+
+        unlimited = ViewMaterializer("target")._resume_metadata(
+            dataset,
+            dataset_factory=dataset_factory,
+            provider_factory=provider_factory,
+            expected=1,
+            use_map_style_loader=True,
+        )
+        bounded = ViewMaterializer(
+            "target",
+            max_shard_bytes=10_240,
+        )._resume_metadata(
+            dataset,
+            dataset_factory=dataset_factory,
+            provider_factory=provider_factory,
+            expected=1,
+            use_map_style_loader=True,
+        )
+
+        self.assertNotEqual(unlimited, bounded)
+        self.assertEqual(
+            bounded["materializer"]["max_shard_bytes"],
+            10_240,
         )
 
     def test_materializer_uses_output_dir_name_as_dataset_id(self):
@@ -1962,6 +1996,34 @@ class ViewMaterializerTest(unittest.TestCase):
             )
             self.assertEqual(len(read_store_dataset(target)), 4)
 
+    def test_sample_materializer_rolls_encoded_files_by_byte_size(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = Path(tmpdir) / "target"
+            samples = tuple(_text_sample(f"text-{index}") for index in range(2))
+            view = (Role.DEFAULT, Modality.AUDIO, AudioView.FILE)
+
+            SampleMaterializer(
+                target,
+                split="train",
+                max_shard_bytes=10_240,
+                commit_samples=1,
+            ).write(
+                dataset_factory=_DatasetFactory(samples),
+                provider_factory=_FileSampleProviderFactory(),
+                devices="cpu",
+            )
+
+            entries = tuple(read_view_manifest(target, view))
+            self.assertEqual(
+                [entry.shard for entry in entries],
+                ["part-00000-000000.tar", "part-00000-000001.tar"],
+            )
+            stored = read_store_dataset(target, file_mode="bytes")
+            self.assertEqual(
+                stored[1][Role.DEFAULT, Modality.AUDIO].views[AudioView.FILE],
+                FileBytes(bytes([1]) * 6000, ".flac"),
+            )
+
     def test_materializer_rejects_bounded_finalization(self):
         materializer = ViewMaterializer("target")
 
@@ -1983,6 +2045,7 @@ class ViewMaterializerTest(unittest.TestCase):
                 target,
                 split="train",
                 commit_samples=1,
+                max_shard_bytes=10_240,
             )
 
             status = materializer.write(
@@ -2511,6 +2574,23 @@ class _SampleProvider:
         return [self(sample) for sample in samples]
 
 
+class _FileSampleProvider:
+    def __call__(self, sample):
+        text = sample[Role.DEFAULT, Modality.TEXT].views[TextView.TEXT]
+        index = int(text.rsplit("-", 1)[-1])
+        return {
+            **sample,
+            (Role.DEFAULT, Modality.AUDIO): AudioItem(
+                views={
+                    AudioView.FILE: FileBytes(bytes([index]) * 6000, ".flac")
+                },
+            ),
+        }
+
+    def call_batch(self, samples):
+        return [self(sample) for sample in samples]
+
+
 @dataclass(frozen=True)
 class _DatasetFactory:
     dataset: object
@@ -2658,6 +2738,12 @@ class _ASRProviderFactory:
 class _SampleProviderFactory:
     def __call__(self, device: str):
         return _SampleProvider()
+
+
+@dataclass(frozen=True)
+class _FileSampleProviderFactory:
+    def __call__(self, device: str):
+        return _FileSampleProvider()
 
 
 @dataclass(frozen=True)

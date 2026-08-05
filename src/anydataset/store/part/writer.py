@@ -6,10 +6,10 @@ from pathlib import Path
 
 from ..._io.atomic import replace_dir
 from ..._runtime.sharding import validate_shard
-from ..._validation import positive_int, validate_path_segment
+from ..._validation import optional_positive_int, positive_int, validate_path_segment
 from ...types.item import Modality, Role, Sample, View
 from .._refs import view_path
-from ..config import DEFAULT_MAX_SHARD_SAMPLES
+from ..config import DEFAULT_MAX_SHARD_BYTES, DEFAULT_MAX_SHARD_SAMPLES
 from .sample_write import (
     explicit_views,
     sample_id,
@@ -42,6 +42,7 @@ def write_sample_records(
     split: str | None,
     views: tuple[tuple[Role, Modality, View], ...] | None,
     max_shard_samples: int,
+    max_shard_bytes: int | None = None,
     provenance: Mapping[str, str],
     shard_prefix: str = "",
 ) -> tuple[int, tuple[tuple[Role, Modality, View], ...]]:
@@ -83,6 +84,7 @@ def write_sample_records(
                         root=root,
                         view=view,
                         max_shard_samples=max_shard_samples,
+                        max_shard_bytes=max_shard_bytes,
                         shard_prefix=shard_prefix,
                     )
                     sinks[view] = sink
@@ -115,6 +117,7 @@ def write_dataset_part(
     split: str | None,
     views: tuple[tuple[Role, Modality, View], ...] | None,
     max_shard_samples: int,
+    max_shard_bytes: int | None = None,
     provenance: Mapping[str, str],
     shard_id: int,
     num_shards: int,
@@ -127,6 +130,7 @@ def write_dataset_part(
         split=split,
         views=views,
         max_shard_samples=max_shard_samples,
+        max_shard_bytes=max_shard_bytes,
         provenance=provenance,
         shard_prefix=shard_prefix,
     )
@@ -153,6 +157,7 @@ class DatasetPartWriter:
     split: str | None = None
     views: tuple[tuple[Role, Modality, View], ...] | None = None
     max_shard_samples: int = DEFAULT_MAX_SHARD_SAMPLES
+    max_shard_bytes: int | None = DEFAULT_MAX_SHARD_BYTES
     shard_prefix: str | None = None
     provenance: Mapping[str, str] | None = None
 
@@ -163,6 +168,10 @@ class DatasetPartWriter:
         self.max_shard_samples = positive_int(
             "max_shard_samples",
             self.max_shard_samples,
+        )
+        self.max_shard_bytes = optional_positive_int(
+            "max_shard_bytes",
+            self.max_shard_bytes,
         )
         self.provenance = normalize_provenance(self.provenance)
 
@@ -182,6 +191,7 @@ class DatasetPartWriter:
             split=self.split,
             views=self.views,
             max_shard_samples=self.max_shard_samples,
+            max_shard_bytes=self.max_shard_bytes,
             provenance=provenance,
             shard_id=self.shard_id,
             num_shards=self.num_shards,
@@ -203,6 +213,7 @@ class DatasetFragmentWriter:
     fragment_id: str
     split: str | None = None
     max_shard_samples: int = DEFAULT_MAX_SHARD_SAMPLES
+    max_shard_bytes: int | None = DEFAULT_MAX_SHARD_BYTES
     provenance: Mapping[str, str] | None = None
 
     def __post_init__(self) -> None:
@@ -211,6 +222,10 @@ class DatasetFragmentWriter:
         self.max_shard_samples = positive_int(
             "max_shard_samples",
             self.max_shard_samples,
+        )
+        self.max_shard_bytes = optional_positive_int(
+            "max_shard_bytes",
+            self.max_shard_bytes,
         )
         self.provenance = normalize_provenance(self.provenance)
 
@@ -242,6 +257,7 @@ class DatasetFragmentWriter:
             split=self.split,
             views=None,
             max_shard_samples=self.max_shard_samples,
+            max_shard_bytes=self.max_shard_bytes,
             provenance=provenance,
             shard_id=0,
             num_shards=1,

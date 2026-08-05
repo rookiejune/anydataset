@@ -46,6 +46,7 @@ class FragmentBatchConfig:
     split: str | None
     provenance: Mapping[str, str]
     max_shard_samples: int
+    max_shard_bytes: int | None
     commit_samples: int
     write_workers: int
     write_prefetch: int | None
@@ -191,6 +192,7 @@ class FragmentBatchWriter:
             split=self.config.split,
             provenance=self.config.provenance,
             max_shard_samples=self.config.max_shard_samples,
+            max_shard_bytes=self.config.max_shard_bytes,
             indexes=indexes,
             samples=indexed,
         )
@@ -234,6 +236,7 @@ class FragmentWriteJob:
     split: str | None
     provenance: Mapping[str, str]
     max_shard_samples: int
+    max_shard_bytes: int | None
     indexes: tuple[int, ...]
     samples: tuple[tuple[int, Sample], ...]
 
@@ -247,6 +250,7 @@ def write_fragment(job: FragmentWriteJob) -> None:
         fragment_id=fragment_id,
         provenance=job.provenance,
         max_shard_samples=job.max_shard_samples,
+        max_shard_bytes=job.max_shard_bytes,
     ).write(job.samples)
 
 

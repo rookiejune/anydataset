@@ -12,14 +12,14 @@ from .._validation import non_negative_int, optional_positive_int, positive_int
 from ._pickle_state import decode_pickle_state, validate_pickle_fields
 from .part.dispatch import DatasetFactory, ordered_samples, write_dataset_parts
 from ..types.item import Modality, Role, Sample, View
-from .config import DEFAULT_MAX_SHARD_SAMPLES
+from .config import DEFAULT_MAX_SHARD_BYTES, DEFAULT_MAX_SHARD_SAMPLES
 from .part.writer import write_sample_records
 from .payload.groups import write_payload_groups
 from .part.sample_write import explicit_views
 from .manifest.schema import normalize_provenance
 from .paths import dataset_ready_path
 
-DATASET_WRITER_PICKLE_VERSION = 1
+DATASET_WRITER_PICKLE_VERSION = 2
 
 _DATASET_WRITER_PICKLE_FIELDS = frozenset(
     {
@@ -28,17 +28,21 @@ _DATASET_WRITER_PICKLE_FIELDS = frozenset(
         "split",
         "views",
         "max_shard_samples",
+        "max_shard_bytes",
         "provenance",
         "num_shards",
         "num_workers",
         "prefetch_factor",
     }
 )
+_DATASET_WRITER_PICKLE_V1_FIELDS = _DATASET_WRITER_PICKLE_FIELDS - {
+    "max_shard_bytes"
+}
 _DATASET_WRITER_LEGACY_REQUIRED_FIELDS = frozenset(
     {"output_dir", "dataset_id", "split", "views", "max_shard_samples"}
 )
 _DATASET_WRITER_LEGACY_OPTIONAL_FIELDS = (
-    _DATASET_WRITER_PICKLE_FIELDS - _DATASET_WRITER_LEGACY_REQUIRED_FIELDS
+    _DATASET_WRITER_PICKLE_V1_FIELDS - _DATASET_WRITER_LEGACY_REQUIRED_FIELDS
 )
 
 
@@ -49,6 +53,7 @@ class DatasetWriter:
     split: str | None = None
     views: tuple[tuple[Role, Modality, View], ...] | None = None
     max_shard_samples: int = DEFAULT_MAX_SHARD_SAMPLES
+    max_shard_bytes: int | None = DEFAULT_MAX_SHARD_BYTES
     provenance: Mapping[str, str] | None = None
     num_shards: int = 1
     num_workers: int = 0
@@ -62,6 +67,10 @@ class DatasetWriter:
         self.max_shard_samples = positive_int(
             "max_shard_samples",
             self.max_shard_samples,
+        )
+        self.max_shard_bytes = optional_positive_int(
+            "max_shard_bytes",
+            self.max_shard_bytes,
         )
         self.provenance = normalize_provenance(self.provenance)
         self.num_shards = positive_int("num_shards", self.num_shards)
@@ -79,6 +88,7 @@ class DatasetWriter:
             "split": self.split,
             "views": self.views,
             "max_shard_samples": self.max_shard_samples,
+            "max_shard_bytes": self.max_shard_bytes,
             "provenance": self.provenance,
             "num_shards": self.num_shards,
             "num_workers": self.num_workers,
@@ -86,13 +96,11 @@ class DatasetWriter:
         }
 
     def __setstate__(self, state: object) -> None:
-        legacy, values = decode_pickle_state(
-            state,
-            kind="DatasetWriter",
-            current_version=DATASET_WRITER_PICKLE_VERSION,
-        )
-        if legacy:
+        version, values = _dataset_writer_pickle_state(state)
+        if version == 0:
             values = _migrate_dataset_writer_pickle_v0(values)
+        elif version == 1:
+            values = _migrate_dataset_writer_pickle_v1(values)
         else:
             validate_pickle_fields(
                 values,
@@ -106,6 +114,7 @@ class DatasetWriter:
             split=values["split"],
             views=values["views"],
             max_shard_samples=values["max_shard_samples"],
+            max_shard_bytes=values["max_shard_bytes"],
             provenance=values["provenance"],
             num_shards=values["num_shards"],
             num_workers=values["num_workers"],
@@ -143,6 +152,7 @@ class DatasetWriter:
             split=self.split,
             views=self.views,
             max_shard_samples=self.max_shard_samples,
+            max_shard_bytes=self.max_shard_bytes,
             num_shards=self.num_shards,
             num_workers=self.num_workers,
             prefetch_factor=self.prefetch_factor,
@@ -165,6 +175,7 @@ class DatasetWriter:
             split=self.split,
             views=self.views,
             max_shard_samples=self.max_shard_samples,
+            max_shard_bytes=self.max_shard_bytes,
             provenance=provenance,
         )
         write_payload_groups(root, written_views, sample_count)
@@ -191,7 +202,36 @@ def _migrate_dataset_writer_pickle_v0(
     values.setdefault("num_shards", 1)
     values.setdefault("num_workers", 0)
     values.setdefault("prefetch_factor", None)
+    values.setdefault("max_shard_bytes", None)
     return values
+
+
+def _migrate_dataset_writer_pickle_v1(
+    state: dict[str, Any],
+) -> dict[str, Any]:
+    validate_pickle_fields(
+        state,
+        kind="DatasetWriter",
+        required=_DATASET_WRITER_PICKLE_V1_FIELDS,
+    )
+    return {**state, "max_shard_bytes": None}
+
+
+def _dataset_writer_pickle_state(state: object) -> tuple[int, dict[str, Any]]:
+    if (
+        isinstance(state, dict)
+        and type(state.get("pickle_schema_version")) is int
+        and state.get("pickle_schema_version") == 1
+    ):
+        values = dict(state)
+        values.pop("pickle_schema_version")
+        return 1, values
+    legacy, values = decode_pickle_state(
+        state,
+        kind="DatasetWriter",
+        current_version=DATASET_WRITER_PICKLE_VERSION,
+    )
+    return (0 if legacy else DATASET_WRITER_PICKLE_VERSION), values
 
 
 def _validate_dataset_writer_pickle_state(

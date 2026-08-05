@@ -183,9 +183,10 @@ materializer 必须报错，不静默覆盖。
 自己的 process group，并定义各 rank 的同步契约。
 `commit_samples` 控制 checkpoint 粒度，默认是 `max(batch_size, 1024)`，限制尚未落盘的
 provider 输出数量；需要更细断点时可以显式调低。最终提交会逐 payload 读取这些 fragment，
-按 `max_shard_samples` 流式重新打包 tar，因此 checkpoint 粒度不会决定发布 store 的 shard
-数量，也不需要把一个完整目标 shard 的输出同时保留在内存中。只有一个 fragment 时继续
-复用原 shard，避免小数据集无谓重写。
+按 `max_shard_samples` 和可选 `max_shard_bytes` 流式重新打包 tar，因此 checkpoint 粒度
+不会决定发布 store 的 shard 数量，也不需要把一个完整目标 shard 的输出同时保留在内存中。
+发布入口配置任一 shard 上限时，即使只有一个 fragment 也按最终物理契约重新打包；未配置
+上限时才复用原 shard。
 调用方可以通过 `max_new_samples` 或显式递增的 `sample_indexes` 配合
 `finalize=False`，只完成本轮计划范围并保留同一份完整输入 identity 下的 resume
 fragment。最终一次调用不再传范围并使用默认 `finalize=True`，只补齐缺失 index，覆盖
@@ -312,10 +313,12 @@ DataLoader workers”的模型；只解析出一个 device 时不启动外层 de
 `dataset_id` 由 dataset class、`Spec` 和 store manifest provenance 决定；filtered view
 会把上游 identity、rule 和 label 纳入 identity。对于内容或顺序由业务工程管理的输入，
 调用方用非空 `input_id` 版本化整个输入快照，并在输入变化时更新。
-store 的 `AudioView.FILE` payload 解包到
+store 的 `AudioView.FILE` 默认在 path mode 解包到
 `$ANYDATASET_HOME/cache/store-files/<store_id>`，cache identity 包含 view、shard、
 payload key 和 shard fingerprint，写入使用同目录原子替换。派生文件被外部清理后会按需
 重新解包；dataset 不再为每个访问过的 FILE 样本维护无界进程内路径表。
+`file_mode="bytes"` 是不参与 dataset identity 的 operational load option；该模式直接从 tar
+返回保留 suffix 的 `FileBytes`，不创建解包 cache，也不持有 retained-file lease。
 包含 FILE view 的 store reader 会在
 `$ANYDATASET_HOME/cache/store-file-leases/<store_id>.lock` 持有跨进程共享 lease。
 `cleanup_store_files(store_root)` 只在取得独占 lease 后删除该 store 的解包目录；存在活动

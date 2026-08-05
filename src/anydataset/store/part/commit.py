@@ -18,9 +18,10 @@ from ..._runtime.resume import (
     compact_completed_index_entries,
 )
 from ..._runtime.sharding import validate_shard
-from ..._validation import positive_int
+from ..._validation import optional_positive_int, positive_int
 from ...types.item import Modality, Role, View
 from .._refs import validate_entry_ref, view_path
+from ..config import DEFAULT_MAX_SHARD_SAMPLES
 from ..payload.integrity import validate_store_payloads
 from ..payload.groups import write_payload_groups
 from .writer import (
@@ -190,6 +191,7 @@ def commit_store_fragments(
     split: str | None = None,
     expected_sample_count: int | None = None,
     max_shard_samples: int | None = None,
+    max_shard_bytes: int | None = None,
     provenance: Mapping[str, str] | None = None,
     progress: CommitProgress | None = None,
 ) -> Path:
@@ -200,6 +202,10 @@ def commit_store_fragments(
             "max_shard_samples",
             max_shard_samples,
         )
+    max_shard_bytes = optional_positive_int(
+        "max_shard_bytes",
+        max_shard_bytes,
+    )
     fragments_root = Path(fragments_dir).expanduser()
     fragment_infos = (
         _fragment_infos(
@@ -239,6 +245,7 @@ def commit_store_fragments(
                 expected_sample_count=expected_sample_count,
                 views=views,
                 repack_max_shard_samples=max_shard_samples,
+                repack_max_shard_bytes=max_shard_bytes,
                 shard_prefix="part-00000-",
                 provenance=commit_provenance,
                 progress=progress,
@@ -255,6 +262,7 @@ def commit_fragment_part(
     num_shards: int,
     split: str | None = None,
     max_shard_samples: int | None = None,
+    max_shard_bytes: int | None = None,
     provenance: Mapping[str, str] | None = None,
     progress: CommitProgress | None = None,
 ) -> Path:
@@ -264,6 +272,10 @@ def commit_fragment_part(
             "max_shard_samples",
             max_shard_samples,
         )
+    max_shard_bytes = optional_positive_int(
+        "max_shard_bytes",
+        max_shard_bytes,
+    )
     fragment_infos, roots = _fragment_info_roots(
         tuple(Path(path) for path in fragments),
         dataset_id=dataset_id,
@@ -282,6 +294,8 @@ def commit_fragment_part(
             shard_id=shard_id,
             num_shards=num_shards,
             split=split,
+            max_shard_samples=max_shard_samples or DEFAULT_MAX_SHARD_SAMPLES,
+            max_shard_bytes=max_shard_bytes,
             provenance=commit_provenance,
         ).write(())
     views = _store_views(roots)
@@ -304,6 +318,7 @@ def commit_fragment_part(
                 views=views,
                 dense=False,
                 repack_max_shard_samples=max_shard_samples,
+                repack_max_shard_bytes=max_shard_bytes,
                 shard_prefix=f"part-{shard_id:05d}-",
                 provenance=commit_provenance,
                 progress=progress,
@@ -448,6 +463,7 @@ def _commit_roots_to_tmp(
     views: tuple[tuple[Role, Modality, View], ...] | None = None,
     dense: bool = True,
     repack_max_shard_samples: int | None = None,
+    repack_max_shard_bytes: int | None = None,
     shard_prefix: str = "",
     progress: CommitProgress | None = None,
 ) -> Path:
@@ -464,6 +480,7 @@ def _commit_roots_to_tmp(
         stores,
         views=selected_views,
         repack_max_shard_samples=repack_max_shard_samples,
+        repack_max_shard_bytes=repack_max_shard_bytes,
         shard_prefix=shard_prefix,
         progress=progress,
     )
@@ -486,6 +503,7 @@ def _write_committed_view_manifests(
     *,
     views: tuple[tuple[Role, Modality, View], ...] | None,
     repack_max_shard_samples: int | None,
+    repack_max_shard_bytes: int | None,
     shard_prefix: str,
     progress: CommitProgress | None,
 ) -> None:
@@ -494,7 +512,10 @@ def _write_committed_view_manifests(
         return
     sample_indexes_by_ref = _sample_indexes_by_ref(root)
     for view in selected_views:
-        if repack_max_shard_samples is not None and len(stores) > 1:
+        if (
+            repack_max_shard_samples is not None
+            or repack_max_shard_bytes is not None
+        ):
             repack = True
             view_count, expected_view_count = _write_repacked_view_manifest(
                 root,
@@ -502,6 +523,7 @@ def _write_committed_view_manifests(
                 view,
                 sample_indexes_by_ref.get(view[:2], ()),
                 max_shard_samples=repack_max_shard_samples,
+                max_shard_bytes=repack_max_shard_bytes,
                 shard_prefix=shard_prefix,
                 progress=progress,
             )
@@ -677,7 +699,8 @@ def _write_repacked_view_manifest(
     view: tuple[Role, Modality, View],
     sample_indexes: Iterable[int],
     *,
-    max_shard_samples: int,
+    max_shard_samples: int | None,
+    max_shard_bytes: int | None,
     shard_prefix: str,
     progress: CommitProgress | None,
 ) -> tuple[int, int]:
@@ -705,6 +728,7 @@ def _write_repacked_view_manifest(
         root,
         view,
         max_shard_samples=max_shard_samples,
+        max_shard_bytes=max_shard_bytes,
         shard_prefix=shard_prefix,
     )
     payloads = PayloadCache()

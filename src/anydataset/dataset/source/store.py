@@ -22,11 +22,12 @@ class StoreSource:
         _ = cache_path
         _validate_load_options(
             spec,
-            ("legacy_policy", "unsafe_pickle_payloads"),
+            ("legacy_policy", "unsafe_pickle_payloads", "file_mode"),
             source="store",
         )
         legacy_policy = spec.load_options.get("legacy_policy", "reject")
         unsafe_pickle_payloads = spec.load_options.get("unsafe_pickle_payloads", False)
+        file_mode = spec.load_options.get("file_mode", "path")
         if type(unsafe_pickle_payloads) is not bool:
             raise TypeError("store unsafe_pickle_payloads load option must be a boolean.")
         dataset = read_store_dataset(
@@ -34,6 +35,7 @@ class StoreSource:
             views=self.views,
             legacy_policy=legacy_policy,
             unsafe_pickle_payloads=unsafe_pickle_payloads,
+            file_mode=file_mode,
         )
         if spec.split is not None and dataset.manifest.split != spec.split:
             dataset.close()

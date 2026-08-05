@@ -7,7 +7,7 @@ from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import TracebackType
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 from .._legacy import legacy
 from .._io.files import StatFingerprint as _StatFingerprint
@@ -56,7 +56,8 @@ from .payload.archive import PayloadCache, payload_value, read_payload_bytes
 
 _SAMPLE_INDEX_VALIDATION_VERSION = 2
 _SAMPLE_ID_SET_LIMIT = 1_000_000
-STORE_DATASET_PICKLE_VERSION = 1
+STORE_DATASET_PICKLE_VERSION = 2
+FileMode = Literal["path", "bytes"]
 
 _STORE_DATASET_PICKLE_FIELDS = frozenset(
     {
@@ -67,16 +68,18 @@ _STORE_DATASET_PICKLE_FIELDS = frozenset(
         "_file_lease",
         "_payloads",
         "_unsafe_pickle_payloads",
+        "_file_mode",
         "_payload_group_cache",
         "_manifest_cache",
         "_resource_state",
     }
 )
+_STORE_DATASET_PICKLE_V1_FIELDS = _STORE_DATASET_PICKLE_FIELDS - {"_file_mode"}
 _STORE_DATASET_LEGACY_OPTIONAL_FIELDS = frozenset(
     {"_unsafe_pickle_payloads", "_manifest_cache", "_resource_state"}
 )
 _STORE_DATASET_LEGACY_REQUIRED_FIELDS = (
-    _STORE_DATASET_PICKLE_FIELDS - _STORE_DATASET_LEGACY_OPTIONAL_FIELDS
+    _STORE_DATASET_PICKLE_V1_FIELDS - _STORE_DATASET_LEGACY_OPTIONAL_FIELDS
 )
 
 # Legacy-v0 pickles written before payload grouping moved out of this module
@@ -106,6 +109,7 @@ class StoreDataset(MapStyleABC):
         repr=False,
     )
     _unsafe_pickle_payloads: bool = field(default=False, compare=False, repr=False)
+    _file_mode: FileMode = field(default="path", compare=False, repr=False)
     _payload_group_cache: PayloadGroupCache = field(
         default_factory=PayloadGroupCache,
         compare=False,
@@ -218,19 +222,18 @@ class StoreDataset(MapStyleABC):
             "_file_lease": self._file_lease,
             "_payloads": self._payloads,
             "_unsafe_pickle_payloads": self._unsafe_pickle_payloads,
+            "_file_mode": self._file_mode,
             "_payload_group_cache": self._payload_group_cache,
             "_manifest_cache": self._manifest_cache,
             "_resource_state": self._resource_state,
         }
 
     def __setstate__(self, state: object) -> None:
-        legacy, values = decode_pickle_state(
-            state,
-            kind="StoreDataset",
-            current_version=STORE_DATASET_PICKLE_VERSION,
-        )
-        if legacy:
+        version, values = _store_dataset_pickle_state(state)
+        if version == 0:
             values = _migrate_store_dataset_pickle_v0(values)
+        elif version == 1:
+            values = _migrate_store_dataset_pickle_v1(values)
         else:
             validate_pickle_fields(
                 values,
@@ -264,9 +267,38 @@ def _migrate_store_dataset_pickle_v0(
     )
     values = dict(state)
     values.setdefault("_unsafe_pickle_payloads", False)
+    values.setdefault("_file_mode", "path")
     values.setdefault("_manifest_cache", ManifestParquetCache())
     values.setdefault("_resource_state", _DatasetResourceState())
     return values
+
+
+def _migrate_store_dataset_pickle_v1(
+    state: dict[str, Any],
+) -> dict[str, Any]:
+    validate_pickle_fields(
+        state,
+        kind="StoreDataset",
+        required=_STORE_DATASET_PICKLE_V1_FIELDS,
+    )
+    return {**state, "_file_mode": "path"}
+
+
+def _store_dataset_pickle_state(state: object) -> tuple[int, dict[str, Any]]:
+    if (
+        isinstance(state, dict)
+        and type(state.get("pickle_schema_version")) is int
+        and state.get("pickle_schema_version") == 1
+    ):
+        values = dict(state)
+        values.pop("pickle_schema_version")
+        return 1, values
+    legacy, values = decode_pickle_state(
+        state,
+        kind="StoreDataset",
+        current_version=STORE_DATASET_PICKLE_VERSION,
+    )
+    return (0 if legacy else STORE_DATASET_PICKLE_VERSION), values
 
 
 def _validate_store_dataset_pickle_state(state: Mapping[str, Any]) -> None:
@@ -296,6 +328,7 @@ def _validate_store_dataset_pickle_state(state: Mapping[str, Any]) -> None:
         raise TypeError(
             "StoreDataset pickle field '_unsafe_pickle_payloads' must be a boolean."
         )
+    _validate_file_mode(state["_file_mode"])
     if type(state["_resource_state"].closed) is not bool:
         raise TypeError(
             "StoreDataset pickle resource closed state must be a boolean."
@@ -324,9 +357,11 @@ def read_store_dataset(
     preload: bool = False,
     legacy_policy: str = "reject",
     unsafe_pickle_payloads: bool = False,
+    file_mode: FileMode = "path",
 ) -> StoreDataset:
     if type(unsafe_pickle_payloads) is not bool:
         raise TypeError("unsafe_pickle_payloads must be a boolean.")
+    file_mode = _validate_file_mode(file_mode)
     root = Path(root).expanduser().resolve()
     _validate_dataset_root(root)
     manifest = read_store_manifest(root, legacy_policy=legacy_policy)
@@ -368,7 +403,8 @@ def read_store_dataset(
             store_views.preload()
         file_lease = (
             lease_store_files(root)
-            if any(
+            if file_mode == "path"
+            and any(
                 modality is item.Modality.AUDIO and key == item.AudioView.FILE
                 for _role, modality, key in selected_views
             )
@@ -382,6 +418,7 @@ def read_store_dataset(
             _file_lease=file_lease,
             _manifest_cache=manifest_cache,
             _unsafe_pickle_payloads=unsafe_pickle_payloads,
+            _file_mode=file_mode,
         )
     except Exception:
         manifest_cache.close()
@@ -671,7 +708,15 @@ def _view_value(
     entry: ViewManifestEntry,
 ) -> Any:
     if view.view[1] is item.Modality.AUDIO and view.view[2] == item.AudioView.FILE:
-        return str(_cached_file_payload(dataset, entry, view))
+        if dataset._file_mode == "path":
+            return str(_cached_file_payload(dataset, entry, view))
+        data = read_payload_bytes(
+            dataset.root,
+            view.view,
+            entry,
+            cache=dataset._payloads,
+        )
+        return item.FileBytes(data, Path(entry.key).suffix or ".bin")
 
     data = read_payload_bytes(dataset.root, view.view, entry, cache=dataset._payloads)
     return payload_value(
@@ -720,3 +765,11 @@ def _enum_keys(values: Mapping[str, Any], enum_type):
     for key, value in values.items():
         converted[enum_type(key)] = value
     return converted
+
+
+def _validate_file_mode(value: object) -> FileMode:
+    if not isinstance(value, str):
+        raise TypeError("file_mode must be a string.")
+    if value not in {"path", "bytes"}:
+        raise ValueError("file_mode must be 'path' or 'bytes'.")
+    return cast(FileMode, value)

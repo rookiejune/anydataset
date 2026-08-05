@@ -3,7 +3,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Protocol, cast, runtime_checkable
+from typing import TYPE_CHECKING, Any, Literal, Protocol, cast, runtime_checkable
 
 from torch.utils.data import Dataset, IterableDataset
 
@@ -68,6 +68,7 @@ class _DatasetOperations:
         split: str | None = None,
         views: tuple[tuple[Role, Modality, View], ...] | None = None,
         max_shard_samples: int = _DEFAULT_MAX_SHARD_SAMPLES,
+        max_shard_bytes: int | None = None,
         num_shards: int = 1,
         num_workers: int = 0,
         prefetch_factor: int | None = None,
@@ -80,6 +81,7 @@ class _DatasetOperations:
             split=self._default_write_split() if split is None else split,
             views=views,
             max_shard_samples=max_shard_samples,
+            max_shard_bytes=max_shard_bytes,
             num_shards=num_shards,
             num_workers=num_workers,
             prefetch_factor=prefetch_factor,
@@ -338,6 +340,7 @@ class AnyDataset(_Base, MapStyleABC):
         transforms: Transforms | None = None,
         legacy_policy: str = "reject",
         unsafe_pickle_payloads: bool = False,
+        file_mode: Literal["path", "bytes"] = "path",
     ) -> AnyDataset:
         """Open a canonical store while loading only the selected views."""
 
@@ -345,6 +348,10 @@ class AnyDataset(_Base, MapStyleABC):
             raise TypeError("views must be a tuple or None.")
         if type(unsafe_pickle_payloads) is not bool:
             raise TypeError("unsafe_pickle_payloads must be a boolean.")
+        if not isinstance(file_mode, str):
+            raise TypeError("file_mode must be a string.")
+        if file_mode not in {"path", "bytes"}:
+            raise ValueError("file_mode must be 'path' or 'bytes'.")
         from .source.store import StoreSource
 
         load_options: dict[str, object] = {}
@@ -352,6 +359,8 @@ class AnyDataset(_Base, MapStyleABC):
             load_options["legacy_policy"] = legacy_policy
         if unsafe_pickle_payloads:
             load_options["unsafe_pickle_payloads"] = True
+        if file_mode != "path":
+            load_options["file_mode"] = file_mode
         dataset = cls(
             Spec(
                 source=Source.STORE,
@@ -502,6 +511,7 @@ def _write_dataset(
     split: str | None,
     views: tuple[tuple[Role, Modality, View], ...] | None,
     max_shard_samples: int,
+    max_shard_bytes: int | None,
     num_shards: int,
     num_workers: int,
     prefetch_factor: int | None,
@@ -515,6 +525,7 @@ def _write_dataset(
         split=split,
         views=views,
         max_shard_samples=max_shard_samples,
+        max_shard_bytes=max_shard_bytes,
         num_shards=num_shards,
         num_workers=num_workers,
         prefetch_factor=prefetch_factor,

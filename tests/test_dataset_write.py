@@ -19,7 +19,7 @@ class DatasetWriteTest(unittest.TestCase):
 
         state = writer.__getstate__()
 
-        self.assertEqual(state["pickle_schema_version"], 1)
+        self.assertEqual(state["pickle_schema_version"], 2)
         self.assertEqual(
             set(state),
             {
@@ -29,6 +29,7 @@ class DatasetWriteTest(unittest.TestCase):
                 "split",
                 "views",
                 "max_shard_samples",
+                "max_shard_bytes",
                 "provenance",
                 "num_shards",
                 "num_workers",
@@ -55,12 +56,23 @@ class DatasetWriteTest(unittest.TestCase):
         self.assertEqual(restored.num_shards, 1)
         self.assertEqual(restored.num_workers, 0)
         self.assertIsNone(restored.prefetch_factor)
+        self.assertIsNone(restored.max_shard_bytes)
+
+    def test_dataset_writer_restores_v1_pickle_state(self):
+        state = DatasetWriter("output").__getstate__()
+        state["pickle_schema_version"] = 1
+        state.pop("max_shard_bytes")
+        restored = DatasetWriter.__new__(DatasetWriter)
+
+        restored.__setstate__(state)
+
+        self.assertIsNone(restored.max_shard_bytes)
 
     def test_dataset_writer_rejects_unknown_pickle_schema(self):
         state = DatasetWriter("output").__getstate__()
         restored = DatasetWriter.__new__(DatasetWriter)
 
-        for version in (0, 2):
+        for version in (0, 3):
             with self.subTest(version=version):
                 state["pickle_schema_version"] = version
                 with self.assertRaisesRegex(
@@ -217,6 +229,7 @@ class DatasetWriteTest(unittest.TestCase):
             split=None,
             views=None,
             max_shard_samples=1,
+            max_shard_bytes=None,
             num_shards=1,
             num_workers=0,
             prefetch_factor=None,

@@ -669,6 +669,13 @@ dataset must be map-style or implement `iter_shard()`. Run the writer
 from the application main process. When loader workers are enabled and the
 dataset exposes `prepare()`, the writer calls it once in the parent before
 spawning so shared source metadata can be prepared safely.
+`max_shard_samples` bounds members per view shard. `max_shard_bytes` optionally
+bounds the projected closed tar size, including tar headers, 512-byte payload
+padding, end blocks, and record padding. Both limits apply to direct writers,
+parallel part writers, resumable materializers, snapshots, and final repacks.
+A single payload larger than the byte limit is kept as one oversized singleton
+shard instead of being split or rejected.
+
 
 `AnyDataset.from_store(..., views=...)` loads only the selected view manifests
 and payloads. The selection is preserved across pickle/spawn and participates
@@ -744,12 +751,14 @@ supported. Stores containing custom Python payload objects require an explicit
 `read_store_dataset(..., unsafe_pickle_payloads=True)` opt-in, and should only be
 read from trusted sources.
 
-`AudioView.FILE` payloads are extracted under
-`$ANYDATASET_HOME/cache/store-files`. A reader that selected the file view holds
-a shared lease for its lifetime, so cleanup cannot invalidate a returned path
-while that reader remains reachable. Hold an explicit lease when the path must
-outlive the reader, then clean that physical store when no reader or explicit
-lease is active:
+`AudioView.FILE` defaults to path mode: payloads are extracted under
+`$ANYDATASET_HOME/cache/store-files`, and a reader that selected the file view
+holds a shared lease for its lifetime. Use
+`AnyDataset.from_store(..., file_mode="bytes")` when the consumer accepts
+in-memory encoded files; it returns `FileBytes(data, suffix)` directly from the
+tar shard without an extracted-file cache or lease. In path mode, hold an
+explicit lease when the path must outlive the reader, then clean that physical
+store when no reader or explicit lease is active:
 
 ```python
 from anydataset.store import cleanup_store_files, lease_store_files

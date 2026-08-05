@@ -12,6 +12,7 @@ from ...types import (
     AudioItem,
     AudioMeta,
     AudioView,
+    FileBytes,
     Modality,
     Role,
     Sample,
@@ -21,10 +22,11 @@ from ...types import (
 from .types import AudioBatch, SpeechBatch
 
 ItemT = TypeVar("ItemT")
-AudioLoader = Callable[[Union[str, Path]], tuple[Tensor, int]]
+AudioSource = Union[str, Path, FileBytes]
+AudioLoader = Callable[[AudioSource], tuple[Tensor, int]]
 
 
-def load_audio_file(path: str | Path) -> tuple[Tensor, int]:
+def load_audio_file(source: AudioSource) -> tuple[Tensor, int]:
     """Load a complete audio file as [channels, time] without clipping."""
 
     try:
@@ -33,7 +35,11 @@ def load_audio_file(path: str | Path) -> tuple[Tensor, int]:
         raise ModuleNotFoundError(
             "Loading audio files requires the anydataset[audio] extra (torchaudio)."
         ) from exc
-    waveform, sample_rate = torchaudio.load(str(path))
+    if isinstance(source, FileBytes):
+        with source.open() as stream:
+            waveform, sample_rate = torchaudio.load(stream)
+    else:
+        waveform, sample_rate = torchaudio.load(str(source))
     return waveform, int(sample_rate)
 
 
@@ -119,9 +125,9 @@ def _prepare_audio_sample(
     channels: int,
 ) -> Tensor:
     audio_item = _sample_item(sample, (Role.DEFAULT, Modality.AUDIO), AudioItem)
-    path = _audio_path(audio_item)
+    source = _audio_source(audio_item)
     loaded_waveform, source_sample_rate = _load_audio(
-        audio_item, path=path, audio_loader=audio_loader
+        audio_item, source=source, audio_loader=audio_loader
     )
     waveform, _ = prepare_audio(
         (loaded_waveform, source_sample_rate),
@@ -140,9 +146,9 @@ def _prepare_speech_sample(
 ) -> _PreparedSpeech:
     audio_item = _sample_item(sample, (Role.DEFAULT, Modality.AUDIO), AudioItem)
     text_item = _sample_item(sample, (Role.DEFAULT, Modality.TEXT), TextItem)
-    path = _audio_path(audio_item)
+    source = _audio_source(audio_item)
     loaded_waveform, source_sample_rate = _load_audio(
-        audio_item, path=path, audio_loader=audio_loader
+        audio_item, source=source, audio_loader=audio_loader
     )
     waveform, _ = prepare_audio(
         (loaded_waveform, source_sample_rate),
@@ -190,24 +196,27 @@ def _sample_item(
     return value
 
 
-def _audio_path(audio: AudioItem) -> str | None:
+def _audio_source(audio: AudioItem) -> AudioSource | None:
     if AudioView.FILE not in audio.views:
         return None
-    return str(audio.views[AudioView.FILE])
+    value = audio.views[AudioView.FILE]
+    if not isinstance(value, (str, Path, FileBytes)):
+        raise TypeError("AudioView.FILE must be a path or FileBytes.")
+    return value
 
 
 def _load_audio(
     audio: AudioItem,
     *,
-    path: str | None,
+    source: AudioSource | None,
     audio_loader: AudioLoader,
 ) -> tuple[Tensor, int]:
     if AudioView.WAVEFORM in audio.views:
         waveform, sample_rate = audio.views[AudioView.WAVEFORM]
         return waveform, int(sample_rate)
-    if path is None:
+    if source is None:
         raise ValueError("Audio sample requires waveform or file view.")
-    waveform, sample_rate = audio_loader(Path(path))
+    waveform, sample_rate = audio_loader(source)
     return waveform, int(sample_rate)
 
 

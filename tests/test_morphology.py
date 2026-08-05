@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import unittest
 from dataclasses import replace
+from io import BytesIO
 from unittest import mock
 
 import torch
@@ -14,6 +15,7 @@ from anydataset.dataset.morphology import (
     build_toy_audio_dataset,
     build_toy_speech_dataset,
     build_toy_speech_grid,
+    load_audio_file,
     speech_collate,
     speech_grid_batch,
     speech_grid_collate,
@@ -22,6 +24,7 @@ from anydataset.types import (
     AudioItem,
     AudioMeta,
     AudioView,
+    FileBytes,
     Modality,
     Role,
 )
@@ -76,6 +79,43 @@ class MorphologyContractTest(unittest.TestCase):
         batch = audio_collate(dataset)
         self.assertEqual(batch.waveform.ndim, 3)
         self.assertEqual(tuple(batch.lengths.shape), (2,))
+
+    def test_audio_collate_passes_file_bytes_to_loader(self) -> None:
+        payload = FileBytes(b"encoded", ".flac")
+        sample = {
+            (Role.DEFAULT, Modality.AUDIO): AudioItem(
+                views={AudioView.FILE: payload}
+            )
+        }
+        seen = []
+
+        def load(source):
+            seen.append(source)
+            return torch.tensor([[1.0, 2.0]]), 16000
+
+        batch = audio_collate((sample,), audio_loader=load)
+
+        self.assertEqual(seen, [payload])
+        self.assertEqual(batch.lengths.tolist(), [2])
+
+    def test_load_audio_file_decodes_file_bytes_in_memory(self) -> None:
+        payload = FileBytes(b"encoded", ".flac")
+        seen = []
+
+        class FakeTorchAudio:
+            @staticmethod
+            def load(source):
+                seen.append(source)
+                self.assertIsInstance(source, BytesIO)
+                self.assertEqual(source.getvalue(), b"encoded")
+                return torch.tensor([[1.0, 2.0]]), 24000
+
+        with mock.patch.dict("sys.modules", {"torchaudio": FakeTorchAudio()}):
+            waveform, sample_rate = load_audio_file(payload)
+
+        self.assertTrue(torch.equal(waveform, torch.tensor([[1.0, 2.0]])))
+        self.assertEqual(sample_rate, 24000)
+        self.assertTrue(seen[0].closed)
 
     def test_speech_collate_requires_text_not_speaker(self) -> None:
         dataset = build_toy_speech_dataset(samples=2, seconds=0.01, sample_rate=16000)

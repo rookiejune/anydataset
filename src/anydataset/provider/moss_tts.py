@@ -2,16 +2,14 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from pathlib import Path
-from tempfile import TemporaryDirectory
 from typing import Any
+from warnings import warn
 
 import torch
 
 from ..dataset.collate import Batch, FieldGroup, FieldRef
 from ..types.item import Modality, Role
-from ..types.item import AudioItem, AudioMeta, AudioView, TextItem, TextView
-
-torchaudio: Any | None = None
+from ..types.item import AudioItem, AudioMeta, AudioView, FileBytes, TextItem, TextView
 
 
 class MossTTSProvider:
@@ -23,11 +21,12 @@ class MossTTSProvider:
         *,
         options: Any | None = None,
         reference_role: Role | None = None,
-        max_reference_files: int = 1024,
+        max_reference_files: int | None = None,
         runtime_kwargs: Mapping[str, object] | None = None,
         **load_options: Any,
     ) -> None:
         try:
+            from anytrain.tts import EncodedAudioReference, WaveformReference
             from anytrain.tts.moss import MossTTS
         except ImportError as exc:
             raise ImportError("MossTTSProvider requires `anytrain[moss-tts]`.") from exc
@@ -38,12 +37,16 @@ class MossTTSProvider:
             self.tts = MossTTS.from_pretrained(model, **kwargs)
         self.options = options
         self.reference_role = reference_role
-        self.max_reference_files = _positive_int(
-            "max_reference_files",
-            max_reference_files,
-        )
-        self._tempdir: TemporaryDirectory[str] | None = None
-        self._reference_file_count = 0
+        self._encoded_audio_reference = EncodedAudioReference
+        self._waveform_reference = WaveformReference
+        if max_reference_files is not None:
+            _positive_int("max_reference_files", max_reference_files)
+            warn(
+                "max_reference_files is deprecated and ignored; anytrain now "
+                "owns temporary reference-file materialization.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
 
     def __call__(self, views: Mapping[Any, Any]) -> Any:
         text = views[TextView.TEXT]
@@ -52,7 +55,7 @@ class MossTTSProvider:
         output = self.tts.synthesize(
             text,
             self.options,
-            reference_audio_path=self._reference_path(views),
+            reference_audio=self._reference(views),
         )
         return _audio_output(output)
 
@@ -78,26 +81,29 @@ class MossTTSProvider:
         outputs = self.tts.synthesize(
             texts,
             self.options,
-            reference_audio_paths=self._reference_paths(batch, len(texts)),
+            reference_audios=self._references(batch, len(texts)),
         )
         if not isinstance(outputs, Sequence):
             raise TypeError("MossTTS batch synthesize output must be a sequence.")
         return [_audio_output(output) for output in outputs]
 
-    def _reference_path(self, views: Mapping[Any, Any]) -> str | None:
+    def _reference(self, views: Mapping[Any, Any]) -> Any | None:
         if self.reference_role is None:
             return None
         if AudioView.FILE in views:
-            return self._file_path(views[AudioView.FILE])
+            return self._file_reference(views[AudioView.FILE])
         if AudioView.WAVEFORM in views:
             waveform, sample_rate = views[AudioView.WAVEFORM]
-            return self._waveform_path(torch.as_tensor(waveform), int(sample_rate))
+            return self._waveform_reference(
+                torch.as_tensor(waveform),
+                int(sample_rate),
+            )
         raise ValueError(
             "MossTTSProvider reference input requires AudioView.FILE or "
             "AudioView.WAVEFORM."
         )
 
-    def _reference_paths(self, batch: Batch, count: int) -> Sequence[str] | None:
+    def _references(self, batch: Batch, count: int) -> Sequence[Any] | None:
         if self.reference_role is None:
             return None
         ref = (self.reference_role, Modality.AUDIO)
@@ -111,15 +117,7 @@ class MossTTSProvider:
                 raise ValueError(
                     "reference file batch size must match text batch size."
                 )
-            self._prepare_reference_files(
-                sum(isinstance(value, bytes) for value in values)
-            )
-            paths = [self._file_path(value) for value in values]
-            if len(paths) != count:
-                raise ValueError(
-                    "reference file batch size must match text batch size."
-                )
-            return paths
+            return [self._file_reference(value) for value in values]
         if AudioView.WAVEFORM in views:
             waveform, sample_rates = views[AudioView.WAVEFORM]
             lengths = batch.lengths(FieldRef(ref, FieldGroup.VIEWS, AudioView.WAVEFORM))
@@ -127,9 +125,8 @@ class MossTTSProvider:
                 raise ValueError(
                     "reference audio batch size must match text batch size."
                 )
-            self._prepare_reference_files(count)
             return [
-                self._waveform_path(
+                self._waveform_reference(
                     waveform[index, :, : int(length.item())],
                     int(sample_rates[index].item()),
                 )
@@ -140,60 +137,16 @@ class MossTTSProvider:
             "AudioView.WAVEFORM."
         )
 
-    def _file_path(self, value: Any) -> str:
+    def _file_reference(self, value: Any) -> Any:
         if isinstance(value, (str, Path)):
             return str(Path(value).expanduser())
+        if isinstance(value, FileBytes):
+            return self._encoded_audio_reference(value.data, value.suffix)
         if isinstance(value, bytes):
-            return self._bytes_path(value)
-        raise TypeError("reference file view must be a path or bytes.")
-
-    def _bytes_path(self, value: bytes) -> str:
-        self._prepare_reference_file()
-        path = self._reference_dir / f"ref-{self._reference_file_count:08d}.wav"
-        path.write_bytes(value)
-        self._reference_file_count += 1
-        return str(path)
-
-    def _waveform_path(self, waveform: torch.Tensor, sample_rate: int) -> str:
-        self._prepare_reference_file()
-        path = self._reference_dir / f"ref-{self._reference_file_count:08d}.wav"
-        _torchaudio().save(str(path), waveform.detach().cpu(), sample_rate)
-        self._reference_file_count += 1
-        return str(path)
-
-    def _prepare_reference_file(self) -> None:
-        if (
-            self._tempdir is None
-            or self._reference_file_count >= self.max_reference_files
-        ):
-            self._reset_reference_dir()
-
-    def _prepare_reference_files(self, count: int) -> None:
-        if count <= 0:
-            return
-        if count > self.max_reference_files:
-            raise ValueError(
-                "reference batch size must not exceed max_reference_files."
-            )
-        if (
-            self._tempdir is None
-            or self._reference_file_count + count > self.max_reference_files
-        ):
-            self._reset_reference_dir()
-
-    def _reset_reference_dir(self) -> None:
-        if self._tempdir is not None:
-            self._tempdir.cleanup()
-        self._tempdir = TemporaryDirectory(prefix="anydataset-moss-ref-")
-        self._reference_file_count = 0
-
-    @property
-    def _reference_dir(self) -> Path:
-        if self._tempdir is None:
-            self._reset_reference_dir()
-        if self._tempdir is None:
-            raise RuntimeError("failed to create reference audio tempdir.")
-        return Path(self._tempdir.name)
+            return self._encoded_audio_reference(value, ".wav")
+        raise TypeError(
+            "reference file view must be a path, FileBytes, or bytes."
+        )
 
 
 def _text_refs(batch: Batch) -> tuple[tuple[Role, Modality], ...]:
@@ -217,7 +170,7 @@ def _text_batch(value: Any) -> list[str]:
 
 
 def _file_batch(value: Any) -> list[Any]:
-    if isinstance(value, (str, Path, bytes)):
+    if isinstance(value, (str, Path, bytes, FileBytes)):
         return [value]
     if not isinstance(value, Sequence):
         raise TypeError("batched reference file view must be a sequence.")
@@ -233,21 +186,6 @@ def _audio_output(output: Any) -> AudioItem:
             )
         },
     )
-
-
-def _torchaudio():
-    global torchaudio
-    if torchaudio is not None:
-        return torchaudio
-    try:
-        import torchaudio as loaded
-    except ImportError as exc:
-        raise ImportError(
-            "MossTTSProvider waveform reference audio requires "
-            "pip install anydataset[audio]."
-        ) from exc
-    torchaudio = loaded
-    return torchaudio
 
 
 def _positive_int(name: str, value: int) -> int:

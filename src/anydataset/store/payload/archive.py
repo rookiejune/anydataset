@@ -16,7 +16,7 @@ from ..._io.files import StatFingerprint as _StatFingerprint
 from ..._io.files import portable_stat_fingerprint as _portable_stat_fingerprint
 from ..._io.files import stat_fingerprint as _stat_fingerprint
 from ..._validation import validate_path_segment
-from ...types.item import AudioView, Modality, Role, TextView, View
+from ...types.item import AudioView, FileBytes, Modality, Role, TextView, View
 from ..jsonio import read_json, write_json
 from ..manifest.schema import ViewManifestEntry
 from ..paths import view_shard_index_path, view_shard_path
@@ -246,10 +246,31 @@ def read_payload_bytes(
 
 def add_payload(archive: tarfile.TarFile, payload: Payload) -> None:
     _validate_payload_key(payload.key)
+    info = _payload_info(payload)
+    archive.addfile(info, BytesIO(payload.data))
+
+
+def payload_tar_span(archive: tarfile.TarFile, payload: Payload) -> int:
+    """Return the exact tar bytes occupied by one payload before end padding."""
+
+    _validate_payload_key(payload.key)
+    info = _payload_info(payload)
+    header_size = len(
+        info.tobuf(archive.format, archive.encoding, archive.errors)
+    )
+    data_size = (
+        (len(payload.data) + tarfile.BLOCKSIZE - 1)
+        // tarfile.BLOCKSIZE
+        * tarfile.BLOCKSIZE
+    )
+    return header_size + data_size
+
+
+def _payload_info(payload: Payload) -> tarfile.TarInfo:
     info = tarfile.TarInfo(payload.key)
     info.size = len(payload.data)
     info.mtime = 0
-    archive.addfile(info, BytesIO(payload.data))
+    return info
 
 
 def write_payload_index(
@@ -326,7 +347,10 @@ def _file_payload(
     sample_index: int,
     value: Any,
 ) -> Payload:
-    if isinstance(value, bytes):
+    if isinstance(value, FileBytes):
+        data = value.data
+        suffix = value.suffix
+    elif isinstance(value, bytes):
         data = value
         suffix = ".bin"
     elif isinstance(value, (str, Path)):
@@ -336,7 +360,9 @@ def _file_payload(
         data = path.read_bytes()
         suffix = path.suffix if path.suffix else ".bin"
     else:
-        raise TypeError("file views must be bytes or a filesystem path.")
+        raise TypeError(
+            "file views must be FileBytes, bytes, or a filesystem path."
+        )
     return Payload(
         key=f"{_sample_key(sample_index)}{suffix}",
         data=data,

@@ -38,6 +38,7 @@ def write_dataset_parts(
     split: str | None,
     views: tuple[tuple[Role, Modality, View], ...] | None,
     max_shard_samples: int,
+    max_shard_bytes: int | None,
     num_shards: int,
     num_workers: int,
     prefetch_factor: int | None,
@@ -65,6 +66,7 @@ def write_dataset_parts(
             split=split,
             views=views,
             max_shard_samples=max_shard_samples,
+            max_shard_bytes=max_shard_bytes,
             num_shards=num_shards,
             num_workers=num_workers,
             prefetch_factor=prefetch_factor,
@@ -87,6 +89,7 @@ def _run_parts(
     split: str | None,
     views: tuple[tuple[Role, Modality, View], ...] | None,
     max_shard_samples: int,
+    max_shard_bytes: int | None,
     num_shards: int,
     num_workers: int,
     prefetch_factor: int | None,
@@ -107,6 +110,7 @@ def _run_parts(
                         split=split,
                         views=views,
                         max_shard_samples=max_shard_samples,
+                        max_shard_bytes=max_shard_bytes,
                         num_shards=num_shards,
                         shard_id=shard_id,
                         num_workers=num_workers,
@@ -180,6 +184,7 @@ class _WorkerConfig:
     split: str | None
     views: tuple[tuple[Role, Modality, View], ...] | None
     max_shard_samples: int
+    max_shard_bytes: int | None
     num_shards: int
     shard_id: int
     num_workers: int
@@ -214,6 +219,7 @@ def _write_worker(
             num_shards=config.num_shards,
             views=config.views,
             max_shard_samples=config.max_shard_samples,
+            max_shard_bytes=config.max_shard_bytes,
             provenance=config.provenance,
         )
         writer.write(
