@@ -40,12 +40,13 @@
 
 1. **输入和结构硬错误**：缺失或非字符串文本、空文本、控制字符、过长重复字符、
    明显文字脚本错误、placeholder 或 HTML tag multiset 不一致。这类默认 `reject`。
-2. **简单数值硬错误**：当前 number parser 能明确解析的数字 token 不一致，例如
-   `12 -> 13`，默认 `reject`。
+2. **可判定的数值硬错误**：number parser 能明确解析的数字 multiset 不一致，例如
+   `12 -> 13`，默认 `reject`。zh-en 语言对还会先做下文所述的有限跨语言归一化。
 3. **表面格式差异**：数值等价但表面形式不同，例如 `6.0 -> 6`，仍输出
    `accept`，并记录 `number_surface_mismatch` flag。
-4. **复杂数字表达**：年代、世纪、约数、自然语言数量单位、`early/mid/late`
-   等规则难以可靠判断的表达，由 pair 原子规则返回 `reject`。
+4. **未支持的复杂数字表达**：无法由有限规则证明等价的表达，例如 `兆`、
+   written fraction、未配对的月份以及 `early/mid/late`，由 pair 原子规则返回
+   `reject`。
 5. **结构异常**：长度比例异常或轻度文字脚本偏差由对应原子规则返回 `reject`。
 6. **未命中规则**：输出 `accept`，但这只表示轻量规则没有发现问题，不是语义证明。
 7. **后续规则**：Bicleaner 等模型规则返回 `accept` 时可以把已有 `reject` 提升到
@@ -57,15 +58,37 @@
 12 -> 13                         reject
 {price} -> {amount}              reject
 6.0 -> 6                         accept + number_surface_mismatch flag
-1.9万 -> 19,000                  reject，后续模型 accept 时变成 review
-19世纪30年代 -> 1830s            reject，后续模型 accept 时变成 review
+1.9万 -> 19,000                  zh-en accept + number_surface_mismatch flag
+19世纪30年代 -> 1830s            zh-en accept + number_surface_mismatch flag
 19世纪30年代 -> late 1830s       reject，后续模型 accept 时变成 review
+3兆 -> 3 trillion                reject
 ```
 
-当前实现不解析单位、货币、日期字段或代码语法，也不比较这些 token 的语义。例如
-`12公斤 -> 12 pounds`、`12美元 -> 12 euros` 或 `foo() -> bar()` 可能因为数字一致且
-其他轻量规则未命中而得到 `accept`。这些约束应由调用方增加专用规则或交给后端复核，
-不能从当前 label 反推它们已经一致。
+数值比较始终使用 `Counter` multiset 全等：不会忽略任一侧的额外数字，也不会退化成
+只比较去重后的 set。因此 `2020, 2020 -> 2020` 仍然是 `reject`。
+
+当 profile 两端恰好是 `Lang.ZH` 和 `Lang.EN` 时，pair 规则自动启用有限的双语数字
+等价层。它与 source/target 顺序、dataset 类型以及是否通过 WMT19 preset 构造无关。
+当前确认支持：
+
+- 全角数字归一化，并避免 NFKC 把 `¾` 展开为两个普通数字；
+- `—`、`–`、`~`、`至` 和 `-` 分隔的范围端点；
+- 中文 `万`、`亿`、`万亿`、`万多亿`，以及英文 `thousand`、`million`、
+  `billion`、`trillion`，包括 `$70-trillion` 形式；
+- `20世纪90年代 <-> 1990s`；
+- 中文阿拉伯数字月份与显式英文月份名，例如 `9月 <-> September`；小写 `may`
+  和句首情态动词 `May` 不视为月份；
+- 全角地名分隔符，例如 `柏林－19年来` 中的 `－` 不视为负号。
+
+这不是通用单位、货币或日期换算器。`兆`、中英文自然语言数字词、written
+fractions、温度/货币换算和一侧隐含共享单位的范围仍不放宽；也不比较单位名称的
+语义。因此 `12公斤 -> 12 pounds`、`12美元 -> 12 euros` 或 `foo() -> bar()` 仍可能
+因为数值一致且其他轻量规则未命中而得到 `accept`。这些约束应由调用方增加专用规则
+或交给后端复核，不能从当前 label 反推它们已经一致。
+
+zh-en 中 `$` 后的十进制数字按货币数值处理，不按 shell positional placeholder
+处理；braced 和 printf placeholder 仍要求 multiset 一致。其他语言对保留原有
+placeholder 和简单数字行为。
 
 ## 第一版级联
 
@@ -74,7 +97,8 @@
 1. 空文本、控制字符、过长重复字符。
 2. 源文和译文长度比例异常。
 3. 源文和译文在不同语言时完全相同。
-4. 简单数字 token、占位符和 HTML 标签的一致性；复杂数字表达是可恢复 reject。
+4. 数字 multiset、占位符和 HTML 标签的一致性；zh-en 使用上述有限等价层，未支持
+   的复杂数字表达是可恢复 reject。
 5. 数字表面形式是否保真，例如 `6.0` 和 `6` 的数值相同，但在训练数据里
    可能应该保留格式差异，默认 `accept` 并写入 `number_surface_mismatch`。
 6. 根据语言提示检查主要文字脚本，例如英文应主要是 Latin，中文应主要是 CJK。
@@ -130,8 +154,8 @@
 - 可明确解析的简单数值不同，例如 `12` 变成 `13`。
 - HTML tag multiset 不同。
 
-单位、货币、日期和代码语义不属于当前规则能力，必须由调用方或其他 evaluator 负责。
-简单数值不同默认 `reject`；表面形式不同默认 `accept` 加 flag。链式入口里，
+一般单位、货币、日期和代码语义不属于当前规则能力，必须由调用方或其他 evaluator
+负责。可判定的数值不同默认 `reject`；表面形式不同默认 `accept` 加 flag。链式入口里，
 后续规则返回 `accept` 时可以把此前的 `reject` 升成 `review`，但不能直接升回
 `accept`；后续规则返回 `reject` 会把当前 `review` 再打回 `reject`。
 

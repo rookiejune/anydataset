@@ -18,7 +18,7 @@ from anydataset.quality.translation import (
     TranslationQuality,
     TranslationQualityProfile,
 )
-from anydataset.types import Lang, Modality, Role, TextItem, TextView
+from anydataset.types import Lang, Modality, Preset, Role, TextItem, TextView
 
 
 class TranslationQualityTest(unittest.TestCase):
@@ -74,6 +74,28 @@ class TranslationQualityTest(unittest.TestCase):
         predicate = Bicleaner(lambda _source, _target: float("nan"), Lang.EN, Lang.FR)
         with self.assertRaisesRegex(ValueError, "scorer output must be finite"):
             predicate(_text_pair("hello", "bonjour"))
+
+    def test_wmt19_translation_profile_accepts_both_zh_en_directions(self):
+        for source_lang, target_lang in (
+            (Lang.ZH, Lang.EN),
+            (Lang.EN, Lang.ZH),
+        ):
+            with self.subTest(source_lang=source_lang, target_lang=target_lang):
+                predicate = TranslationQuality.from_preset(
+                    Preset.WMT19,
+                    source_lang=source_lang,
+                    target_lang=target_lang,
+                )
+
+                self.assertEqual(predicate.profile.source_lang, source_lang)
+                self.assertEqual(predicate.profile.target_lang, target_lang)
+
+        with self.assertRaisesRegex(ValueError, "zh-en pair"):
+            TranslationQuality.from_preset(
+                Preset.WMT19,
+                source_lang=Lang.EN,
+                target_lang=Lang.FR,
+            )
 
     def test_quality_configuration_is_immutable(self):
         text_profile = TextQualityProfile()
@@ -141,6 +163,125 @@ class TranslationQualityTest(unittest.TestCase):
 
         self.assertEqual(decision.label, QualityLabel.ACCEPT)
         self.assertIn("number_surface_mismatch", decision.metrics["flags"])
+
+    def test_zh_en_numbers_accept_conservative_cross_lingual_equivalence(self):
+        cases = (
+            ("人口达到6.8亿。", "The population reached 680 million."),
+            ("该国有16亿人口。", "The country has 1.6 billion people."),
+            ("投资额为2.7亿元。", "The investment was 270 million yuan."),
+            ("总额为1 000亿美元。", "The total was $100 billion."),
+            ("全球经济产值为70万亿美元。", "The $70-trillion global economy."),
+            ("流入超过1万多亿美元。", "More than $1 trillion flowed in."),
+            ("统计期为2008—2009年。", "The period was 2008-2009."),
+            ("统计期为2008至2009年。", "The period was 2008~2009."),
+            ("这发生在20世纪90年代。", "This happened in the 1990s."),
+            ("会议于2020年11月举行。", "The meeting was held in November 2020."),
+            ("FOMC9月会议。", "The FOMC September meeting."),
+            ("柏林－19年来一直如此。", "BERLIN – This has been true for 19 years."),
+            ("会议于２０２０年１１月举行。", "The meeting was held in November 2020."),
+        )
+
+        for chinese, english in cases:
+            for source, target, source_lang, target_lang in (
+                (chinese, english, Lang.ZH, Lang.EN),
+                (english, chinese, Lang.EN, Lang.ZH),
+            ):
+                with self.subTest(source=source, target=target):
+                    predicate = TranslationQuality(
+                        TranslationQualityProfile(
+                            source_lang=source_lang,
+                            target_lang=target_lang,
+                        )
+                    )
+                    decision = predicate(_text_pair(source, target))
+
+                    self.assertEqual(decision.label, QualityLabel.ACCEPT)
+                    self.assertNotIn("complex_numbers", decision.metrics["flags"])
+                    self.assertNotIn(
+                        "number_value_mismatch",
+                        decision.metrics["flags"],
+                    )
+
+    def test_zh_en_numbers_reject_real_value_mismatches(self):
+        cases = (
+            ("有500多万人。", "There were 500 million people."),
+            ("价值1.5亿美元。", "It was worth $1.5 trillion."),
+            ("价格为77美元。", "The price was $77 billion."),
+            ("总额为700亿美元。", "The total was $700 billion."),
+            ("共有37万人。", "There were 37 million people."),
+            ("投资60亿美元。", "An investment of $60 billion."),
+            ("2020年和2020年各举行一次。", "It was held once in 2020."),
+        )
+
+        for chinese, english in cases:
+            for source, target, source_lang, target_lang in (
+                (chinese, english, Lang.ZH, Lang.EN),
+                (english, chinese, Lang.EN, Lang.ZH),
+            ):
+                with self.subTest(source=source, target=target):
+                    predicate = TranslationQuality(
+                        TranslationQualityProfile(
+                            source_lang=source_lang,
+                            target_lang=target_lang,
+                        )
+                    )
+                    decision = predicate(_text_pair(source, target))
+
+                    self.assertEqual(decision.label, QualityLabel.REJECT)
+                    self.assertIn(
+                        "number_value_mismatch",
+                        decision.metrics["flags"],
+                    )
+
+    def test_zh_en_numbers_keep_unsupported_expressions_conservative(self):
+        predicate = TranslationQuality(
+            TranslationQualityProfile(source_lang=Lang.ZH, target_lang=Lang.EN)
+        )
+        cases = (
+            ("会议于2020年5月举行。", "The meeting may happen in 2020."),
+            ("会议于2020年5月举行。", "May happen in 2020."),
+            ("资源为3兆美元。", "The resources totaled $3 trillion."),
+            ("比例为¾。", "The ratio is 3/4."),
+        )
+
+        for source, target in cases:
+            with self.subTest(source=source, target=target):
+                decision = predicate(_text_pair(source, target))
+
+                self.assertEqual(decision.label, QualityLabel.REJECT)
+                self.assertIn("complex_numbers", decision.metrics["flags"])
+
+    def test_zh_en_numbers_do_not_treat_modal_may_or_nfkc_fraction_as_numbers(self):
+        predicate = TranslationQuality(
+            TranslationQualityProfile(source_lang=Lang.ZH, target_lang=Lang.EN)
+        )
+        cases = (
+            ("这也许有帮助。", "It may help."),
+            (
+                "这最终取决于判断¾这只是多种判断之一。",
+                "It depends on a judgment – one of many judgments.",
+            ),
+        )
+
+        for source, target in cases:
+            with self.subTest(source=source, target=target):
+                decision = predicate(_text_pair(source, target))
+
+                self.assertEqual(decision.label, QualityLabel.ACCEPT)
+                self.assertNotIn(
+                    "number_value_mismatch",
+                    decision.metrics["flags"],
+                )
+
+    def test_cross_lingual_number_equivalence_is_specific_to_zh_en(self):
+        predicate = TranslationQuality(
+            TranslationQualityProfile(source_lang=Lang.ZH, target_lang=Lang.FR)
+        )
+
+        decision = predicate(_text_pair("人口达到6.8亿。", "680 millions."))
+
+        self.assertEqual(decision.label, QualityLabel.REJECT)
+        self.assertIn("complex_numbers", decision.metrics["flags"])
 
     def test_pair_rejects_short_target(self):
         predicate = TranslationQuality(

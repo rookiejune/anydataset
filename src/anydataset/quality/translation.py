@@ -7,8 +7,12 @@ label transitions are provided by anydataset.quality.rules.
 
 from __future__ import annotations
 
+import re
+import unicodedata
+from collections import Counter
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 from functools import cached_property
 
 from .._compat import Self
@@ -21,6 +25,66 @@ from . import _text as text
 from .rules import QualityLabel
 
 Scorer = Callable[[str, str], float]
+
+_SPACE_RE = re.compile(r"\s+")
+_NUMBER_RE = re.compile(
+    r"(?<![A-Za-z0-9])[+-]?(?:\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?)"
+)
+_SCALED_NUMBER_RE = re.compile(
+    r"(?<![A-Za-z0-9])"
+    r"(?P<number>[+-]?(?:\d{1,3}(?:[,\s]\d{3})+|\d+)(?:\.\d+)?)"
+    r"[\s-]*(?P<scale>万多亿|万亿|亿|万|thousand|million|billion|trillion)"
+    r"(?![A-Za-z])",
+    re.IGNORECASE,
+)
+_ZH_CENTURY_DECADE_RE = re.compile(
+    r"(?<![A-Za-z0-9])(?P<century>\d{1,2})\s*世纪\s*"
+    r"(?P<decade>\d{1,2})\s*年代"
+)
+_ZH_MONTH_RE = re.compile(r"(?<!\d)(?P<month>1[0-2]|0?[1-9])\s*月份?")
+_ZH_YEAR_RE = re.compile(r"(?<!\d)\d{1,4}\s*年(?!代)")
+_EN_MONTH_RE = re.compile(
+    r"\b(?:January|February|March|April|May|June|July|August|September|"
+    r"October|November|December)\b"
+)
+_EN_DECADE_RE = re.compile(r"(?<!\d)(?P<year>\d{3,4})s\b", re.IGNORECASE)
+_ZH_UNSUPPORTED_COMPLEX_RE = re.compile(
+    r"\d+(?:[.,]\d+)?\s*(?:世纪|年代|年份?|月份?|日|万多亿|万亿|亿|万|兆|千|百)"
+)
+_EN_UNSUPPORTED_COMPLEX_RE = re.compile(
+    r"(?:\b(?:early|mid|late)\b|\b(?:century|centuries|decade|decades)\b|"
+    r"\d{3,4}s\b)",
+    re.IGNORECASE,
+)
+_UNICODE_FRACTION_RE = re.compile(r"\d+\N{FRACTION SLASH}\d+")
+_ASCII_RANGE_RE = re.compile(
+    r"^[+-]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?"
+    r"(?:-(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?)+$"
+)
+_SCALE_MULTIPLIERS = {
+    "万": Decimal(10_000),
+    "亿": Decimal(100_000_000),
+    "万亿": Decimal(1_000_000_000_000),
+    "万多亿": Decimal(1_000_000_000_000),
+    "thousand": Decimal(1_000),
+    "million": Decimal(1_000_000),
+    "billion": Decimal(1_000_000_000),
+    "trillion": Decimal(1_000_000_000_000),
+}
+_EN_MONTHS = {
+    "January": 1,
+    "February": 2,
+    "March": 3,
+    "April": 4,
+    "May": 5,
+    "June": 6,
+    "July": 7,
+    "August": 8,
+    "September": 9,
+    "October": 10,
+    "November": 11,
+    "December": 12,
+}
 
 
 @dataclass(init=False, unsafe_hash=True)
@@ -103,16 +167,51 @@ class _Metrics:
         return text.length_ratio(self.source.chars, self.target.chars)
 
     @cached_property
-    def number_value_overlap(self) -> float:
-        return text.overlap(self.source.number_values, self.target.number_values)
+    def numbers(self) -> _NumberPair:
+        if {
+            self.source.expected_lang,
+            self.target.expected_lang,
+        } == {Lang.ZH, Lang.EN}:
+            return _zh_en_numbers(self.source, self.target)
+        return _NumberPair(
+            source=text.counts(self.source.number_values),
+            target=text.counts(self.target.number_values),
+            unsupported_complex=(
+                self.source.complex_numbers or self.target.complex_numbers
+            ),
+        )
 
     @cached_property
     def number_surface_overlap(self) -> float:
         return text.overlap(self.source.numbers, self.target.numbers)
 
     @cached_property
-    def complex_numbers(self) -> bool:
-        return self.source.complex_numbers or self.target.complex_numbers
+    def has_numbers(self) -> bool:
+        return bool(
+            self.numbers.source
+            or self.numbers.target
+            or self.source.numbers
+            or self.target.numbers
+        )
+
+    @cached_property
+    def placeholders(self) -> tuple[Counter[str], Counter[str]]:
+        source = self.source.placeholders
+        target = self.target.placeholders
+        if {
+            self.source.expected_lang,
+            self.target.expected_lang,
+        } == {Lang.ZH, Lang.EN}:
+            source = tuple(value for value in source if not _dollar_number(value))
+            target = tuple(value for value in target if not _dollar_number(value))
+        return text.counts(source), text.counts(target)
+
+
+@dataclass(frozen=True)
+class _NumberPair:
+    source: Counter[str]
+    target: Counter[str]
+    unsupported_complex: bool
 
 
 @dataclass(frozen=True)
@@ -219,8 +318,10 @@ class TranslationQuality:
 
         source = _lang("source_lang", source_lang)
         target = _lang("target_lang", target_lang)
-        if source != Lang.ZH or target != Lang.EN:
-            raise ValueError("WMT19 translation quality profile is only defined for zh-en.")
+        if {source, target} != {Lang.ZH, Lang.EN}:
+            raise ValueError(
+                "WMT19 translation quality profile is only defined for the zh-en pair."
+            )
         return cls(TranslationQualityProfile(source_lang=source, target_lang=target))
 
     def __call__(self, sample: Sample) -> FilterDecision:
@@ -292,9 +393,7 @@ def _placeholder_mismatch(
     metrics: _Metrics,
     profile: TranslationQualityProfile,
 ) -> _Decision:
-    return _reject(
-        text.counts(metrics.source.placeholders) != text.counts(metrics.target.placeholders),
-    )
+    return _reject(metrics.placeholders[0] != metrics.placeholders[1])
 
 
 def _html_tag_mismatch(
@@ -310,18 +409,17 @@ def _complex_numbers(
     metrics: _Metrics,
     profile: TranslationQualityProfile,
 ) -> _Decision:
-    return _reject(metrics.complex_numbers)
+    return _reject(metrics.numbers.unsupported_complex)
 
 
 def _number_value_mismatch(
     metrics: _Metrics,
     profile: TranslationQualityProfile,
 ) -> _Decision:
-    has_numbers = len(metrics.source.numbers) > 0 or len(metrics.target.numbers) > 0
     return _reject(
-        has_numbers
-        and not metrics.complex_numbers
-        and metrics.number_value_overlap < 1.0,
+        metrics.has_numbers
+        and not metrics.numbers.unsupported_complex
+        and metrics.numbers.source != metrics.numbers.target,
     )
 
 
@@ -329,12 +427,207 @@ def _number_surface_mismatch(
     metrics: _Metrics,
     profile: TranslationQualityProfile,
 ) -> _Decision:
-    has_numbers = len(metrics.source.numbers) > 0 or len(metrics.target.numbers) > 0
     return _accept(
-        has_numbers
-        and metrics.number_value_overlap == 1.0
+        metrics.has_numbers
+        and not metrics.numbers.unsupported_complex
+        and metrics.numbers.source == metrics.numbers.target
         and metrics.number_surface_overlap < 1.0,
     )
+
+
+def _zh_en_numbers(source: text.Metrics, target: text.Metrics) -> _NumberPair:
+    if source.expected_lang == Lang.ZH:
+        chinese_metrics, english_metrics = source, target
+        source_is_chinese = True
+    else:
+        chinese_metrics, english_metrics = target, source
+        source_is_chinese = False
+
+    chinese = _numeric_text(chinese_metrics.normalized)
+    english = _numeric_text(english_metrics.normalized)
+    months = _zh_months(chinese) & _en_months(english)
+    chinese_values, decades, chinese_unsupported = _zh_number_values(
+        chinese,
+        months,
+    )
+    english_values, english_unsupported = _en_number_values(
+        english,
+        months,
+        decades,
+    )
+    unsupported = (
+        chinese_unsupported
+        or english_unsupported
+        or _unsupported_number_tokens(chinese_metrics)
+        or _unsupported_number_tokens(english_metrics)
+    )
+    if source_is_chinese:
+        return _NumberPair(chinese_values, english_values, unsupported)
+    return _NumberPair(english_values, chinese_values, unsupported)
+
+
+def _zh_number_values(
+    value: str,
+    months: set[int],
+) -> tuple[Counter[str], set[int], bool]:
+    values: list[str] = []
+    value_spans: list[tuple[int, int]] = []
+    supported_spans: list[tuple[int, int]] = []
+    decades: set[int] = set()
+
+    if "世纪" in value and "年代" in value:
+        for match in _ZH_CENTURY_DECADE_RE.finditer(value):
+            century = int(match.group("century"))
+            decade = int(match.group("decade"))
+            if century <= 0 or decade >= 100:
+                continue
+            year = (century - 1) * 100 + decade
+            values.append(str(year))
+            decades.add(year)
+            span = (match.start(), match.end())
+            value_spans.append(span)
+            supported_spans.append(span)
+
+    for match in _SCALED_NUMBER_RE.finditer(value):
+        number = _SPACE_RE.sub("", match.group("number")).replace(",", "")
+        try:
+            scaled = Decimal(number) * _SCALE_MULTIPLIERS[match.group("scale")]
+        except InvalidOperation:
+            continue
+        values.append(_decimal(scaled))
+        span = (match.start(), match.end())
+        value_spans.append(span)
+        supported_spans.append(span)
+
+    if months:
+        for match in _ZH_MONTH_RE.finditer(value):
+            month = int(match.group("month"))
+            if month not in months:
+                continue
+            values.append(str(month))
+            span = (match.start(), match.end())
+            value_spans.append(span)
+            supported_spans.append(span)
+
+    supported_spans.extend(
+        (match.start(), match.end()) for match in _ZH_YEAR_RE.finditer(value)
+    )
+    remaining = _masked(value, value_spans)
+    values.extend(_number(match.group(0)) for match in _NUMBER_RE.finditer(remaining))
+    unsupported = _ZH_UNSUPPORTED_COMPLEX_RE.search(
+        _masked(value, supported_spans)
+    ) is not None
+    return Counter(values), decades, unsupported
+
+
+def _en_number_values(
+    value: str,
+    months: set[int],
+    decades: set[int],
+) -> tuple[Counter[str], bool]:
+    values: list[str] = []
+    value_spans: list[tuple[int, int]] = []
+    supported_spans: list[tuple[int, int]] = []
+
+    for match in _SCALED_NUMBER_RE.finditer(value):
+        number = _SPACE_RE.sub("", match.group("number")).replace(",", "")
+        try:
+            scaled = Decimal(number) * _SCALE_MULTIPLIERS[
+                match.group("scale").lower()
+            ]
+        except InvalidOperation:
+            continue
+        values.append(_decimal(scaled))
+        span = (match.start(), match.end())
+        value_spans.append(span)
+        supported_spans.append(span)
+
+    if months:
+        for match in _EN_MONTH_RE.finditer(value):
+            month = _en_month(value, match)
+            if month is not None and month in months:
+                values.append(str(month))
+
+    if decades:
+        for match in _EN_DECADE_RE.finditer(value):
+            year = int(match.group("year"))
+            if year not in decades:
+                continue
+            values.append(str(year))
+            span = (match.start(), match.end())
+            value_spans.append(span)
+            supported_spans.append(span)
+
+    remaining = _masked(value, value_spans)
+    values.extend(_number(match.group(0)) for match in _NUMBER_RE.finditer(remaining))
+    unsupported = _EN_UNSUPPORTED_COMPLEX_RE.search(
+        _masked(value, supported_spans)
+    ) is not None
+    return Counter(values), unsupported
+
+
+def _numeric_text(value: str) -> str:
+    if "\N{FULLWIDTH HYPHEN-MINUS}" in value:
+        value = value.replace("\N{FULLWIDTH HYPHEN-MINUS}", "\N{EN DASH}")
+    normalized = value if value.isascii() else unicodedata.normalize("NFKC", value)
+    if "\N{FRACTION SLASH}" in normalized:
+        return _UNICODE_FRACTION_RE.sub(" ", normalized)
+    return normalized
+
+
+def _zh_months(value: str) -> set[int]:
+    return {int(match.group("month")) for match in _ZH_MONTH_RE.finditer(value)}
+
+
+def _en_months(value: str) -> set[int]:
+    return {
+        month
+        for match in _EN_MONTH_RE.finditer(value)
+        if (month := _en_month(value, match)) is not None
+    }
+
+
+def _en_month(value: str, match: re.Match[str]) -> int | None:
+    name = match.group(0)
+    if name != "May":
+        return _EN_MONTHS[name]
+    prefix = value[: match.start()].rstrip()
+    suffix = value[match.end() :].lstrip(" ,")
+    sentence_initial = not prefix or prefix[-1] in ".!?"
+    if sentence_initial and (not suffix or not suffix[0].isdecimal()):
+        return None
+    return _EN_MONTHS[name]
+
+
+def _number(value: str) -> str:
+    value = value.replace(",", "")
+    try:
+        return _decimal(Decimal(value))
+    except InvalidOperation:
+        return value
+
+
+def _decimal(value: Decimal) -> str:
+    return format(value.normalize(), "f")
+
+
+def _masked(value: str, spans: list[tuple[int, int]]) -> str:
+    masked = list(value)
+    for start, end in spans:
+        masked[start:end] = " " * (end - start)
+    return "".join(masked)
+
+
+def _unsupported_number_tokens(metrics: text.Metrics) -> bool:
+    return any(
+        text.normalized_number(token) is None
+        and _ASCII_RANGE_RE.fullmatch(token) is None
+        for token in metrics.numbers
+    )
+
+
+def _dollar_number(value: str) -> bool:
+    return value.startswith("$") and value[1:].isdecimal()
 
 
 def _accept(matched: bool) -> _Decision:
