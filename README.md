@@ -976,6 +976,28 @@ contract when it generates a view: each id in column `k` must satisfy
 `0 <= id < codebook_sizes[k]`. Store manifests do not carry `codebook_sizes`,
 so directly loaded store views are not range-checked by readers or collation.
 
+`AudioTokenizerProvider` is the directional alternative for backends that only
+implement waveform-to-codes tokenization. It consumes AnyTrain's
+`AudioTokenizer` capability, calls only `tokenize(...)`, and applies the same
+`[frame, codebook]` shape and per-codebook range checks without requiring a
+decoder. Its declared `spec.view` must exactly match the provider output view,
+so codes cannot be silently stored under another backend's label. The built-in
+`GLM4Provider` loads the `glm4` tokenizer capability and materializes raw
+`AudioView.GLM4` values with shape `[frame, 1]`:
+
+```python
+from anydataset.provider import GLM4Provider
+
+def provider_factory(device: str):
+    return GLM4Provider(device=device)
+```
+
+Source files/API/model contracts, the fixed weights revision, and deterministic
+GLM4 tokenization are owned and validated by AnyTrain. The source checkout or
+fork is not tied to a Git commit. `ViewMaterializer` resume fragments and
+snapshots are unchanged, so an in-progress producer can continue publishing
+completed GLM4 prefixes while downstream training reads an explicit snapshot.
+
 `ModalityMaterializer` adds a missing modality under the same role. The
 provider declares its output view; the materializer infers the output modality
 from that view and uses the role's single remaining modality as input. It raises

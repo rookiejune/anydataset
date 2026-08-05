@@ -4,14 +4,17 @@ from importlib import import_module
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from .codec import CodecProvider
+    from .codec import AudioTokenizerProvider, CodecProvider
+    from .glm4 import GLM4Provider
     from .longcat import LongCatProvider
     from .moss_tts import MossTTSProvider
     from .qwen_tts import QwenTTSProvider
     from .whisper import WhisperASRProvider
 
 __all__ = [
+    "AudioTokenizerProvider",
     "CodecProvider",
+    "GLM4Provider",
     "LongCatProvider",
     "MossTTSProvider",
     "QwenTTSProvider",
@@ -19,7 +22,9 @@ __all__ = [
 ]
 
 _PROVIDER_MODULES = {
+    "AudioTokenizerProvider": ".codec",
     "CodecProvider": ".codec",
+    "GLM4Provider": ".glm4",
     "LongCatProvider": ".longcat",
     "MossTTSProvider": ".moss_tts",
     "QwenTTSProvider": ".qwen_tts",

@@ -110,6 +110,7 @@ class AudioView(StrEnum):
     DAC = auto()
     STABLE = auto()
     UNICODEC = auto()
+    GLM4 = auto()
     SPEAKERS = auto()
     SPEAKER_LENGTHS = auto()
 

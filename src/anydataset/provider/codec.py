@@ -1,8 +1,9 @@
-"""Materialize audio codec views through the shared anytrain contract.
+"""Materialize frame-code audio views through shared AnyTrain contracts.
 
-The provider accepts waveform or file views and writes complete ordered codec
-ids. It owns batching and frame trimming, but does not interpret codebook
-semantics or codec-specific configuration.
+The providers accept waveform or file views and write complete ordered code
+ids. ``AudioTokenizerProvider`` needs only the waveform-to-codes capability;
+``CodecProvider`` retains a complete codec for callers that also decode. Both
+own batching and frame trimming without interpreting codebook semantics.
 """
 
 from __future__ import annotations
@@ -18,23 +19,24 @@ from ..types.item import AudioView, Modality, Role
 from .abc import AudioProvider
 
 if TYPE_CHECKING:
-    from anytrain.codec import FrameCodec
+    from anytrain.codec import AudioTokenizer, FrameCodec
 
 
-class CodecProvider(nn.Module, AudioProvider):
-    def __init__(self, codec: FrameCodec, output: AudioView) -> None:
+class _FrameCodeProvider(nn.Module, AudioProvider):
+    def __init__(self, output: AudioView) -> None:
         super().__init__()
-        self.codec = codec
         self.output = output
-        if isinstance(codec, nn.Module):
-            codec.eval()
+
+    @property
+    def codebook_sizes(self) -> Sequence[int]:
+        raise NotImplementedError
 
     @torch.inference_mode()
     def forward(self, views: Mapping[AudioView, Any]) -> torch.Tensor:
         waveform, sample_rate = self._audio_batch(views)
         codes = _codes(
-            self.codec.encode(waveform, sample_rate),
-            self.codec.codebook_sizes,
+            self._tokenize(waveform, sample_rate),
+            self.codebook_sizes,
         )
         return self._tensor(codes[0])
 
@@ -66,8 +68,8 @@ class CodecProvider(nn.Module, AudioProvider):
         for length, indexes in self._length_groups(lengths):
             clipped = waveform[list(indexes), ..., :length].contiguous()
             codes = _codes(
-                self.codec.encode(clipped, sample_rate),
-                self.codec.codebook_sizes,
+                self._tokenize(clipped, sample_rate),
+                self.codebook_sizes,
             )
             if codes.shape[0] != len(indexes):
                 raise ValueError(
@@ -92,6 +94,61 @@ class CodecProvider(nn.Module, AudioProvider):
         if waveform.ndim == 1:
             waveform = waveform.unsqueeze(0)
         return waveform.unsqueeze(0), sample_rate
+
+    def _tokenize(self, audio: torch.Tensor, sample_rate: int) -> object:
+        raise NotImplementedError
+
+
+class AudioTokenizerProvider(_FrameCodeProvider):
+    """Materialize one frame-code view from a tokenizer-only capability."""
+
+    def __init__(
+        self,
+        tokenizer: AudioTokenizer[object],
+        output: AudioView,
+    ) -> None:
+        spec = tokenizer.spec
+        if spec.view != output.value:
+            raise ValueError(
+                f"Audio tokenizer spec view {spec.view!r} does not match "
+                f"provider output {output.value!r}."
+            )
+        codebook_sizes = spec.frame_codebook_sizes
+        if not codebook_sizes:
+            raise ValueError(
+                "AudioTokenizerProvider requires a frame-code tokenizer spec."
+            )
+        super().__init__(output)
+        self._codebook_sizes = tuple(codebook_sizes)
+        self.tokenizer = tokenizer
+        if isinstance(tokenizer, nn.Module):
+            tokenizer.eval()
+        if isinstance(tokenizer.backend, nn.Module):
+            tokenizer.backend.eval()
+
+    def _tokenize(self, audio: torch.Tensor, sample_rate: int) -> object:
+        return self.tokenizer.tokenize(audio, sample_rate)
+
+    @property
+    def codebook_sizes(self) -> Sequence[int]:
+        return self._codebook_sizes
+
+
+class CodecProvider(_FrameCodeProvider):
+    """Materialize frame codes while retaining a complete codec for decoding."""
+
+    def __init__(self, codec: FrameCodec, output: AudioView) -> None:
+        super().__init__(output)
+        self.codec = codec
+        if isinstance(codec, nn.Module):
+            codec.eval()
+
+    def _tokenize(self, audio: torch.Tensor, sample_rate: int) -> object:
+        return self.codec.encode(audio, sample_rate)
+
+    @property
+    def codebook_sizes(self) -> Sequence[int]:
+        return self.codec.codebook_sizes
 
 
 def _audio_refs(batch: Batch) -> tuple[tuple[Role, Modality], ...]:
@@ -122,7 +179,7 @@ def _single_sample_rate(sample_rates: torch.Tensor) -> int:
     return int(first)
 
 
-def _codes(codes: torch.Tensor, codebook_sizes: Sequence[int]) -> torch.Tensor:
+def _codes(codes: object, codebook_sizes: Sequence[int]) -> torch.Tensor:
     if not isinstance(codes, torch.Tensor):
         raise TypeError("Codec encode must return a Tensor.")
     if codes.ndim != 3:
@@ -152,4 +209,4 @@ def _codes(codes: torch.Tensor, codebook_sizes: Sequence[int]) -> torch.Tensor:
     return codes
 
 
-__all__ = ["CodecProvider"]
+__all__ = ["AudioTokenizerProvider", "CodecProvider"]

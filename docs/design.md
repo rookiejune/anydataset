@@ -119,16 +119,22 @@ iterable 路径不做该截断。
 base store -> provider -> standalone store -> schema selects derived view
 ```
 
-例如 LongCat codes 是 `AudioView.LONGCAT`。Codec view 的单样本值统一为整数 Tensor
+例如 LongCat codes 是 `AudioView.LONGCAT`。Frame codec view 的单样本值统一为整数 Tensor
 `[frame, codebook]`，collate 后为 `[batch, frame, codebook]`，mask 为
 `[batch, frame]`。K 个码本必须完整、有序保存；数据层不区分 semantic / acoustic
-codebook。经 `CodecProvider` 生成时，第 k 列的每个 id 必须满足
+codebook。经 `CodecProvider` 或 `AudioTokenizerProvider` 生成时，第 k 列的每个 id 必须满足
 `0 <= id < codebook_sizes[k]`；provider 在输出设备上逐码本检查该值域，越界时在
 写入前显式报错。store manifest 不保存 `codebook_sizes`，因此直接读取 store 时不做该
 值域校验；已有 view 进入 collate 时也只检查通用 tensor 契约。具体码本语义属于 codec
 或下游任务。旧的
 `{"semantic_codes": ..., "acoustic_codes": ...}` mapping 不属于当前 codec view
 契约，进入 collate 时应显式报错。
+
+`AudioTokenizerProvider` 只依赖 AnyTrain 的 `AudioTokenizer` capability，并只执行
+waveform -> frame codes；它不要求 backend 暴露 decode，并要求 `spec.view` 与 provider
+output view 精确一致，避免把 codes 错标成其他 backend view。`GLM4Provider` 是该方向性
+边界的内置入口，输出 `AudioView.GLM4` 的 `[frame, 1]` raw ids。需要重建音频的调用方仍
+使用持有完整 frame codec 的 `CodecProvider`，不能从 tokenizer-only provider 推断 decoder。
 
 Preset 不负责加载 codec，也不应该把 LongCat 逻辑塞进 raw row parse。Preset 只需要
 产出可被 provider 消费的音频 view，例如 `AudioView.WAVEFORM` 或 `AudioView.FILE`。

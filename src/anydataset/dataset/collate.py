@@ -197,6 +197,7 @@ def _is_codec_field(field: FieldRef) -> bool:
             item.AudioView.DAC,
             item.AudioView.STABLE,
             item.AudioView.UNICODEC,
+            item.AudioView.GLM4,
         }
     )
 

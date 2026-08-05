@@ -28,6 +28,7 @@ _FRAME_CODEC_VIEWS = frozenset(
         AudioView.DAC,
         AudioView.STABLE,
         AudioView.UNICODEC,
+        AudioView.GLM4,
     }
 )
 

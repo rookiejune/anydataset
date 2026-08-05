@@ -312,7 +312,9 @@ def test_provider_public_api_boundary() -> None:
     _assert_public_all(
         provider,
         [
+            "AudioTokenizerProvider",
             "CodecProvider",
+            "GLM4Provider",
             "LongCatProvider",
             "MossTTSProvider",
             "QwenTTSProvider",
