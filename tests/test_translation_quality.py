@@ -172,6 +172,7 @@ class TranslationQualityTest(unittest.TestCase):
             ("总额为1 000亿美元。", "The total was $100 billion."),
             ("全球经济产值为70万亿美元。", "The $70-trillion global economy."),
             ("流入超过1万多亿美元。", "More than $1 trillion flowed in."),
+            ("市值为70 Trillion美元。", "The market value was $70 trillion."),
             ("统计期为2008—2009年。", "The period was 2008-2009."),
             ("统计期为2008至2009年。", "The period was 2008~2009."),
             ("这发生在20世纪90年代。", "This happened in the 1990s."),

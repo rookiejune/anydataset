@@ -491,7 +491,9 @@ def _zh_number_values(
     for match in _SCALED_NUMBER_RE.finditer(value):
         number = _SPACE_RE.sub("", match.group("number")).replace(",", "")
         try:
-            scaled = Decimal(number) * _SCALE_MULTIPLIERS[match.group("scale")]
+            scaled = Decimal(number) * _SCALE_MULTIPLIERS[
+                match.group("scale").lower()
+            ]
         except InvalidOperation:
             continue
         values.append(_decimal(scaled))
