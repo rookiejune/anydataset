@@ -37,6 +37,7 @@ class SpeechQualityProfile:
     min_utmos: float = 2.8
     max_wer: float | None = None
     min_chrf: float = 50.0
+    max_duration_seconds: float | None = None
     max_seconds_per_text_unit: float | None = 4.0
     min_peak_amplitude: float | None = 0.05
     min_bleu: float | None = None
@@ -46,6 +47,11 @@ class SpeechQualityProfile:
         if self.max_wer is not None:
             _finite_threshold(self.max_wer, name="max_wer")
         _finite_threshold(self.min_chrf, name="min_chrf")
+        if self.max_duration_seconds is not None:
+            _finite_threshold(
+                self.max_duration_seconds,
+                name="max_duration_seconds",
+            )
         if self.max_seconds_per_text_unit is not None:
             _finite_threshold(
                 self.max_seconds_per_text_unit,
@@ -458,6 +464,11 @@ def _flags(metrics: Mapping[str, float], profile: SpeechQualityProfile) -> list[
         flags.append("wer_high")
     if metrics["chrf"] < profile.min_chrf:
         flags.append("chrf_low")
+    if (
+        profile.max_duration_seconds is not None
+        and metrics["duration_seconds"] > profile.max_duration_seconds
+    ):
+        flags.append("duration_high")
     if (
         profile.max_seconds_per_text_unit is not None
         and metrics["seconds_per_text_unit"] > profile.max_seconds_per_text_unit

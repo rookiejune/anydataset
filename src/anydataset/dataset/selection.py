@@ -4,6 +4,7 @@ from collections.abc import Iterator, Sequence
 from typing import Any, Callable, cast
 
 from ..types.item import Sample
+from ._selection import selected_index_groups
 from .abc import MapStyleABC
 
 
@@ -51,23 +52,15 @@ class IndexSelection(MapStyleABC):
         num_replicas: int,
         rank: int,
     ) -> Iterator[Sequence[int]]:
-        positions = {index: position for position, index in enumerate(self._indices)}
-        selected_position = 0
-        groups = self.dataset._shuffle(
+        yield from selected_index_groups(
+            self.dataset,
+            self._indices,
             shuffle=shuffle,
             seed=seed,
             epoch=epoch,
-            num_replicas=1,
-            rank=0,
+            num_replicas=num_replicas,
+            rank=rank,
         )
-        for group in groups:
-            selected = [positions[index] for index in group if index in positions]
-            if not selected:
-                continue
-            offset = (rank - selected_position) % num_replicas
-            selected_position += len(selected)
-            if offset < len(selected):
-                yield selected[offset::num_replicas]
 
 
 def _indices(values: Sequence[int], length: int) -> tuple[int, ...]:

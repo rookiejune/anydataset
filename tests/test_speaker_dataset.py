@@ -473,7 +473,7 @@ class SpeakerAudioGridTest(unittest.TestCase):
                 AudioView.BICODEC,
                 {
                     "semantic": torch.tensor([[1], [2]]),
-                    "acoustic": torch.tensor([[10], [11]]),
+                    "global": torch.tensor([[10], [11]]),
                 },
             ),
             _flat_view_sample(
@@ -483,7 +483,7 @@ class SpeakerAudioGridTest(unittest.TestCase):
                 AudioView.BICODEC,
                 {
                     "semantic": torch.tensor([[3]]),
-                    "acoustic": torch.tensor([[12], [13]]),
+                    "global": torch.tensor([[12], [13]]),
                 },
             ),
         ]
@@ -503,11 +503,29 @@ class SpeakerAudioGridTest(unittest.TestCase):
         )
         self.assertTrue(
             torch.equal(
-                values["acoustic"],
+                values["global"],
                 torch.tensor([[[[10], [11]], [[12], [13]]]]),
             )
         )
         self.assertTrue(torch.equal(block.lengths, torch.tensor([[2, 1]])))
+
+    def test_bicodec_view_rejects_legacy_acoustic_key(self):
+        cells = [
+            _flat_view_sample(
+                "hello",
+                "Vivian",
+                0,
+                AudioView.BICODEC,
+                {
+                    "semantic": torch.tensor([[1]]),
+                    "acoustic": torch.tensor([[10]]),
+                },
+            )
+        ]
+        grid = SpeakerAudioGrid(cells, ("Vivian",))
+
+        with self.assertRaisesRegex(ValueError, "semantic.*global"):
+            grid.select().load(view=AudioView.BICODEC)
 
     def test_multiple_views_require_explicit_selection(self):
         cells = _speaker_grid_cells()

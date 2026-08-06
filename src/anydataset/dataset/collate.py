@@ -218,9 +218,9 @@ def _collate_bicodec(
     for value in values:
         if not isinstance(value, Mapping):
             raise TypeError(f"BiCodec view values must be mappings for {field!r}.")
-        if set(value) != {"semantic", "acoustic"}:
+        if set(value) != {"semantic", "global"}:
             raise ValueError(
-                f"BiCodec view values must contain semantic and acoustic for {field!r}."
+                f"BiCodec view values must contain semantic and global for {field!r}."
             )
         mappings.append(value)
 
@@ -228,22 +228,31 @@ def _collate_bicodec(
         [value["semantic"] for value in mappings],
         field,
     )
-    acoustic_values = [value["acoustic"] for value in mappings]
-    if any(not isinstance(value, torch.Tensor) for value in acoustic_values):
-        raise TypeError(f"BiCodec acoustic values must be tensors for {field!r}.")
-    acoustics = cast(list[torch.Tensor], acoustic_values)
-    first = acoustics[0]
-    if first.ndim != 2 or any(value.shape != first.shape for value in acoustics[1:]):
+    global_values = [value["global"] for value in mappings]
+    if any(not isinstance(value, torch.Tensor) for value in global_values):
+        raise TypeError(f"BiCodec global values must be tensors for {field!r}.")
+    globals_ = cast(list[torch.Tensor], global_values)
+    first = globals_[0]
+    if first.ndim != 2 or any(value.shape != first.shape for value in globals_[1:]):
         raise ValueError(
-            f"BiCodec acoustic values must share one [unit, codebook] shape for {field!r}."
+            f"BiCodec global values must share one [unit, codebook] shape for {field!r}."
         )
-    if any(value.dtype != first.dtype for value in acoustics[1:]):
-        raise TypeError(f"BiCodec acoustic values must share one dtype for {field!r}.")
-    if any(value.device != first.device for value in acoustics[1:]):
-        raise ValueError(f"BiCodec acoustic values must share one device for {field!r}.")
+    if first.shape[0] == 0 or first.shape[1] == 0:
+        raise ValueError(f"BiCodec global values must not be empty for {field!r}.")
+    if any(
+        value.dtype == torch.bool
+        or value.is_floating_point()
+        or value.is_complex()
+        for value in globals_
+    ):
+        raise TypeError(f"BiCodec global values must contain integer ids for {field!r}.")
+    if any(value.dtype != first.dtype for value in globals_[1:]):
+        raise TypeError(f"BiCodec global values must share one dtype for {field!r}.")
+    if any(value.device != first.device for value in globals_[1:]):
+        raise ValueError(f"BiCodec global values must share one device for {field!r}.")
     return {
         "semantic": semantic,
-        "acoustic": torch.stack(acoustics),
+        "global": torch.stack(globals_),
     }, mask
 
 

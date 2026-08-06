@@ -9,6 +9,7 @@ from typing import Any
 
 from typing_extensions import Unpack
 
+from ..dataset._selection import selected_index_groups
 from ..dataset.abc import AnyDataset, MapStyleABC
 from ..store.reader import StoreDataset
 from ..types import Spec
@@ -533,6 +534,28 @@ class FilteredDataset(MapStyleABC):
 
     def __getitem__(self, index: int) -> Sample:
         return filter_universe(self.base)[self._indices[index]]
+
+    def cost_row(self, index: int) -> Any:
+        return filter_universe(self.base).cost_row(self._indices[index])
+
+    def _shuffle(
+        self,
+        *,
+        shuffle: bool,
+        seed: int,
+        epoch: int,
+        num_replicas: int,
+        rank: int,
+    ) -> Iterator[Sequence[int]]:
+        yield from selected_index_groups(
+            filter_universe(self.base),
+            self._indices,
+            shuffle=shuffle,
+            seed=seed,
+            epoch=epoch,
+            num_replicas=num_replicas,
+            rank=rank,
+        )
 
 
 @dataclass(frozen=True)

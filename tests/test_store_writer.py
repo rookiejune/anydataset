@@ -290,6 +290,36 @@ class DatasetWriterTest(unittest.TestCase):
                 ]
             self.assertIsNone(value)
 
+    def test_writer_safely_round_trips_bicodec_semantic_and_global_view(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output = Path(tmpdir) / "dataset"
+            semantic = torch.tensor([[1], [2]])
+            global_codes = torch.tensor([[10], [11]])
+            sample = {
+                (Role.DEFAULT, Modality.AUDIO): AudioItem(
+                    views={
+                        AudioView.BICODEC: {
+                            "semantic": semantic,
+                            "global": global_codes,
+                        }
+                    }
+                )
+            }
+
+            DatasetWriter(output, dataset_id="bicodec").write([sample])
+
+            with read_store_dataset(
+                output,
+                unsafe_pickle_payloads=False,
+            ) as dataset:
+                value = dataset[0][Role.DEFAULT, Modality.AUDIO].views[
+                    AudioView.BICODEC
+                ]
+
+            self.assertEqual(set(value), {"semantic", "global"})
+            self.assertTrue(torch.equal(value["semantic"], semantic))
+            self.assertTrue(torch.equal(value["global"], global_codes))
+
     def test_writer_rejects_sample_without_views(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             output = Path(tmpdir) / "dataset"

@@ -20,6 +20,7 @@ from .materialize.materializer import (
     SampleMaterializer,
     ViewMaterializer,
 )
+from .indexes import rebuild_store_payload_indexes
 from .migration import migrate_store
 from .payload.files import StoreFilesInUseError, cleanup_store_files, lease_store_files
 from .payload.integrity import validate_store_payloads, validate_store_view_payloads
@@ -44,6 +45,7 @@ __all__ = [
     "ModalityProvider",
     "ModalityTransform",
     "Provider",
+    "rebuild_store_payload_indexes",
     "SampleMaterializer",
     "SampleProvider",
     "validate_store_payloads",

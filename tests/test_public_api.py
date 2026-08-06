@@ -283,6 +283,7 @@ def test_store_public_api_boundary() -> None:
             "ModalityProvider",
             "ModalityTransform",
             "Provider",
+            "rebuild_store_payload_indexes",
             "SampleMaterializer",
             "SampleProvider",
             "validate_store_payloads",

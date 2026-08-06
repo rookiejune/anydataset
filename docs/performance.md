@@ -79,10 +79,12 @@
   Parquet row group，预计算每个文件的 row-group stop，并以 LRU 复用已打开的
   `ParquetFile`；动态 batch shuffle 直接按 row group 生成有界 index group，避免 rank 和
   DataLoader worker 重复解析全部 CSV，也不构造全数据集 Python index list。
-- cost-aware planner 接受稳定 cost sequence 或常量 cost，并以 bounded lookahead 流式
-  生成 batch；候选删除和 batch cost 更新不再随全量 pending list 或当前 batch size
-  重复放大。DDP 每 128 个 plan 通过 tensor collective 同步 plan count，只在最终不完整
-  窗口裁剪 rank-local 尾部。
+- cost-aware planner 接受稳定 cost sequence、callable metadata cost 或单位 cost，并以
+  bounded lookahead 流式生成 batch；候选删除和 batch cost 更新不再随全量 pending list
+  或当前 batch size 重复放大。callable cost 可显式按全局 index 顺序一次物化，以顺序
+  manifest 扫描替代 shuffle 后的随机 row-group 读取。DDP 默认在首个 batch 前完整生成
+  rank-local plans，仅通过一次 tensor collective 同步 plan count，并裁剪 rank-local
+  最终尾部；首个 batch 后不再进入 planner collective。
 - part/fragment commit 不再常驻保存 `item ref -> sample_index array`；提交时先写
   ordered sample manifest，再按 view 流式扫描 sample manifest 做覆盖校验。
 - 大量 part/fragment 的 manifest 使用固定 fan-in 的分层归并，打开的 parquet 文件数不再
@@ -131,9 +133,9 @@
 | 入口 | 当前默认值 | 默认值定位 | 生产调优入口 |
 | --- | --- | --- | --- |
 | `Runtime()` | reader/writer 的 `auto` 始终解析为 spawn；writer 默认 thread backend | 不让平台或 server 拓扑静默改变进程语义，避免继承设备状态 | 验证目标平台和设备边界后可显式覆盖 reader/writer start method；只有明确需要跨进程写入时才改 writer backend |
-| `DatasetWriter` | `num_shards=1`、`num_workers=0`、`prefetch_factor=None` | 默认串行写，支持任意 iterable，避免默认要求 dataset factory 可 pickle | 大数据集显式传 `dataset_factory`，按数据源和存储调 `num_shards`、`num_workers`、`prefetch_factor` |
+| `DatasetWriter` | `num_shards=1`、`num_workers=0`、`prefetch_factor=None`、`max_shard_bytes=None` | 默认串行写，支持任意 iterable，避免默认要求 dataset factory 可 pickle；不猜物理容量上限 | 大数据集显式传 `dataset_factory`，按数据源和存储调 `num_shards`、`num_workers`、`prefetch_factor`、`max_shard_samples` 和 `max_shard_bytes` |
 | `FilterRule.apply` | `device="auto"`、`batch_size=1`、`num_workers=0`、`prefetch_factor=None`、`commit_samples=100_000`、`write_workers=1` | 兼容只实现逐样本 `__call__` 的 predicate，并用后台 writer 重叠 partition cache 落盘 | predicate 支持 `call_batch` 时显式增大 `batch_size`；CPU decode 或特征读取重时调 `num_workers`/`prefetch_factor`；落盘慢时调 `write_workers`/`write_prefetch` |
-| `ViewMaterializer` / `ModalityMaterializer` | `batch_size=1`、`num_workers=0`、`prefetch_factor=None`、`commit_samples=max(batch_size, 1024)`、`write_workers=1` | 默认单样本 provider 可运行，以有界 checkpoint 内存让 provider 执行与落盘重叠；最终按 `max_shard_samples` 流式 repack | GPU/provider 生产任务在 workflow/job wrapper 中显式调 `batch_size`、`num_workers`、`prefetch_factor`、`write_workers`、`write_prefetch`、`commit_samples`、`max_shard_samples` 和 `devices` |
+| `ViewMaterializer` / `ModalityMaterializer` | `batch_size=1`、`num_workers=0`、`prefetch_factor=None`、`commit_samples=max(batch_size, 1024)`、`write_workers=1`、`max_shard_bytes=None` | 默认单样本 provider 可运行，以有界 checkpoint 内存让 provider 执行与落盘重叠；最终按 sample/byte shard 上限流式 repack | GPU/provider 生产任务在 workflow/job wrapper 中显式调 `batch_size`、`num_workers`、`prefetch_factor`、`write_workers`、`write_prefetch`、`commit_samples`、`max_shard_samples`、`max_shard_bytes` 和 `devices` |
 | `AnyDataset.from_store(...)` | `views=None` 读取完整 store 语义 | 默认保留数据集语义，不猜训练只需要哪些 view | 训练、过滤或物化只需要部分 payload 时显式传 `views=...`，减少 manifest 和 payload 读取 |
 
 如果某个 workflow 已经有稳定 benchmark，例如固定 A100、固定 provider、固定 store 后端，

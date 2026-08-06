@@ -949,17 +949,17 @@ def _codec(value: object, view: AudioView) -> torch.Tensor:
     return value
 
 
-def _semantic_acoustic(value: object) -> tuple[torch.Tensor, torch.Tensor]:
+def _semantic_global(value: object) -> tuple[torch.Tensor, torch.Tensor]:
     if not isinstance(value, Mapping):
-        raise TypeError("AudioView.BICODEC must be a semantic/acoustic mapping.")
+        raise TypeError("AudioView.BICODEC must be a semantic/global mapping.")
     fields = cast(Mapping[object, object], value)
-    if set(fields) != {"semantic", "acoustic"}:
+    if set(fields) != {"semantic", "global"}:
         raise ValueError(
-            "AudioView.BICODEC must contain exactly 'semantic' and 'acoustic'."
+            "AudioView.BICODEC must contain exactly 'semantic' and 'global'."
         )
     return (
         _codec(fields["semantic"], AudioView.BICODEC),
-        _codec(fields["acoustic"], AudioView.BICODEC),
+        _codec(fields["global"], AudioView.BICODEC),
     )
 
 
@@ -980,17 +980,17 @@ def _collate_audio_view(
     if view in _FRAME_CODEC_VIEWS:
         return (*_stack_unit_sequences(tuple(_codec(item.views.get(view), view) for item in items)), None)
     if view is AudioView.BICODEC:
-        values = tuple(_semantic_acoustic(item.views.get(view)) for item in items)
+        values = tuple(_semantic_global(item.views.get(view)) for item in items)
         semantics, lengths = _stack_unit_sequences(
             tuple(semantic for semantic, _ in values)
         )
-        acoustics = tuple(acoustic for _, acoustic in values)
-        first_shape = tuple(acoustics[0].shape)
-        if any(tuple(value.shape) != first_shape for value in acoustics[1:]):
-            raise ValueError("AudioView.BICODEC acoustic units must share one fixed shape.")
+        globals_ = tuple(global_codes for _, global_codes in values)
+        first_shape = tuple(globals_[0].shape)
+        if any(tuple(value.shape) != first_shape for value in globals_[1:]):
+            raise ValueError("AudioView.BICODEC global units must share one fixed shape.")
         return {
             "semantic": semantics,
-            "acoustic": torch.stack(acoustics),
+            "global": torch.stack(globals_),
         }, lengths, None
     raise ValueError(f"unsupported speaker grid audio view: {view!r}.")
 
@@ -1036,38 +1036,38 @@ def _block_value(
             )
         limit = tensor.shape[2]
     elif view is AudioView.BICODEC:
-        semantic, acoustic = _semantic_acoustic_block(value, shape)
+        semantic, global_codes = _semantic_global_block(value, shape)
         limit = semantic.shape[2]
-        if tuple(acoustic.shape[:2]) != shape:
-            raise ValueError("block acoustic units must preserve text and speaker axes.")
+        if tuple(global_codes.shape[:2]) != shape:
+            raise ValueError("block global units must preserve text and speaker axes.")
     else:
         raise ValueError(f"unsupported speaker grid audio view: {view!r}.")
     if bool(torch.any(lengths > limit).item()):
         raise ValueError("lengths must not exceed the selected audio view unit axis.")
 
 
-def _semantic_acoustic_block(
+def _semantic_global_block(
     value: object,
     shape: tuple[int, int],
 ) -> tuple[torch.Tensor, torch.Tensor]:
     if not isinstance(value, Mapping):
-        raise TypeError("AudioView.BICODEC block must be a semantic/acoustic mapping.")
+        raise TypeError("AudioView.BICODEC block must be a semantic/global mapping.")
     fields = cast(Mapping[object, object], value)
-    if set(fields) != {"semantic", "acoustic"}:
+    if set(fields) != {"semantic", "global"}:
         raise ValueError(
-            "AudioView.BICODEC block must contain exactly 'semantic' and 'acoustic'."
+            "AudioView.BICODEC block must contain exactly 'semantic' and 'global'."
         )
     semantic = fields["semantic"]
-    acoustic = fields["acoustic"]
-    if not isinstance(semantic, torch.Tensor) or not isinstance(acoustic, torch.Tensor):
+    global_codes = fields["global"]
+    if not isinstance(semantic, torch.Tensor) or not isinstance(global_codes, torch.Tensor):
         raise TypeError("AudioView.BICODEC block values must be Tensors.")
-    if semantic.ndim != 4 or acoustic.ndim != 4:
+    if semantic.ndim != 4 or global_codes.ndim != 4:
         raise ValueError(
             "AudioView.BICODEC block values must have [text, speaker, unit, codebook] shape."
         )
     if tuple(semantic.shape[:2]) != shape:
         raise ValueError("block semantic units must preserve text and speaker axes.")
-    return semantic, acoustic
+    return semantic, global_codes
 
 
 def _stack_waveforms(waveforms: Sequence[torch.Tensor]) -> torch.Tensor:

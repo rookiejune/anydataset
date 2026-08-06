@@ -184,6 +184,36 @@ class SpeechQualityTest(unittest.TestCase):
         self.assertEqual(decision.label, QualityLabel.REJECT)
         self.assertEqual(decision.metrics["flags"], ["default_bleu_low"])
 
+    def test_rejects_above_absolute_duration_when_threshold_is_enabled(self):
+        predicate = SpeechQuality(
+            profile=SpeechQualityProfile(
+                max_duration_seconds=0.5,
+                max_seconds_per_text_unit=None,
+            ),
+            evaluator=FakeSpeechEvaluator(
+                [
+                    {"utmos": 4.0, "wer": 0.1, "chrf": 80.0, "bleu": 70.0},
+                ]
+            ),
+        )
+
+        decision = predicate(_sample(torch.ones(1, 16000), 16000, "hello"))
+
+        self.assertEqual(decision.label, QualityLabel.REJECT)
+        self.assertEqual(decision.metrics["flags"], ["default_duration_high"])
+        self.assertEqual(decision.metrics["items"][0]["flags"], ["duration_high"])
+
+    def test_rejects_invalid_absolute_duration_threshold(self):
+        for value, error in (
+            (True, TypeError),
+            ("1.0", TypeError),
+            (float("inf"), ValueError),
+            (float("nan"), ValueError),
+        ):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(error, "max_duration_seconds"):
+                    SpeechQualityProfile(max_duration_seconds=value)  # type: ignore[arg-type]
+
     def test_rejects_long_audio_per_text_unit_and_low_peak(self):
         predicate = SpeechQuality(
             evaluator=FakeSpeechEvaluator(

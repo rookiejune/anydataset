@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import gc
+import io
 import multiprocessing
 import os
 import pickle
@@ -9,20 +10,29 @@ import sys
 import tarfile
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from io import BytesIO
 from pathlib import Path
 from unittest import mock
 
 import torch
 
+from anydataset._io.files import stat_fingerprint
 from anydataset.store import (
     DatasetWriter,
     migrate_store,
+    rebuild_store_payload_indexes,
 )
+from anydataset.store.maintenance import main as maintenance_main
 from anydataset.store.jsonio import read_json, write_json
 from anydataset.store.manifest.schema import STORE_SCHEMA_VERSION, ViewManifestEntry
 from anydataset.store.manifest.io import read_sample_manifest_index
-from anydataset.store.paths import view_manifest_parquet_path, view_shard_path
+from anydataset.store.paths import (
+    view_manifest_parquet_path,
+    view_shard_index_path,
+    view_shard_path,
+)
+from anydataset.store.payload.archive import _read_payload_index
 from anydataset.store.payload.files import (
     StoreFilesLease,
     StoreFilesInUseError,
@@ -325,6 +335,40 @@ class StoreIntegrityTest(unittest.TestCase):
                     with self.assertRaisesRegex(ValueError, "invalid payload key"):
                         validate_store_view_payloads(root, view, level=level)
 
+
+class StorePayloadIndexMaintenanceTest(unittest.TestCase):
+    def test_rebuild_store_payload_indexes_repairs_legacy_sidecars(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir) / "store"
+            _write_store(root)
+            view = (Role.DEFAULT, Modality.AUDIO, AudioView.WAVEFORM)
+            shard = view_shard_path(root, view, "000000.tar")
+            index = view_shard_index_path(root, view, "000000.tar")
+            legacy = read_json(index)
+            legacy.pop("portable_fingerprint")
+            legacy["fingerprint"] = [0] * len(legacy["fingerprint"])
+            write_json(index, legacy)
+
+            self.assertIsNone(_read_payload_index(shard, stat_fingerprint(shard.stat())))
+
+            rebuilt = rebuild_store_payload_indexes(root)
+
+            self.assertEqual(len(rebuilt), 2)
+            self.assertIn(index, rebuilt)
+            self.assertIn("portable_fingerprint", read_json(index))
+            self.assertIsNotNone(_read_payload_index(shard, stat_fingerprint(shard.stat())))
+
+    def test_reindex_payloads_command_reports_rebuilt_index_count(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir) / "store"
+            _write_store(root)
+            output = io.StringIO()
+
+            with redirect_stdout(output):
+                status = maintenance_main(["reindex-payloads", str(root)])
+
+            self.assertEqual(status, 0)
+            self.assertEqual(output.getvalue().strip(), "2")
 
 class StoreFilesCleanupTest(unittest.TestCase):
     def test_lease_pickle_state_is_explicit_and_versioned(self):

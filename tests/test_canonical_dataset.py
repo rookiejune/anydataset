@@ -1103,7 +1103,7 @@ class CanonicalDatasetTest(unittest.TestCase):
         with self.assertRaisesRegex(TypeError, "Codec view values must be tensors"):
             collate_fn(schema)(samples)
 
-    def test_collate_fn_batches_bicodec_semantic_and_fixed_acoustic_units(self):
+    def test_collate_fn_batches_bicodec_semantic_and_global_units(self):
         ref = (Role.DEFAULT, Modality.AUDIO)
         schema = {ref: AudioReq(views=frozenset({AudioView.BICODEC}))}
         samples = [
@@ -1112,7 +1112,7 @@ class CanonicalDatasetTest(unittest.TestCase):
                     views={
                         AudioView.BICODEC: {
                             "semantic": torch.tensor([[1], [2]]),
-                            "acoustic": torch.tensor([[10], [11]]),
+                            "global": torch.tensor([[10], [11]]),
                         }
                     }
                 )
@@ -1122,7 +1122,7 @@ class CanonicalDatasetTest(unittest.TestCase):
                     views={
                         AudioView.BICODEC: {
                             "semantic": torch.tensor([[3]]),
-                            "acoustic": torch.tensor([[12], [13]]),
+                            "global": torch.tensor([[12], [13]]),
                         }
                     }
                 )
@@ -1137,7 +1137,7 @@ class CanonicalDatasetTest(unittest.TestCase):
         )
         self.assertTrue(
             torch.equal(
-                values["acoustic"],
+                values["global"],
                 torch.tensor([[[10], [11]], [[12], [13]]]),
             )
         )
@@ -1149,6 +1149,44 @@ class CanonicalDatasetTest(unittest.TestCase):
                 torch.tensor([[True, True], [True, False]]),
             )
         )
+
+    def test_collate_fn_rejects_legacy_bicodec_acoustic_key(self):
+        ref = (Role.DEFAULT, Modality.AUDIO)
+        schema = {ref: AudioReq(views=frozenset({AudioView.BICODEC}))}
+        samples = [
+            {
+                ref: AudioItem(
+                    views={
+                        AudioView.BICODEC: {
+                            "semantic": torch.tensor([[1]]),
+                            "acoustic": torch.tensor([[2]]),
+                        }
+                    }
+                )
+            }
+        ]
+
+        with self.assertRaisesRegex(ValueError, "semantic and global"):
+            collate_fn(schema)(samples)
+
+    def test_collate_fn_rejects_non_integer_bicodec_global_units(self):
+        ref = (Role.DEFAULT, Modality.AUDIO)
+        schema = {ref: AudioReq(views=frozenset({AudioView.BICODEC}))}
+        samples = [
+            {
+                ref: AudioItem(
+                    views={
+                        AudioView.BICODEC: {
+                            "semantic": torch.tensor([[1]]),
+                            "global": torch.tensor([[2.0]]),
+                        }
+                    }
+                )
+            }
+        ]
+
+        with self.assertRaisesRegex(TypeError, "global values must contain integer ids"):
+            collate_fn(schema)(samples)
 
     def test_collate_fn_rejects_mixed_codec_dtypes(self):
         ref = (Role.DEFAULT, Modality.AUDIO)

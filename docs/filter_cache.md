@@ -57,6 +57,14 @@ space. Cache metadata records the upstream rule, selected labels, and the
 upstream generation id; the downstream cache key is separated from the same rule
 applied to the physical dataset.
 
+Filtered views preserve the physical dataset's lightweight cost and shuffle
+contracts. Callable dataloader costs receive the underlying `cost_row(...)`
+metadata for the selected physical index instead of materializing the full
+sample. Shuffle first keeps the physical dataset's index groups, then maps the
+selected rows into filtered-view positions and distributes that selected stream
+across DDP ranks. This retains store payload locality while balancing selection
+positions globally rather than restarting rank assignment in every group.
+
 Predicate return values are normalized to string labels:
 
 - `True` becomes `"accept"`.

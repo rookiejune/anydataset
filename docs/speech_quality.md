@@ -34,6 +34,7 @@ The default thresholds are:
 - `min_utmos=2.8`
 - `max_wer=None`
 - `min_chrf=50.0`
+- `max_duration_seconds=None`
 - `max_seconds_per_text_unit=4.0`
 - `min_peak_amplitude=0.05`
 - `min_bleu=None`
@@ -41,7 +42,9 @@ The default thresholds are:
 WER is still recorded for audit, but is not a rejection threshold by default
 because ASR output may omit word separators in languages such as Chinese. Enable
 WER rejection by setting `SpeechQualityProfile(max_wer=...)`. Enable BLEU
-rejection by setting `SpeechQualityProfile(min_bleu=...)`.
+rejection by setting `SpeechQualityProfile(min_bleu=...)`. Set
+`max_duration_seconds` when the generated-audio pipeline needs an absolute
+utterance-duration ceiling in addition to the text-normalized duration check.
 
 ## Metrics
 
@@ -91,7 +94,8 @@ store without materializing reconstructed waveform views.
 Each metrics payload includes:
 
 - `decision`: normalized label.
-- `flags`: role-prefixed threshold failures such as `default_utmos_low`.
+- `flags`: role-prefixed threshold failures such as `default_utmos_low` or
+  `default_duration_high`.
 - `flags` also records hard input failures such as `default_non_finite_waveform`.
 - `warnings`: role-prefixed skipped-input warnings such as
   `source_missing_text`.

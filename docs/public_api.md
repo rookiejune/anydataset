@@ -23,7 +23,8 @@ Use these paths for application code:
 - `anydataset`: top-level dataset construction, specs, presets, filters, and
   language helpers.
 - `anydataset.types`: canonical sample, item, schema, role, modality, view,
-  metadata, source, preset, language types, and encoded `FileBytes` payloads.
+  metadata, source, preset, language types, encoded `FileBytes` payloads, and
+  the structured BiCodec `SemanticGlobalView` mapping contract.
 - `anydataset.presets`: built-in dataset preset classes.
 - `anydataset.dataset`: dataset base classes, index selection, generic collate
   helpers, and morphology collate/view contracts.
