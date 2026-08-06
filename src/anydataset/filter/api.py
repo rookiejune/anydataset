@@ -5,13 +5,12 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from typing_extensions import Unpack
 
 from ..dataset._selection import selected_index_groups
-from ..dataset.abc import AnyDataset, MapStyleABC
-from ..store.reader import StoreDataset
+from ..dataset.abc import MapStyleABC
 from ..types import Spec
 from ..types.item import Sample
 from .cache.identity import (
@@ -36,6 +35,9 @@ from .types import (
     FilterPredicate,
     _Index,
 )
+
+if TYPE_CHECKING:
+    from .live import FilterRun
 
 # Keep the historical pickle entry points importable from this module.
 _restore_filter_cache = _filter_serialization.restore_filter_cache
@@ -150,6 +152,24 @@ class FilterRule:
             **apply_kwargs,
         )
 
+    def open(
+        self,
+        *,
+        dataset_factory: DatasetFactory,
+        labels: FilterLabel | Sequence[FilterLabel] | None = None,
+        **apply_kwargs: Unpack[FilterApplyKwargs],
+    ) -> FilterRun:
+        """Open a live selection while decisions materialize in background."""
+
+        from .live import open_filter
+
+        return open_filter(
+            self,
+            dataset_factory=dataset_factory,
+            labels=labels,
+            options=apply_options(apply_kwargs),
+        )
+
     def apply_with_report(
         self,
         *,
@@ -185,7 +205,7 @@ class _FilterCache:
 
     def __init__(
         self,
-        base: AnyDataset | StoreDataset | FilteredDataset,
+        base: MapStyleABC,
         partitions: Mapping[str, _Index],
         rule: FilterRule,
         cache_path: Path,
@@ -193,8 +213,13 @@ class _FilterCache:
         lease: GenerationLease,
         metrics_path: Path | None = None,
         input_id: str | None = None,
+        allow_logical: bool = False,
     ) -> None:
-        base = filter_base(base)
+        base = filter_base(
+            base,
+            input_id=input_id,
+            allow_logical=allow_logical,
+        )
         if not isinstance(rule, FilterRule):
             raise TypeError("rule must be a FilterRule.")
         cache_path = Path(cache_path)
@@ -243,7 +268,7 @@ class _FilterCache:
         )
 
     @property
-    def base(self) -> AnyDataset | StoreDataset | FilteredDataset:
+    def base(self) -> MapStyleABC:
         return self._base
 
     @property
@@ -418,7 +443,7 @@ class FilteredDataset(MapStyleABC):
     @classmethod
     def _from_generation(
         cls,
-        base: AnyDataset | StoreDataset | FilteredDataset,
+        base: MapStyleABC,
         rule: FilterRule,
         cache_path: Path,
         labels: Sequence[str],
@@ -459,7 +484,7 @@ class FilteredDataset(MapStyleABC):
         return _restore_filtered_dataset, (self._cache, self.labels)
 
     @property
-    def base(self) -> AnyDataset | StoreDataset | FilteredDataset:
+    def base(self) -> MapStyleABC:
         return self._cache.base
 
     @property

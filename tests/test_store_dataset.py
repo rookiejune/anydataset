@@ -238,6 +238,59 @@ class StoreSourceTest(unittest.TestCase):
         self.assertEqual(row.sample_index, 0)
         self.assertTrue(row.sample_id)
 
+    def test_store_dataset_getitems_sorts_physical_reads_and_restores_order(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output = Path(tmpdir) / "dataset"
+            DatasetWriter(output, dataset_id="batch-read").write(
+                [
+                    _audio_sample(waveform=torch.tensor([[float(index)]]))
+                    for index in range(4)
+                ]
+            )
+            dataset = read_store_dataset(output)
+
+            with mock.patch.object(
+                store_reader,
+                "_sample_for_entry",
+                wraps=store_reader._sample_for_entry,
+            ) as read:
+                batch = dataset.__getitems__([2, 0, 2, -1, 1])
+
+        self.assertEqual(
+            [call.args[1] for call in read.call_args_list],
+            [0, 1, 2, 3],
+        )
+        self.assertEqual(
+            [
+                sample[Role.DEFAULT, Modality.AUDIO]
+                .views[AudioView.WAVEFORM][0]
+                .item()
+                for sample in batch
+            ],
+            [2.0, 0.0, 2.0, 3.0, 1.0],
+        )
+
+    def test_store_dataset_getitems_validates_indexes_before_reading(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output = Path(tmpdir) / "dataset"
+            DatasetWriter(output, dataset_id="batch-read-errors").write(
+                [_audio_sample(waveform=torch.tensor([[0.0]]))]
+            )
+            dataset = read_store_dataset(output)
+
+            with mock.patch.object(
+                store_reader,
+                "_sample_for_entry",
+                wraps=store_reader._sample_for_entry,
+            ) as read:
+                with self.assertRaisesRegex(TypeError, "must be an integer"):
+                    dataset.__getitems__([0, True])
+                self.assertEqual(read.call_count, 0)
+
+                with self.assertRaisesRegex(IndexError, "out of range"):
+                    dataset.__getitems__([0, 1])
+                self.assertEqual(read.call_count, 0)
+
     def test_read_store_manifest_reads_dataset_json_only(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

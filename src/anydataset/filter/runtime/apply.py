@@ -32,7 +32,7 @@ from ..cache.identity import (
     metadata,
 )
 from ..cache.storage import read_partitions
-from ..types import DatasetFactory, FilterApplyReport
+from ..types import DatasetFactory, FilterApplyReport, FilterChunkObserver
 
 if TYPE_CHECKING:
     from ..api import FilterRule, _FilterCache
@@ -75,12 +75,18 @@ def apply_filter(
     rebuild: bool,
     dataset_factory: DatasetFactory,
     with_report: bool = False,
+    chunk_observer: FilterChunkObserver | None = None,
+    allow_logical: bool = False,
 ) -> _AppliedFilter:
     from ..api import _FilterCache
 
     started_at = perf_counter()
     dataset_started_at = perf_counter()
-    dataset = filter_base(dataset_factory())
+    dataset = filter_base(
+        dataset_factory(),
+        input_id=input_id,
+        allow_logical=allow_logical,
+    )
     dataset_seconds = perf_counter() - dataset_started_at
     ensured = ensure_filter(
         dataset,
@@ -99,6 +105,8 @@ def apply_filter(
         runtime=runtime,
         rebuild=rebuild,
         dataset_factory=dataset_factory,
+        chunk_observer=chunk_observer,
+        allow_logical=allow_logical,
     )
     try:
         partition_started_at = perf_counter()
@@ -113,6 +121,7 @@ def apply_filter(
             metrics_path=metrics_path(ensured.generation.path) if metrics else None,
             dataset_factory=dataset_factory,
             input_id=input_id,
+            allow_logical=allow_logical,
         )
         report = None
         if with_report:
@@ -151,11 +160,17 @@ def ensure_filter(
     runtime: Runtime,
     rebuild: bool,
     dataset_factory: DatasetFactory,
+    chunk_observer: FilterChunkObserver | None = None,
+    allow_logical: bool = False,
 ) -> _EnsuredFilter:
     from ..api import FilterRule
     from ..cache.resume import cleanup_filter_resume_dir
 
-    dataset = filter_base(dataset)
+    dataset = filter_base(
+        dataset,
+        input_id=input_id,
+        allow_logical=allow_logical,
+    )
     if not isinstance(rule, FilterRule):
         raise TypeError("rule must be a FilterRule.")
     if not isinstance(metrics, bool):
@@ -253,6 +268,7 @@ def ensure_filter(
             worker_timeout=worker_timeout,
             runtime=runtime,
             dataset_factory=dataset_factory,
+            chunk_observer=chunk_observer,
         )
         return _EnsuredFilter(
             generation=generation,

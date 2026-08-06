@@ -4,7 +4,7 @@ import hashlib
 import json
 from collections.abc import Mapping
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Union
+from typing import TYPE_CHECKING, Any
 
 from typing_extensions import TypeGuard
 
@@ -22,17 +22,29 @@ from ..rules import rule_cache_key, rule_identity
 if TYPE_CHECKING:
     from ..api import FilteredDataset, FilterRule
 
-    FilterBase = Union[AnyDataset, StoreDataset, FilteredDataset]
+    FilterBase = MapStyleABC
 else:
     FilterBase = MapStyleABC
 
 _FILTER_VIEW_SCHEMA_VERSION = 3
 
 
-def filter_base(dataset: object) -> FilterBase:
+def filter_base(
+    dataset: object,
+    *,
+    input_id: str | None = None,
+    allow_logical: bool = False,
+) -> FilterBase:
     from ..api import FilteredDataset
 
     if isinstance(dataset, (AnyDataset, StoreDataset, FilteredDataset)):
+        return dataset
+    if allow_logical and isinstance(dataset, MapStyleABC):
+        if input_id is None and dataset_universe_id(dataset) is None:
+            raise ValueError(
+                "input_id is required to filter a logical map-style dataset "
+                "without universe_id()."
+            )
         return dataset
     raise TypeError("dataset must be an AnyDataset, StoreDataset, or FilteredDataset.")
 
@@ -81,6 +93,25 @@ def filter_identity(
             "sample_count": len(dataset),
         }
         return _with_input_id(identity, input_id)
+    universe_id = dataset_universe_id(dataset)
+    if universe_id is not None:
+        return _with_input_id(
+            {
+                "kind": "universe",
+                "universe_id": universe_id,
+            },
+            input_id,
+        )
+    if not isinstance(dataset, (AnyDataset, StoreDataset)):
+        if input_id is None:
+            raise ValueError(
+                "input_id is required to identify a logical map-style dataset."
+            )
+        return {
+            "kind": "logical",
+            "type": f"{type(dataset).__module__}.{type(dataset).__qualname__}",
+            "input_id": input_id,
+        }
     spec = filter_spec(dataset)
     identity = {
         "kind": "physical",
@@ -95,6 +126,18 @@ def filter_identity(
     if selection is not None:
         identity["views"] = selection
     return _with_input_id(identity, input_id)
+
+
+def dataset_universe_id(dataset: object) -> str | None:
+    identity = getattr(dataset, "universe_id", None)
+    if not callable(identity):
+        return None
+    value = identity()
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value:
+        raise ValueError("universe_id() must return a non-empty string or None.")
+    return value
 
 
 def _store_provenance(

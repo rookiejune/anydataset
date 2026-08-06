@@ -144,6 +144,17 @@ class FileBytes:
         return BytesIO(self.data)
 
 
+# Structured audio tokenizer outputs use mappings so their serialized field
+# names remain independent from AnyTrain's concrete result dataclasses.
+SemanticAcousticView = TypedDict(
+    "SemanticAcousticView",
+    {
+        "semantic": "Tensor",
+        "acoustic": "Tensor",
+    },
+)
+
+
 # ``global`` is a Python keyword, so this public mapping contract requires the
 # functional TypedDict syntax to preserve the serialized key exactly.
 SemanticGlobalView = TypedDict(

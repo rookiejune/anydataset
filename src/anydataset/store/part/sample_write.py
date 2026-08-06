@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import re
+import sqlite3
 from collections.abc import Mapping
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any, cast
 
+from ...dataset.universe import SampleIdentity
 from ...types.item import (
     Item,
     Modality,
@@ -13,6 +17,8 @@ from ...types.item import (
 )
 from .._refs import sample_ref_path, view_path
 from ..manifest.schema import SampleItem, SampleManifestEntry, string_key_dict
+
+_SAMPLE_ID_SET_LIMIT = 1_000_000
 
 
 def sample_manifest_entry(
@@ -129,6 +135,77 @@ def sample_id_prefix(dataset_id: str) -> str:
 
 def sample_id(dataset: str, index: int) -> str:
     return f"{index:012d}-{dataset}"
+
+
+def inherited_sample_id(source: object, index: int) -> str | None:
+    """Return a stable source identity when the input exposes that capability."""
+
+    if not isinstance(source, SampleIdentity):
+        return None
+    value = source.sample_id(index)
+    if not isinstance(value, str) or not value:
+        raise ValueError("sample_id() must return a non-empty string.")
+    return value
+
+
+class UniqueSampleIds:
+    """Validate sample IDs with bounded memory for large store writes."""
+
+    def __init__(self, root: Path) -> None:
+        self._root = root
+        self._ids: set[str] | None = set()
+        self._temporary: TemporaryDirectory[str] | None = None
+        self._connection: sqlite3.Connection | None = None
+
+    def add(self, value: str) -> None:
+        if self._ids is not None:
+            if value in self._ids:
+                raise ValueError(f"Duplicate sample_id {value!r}.")
+            self._ids.add(value)
+            if len(self._ids) >= _SAMPLE_ID_SET_LIMIT:
+                self._spill()
+            return
+        self._insert(value)
+
+    def close(self) -> None:
+        if self._connection is not None:
+            self._connection.close()
+            self._connection = None
+        if self._temporary is not None:
+            self._temporary.cleanup()
+            self._temporary = None
+
+    def _spill(self) -> None:
+        ids = self._ids
+        if ids is None:
+            return
+        self._temporary = TemporaryDirectory(
+            prefix=".sample-ids-",
+            dir=self._root,
+        )
+        self._connection = sqlite3.connect(
+            Path(self._temporary.name) / "ids.sqlite"
+        )
+        self._connection.execute(
+            "CREATE TABLE sample_ids (sample_id TEXT PRIMARY KEY)"
+        )
+        self._connection.executemany(
+            "INSERT INTO sample_ids(sample_id) VALUES (?)",
+            ((value,) for value in ids),
+        )
+        self._ids = None
+
+    def _insert(self, value: str) -> None:
+        connection = self._connection
+        if connection is None:
+            raise RuntimeError("sample id validation database is missing.")
+        try:
+            connection.execute(
+                "INSERT INTO sample_ids(sample_id) VALUES (?)",
+                (value,),
+            )
+        except sqlite3.IntegrityError as exc:
+            raise ValueError(f"Duplicate sample_id {value!r}.") from exc
 
 
 def slug(value: str) -> str:

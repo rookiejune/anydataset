@@ -21,20 +21,37 @@ from .morphology import (
     speech_grid_collate,
 )
 from .selection import IndexSelection
+from .universe import DatasetUniverse, IndexIdentity, SampleIdentity, UniverseIdentity
+from .view import (
+    DecisionSet,
+    Selection,
+    SelectionView,
+    StaticSelection,
+    UnknownDecisionError,
+)
 
 __all__ = [
     "AnyDataset",
     "AudioBatch",
     "Batch",
+    "DatasetUniverse",
+    "DecisionSet",
     "FieldGroup",
     "FieldRef",
     "IterableAnyDataset",
     "IndexSelection",
+    "IndexIdentity",
     "MapStyleABC",
     "Morphology",
+    "SampleIdentity",
+    "Selection",
+    "SelectionView",
     "SpeechBatch",
     "SpeechGridBatch",
     "SpeechGridView",
+    "StaticSelection",
+    "UnknownDecisionError",
+    "UniverseIdentity",
     "audio_collate",
     "build_toy_audio_dataset",
     "build_toy_speech_dataset",

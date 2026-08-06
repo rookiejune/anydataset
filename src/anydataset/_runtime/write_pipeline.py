@@ -44,6 +44,7 @@ class BackgroundWriteSink(Generic[T]):
         self._executor: Executor | None = None
         self._pending: dict[Future[None], tuple[T, float]] = {}
         self._ready_queue: SimpleQueue[Future[None]] = SimpleQueue()
+        self._error: BaseException | None = None
         self._closed = False
 
     def __enter__(self) -> BackgroundWriteSink[T]:
@@ -74,21 +75,26 @@ class BackgroundWriteSink(Generic[T]):
         self.abort()
 
     def submit(self, job: T) -> None:
+        self.raise_if_failed()
         if self._closed:
             raise RuntimeError("background write sink is already closed.")
         executor = self._executor
         if executor is None:
             start = time.perf_counter()
             self._on_submit(job, 1)
-            self.write(job)
+            try:
+                self.write(job)
+            except BaseException as exc:
+                self._remember_error(exc)
+                raise
             self._on_complete(job, 0, time.perf_counter() - start)
             return
-        self._drain_ready()
         backpressure_started: float | None = None
         while len(self._pending) >= self._pending_limit:
             if backpressure_started is None:
                 backpressure_started = time.perf_counter()
             self._drain_one()
+            self._raise_error()
         if backpressure_started is not None:
             self._on_backpressure(time.perf_counter() - backpressure_started)
         future = executor.submit(self.write, job)
@@ -96,15 +102,32 @@ class BackgroundWriteSink(Generic[T]):
         future.add_done_callback(self._mark_ready)
         self._on_submit(job, len(self._pending))
 
+    def flush(self) -> None:
+        """Wait for submitted writes while keeping the sink open for reuse."""
+
+        self._drain_ready()
+        if self._closed:
+            self._raise_error()
+            return
+        while self._pending:
+            self._drain_ready()
+            if not self._pending:
+                break
+            self._drain_one()
+        self._raise_error()
+
+    def raise_if_failed(self) -> None:
+        """Raise the first completed write failure without waiting for pending jobs."""
+
+        self._drain_ready()
+        self._raise_error()
+
     def close(self) -> None:
         if self._closed:
+            self._raise_error()
             return
         try:
-            while self._pending:
-                self._drain_ready()
-                if not self._pending:
-                    break
-                self._drain_one()
+            self.flush()
         finally:
             if self._executor is not None:
                 self._executor.shutdown()
@@ -135,7 +158,11 @@ class BackgroundWriteSink(Generic[T]):
 
     def _complete(self, future: Future[None]) -> None:
         job, start = self._pending.pop(future)
-        future.result()
+        try:
+            future.result()
+        except BaseException as exc:
+            self._remember_error(exc)
+            return
         self._on_complete(job, len(self._pending), time.perf_counter() - start)
 
     def _drain_ready(self) -> None:
@@ -149,6 +176,14 @@ class BackgroundWriteSink(Generic[T]):
 
     def _mark_ready(self, future: Future[None]) -> None:
         self._ready_queue.put(future)
+
+    def _remember_error(self, error: BaseException) -> None:
+        if self._error is None:
+            self._error = error
+
+    def _raise_error(self) -> None:
+        if self._error is not None:
+            raise self._error
 
     def _on_submit(self, job: T, pending: int) -> None:
         if self.on_submit is not None:

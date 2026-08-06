@@ -29,6 +29,7 @@ from .writer import (
     fragment_json_path as _fragment_json_path,
     part_json_path as _part_json_path,
 )
+from .sample_write import UniqueSampleIds
 from ..jsonio import read_json, write_json
 from ..manifest.schema import (
     DatasetManifest,
@@ -589,6 +590,7 @@ def _write_ordered_samples_manifest(
     previous_index: int | None = None
     count = 0
     pending = 0
+    sample_ids = UniqueSampleIds(root)
     try:
         for count, entry in enumerate(_merged_sample_entries(stores), start=1):
             if previous_index is not None:
@@ -615,6 +617,7 @@ def _write_ordered_samples_manifest(
                     f"missing sample_index {expected_index}."
                 )
             previous_index = entry.sample_index
+            sample_ids.add(entry.sample_id)
             writer.write(
                 SampleManifestEntry(
                     sample_id=entry.sample_id,
@@ -636,6 +639,8 @@ def _write_ordered_samples_manifest(
     except Exception:
         writer.abort()
         raise
+    finally:
+        sample_ids.close()
     return count
 
 

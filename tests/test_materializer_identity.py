@@ -47,6 +47,22 @@ class _TensorFactory:
         return self.tensor
 
 
+class _ExecutionDatasetFactory:
+    def __init__(self, cache: Path) -> None:
+        self.cache = cache
+
+    def __call__(self):
+        return []
+
+
+class _ExecutionProviderFactory:
+    def __init__(self, endpoint: str) -> None:
+        self.endpoint = endpoint
+
+    def __call__(self, _device: str):
+        return None
+
+
 def _dataset_factory():
     return []
 
@@ -120,14 +136,90 @@ class MaterializerIdentityTest(unittest.TestCase):
             use_map_style_loader=True,
         )
 
-        self.assertEqual(metadata["schema_version"], 6)
+        self.assertEqual(metadata["schema_version"], 7)
         self.assertIsNone(metadata["materializer"]["max_shard_bytes"])
         self.assertEqual(metadata["input"]["semantic_id"], "input-v2")
         self.assertEqual(metadata["provider"]["semantic_id"], "provider-v3")
+        self.assertEqual(
+            metadata["input"]["factory"],
+            {"kind": "semantic", "id": "input-v2"},
+        )
+        self.assertEqual(
+            metadata["provider"]["factory"],
+            {"kind": "semantic", "id": "provider-v3"},
+        )
+
+    def test_explicit_semantic_ids_exclude_execution_only_factory_state(self):
+        materializer = ViewMaterializer(
+            Path("output"),
+            input_id="input-v2",
+            provider_id="provider-v3",
+        )
+
+        first = materializer._resume_metadata(
+            [],
+            dataset_factory=_ExecutionDatasetFactory(Path("cache-a")),
+            provider_factory=_ExecutionProviderFactory("worker-a"),
+            expected=0,
+            use_map_style_loader=True,
+        )
+        second = materializer._resume_metadata(
+            [],
+            dataset_factory=_ExecutionDatasetFactory(Path("cache-b")),
+            provider_factory=_ExecutionProviderFactory("worker-b"),
+            expected=0,
+            use_map_style_loader=True,
+        )
+
+        self.assertEqual(first, second)
+
+    def test_resume_metadata_still_distinguishes_semantic_id_changes(self):
+        dataset_factory = _ExecutionDatasetFactory(Path("cache"))
+        provider_factory = _ExecutionProviderFactory("worker")
+
+        first = ViewMaterializer(
+            Path("output"),
+            input_id="input-v1",
+            provider_id="provider-v1",
+        )._resume_metadata(
+            [],
+            dataset_factory=dataset_factory,
+            provider_factory=provider_factory,
+            expected=0,
+            use_map_style_loader=True,
+        )
+        changed_input = ViewMaterializer(
+            Path("output"),
+            input_id="input-v2",
+            provider_id="provider-v1",
+        )._resume_metadata(
+            [],
+            dataset_factory=dataset_factory,
+            provider_factory=provider_factory,
+            expected=0,
+            use_map_style_loader=True,
+        )
+        changed_provider = ViewMaterializer(
+            Path("output"),
+            input_id="input-v1",
+            provider_id="provider-v2",
+        )._resume_metadata(
+            [],
+            dataset_factory=dataset_factory,
+            provider_factory=provider_factory,
+            expected=0,
+            use_map_style_loader=True,
+        )
+
+        self.assertNotEqual(first, changed_input)
+        self.assertNotEqual(first, changed_provider)
 
     def test_rejects_empty_semantic_id(self):
         with self.assertRaisesRegex(ValueError, "provider_id"):
             ViewMaterializer("output", provider_id="")
+
+        with self.assertRaisesRegex(ValueError, "dataset_id"):
+            ViewMaterializer("output", dataset_id="")
 
 
 if __name__ == "__main__":

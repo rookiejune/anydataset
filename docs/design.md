@@ -11,17 +11,50 @@
 - `Schema` 使用 `(Role, Modality) -> Requirement` 表达一次训练或读取真正需要的 view 和 meta。
 - `collate_fn(schema)` 只按照 schema 整理 batch，不为缺失字段补隐式默认值。
 
-Store reader 对 manifest 和 payload shard 使用带 fingerprint 的进程内句柄缓存；调用方可以
-通过 `StoreDataset.close()` 或 context manager 显式释放资源。写入完成的 store 还可以包含
+Canonical store 的 sample/view manifest 保持 Parquet，异构或大型 payload 保持 tar shard。
+Store reader 对两者使用带 fingerprint 的进程内句柄缓存；调用方可以通过
+`StoreDataset.close()` 或 context manager 显式释放资源。写入完成的 store 还可以包含
 `payload-groups.json` 和每个 tar shard 的 offset index，它们都只是可失效的读取优化
 metadata，不改变核心 manifest schema；旧 store 或 sidecar 不可用时 reader 回退到完整
 manifest/tar 扫描。
+
+在线 filter 的 decision/selection fragment 使用 Arrow IPC；它们只是运行中控制面记录，最终
+filter generation 仍发布 Parquet partition。当前不把 waveform、token 等 canonical payload
+整体迁移到 Arrow。只有 [`experiments/todo.md`](experiments/todo.md) 中的代表性 benchmark
+证明随机访问、顺序吞吐、空间和分布式读取收益后，才讨论新的版本化 payload 格式。
 
 Store payload 默认使用 PyTorch safe weights-only 反序列化，支持 tensor、基础容器和
 字符串等常见 view 值。读取包含自定义 Python 对象的旧 store 时，调用方必须确认 store
 来自可信来源，并显式传入 `unsafe_pickle_payloads=True` 打开 pickle 反序列化边界。需要
 更快的发布校验时可显式选择 integrity `fast` 或 `normal`，默认 `full` 会读取
 manifest 引用的 payload body，并拒绝 tar shard 中 manifest 外的额外 payload member。
+
+## DatasetUniverse、Operation 和 Selection
+
+`DatasetUniverse` 表示某个流水线阶段完整、稳定的 map-style sample space。transform 和
+filter 是作用于 universe 的 operation；`SelectionView` 只保存 membership decision，并在
+调用方读取边界按 universe 顺序求交集。selection 不是 transform/filter 的输入裁剪器。
+
+```text
+SelectionView(U0, S0)
+  -> transform every sample in U0
+  -> U1
+  -> SelectionView(U1, rebase(S0 by sample_id))
+  -> filter every sample in U1
+  -> SelectionView(U1, rebase(S0), new selection)
+```
+
+因此链式 `filter -> synthesize -> filter -> tokenize` 中，每个合成、tokenize 和判定过程都覆盖
+当前阶段完整 universe；实际返回对象才应用所有 selection 的有序交集。未完成判定是 unknown，
+不等于 reject。正索引只等待解析该返回位置所需的判定；`len()`、负索引、完整 index 列表和
+shuffle plan 需要完整 selection，因此等待全量判定完成。
+
+`sample_id` 是一对一变换之间唯一稳定的 lineage key。transform writer 必须继承它，selection
+跨阶段 rebase 也按它对齐；缺失或重复 ID 直接报错。`sample_index` 只是在一个 universe/store
+内的 `0..N-1` dense ordinal，用于本地覆盖、manifest lookup 和物理顺序，不证明跨阶段对齐。
+
+operation identity 只描述完整 input universe、operation 本身和输出契约，不包含 selection。
+同一 universe 上不同 filter label 交集应复用同一份 transform 或 decision 物化结果。
 
 ## Schema 心智模型
 
@@ -116,40 +149,62 @@ iterable 路径不做该截断。
 派生表示应通过 provider 和 `ViewMaterializer` 生成。典型流程是：
 
 ```text
-base store -> provider -> standalone store -> schema selects derived view
+complete DatasetUniverse -> provider over all samples -> output DatasetUniverse
+                         -> rebase selection by sample_id -> returned SelectionView
+                         -> standalone canonical store after explicit finalize
 ```
 
-例如 LongCat codes 是 `AudioView.LONGCAT`。Frame codec view 的单样本值统一为整数 Tensor
-`[frame, codebook]`，collate 后为 `[batch, frame, codebook]`，mask 为
-`[batch, frame]`。K 个码本必须完整、有序保存；数据层不区分 semantic / acoustic
-codebook。经 `CodecProvider` 或 `AudioTokenizerProvider` 生成时，第 k 列的每个 id 必须满足
-`0 <= id < codebook_sizes[k]`；provider 在输出设备上逐码本检查该值域，越界时在
-写入前显式报错。store manifest 不保存 `codebook_sizes`，因此直接读取 store 时不做该
-值域校验；已有 view 进入 collate 时也只检查通用 tensor 契约。具体码本语义属于 codec
-或下游任务。旧的
-`{"semantic_codes": ..., "acoustic_codes": ...}` mapping 不属于当前 codec view
-契约，进入 collate 时应显式报错。
+`AudioTokenizerProvider` 只依赖 AnyTrain 的 `AudioTokenizer` capability，并严格保留
+`AudioCodeSpec.schema` 声明的原生输出，不要求 backend 暴露 decode：
 
-`AudioView.BICODEC` 是独立的 structured view，公开类型为
-`anydataset.types.SemanticGlobalView`。它只接受
-`{"semantic": Tensor[unit, codebook], "global": Tensor[fixed_unit, codebook]}`；
-`semantic` 的 unit 轴可变并在 collate 时产生 mask，`global` 的 shape 在 batch 内固定。
-旧的 `acoustic` key 不做运行时兼容，已有 store 需要显式离线迁移。
+- `FRAME` 的单样本值是整数 Tensor `[unit, codebook]`；
+- `SEMANTIC_ACOUSTIC` 的公开类型是 `SemanticAcousticView`，值为
+  `{"semantic": Tensor[time, codebook], "acoustic": Tensor[unit, codebook]}`；
+- `SEMANTIC_GLOBAL` 的公开类型是 `SemanticGlobalView`，值为
+  `{"semantic": Tensor[time, codebook], "global": Tensor[fixed_unit, codebook]}`。
 
-`AudioTokenizerProvider` 只依赖 AnyTrain 的 `AudioTokenizer` capability，并只执行
-waveform -> frame codes；它不要求 backend 暴露 decode，并要求 `spec.view` 与 provider
-output view 精确一致，避免把 codes 错标成其他 backend view。`GLM4Provider` 是该方向性
-边界的内置入口，输出 `AudioView.GLM4` 的 `[frame, 1]` raw ids。需要重建音频的调用方仍
-使用持有完整 frame codec 的 `CodecProvider`，不能从 tokenizer-only provider 推断 decoder。
+provider 要求 `spec.view` 与 output view 精确一致，并校验 native result 类型、batch、rank、
+codebook 轴、structured layout / fixed unit length 和逐码本值域。每个 id 都必须是 signed
+integer 且满足 `0 <= id < codebook_sizes[k]`，越界时在写入前显式报错。batch provider
+按真实输入 sample rate 和未 padding waveform length 分组，分别调用 tokenizer，再恢复原
+sample 顺序；不会用 `frame_rate` 推算或裁剪 tokenizer 的实际输出长度。
+
+structured audio mapping 只有精确 key set 才进入专用 collate。semantic-acoustic 的
+frame-aligned 两路共享 temporal mask；fixed-length acoustic 轴保持固定 shape，只由
+semantic 轴产生 mask。semantic-global 同样只 pad semantic 轴并直接 stack fixed global
+轴。旧的 `{"semantic_codes": ..., "acoustic_codes": ...}` mapping 不做静默兼容。
+
+`CodecProvider` 保留完整 frame codec 的历史 Tensor `[frame, codebook]` 契约，供已有 store
+和确实还需要 decoder 的调用方兼容使用；它不会伪装成 AnyTrain directional tokenizer。
+因此 `AudioView.LONGCAT` 的新 tokenize 路径保存 semantic/acoustic mapping，而已有
+`CodecProvider` 路径仍可读取和生成完整 `[frame, 4]` Tensor。`GLM4Provider` 是 FRAME
+方向性入口，输出 `AudioView.GLM4` 的 `[frame, 1]` raw ids。
+
+store manifest 不保存 `codebook_sizes`，因此直接读取 store 时不做 provider 级值域校验；
+已有 view 进入 collate 时只检查对应 Tensor 或 structured mapping 的通用形状契约。
 
 Preset 不负责加载 codec，也不应该把 LongCat 逻辑塞进 raw row parse。Preset 只需要
 产出可被 provider 消费的音频 view，例如 `AudioView.WAVEFORM` 或 `AudioView.FILE`。
 
-`ViewMaterializer` 和 `ModalityMaterializer` 都直接发布 standalone store。默认只保留
-provider 输出；需要携带输入 view/meta 时，通过 `keep_schema` 显式选择。这样训练和
-filter 都只读取一个 store，不存在运行时 base/delta overlay，也不依赖两个 dataset
-的 sample index 顺序一致。需要多个派生 view 时，按阶段对上一个 standalone store
-继续物化，并显式保留下一阶段所需字段。
+`ViewMaterializer` 和 `ModalityMaterializer` 的正式发布结果都是 standalone store。默认只
+保留 provider 输出；需要携带输入 view/meta 时，通过 `keep_schema` 显式选择。这样训练和
+filter 都只读取一个 store，不存在运行时 base/delta overlay。一对一阶段通过稳定
+`sample_id` 继承 lineage，不依赖两个 dataset 的 `sample_index` 恰好一致。需要多个派生 view
+时，按阶段对上一个完整 universe 继续物化，并显式保留下一阶段所需字段。
+
+`ViewMaterializer.open()` 是动态入口：显式 `input_id` 下，兼容 ready store 可直接读取，且不
+构造 source、provider 或 staging writer；使用 `input_id_factory` 时，ready 路径只构造一次
+input identity 对象并把结果与 canonical provenance 严格比较，仍不构造 provider。若没有
+ready store，则从完整 source universe 在线生成。前台访问优先 claim 请求 index 并返回
+provider 结果，首次访问后后台 sweep 所有剩余 index。即使 sampler 只访问子集，或输入是带
+selection 的 view，也不能减少 provider coverage；ready 路径需要 selection 时复用同一次已
+打开对象并把资源所有权交给返回 view。`wait()` 和 `close()` 同样会启动 sweep；因此完全不
+访问样本直接 `close()`，仍会等待完整 universe 的生成与 staging flush。`close()` 不发布
+canonical store，正式 ready marker 仍由显式 `write()`/finalize 在完整覆盖和完整校验后原子
+发布。
+
+materializer 可显式传入逻辑 `dataset_id`，使同一 view 放到不同物理 root basename 时仍共享
+online/ready `universe_id`。省略时继续回退到 `output_dir` basename，以兼容已有入口。
 
 `write()` 支持按 part 并行物化，`num_shards` 控制写进程数，`num_workers` 控制每个
 写进程内部的 DataLoader workers；并行写入时调用方应提供可 pickle 的
@@ -180,11 +235,14 @@ v2 store 没有 provenance，属于 legacy compatibility 格式，只能通过�
 `RuntimeWarning`，默认 `reject` 保持发布和 cache-sensitive 路径的安全边界。
 v2 缺失的 provenance 只能按空值参与 identity，不能静默猜测 input/provider 语义；
 发布 store 或生成 cache-sensitive 派生数据前应重新物化或迁移到 v3。新写入的 v3 store
-在 dataset manifest 中保存 materializer 的 `input_id` 和 `provider_id`。更早格式必须先显式迁移或重新物化，
+在 dataset manifest 中保存 materializer 的 `input_id` 和 `provider_id`。`provider_id` 是
+AnyTrain backend + AnyDataset adapter 的全局语义身份，与单个 sample、filter 或 selection
+无关，也不写入 sample metadata。更早格式必须先显式迁移或重新物化，
 不在读取时按 `sample_id` 静默补齐。
 离线 `migrate_store(source, output)` 只处理真实存在过的上一版 canonical 布局：dataset
-manifest 没有 `schema_version`（也接受显式的 `1`），sample manifest 已包含稠密稳定的
-`sample_index`，view manifest 使用 `sample_id`。迁移通过 sample manifest 的唯一 ID
+manifest 没有 `schema_version`（也接受显式的 `1`），sample manifest 已包含稠密的
+`sample_index`（只在该 store 内作为 ordinal），view manifest 使用稳定 `sample_id`。迁移通过
+sample manifest 的唯一 ID
 映射生成 v3 view manifest，把引用的 payload shard 复制到独立新目录，完成 v3 结构、
 覆盖范围和 tar key 校验后才原子发布。源目录不原地修改。更早的 view revision 目录、
 JSONL manifest 或不同 sample item 结构不属于该 v1 契约，只能从原始 canonical dataset
@@ -196,8 +254,9 @@ item 的少量 view 或 meta，调用方通过 `keep_schema` 显式声明。`kee
 materializer 必须报错，不静默覆盖。
 
 `ViewMaterializer` 和 `ModalityMaterializer` 默认使用可续跑的 fragment 流水线。
-库会把完成的 provider batch 聚合到 checkpoint chunk 后写成 ready fragment，并按全局
-`sample_index` 跳过已完成样本；所有样本覆盖后再原子提交最终 store 并清理 resume
+库会把完成的 provider batch 聚合到 checkpoint chunk 后写成 ready fragment，并按当前
+universe/store 内的 dense `sample_index` 跳过已完成样本；所有样本覆盖后再原子提交最终
+store 并清理 resume
 目录。fragment 仍使用普通 store 校验，损坏或语义不匹配时显式报错，不静默丢弃。
 多设备 materializer 只负责为每个设备启动独立进程并按 rank 分片，不初始化
 `torch.distributed` process group；需要 collective 的 provider 负责显式创建和释放
@@ -219,11 +278,12 @@ resume metadata 与本次运行不兼容时，旧目录会先原子重命名为�
 删除大量 fragment 阻塞新任务。运行日志会记录该目录；确认不再需要后由调用方清理。
 metadata 使用稳定的 factory 标识，并只记录影响 fragment 语义或格式的配置；device
 数量、进程启动方式和 commit 粒度可以在续跑时调整，不会使已完成 fragment 失效。
-factory 标识会纳入函数代码、默认参数、closure 值和 callable 实例状态；其中 Tensor
-按真实内容生成固定长度摘要，不把权重展开进 resume JSON。调用方还可以设置 `input_id`
-和 `provider_id`，为可调用对象无法表达的输入快照或外部模型 checkpoint 提供显式语义版本；
-两个 ID 与自动 factory 标识共同参与兼容性判断，不会替代后者。任一标识变化都会隔离
-旧 resume 目录，避免复用语义不一致的 fragment。
+未提供显式 semantic ID 时，自动 factory 标识会纳入函数代码、默认参数、closure 值和
+callable 实例状态；其中 Tensor 按真实内容生成固定长度摘要，不把权重展开进 resume JSON。
+提供 `input_id` 或 `provider_id` 后，对应 ID 成为该 factory 的权威 identity marker，不再把
+device、cache path、service endpoint 等 execution-only factory state 纳入兼容性判断。调用方
+必须在完整 input universe、模型 checkpoint、adapter 或其他输出语义变化时更新对应 ID；
+ID 变化会隔离旧 resume 目录。selection 不进入这组 identity。
 `write_workers` 控制每个 materializer worker 内的后台写线程数，默认用一个 writer
 让 provider 计算和 fragment 落盘重叠；`write_prefetch` 控制待写任务上限。
 每个 materializer rank 的 writer 完成 fragment 后，会在 rank 进程内把确定性分配给
@@ -305,18 +365,30 @@ TTS provider 只消费已经存在的 `TextView.TEXT`、`TextView.SPEAKERS` 和�
 ## 过滤分区
 
 过滤规则通过零参数 factory 创建 predicate；factory 在实际执行过滤的进程里调用。
-predicate 直接作用在 dataset 产出的完整 canonical `Sample` 上，返回 bool、字符串、
-枚举值或带 metrics 的 `FilterDecision`。库统一归一化为字符串 label，并缓存每个
-label 对应的原始样本下标。
+predicate 直接作用在当前 `DatasetUniverse` 的每个完整 canonical `Sample` 上，返回 bool、
+字符串、枚举值或带 metrics 的 `FilterDecision`。库统一归一化为字符串 label，并为 universe
+中每个样本记录一个 decision。上游 selection 不缩小扫描范围；它只与新 decision selection
+在最终 `SelectionView` 边界有序相交。
 predicate 可选实现 `call_batch(samples)`；返回值必须是与输入等长、按位置对应的有序
 sequence。未实现时仍逐样本调用 `__call__`。batched predicate 遇到 CUDA OOM 时会先
 释放异常引用并清理 CUDA cache，再按原顺序递归二分 batch 重试；每个子 batch 都重新
 校验输出契约。非 OOM 不重试，单样本仍 OOM 时原样抛出。
 
+`FilterRule.open()` 是新的动态入口，返回 `FilterRun`：`run.dataset` 可在后台全量扫描期间
+读取，`run.status` 暴露 `RUNNING`/`COMPLETE`/`FAILED`，`wait()` 等待完整判定，`close()`
+等待并释放 lease。unknown decision 不当作 reject；正索引按需等待，`len()`、负索引和
+shuffle 等完整序列操作等待全量完成。`FilterRule.apply()` 继续作为阻塞兼容入口，返回历史
+`FilteredDataset` 和 apply report；新的链式动态 view 优先使用 `open()`。
+
+在线 run 会把已完成 decision chunk 先写成不可变 Arrow IPC `(index, label)` fragment，再
+发布给 live selection。最终 ready generation 仍是 Parquet partition/metrics；Arrow fragment
+不承载 sample payload，也不改变 canonical store 的 Parquet-manifest/tar-payload 契约。
+
 在线 `RejectReplaceDataset` 不是缓存分区的替代品。它只对已经物化的 map-style
 dataset 做廉价 CPU reject 替换：顺序 look-ahead，失败后再用 worker 本地 accept
 buffer 回填，并在拒绝率偏高时 warning 或硬失败。GPU / 重模型质量规则仍走
-`FilterRule.apply`；详见 [`online_filter.md`](online_filter.md)。
+`FilterRule.open`（阻塞兼容调用可继续使用 `apply`）；详见
+[`online_filter.md`](online_filter.md)。
 
 多设备过滤按 `Runtime.process_start_method` 启动外层进程，默认值是 `"spawn"`；默认
 配置下调用方要显式传入可 pickle 的 `dataset_factory`。库不会把已经构造好的 dataset
@@ -328,11 +400,17 @@ DataLoader workers”的模型；只解析出一个 device 时不启动外层 de
 都会选择不同缓存。修改 predicate、factory、parse function 或 transforms 时应更新版本。
 未提供新字段的旧调用继续使用 name-only cache path。
 
+filter operation identity 由完整 universe snapshot 和 rule identity 决定，不包含上游 rule
+generation、selected labels、selection 顺序或返回长度。同一 universe 上不同 selection 可复用
+同一份 decision cache；一对一 transform 后按稳定 `sample_id` rebase decision。当前 universe
+的 `sample_index` 只是 dense ordinal，不作为跨阶段 lineage。
+
 缓存根目录统一由 `ANYDATASET_HOME` 控制。物理 source prepare cache 写在
 `$ANYDATASET_HOME/cache/sources/<spec_id>`，只由 `Spec` 决定。filter cache 写在
 `$ANYDATASET_HOME/cache/filters/<dataset_id>/<rule_id>`，其中物理 dataset 的
-`dataset_id` 由 dataset class、`Spec` 和 store manifest provenance 决定；filtered view
-会把上游 identity、rule 和 label 纳入 identity。对于内容或顺序由业务工程管理的输入，
+`dataset_id` 由 dataset class、`Spec`、完整 sample count 和 store manifest provenance 决定；
+`SelectionView` 只贡献其 universe，不贡献 selection。对于内容、顺序或 lineage 由业务工程
+管理的逻辑输入，
 调用方用非空 `input_id` 版本化整个输入快照，并在输入变化时更新。
 store 的 `AudioView.FILE` 默认在 path mode 解包到
 `$ANYDATASET_HOME/cache/store-files/<store_id>`，cache identity 包含 view、shard、
@@ -348,9 +426,9 @@ reader 或 `lease_store_files(store_root)` 显式 lease 时直接报错，不静
 显式持有 lease，或把文件复制到调用方拥有的目录。缓存不做自动容量淘汰，清理必须由调用方
 按物理 store 显式触发，后续访问会重新解包。
 物理 dataset 使用自动 identity；业务输入的内容或顺序改变时，调用方必须更新非空
-`input_id`。该 ID 补充而不替代自动 class、`Spec`、provenance 和 sample count identity。
-`FilterRule.version` 版本化 predicate，`input_id` 版本化输入状态；filtered factory、pickle
-重建和链式过滤会继续携带上游 ID。
+`input_id`；`sample_id` membership 变化时也必须更新。该 ID 补充而不替代自动 class、
+`Spec`、provenance 和 sample count identity。`FilterRule.version` 版本化 predicate，
+`input_id` 版本化完整 universe；selection 不参与两者。
 
 运行时 warning 和 worker 日志同样由 `ANYDATASET_HOME` 控制，写入
 `$ANYDATASET_HOME/logs/<timestamp>-<pid>/`。普通 source warning 按来源写成

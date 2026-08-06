@@ -18,7 +18,7 @@ from .generations import (
 from .identity import FilterBase, filter_identity_key
 from .resume import cleanup_filter_resume_dir
 from .storage import load_partition_manifest, metrics_ready
-from ..types import DatasetFactory
+from ..types import DatasetFactory, FilterChunkObserver
 
 if TYPE_CHECKING:
     from ..api import FilterRule
@@ -154,6 +154,7 @@ def write_cache(
     worker_timeout: float | None,
     runtime: Runtime,
     dataset_factory: DatasetFactory,
+    chunk_observer: FilterChunkObserver | None = None,
 ) -> FilterGeneration:
     sample_count = int(metadata["base"]["sample_count"])
     generation = create_filter_generation(
@@ -176,6 +177,7 @@ def write_cache(
             worker_timeout=worker_timeout,
             runtime=runtime,
             dataset_factory=dataset_factory,
+            chunk_observer=chunk_observer,
         ),
     )
     try:
@@ -226,6 +228,7 @@ def _write_cache_tmp(
     worker_timeout: float | None,
     runtime: Runtime,
     dataset_factory: DatasetFactory,
+    chunk_observer: FilterChunkObserver | None = None,
 ) -> None:
     from ..runtime.resume_writer import write_partitions
 
@@ -248,5 +251,6 @@ def _write_cache_tmp(
         worker_timeout=worker_timeout,
         runtime=runtime,
         dataset_factory=dataset_factory,
+        chunk_observer=chunk_observer,
     )
     (tmp / ".ready").write_text("ready\n", encoding="utf-8")

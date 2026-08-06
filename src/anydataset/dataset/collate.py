@@ -156,7 +156,11 @@ def _collate_values(
     if _is_waveform_field(field):
         return _collate_waveforms(values, field)
     if _is_bicodec_field(field):
-        return _collate_bicodec(values, field)
+        return _collate_semantic_global(values, field)
+    if _is_semantic_acoustic_field(field, values):
+        return _collate_semantic_acoustic(values, field)
+    if _is_semantic_global_field(field, values):
+        return _collate_semantic_global(values, field)
     if _is_codec_field(field):
         return _collate_codec_codes(values, field)
 
@@ -210,17 +214,82 @@ def _is_bicodec_field(field: FieldRef) -> bool:
     )
 
 
-def _collate_bicodec(
+def _is_semantic_acoustic_field(
+    field: FieldRef,
+    values: Sequence[Any],
+) -> bool:
+    return (
+        field.group is FieldGroup.VIEWS
+        and field.ref[1] is item.Modality.AUDIO
+        and all(
+            isinstance(value, Mapping) and set(value) == {"semantic", "acoustic"}
+            for value in values
+        )
+    )
+
+
+def _collate_semantic_acoustic(
+    values: Sequence[Any],
+    field: FieldRef,
+) -> tuple[dict[str, torch.Tensor], torch.Tensor]:
+    mappings = cast(list[Mapping[str, Any]], list(values))
+    semantic_values = [value["semantic"] for value in mappings]
+    acoustic_values = [value["acoustic"] for value in mappings]
+    semantic, semantic_mask = _collate_codec_codes(semantic_values, field)
+    acoustic, acoustic_mask = _collate_codec_codes(acoustic_values, field)
+    semantic_tensors = cast(list[torch.Tensor], semantic_values)
+    acoustic_tensors = cast(list[torch.Tensor], acoustic_values)
+    frame_aligned = all(
+        semantic_value.shape[0] == acoustic_value.shape[0]
+        for semantic_value, acoustic_value in zip(
+            semantic_tensors,
+            acoustic_tensors,
+        )
+    )
+    if frame_aligned and not torch.equal(semantic_mask, acoustic_mask):
+        raise ValueError(
+            f"Frame-aligned semantic and acoustic units must align for {field!r}."
+        )
+    if not frame_aligned:
+        acoustic = _stack_fixed_codec_codes(
+            acoustic_values,
+            field,
+            name="acoustic",
+        )
+    return {
+        "semantic": semantic,
+        "acoustic": acoustic,
+    }, semantic_mask
+
+
+def _is_semantic_global_field(
+    field: FieldRef,
+    values: Sequence[Any],
+) -> bool:
+    return (
+        field.group is FieldGroup.VIEWS
+        and field.ref[1] is item.Modality.AUDIO
+        and all(
+            isinstance(value, Mapping) and set(value) == {"semantic", "global"}
+            for value in values
+        )
+    )
+
+
+def _collate_semantic_global(
     values: Sequence[Any],
     field: FieldRef,
 ) -> tuple[dict[str, torch.Tensor], torch.Tensor]:
     mappings: list[Mapping[Any, Any]] = []
     for value in values:
         if not isinstance(value, Mapping):
-            raise TypeError(f"BiCodec view values must be mappings for {field!r}.")
+            raise TypeError(
+                f"Semantic-global view values must be mappings for {field!r}."
+            )
         if set(value) != {"semantic", "global"}:
             raise ValueError(
-                f"BiCodec view values must contain semantic and global for {field!r}."
+                "Semantic-global view values must contain semantic and global "
+                f"for {field!r}."
             )
         mappings.append(value)
 
@@ -229,64 +298,64 @@ def _collate_bicodec(
         field,
     )
     global_values = [value["global"] for value in mappings]
-    if any(not isinstance(value, torch.Tensor) for value in global_values):
-        raise TypeError(f"BiCodec global values must be tensors for {field!r}.")
-    globals_ = cast(list[torch.Tensor], global_values)
-    first = globals_[0]
-    if first.ndim != 2 or any(value.shape != first.shape for value in globals_[1:]):
-        raise ValueError(
-            f"BiCodec global values must share one [unit, codebook] shape for {field!r}."
-        )
-    if first.shape[0] == 0 or first.shape[1] == 0:
-        raise ValueError(f"BiCodec global values must not be empty for {field!r}.")
-    if any(
-        value.dtype == torch.bool
-        or value.is_floating_point()
-        or value.is_complex()
-        for value in globals_
-    ):
-        raise TypeError(f"BiCodec global values must contain integer ids for {field!r}.")
-    if any(value.dtype != first.dtype for value in globals_[1:]):
-        raise TypeError(f"BiCodec global values must share one dtype for {field!r}.")
-    if any(value.device != first.device for value in globals_[1:]):
-        raise ValueError(f"BiCodec global values must share one device for {field!r}.")
     return {
         "semantic": semantic,
-        "global": torch.stack(globals_),
+        "global": _stack_fixed_codec_codes(
+            global_values,
+            field,
+            name="global",
+        ),
     }, mask
+
+
+def _stack_fixed_codec_codes(
+    values: Sequence[Any],
+    field: FieldRef,
+    *,
+    name: str,
+) -> torch.Tensor:
+    _collate_codec_codes(values, field, name=f"{name} values")
+    tensors = cast(list[torch.Tensor], list(values))
+    first = tensors[0]
+    if first.shape[0] == 0:
+        raise ValueError(f"{name.capitalize()} values must not be empty for {field!r}.")
+    if any(value.shape != first.shape for value in tensors[1:]):
+        raise ValueError(
+            f"{name.capitalize()} values must share one [unit, codebook] shape "
+            f"for {field!r}."
+        )
+    return torch.stack(tensors)
 
 
 def _collate_codec_codes(
     values: Sequence[Any],
     field: FieldRef,
+    *,
+    name: str = "Codec view values",
 ) -> tuple[torch.Tensor, torch.Tensor]:
     if any(not isinstance(value, torch.Tensor) for value in values):
-        raise TypeError(f"Codec view values must be tensors for {field!r}.")
+        raise TypeError(f"{name} must be tensors for {field!r}.")
 
     tensors = list(values)
     if any(tensor.ndim != 2 for tensor in tensors):
-        raise ValueError(
-            f"Codec view values must have shape [frame, codebook] for {field!r}."
-        )
+        raise ValueError(f"{name} must have shape [frame, codebook] for {field!r}.")
     if any(
-        tensor.dtype == torch.bool
-        or tensor.is_floating_point()
-        or tensor.is_complex()
+        tensor.dtype == torch.bool or tensor.is_floating_point() or tensor.is_complex()
         for tensor in tensors
     ):
-        raise TypeError(f"Codec view values must contain integer ids for {field!r}.")
+        raise TypeError(f"{name} must contain integer ids for {field!r}.")
 
     dtype = tensors[0].dtype
     if any(tensor.dtype != dtype for tensor in tensors):
-        raise TypeError(f"Codec view values must share one dtype for {field!r}.")
+        raise TypeError(f"{name} must share one dtype for {field!r}.")
     device = tensors[0].device
     if any(tensor.device != device for tensor in tensors):
-        raise ValueError(f"Codec view values must share one device for {field!r}.")
+        raise ValueError(f"{name} must share one device for {field!r}.")
 
     codebooks = tensors[0].shape[1]
     if codebooks == 0 or any(tensor.shape[1] != codebooks for tensor in tensors):
         raise ValueError(
-            f"Codec view values must share one non-empty codebook axis for {field!r}."
+            f"{name} must share one non-empty codebook axis for {field!r}."
         )
 
     lengths = torch.tensor(

@@ -15,7 +15,7 @@ from ..._runtime.parallel import (
 )
 from ..._runtime.progress import Progress, ProgressWriter, put_progress
 from ...runtime import Runtime
-from ...types.item import Role, Schema
+from ...types.item import Role, Schema, View
 from .types import MaterializerProvider
 from ..part.commit import commit_fragment_part, store_fragments
 
@@ -30,6 +30,7 @@ MaterializerMode = Literal["view", "modality", "sample"]
 @dataclass(frozen=True)
 class WorkerConfig:
     output_dir: Path
+    dataset_id: str
     split: str | None
     provenance: Mapping[str, str]
     max_shard_samples: int
@@ -41,6 +42,8 @@ class WorkerConfig:
     write_workers: int
     write_prefetch: int | None
     keep_schema: Schema | None
+    output: View | None
+    schema: Schema | None
     roles: frozenset[Role] | None
     mode: MaterializerMode
     runtime: Runtime
@@ -149,6 +152,7 @@ def worker_materializer(config: WorkerConfig) -> MaterializerWorker:
 
     options: dict[str, Any] = {
         "output_dir": config.output_dir,
+        "dataset_id": config.dataset_id,
         "split": config.split,
         "input_id": config.provenance.get("input_id"),
         "provider_id": config.provenance.get("provider_id"),
@@ -161,6 +165,8 @@ def worker_materializer(config: WorkerConfig) -> MaterializerWorker:
         "write_workers": config.write_workers,
         "write_prefetch": config.write_prefetch,
         "keep_schema": config.keep_schema,
+        "output": config.output,
+        "schema": config.schema,
         "runtime": config.runtime,
     }
     if config.mode == "modality":

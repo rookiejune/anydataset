@@ -10,7 +10,7 @@ from typing import Any
 from .._io.atomic import replace_dir
 from .._validation import non_negative_int, optional_positive_int, positive_int
 from ._pickle_state import decode_pickle_state, validate_pickle_fields
-from .part.dispatch import DatasetFactory, ordered_samples, write_dataset_parts
+from .part.dispatch import DatasetFactory, ordered_sample_records, write_dataset_parts
 from ..types.item import Modality, Role, Sample, View
 from .config import DEFAULT_MAX_SHARD_BYTES, DEFAULT_MAX_SHARD_SAMPLES
 from .part.writer import write_sample_records
@@ -163,14 +163,14 @@ class DatasetWriter:
     def _write_single(self, samples: Any) -> Path:
         return replace_dir(
             self.output_dir,
-            lambda tmp: self._write_to_tmp(tmp, ordered_samples(samples)),
+            lambda tmp: self._write_to_tmp(tmp, samples),
         )
 
-    def _write_to_tmp(self, root: Path, samples: Iterable[Sample]) -> Path:
+    def _write_to_tmp(self, root: Path, samples: Any) -> Path:
         dataset_id, provenance = self._metadata()
         sample_count, written_views = write_sample_records(
             root,
-            enumerate(samples),
+            ordered_sample_records(samples),
             dataset_id=dataset_id,
             split=self.split,
             views=self.views,

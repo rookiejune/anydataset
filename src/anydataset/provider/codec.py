@@ -1,52 +1,59 @@
-"""Materialize frame-code audio views through shared AnyTrain contracts.
+"""Materialize native AnyTrain audio-token views from waveform inputs.
 
-The providers accept waveform or file views and write complete ordered code
-ids. ``AudioTokenizerProvider`` needs only the waveform-to-codes capability;
-``CodecProvider`` retains a complete codec for callers that also decode. Both
-own batching and frame trimming without interpreting codebook semantics.
+``AudioTokenizerProvider`` adapts AnyTrain's directional ``AudioTokenizer``
+capability to canonical ``AudioItem`` views without changing its token schema.
+``CodecProvider`` preserves the legacy complete-frame Tensor contract for
+callers that intentionally retain a full frame codec.
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Union
 
 import torch
 from torch import nn
 
 from ..dataset.collate import Batch
-from ..types.item import AudioView, Modality, Role
+from ..types.item import (
+    AudioView,
+    Modality,
+    Role,
+    SemanticAcousticView,
+    SemanticGlobalView,
+)
 from .abc import AudioProvider
 
 if TYPE_CHECKING:
-    from anytrain.codec import AudioTokenizer, FrameCodec
+    from anytrain.codec import AudioCodeSpec, AudioCodes, AudioTokenizer, FrameCodec
 
 
-class _FrameCodeProvider(nn.Module, AudioProvider):
+_TokenView = Union[torch.Tensor, SemanticAcousticView, SemanticGlobalView]
+_SIGNED_INTEGER_DTYPES = frozenset({torch.int8, torch.int16, torch.int32, torch.int64})
+
+
+class _BatchedAudioProvider(nn.Module, AudioProvider):
+    _operation = "Audio provider"
+
     def __init__(self, output: AudioView) -> None:
         super().__init__()
         self.output = output
 
-    @property
-    def codebook_sizes(self) -> Sequence[int]:
-        raise NotImplementedError
-
     @torch.inference_mode()
-    def forward(self, views: Mapping[AudioView, Any]) -> torch.Tensor:
+    def forward(self, views: Mapping[AudioView, Any]) -> Any:
         waveform, sample_rate = self._audio_batch(views)
-        codes = _codes(
-            self._tokenize(waveform, sample_rate),
-            self.codebook_sizes,
-        )
-        return self._tensor(codes[0])
+        values = self._batch_values(waveform, sample_rate)
+        if len(values) != 1:
+            raise ValueError(
+                f"{self._operation} must return one output per input waveform."
+            )
+        return values[0]
 
     @torch.inference_mode()
     def call_batch(
         self,
         batch: Batch,
-    ) -> (
-        Sequence[torch.Tensor] | Mapping[tuple[Role, Modality], Sequence[torch.Tensor]]
-    ):
+    ) -> Sequence[Any] | Mapping[tuple[Role, Modality], Sequence[Any]]:
         refs = _audio_refs(batch)
         outputs = {ref: self._encode_ref_batch(batch, ref) for ref in refs}
         if len(refs) == 1:
@@ -57,29 +64,21 @@ class _FrameCodeProvider(nn.Module, AudioProvider):
         self,
         batch: Batch,
         ref: tuple[Role, Modality],
-    ) -> Sequence[torch.Tensor]:
+    ) -> Sequence[Any]:
         waveform, sample_rates, lengths = self._waveform_batch(batch, ref)
-        if waveform.is_floating_point():
-            waveform = waveform.float()
-        if waveform.ndim == 2:
-            waveform = waveform.unsqueeze(1)
-        sample_rate = _single_sample_rate(sample_rates)
-        outputs: dict[int, torch.Tensor] = {}
-        for length, indexes in self._length_groups(lengths):
+        waveform = _batched_waveform(waveform)
+        outputs: dict[int, Any] = {}
+        for sample_rate, length, indexes in self._batch_groups(
+            sample_rates,
+            lengths,
+        ):
             clipped = waveform[list(indexes), ..., :length].contiguous()
-            codes = _codes(
-                self._tokenize(clipped, sample_rate),
-                self.codebook_sizes,
-            )
-            if codes.shape[0] != len(indexes):
+            values = self._batch_values(clipped, sample_rate)
+            if len(values) != len(indexes):
                 raise ValueError(
-                    "Codec encode must return one output per input waveform."
+                    f"{self._operation} must return one output per input waveform."
                 )
-            codes = self._tensor(codes)
-            outputs.update(
-                (sample_index, codes[batch_index])
-                for batch_index, sample_index in enumerate(indexes)
-            )
+            outputs.update(zip(indexes, values))
         return [outputs[index] for index in range(len(lengths))]
 
     def _audio_batch(self, views: Mapping[AudioView, Any]) -> tuple[torch.Tensor, int]:
@@ -93,18 +92,70 @@ class _FrameCodeProvider(nn.Module, AudioProvider):
             waveform = waveform.float()
         if waveform.ndim == 1:
             waveform = waveform.unsqueeze(0)
-        return waveform.unsqueeze(0), sample_rate
+        if waveform.ndim != 2:
+            raise ValueError(
+                "Single audio waveform must have shape [time] or [channel, time]."
+            )
+        return waveform.unsqueeze(0), _sample_rate(sample_rate)
+
+    def _batch_values(
+        self,
+        audio: torch.Tensor,
+        sample_rate: int,
+    ) -> Sequence[Any]:
+        raise NotImplementedError
+
+    def _batch_groups(
+        self,
+        sample_rates: torch.Tensor,
+        lengths: torch.Tensor,
+    ) -> tuple[tuple[int, int, tuple[int, ...]], ...]:
+        raise NotImplementedError
+
+
+class _FrameCodeProvider(_BatchedAudioProvider):
+    _operation = "Codec encode"
+
+    @property
+    def codebook_sizes(self) -> Sequence[int]:
+        raise NotImplementedError
+
+    def _batch_values(
+        self,
+        audio: torch.Tensor,
+        sample_rate: int,
+    ) -> Sequence[torch.Tensor]:
+        codes = _codes(
+            self._tokenize(audio, sample_rate),
+            self.codebook_sizes,
+        )
+        if codes.shape[0] != audio.shape[0]:
+            raise ValueError("Codec encode must return one output per input waveform.")
+        return tuple(self._tensor(value) for value in codes)
+
+    def _batch_groups(
+        self,
+        sample_rates: torch.Tensor,
+        lengths: torch.Tensor,
+    ) -> tuple[tuple[int, int, tuple[int, ...]], ...]:
+        sample_rate = _single_sample_rate(sample_rates)
+        return tuple(
+            (sample_rate, length, indexes)
+            for length, indexes in self._length_groups(lengths)
+        )
 
     def _tokenize(self, audio: torch.Tensor, sample_rate: int) -> object:
         raise NotImplementedError
 
 
-class AudioTokenizerProvider(_FrameCodeProvider):
-    """Materialize one frame-code view from a tokenizer-only capability."""
+class AudioTokenizerProvider(_BatchedAudioProvider):
+    """Adapt one AnyTrain tokenizer to its declared native audio-code schema."""
+
+    _operation = "Audio tokenizer"
 
     def __init__(
         self,
-        tokenizer: AudioTokenizer[object],
+        tokenizer: AudioTokenizer[AudioCodes],
         output: AudioView,
     ) -> None:
         spec = tokenizer.spec
@@ -113,25 +164,36 @@ class AudioTokenizerProvider(_FrameCodeProvider):
                 f"Audio tokenizer spec view {spec.view!r} does not match "
                 f"provider output {output.value!r}."
             )
-        codebook_sizes = spec.frame_codebook_sizes
-        if not codebook_sizes:
-            raise ValueError(
-                "AudioTokenizerProvider requires a frame-code tokenizer spec."
-            )
+        schema = _schema(spec)
+        _validate_spec(spec, schema)
+
         super().__init__(output)
-        self._codebook_sizes = tuple(codebook_sizes)
+        self.spec = spec
         self.tokenizer = tokenizer
+        self._schema = schema
         if isinstance(tokenizer, nn.Module):
             tokenizer.eval()
         if isinstance(tokenizer.backend, nn.Module):
             tokenizer.backend.eval()
 
-    def _tokenize(self, audio: torch.Tensor, sample_rate: int) -> object:
-        return self.tokenizer.tokenize(audio, sample_rate)
+    def _batch_values(
+        self,
+        audio: torch.Tensor,
+        sample_rate: int,
+    ) -> Sequence[_TokenView]:
+        return _token_views(
+            self.tokenizer.tokenize(audio, sample_rate),
+            self.spec,
+            self._schema,
+            batch_size=audio.shape[0],
+        )
 
-    @property
-    def codebook_sizes(self) -> Sequence[int]:
-        return self._codebook_sizes
+    def _batch_groups(
+        self,
+        sample_rates: torch.Tensor,
+        lengths: torch.Tensor,
+    ) -> tuple[tuple[int, int, tuple[int, ...]], ...]:
+        return _rate_length_groups(sample_rates, lengths)
 
 
 class CodecProvider(_FrameCodeProvider):
@@ -163,20 +225,313 @@ def _audio_refs(batch: Batch) -> tuple[tuple[Role, Modality], ...]:
     )
     if not refs:
         raise ValueError(
-            "CodecProvider.call_batch expects at least one audio waveform input."
+            "Audio token provider call_batch expects at least one audio input."
         )
     return refs
 
 
-def _single_sample_rate(sample_rates: torch.Tensor) -> int:
+def _batched_waveform(waveform: torch.Tensor) -> torch.Tensor:
+    if waveform.is_floating_point():
+        waveform = waveform.float()
+    if waveform.ndim == 2:
+        waveform = waveform.unsqueeze(1)
+    if waveform.ndim != 3:
+        raise ValueError(
+            "Batched audio waveform must have shape [batch, time] or "
+            "[batch, channel, time]."
+        )
+    return waveform
+
+
+def _sample_rate(value: object) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError("Audio waveform sample rate must be an integer.")
+    if value <= 0:
+        raise ValueError("Audio waveform sample rate must be positive.")
+    return value
+
+
+def _batch_axes(
+    sample_rates: torch.Tensor,
+    lengths: torch.Tensor,
+) -> tuple[list[int], list[int]]:
     if sample_rates.ndim != 1:
         raise ValueError("Batched waveform sample rates must have shape [batch].")
+    if lengths.ndim != 1:
+        raise ValueError("Batched waveform lengths must have shape [batch].")
     if sample_rates.numel() == 0:
         raise ValueError("Batched waveform sample rates must not be empty.")
-    first = sample_rates[0].item()
-    if not torch.equal(sample_rates, sample_rates.new_full(sample_rates.shape, first)):
+    if sample_rates.shape != lengths.shape:
+        raise ValueError("Batched waveform sample rates and lengths must align.")
+    rates = [int(value) for value in sample_rates.tolist()]
+    sizes = [int(value) for value in lengths.tolist()]
+    if any(value <= 0 for value in rates):
+        raise ValueError("Batched waveform sample rates must be positive.")
+    if any(value <= 0 for value in sizes):
+        raise ValueError("Batched waveform lengths must be positive.")
+    return rates, sizes
+
+
+def _single_sample_rate(sample_rates: torch.Tensor) -> int:
+    rates, _ = _batch_axes(
+        sample_rates,
+        torch.ones_like(sample_rates, dtype=torch.int64),
+    )
+    first = rates[0]
+    if any(value != first for value in rates[1:]):
         raise ValueError("CodecProvider.call_batch requires one sample rate per batch.")
-    return int(first)
+    return first
+
+
+def _rate_length_groups(
+    sample_rates: torch.Tensor,
+    lengths: torch.Tensor,
+) -> tuple[tuple[int, int, tuple[int, ...]], ...]:
+    rates, sizes = _batch_axes(sample_rates, lengths)
+    groups: dict[tuple[int, int], list[int]] = {}
+    for index, key in enumerate(zip(rates, sizes)):
+        groups.setdefault(key, []).append(index)
+    return tuple(
+        (sample_rate, length, tuple(indexes))
+        for (sample_rate, length), indexes in groups.items()
+    )
+
+
+def _schema(spec: AudioCodeSpec) -> str:
+    value = spec.schema
+    if isinstance(value, str):
+        schema = value
+    else:
+        schema = getattr(value, "value", None)
+    if schema not in {"frame", "semantic_acoustic", "semantic_global"}:
+        raise ValueError(f"Unsupported audio tokenizer schema: {schema!r}.")
+    return schema
+
+
+def _layout(spec: AudioCodeSpec) -> str:
+    value = spec.acoustic_layout
+    if isinstance(value, str):
+        layout = value
+    else:
+        layout = getattr(value, "value", None)
+    if layout not in {"frame_aligned", "fixed_length"}:
+        raise ValueError(f"Unsupported semantic-acoustic layout: {layout!r}.")
+    return layout
+
+
+def _validate_spec(spec: AudioCodeSpec, schema: str) -> None:
+    if schema == "frame":
+        _codebook_sizes(spec.frame_codebook_sizes, name="frame_codebook_sizes")
+        return
+    _codebook_sizes(
+        spec.semantic_codebook_sizes,
+        name="semantic_codebook_sizes",
+    )
+    if schema == "semantic_acoustic":
+        _codebook_sizes(
+            spec.acoustic_codebook_sizes,
+            name="acoustic_codebook_sizes",
+        )
+        layout = _layout(spec)
+        if layout == "fixed_length":
+            _unit_length(
+                spec.acoustic_unit_length,
+                name="acoustic_unit_length",
+            )
+        return
+    _codebook_sizes(spec.global_codebook_sizes, name="global_codebook_sizes")
+    _unit_length(spec.global_unit_length, name="global_unit_length")
+
+
+def _codebook_sizes(value: Sequence[int], *, name: str) -> None:
+    if not value:
+        raise ValueError(f"Audio tokenizer spec requires {name}.")
+    if any(isinstance(size, bool) or not isinstance(size, int) for size in value):
+        raise TypeError(f"Audio tokenizer spec {name} must contain integers.")
+    if any(size <= 0 for size in value):
+        raise ValueError(f"Audio tokenizer spec {name} must be positive.")
+
+
+def _unit_length(value: object, *, name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError(f"Audio tokenizer spec {name} must be an integer.")
+    if value <= 0:
+        raise ValueError(f"Audio tokenizer spec {name} must be positive.")
+    return value
+
+
+def _token_views(
+    codes: object,
+    spec: AudioCodeSpec,
+    schema: str,
+    *,
+    batch_size: int,
+) -> tuple[_TokenView, ...]:
+    if schema == "frame":
+        values = _token_tensor(
+            codes,
+            spec.frame_codebook_sizes,
+            name="Frame codes",
+            batch_size=batch_size,
+        )
+        return tuple(_cpu(value) for value in values)
+    if schema == "semantic_acoustic":
+        return _semantic_acoustic_views(codes, spec, batch_size=batch_size)
+    return _semantic_global_views(codes, spec, batch_size=batch_size)
+
+
+def _semantic_acoustic_views(
+    codes: object,
+    spec: AudioCodeSpec,
+    *,
+    batch_size: int,
+) -> tuple[SemanticAcousticView, ...]:
+    try:
+        from anytrain.codec import SemanticAcousticCodes
+    except ImportError as exc:
+        raise ImportError(
+            "Semantic-acoustic token materialization requires the current AnyTrain "
+            "package."
+        ) from exc
+    if not isinstance(codes, SemanticAcousticCodes):
+        raise TypeError(
+            "Semantic-acoustic tokenizer must return SemanticAcousticCodes."
+        )
+    semantic = _token_tensor(
+        codes.semantic,
+        spec.semantic_codebook_sizes,
+        name="Semantic codes",
+        batch_size=batch_size,
+    )
+    acoustic = _token_tensor(
+        codes.acoustic,
+        spec.acoustic_codebook_sizes,
+        name="Acoustic codes",
+        batch_size=batch_size,
+    )
+    layout = _layout(spec)
+    if layout == "frame_aligned":
+        if semantic.shape[:2] != acoustic.shape[:2]:
+            raise ValueError(
+                "Frame-aligned semantic and acoustic codes must align on batch "
+                "and time."
+            )
+    else:
+        unit_length = _unit_length(
+            spec.acoustic_unit_length,
+            name="acoustic_unit_length",
+        )
+        if acoustic.shape[1] != unit_length:
+            raise ValueError(
+                "Fixed-length acoustic codes must use the configured unit length "
+                f"{unit_length}, got {acoustic.shape[1]}."
+            )
+    return tuple(
+        {
+            "semantic": _cpu(semantic[index]),
+            "acoustic": _cpu(acoustic[index]),
+        }
+        for index in range(batch_size)
+    )
+
+
+def _semantic_global_views(
+    codes: object,
+    spec: AudioCodeSpec,
+    *,
+    batch_size: int,
+) -> tuple[SemanticGlobalView, ...]:
+    try:
+        from anytrain.codec import SemanticGlobalCodes
+    except ImportError as exc:
+        raise ImportError(
+            "Semantic-global token materialization requires the current AnyTrain "
+            "package."
+        ) from exc
+    if not isinstance(codes, SemanticGlobalCodes):
+        raise TypeError("Semantic-global tokenizer must return SemanticGlobalCodes.")
+    semantic = _token_tensor(
+        codes.semantic,
+        spec.semantic_codebook_sizes,
+        name="Semantic codes",
+        batch_size=batch_size,
+    )
+    global_codes = _token_tensor(
+        codes.global_codes,
+        spec.global_codebook_sizes,
+        name="Global codes",
+        batch_size=batch_size,
+    )
+    unit_length = _unit_length(
+        spec.global_unit_length,
+        name="global_unit_length",
+    )
+    if global_codes.shape[1] != unit_length:
+        raise ValueError(
+            "Global codes must use the configured unit length "
+            f"{unit_length}, got {global_codes.shape[1]}."
+        )
+    return tuple(
+        {
+            "semantic": _cpu(semantic[index]),
+            "global": _cpu(global_codes[index]),
+        }
+        for index in range(batch_size)
+    )
+
+
+def _token_tensor(
+    value: object,
+    codebook_sizes: Sequence[int],
+    *,
+    name: str,
+    batch_size: int,
+) -> torch.Tensor:
+    if not isinstance(value, torch.Tensor):
+        raise TypeError(f"{name} must be a Tensor.")
+    if value.ndim != 3:
+        raise ValueError(f"{name} must have shape [batch, unit, codebook].")
+    if value.shape[0] != batch_size:
+        raise ValueError(f"{name} must return one output per input waveform.")
+    if value.shape[-1] != len(codebook_sizes):
+        raise ValueError(
+            f"{name} must contain all configured {len(codebook_sizes)} codebooks."
+        )
+    if value.dtype not in _SIGNED_INTEGER_DTYPES:
+        raise TypeError(f"{name} must contain signed integer ids.")
+    _validate_ranges(value, codebook_sizes, name=name)
+    return value
+
+
+def _validate_ranges(
+    codes: torch.Tensor,
+    codebook_sizes: Sequence[int],
+    *,
+    name: str,
+) -> None:
+    if codes.numel() == 0:
+        return
+    minimum = codes.amin(dim=(0, 1))
+    maximum = codes.amax(dim=(0, 1))
+    limits = torch.as_tensor(
+        codebook_sizes,
+        dtype=torch.int64,
+        device=codes.device,
+    )
+    invalid = (minimum < 0) | (maximum >= limits)
+    if not invalid.any().item():
+        return
+    observed = torch.stack((minimum, maximum), dim=1).cpu().tolist()
+    details = "; ".join(
+        f"codebook {index} observed [{low}, {high}], expected [0, {size})"
+        for index, ((low, high), size) in enumerate(zip(observed, codebook_sizes))
+        if low < 0 or high >= size
+    )
+    raise ValueError(f"{name} ids are outside configured ranges: {details}.")
+
+
+def _cpu(value: torch.Tensor) -> torch.Tensor:
+    return value.detach().cpu().contiguous()
 
 
 def _codes(codes: object, codebook_sizes: Sequence[int]) -> torch.Tensor:

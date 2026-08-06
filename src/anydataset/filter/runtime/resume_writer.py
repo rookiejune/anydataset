@@ -26,7 +26,12 @@ from ..cache.resume import (
     write_filter_fragment,
 )
 from ..cache.storage import MetricsWriter, PartitionWriter
-from ..types import DatasetFactory, _FilterChunk, _FilterMetricsRow
+from ..types import (
+    DatasetFactory,
+    FilterChunkObserver,
+    _FilterChunk,
+    _FilterMetricsRow,
+)
 
 if TYPE_CHECKING:
     from ..api import FilterRule
@@ -214,10 +219,14 @@ def write_partitions(
     worker_timeout: float | None,
     runtime: Runtime,
     dataset_factory: DatasetFactory,
+    chunk_observer: FilterChunkObserver | None = None,
 ) -> None:
     resume_dir = prepare_filter_resume_dir(cache_path, metadata, metrics=metrics)
     expected = dataset_sample_count(dataset, context="filter")
     completed = completed_filter_indexes(resume_dir, expected=expected)
+    if chunk_observer is not None:
+        for chunk in iter_filter_fragment_chunks(resume_dir, metrics=metrics):
+            chunk_observer(chunk)
     stats = _FilterRunStats(
         expected_samples=expected,
         resumed_samples=len(completed),
@@ -250,6 +259,7 @@ def write_partitions(
                 completed=completed,
                 missing=missing,
                 worker_timeout=worker_timeout,
+                chunk_observer=chunk_observer,
             )
             fragment_started = time.perf_counter()
             try:
@@ -310,6 +320,7 @@ class _FilterResumeFragmentWriter:
     completed: Collection[int]
     missing: Sequence[int]
     worker_timeout: float | None
+    chunk_observer: FilterChunkObserver | None = None
 
     def write(
         self,
@@ -334,6 +345,8 @@ class _FilterResumeFragmentWriter:
             def on_complete(
                 job: FilterFragmentJob, pending: int, elapsed: float
             ) -> None:
+                if self.chunk_observer is not None:
+                    self.chunk_observer(job.chunk)
                 samples = len(job.scan_indexes)
                 stats.record_writer_complete(samples, pending, elapsed)
                 progress.put(

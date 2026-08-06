@@ -17,6 +17,7 @@ from ..dataset.abc import MapStyleABC
 from ..dataset._shuffle import shuffle_index_groups
 from ..types import item
 from ..types.language import remap_lang
+from ._identity import materialized_universe_id
 from ._pickle_state import decode_pickle_state, validate_pickle_fields
 from ._refs import view_path
 from .payload.files import StoreFilesLease, lease_store_files, payload_path, store_id
@@ -132,20 +133,51 @@ class StoreDataset(MapStyleABC):
 
     def __getitem__(self, index: int) -> item.Sample:
         self._ensure_open()
-        if index < 0:
-            index += len(self)
-        if index < 0 or index >= len(self):
-            raise IndexError("store dataset index out of range.")
-        sample = self.samples[index]
+        normalized = _store_index(index, len(self))
+        sample = self.samples[normalized]
         return _sample_for_entry(self, sample.sample_index, sample)
+
+    def __getitems__(self, indexes: Sequence[int]) -> list[item.Sample]:
+        """Read a batch in payload-local order and restore caller order.
+
+        PyTorch passes sampler batches through ``__getitems__`` when available.
+        Sorting the physical indexes avoids repeatedly evicting Parquet row groups
+        and tar shard handles under random sampling. Duplicate indexes are decoded
+        once per batch and the requested order is preserved exactly.
+        """
+
+        self._ensure_open()
+        normalized = tuple(_store_index(index, len(self)) for index in indexes)
+        if not normalized:
+            return []
+        ordered = sorted(set(normalized))
+        samples = {
+            index: _sample_for_entry(self, index, self.samples[index])
+            for index in ordered
+        }
+        return [samples[index] for index in normalized]
+
+    def sample_id(self, index: int) -> str:
+        """Return the stable lineage identity for one logical store row."""
+
+        self._ensure_open()
+        return self.samples[_store_index(index, len(self))].sample_id
+
+    def universe_id(self) -> str | None:
+        """Return a derived-universe identity shared with its online facade."""
+
+        self._ensure_open()
+        return materialized_universe_id(
+            self.manifest.dataset_id,
+            self.manifest.split,
+            self.manifest.provenance,
+            len(self.samples),
+            self.views,
+        )
 
     def cost_row(self, index: int) -> SampleManifestEntry:
         self._ensure_open()
-        if index < 0:
-            index += len(self)
-        if index < 0 or index >= len(self):
-            raise IndexError("store dataset index out of range.")
-        return self.samples[index]
+        return self.samples[_store_index(index, len(self))]
 
     def _shuffle(
         self,
@@ -685,6 +717,16 @@ def _sample_for_entry(
             views[view_entry[2]] = _view_value(dataset, view, entry)
         result[sample_ref] = _item_from_entry(sample_ref, item_entry, views)
     return result
+
+
+def _store_index(index: int, length: int) -> int:
+    if isinstance(index, bool) or not isinstance(index, int):
+        raise TypeError("store dataset index must be an integer.")
+    if index < 0:
+        index += length
+    if index < 0 or index >= length:
+        raise IndexError("store dataset index out of range.")
+    return index
 
 
 def _item_from_entry(

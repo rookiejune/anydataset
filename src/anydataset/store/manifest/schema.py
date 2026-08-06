@@ -19,7 +19,7 @@ LEGACY_STORE_SCHEMA_VERSION = 2
 _BASE_DATASET_MANIFEST_FIELDS = frozenset(
     {"dataset_id", "sample_count", "schema_version", "split"}
 )
-_PROVENANCE_FIELDS = frozenset({"input_id", "provider_id"})
+_PROVENANCE_FIELDS = frozenset({"input_id", "provider_id", "output_id"})
 
 
 @dataclass(init=False)

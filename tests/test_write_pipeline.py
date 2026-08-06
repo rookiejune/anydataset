@@ -58,6 +58,50 @@ class BackgroundWriteSinkTest(unittest.TestCase):
             ) as sink:
                 sink.submit("bad")
 
+    def test_flush_waits_and_keeps_sink_reusable(self):
+        calls = []
+
+        sink = BackgroundWriteSink(
+            calls.append,
+            workers=1,
+            start_method="spawn",
+        )
+        sink.__enter__()
+        sink.submit("a")
+        sink.flush()
+        self.assertEqual(calls, ["a"])
+
+        sink.submit("b")
+        sink.flush()
+        sink.close()
+
+        self.assertEqual(calls, ["a", "b"])
+
+    def test_background_failure_is_sticky(self):
+        failure = RuntimeError("bad write")
+
+        def write(_value: str) -> None:
+            raise failure
+
+        sink = BackgroundWriteSink(
+            write,
+            workers=1,
+            start_method="spawn",
+        )
+        sink.__enter__()
+        sink.submit("bad")
+
+        with self.assertRaises(RuntimeError) as flushed:
+            sink.flush()
+        with self.assertRaises(RuntimeError) as submitted:
+            sink.submit("later")
+        with self.assertRaises(RuntimeError) as closed:
+            sink.close()
+
+        self.assertIs(flushed.exception, failure)
+        self.assertIs(submitted.exception, failure)
+        self.assertIs(closed.exception, failure)
+
     def test_completed_job_releases_capacity_before_slow_head(self):
         first_started = Event()
         second_done = Event()

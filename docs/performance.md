@@ -120,9 +120,10 @@
 - integrity 校验提供 `fast`、`normal` 和 `full` 三档；`normal` 起会拒绝非法或重复的 tar
   payload member，默认的 `full` 还会读取全部 manifest 引用的 payload body，并拒绝 manifest
   外的额外 payload member。JSON 和目录原子替换在支持的文件系统上额外同步父目录，便于断电恢复场景。
-- materializer resume metadata 除自动 factory 标识外，还接受显式 `input_id` 和
-  `provider_id` 语义版本。它们共同决定 fragment 是否可复用，避免 mutable input 或模型
-  checkpoint 变化后错误续跑。
+- materializer resume metadata 在缺少显式 semantic ID 时使用自动 factory 标识；设置
+  `input_id` 或 `provider_id` 后，对应 ID 成为权威 factory marker，execution-only factory
+  state 可以变化而不破坏续跑。mutable input、模型 checkpoint 或 adapter 语义变化时必须
+  更新对应 ID，避免错误复用 fragment。
 
 ## 公开默认值与生产调优
 

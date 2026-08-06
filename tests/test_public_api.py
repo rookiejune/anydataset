@@ -17,7 +17,9 @@ import anydataset.store as store
 import anydataset.types as any_types
 
 
-def _assert_public_all(module, expected: list[str], *, private_allowed: set[str] | None = None) -> None:
+def _assert_public_all(
+    module, expected: list[str], *, private_allowed: set[str] | None = None
+) -> None:
     private_allowed = private_allowed or set()
     assert module.__all__ == expected
     for name in module.__all__:
@@ -120,6 +122,7 @@ def test_types_public_api_boundary() -> None:
             "Role",
             "Sample",
             "Schema",
+            "SemanticAcousticView",
             "SemanticGlobalView",
             "Source",
             "SourceKey",
@@ -133,6 +136,9 @@ def test_types_public_api_boundary() -> None:
             "item",
             "remap_lang",
         ],
+    )
+    assert any_types.SemanticAcousticView.__required_keys__ == frozenset(
+        {"semantic", "acoustic"}
     )
     assert any_types.SemanticGlobalView.__required_keys__ == frozenset(
         {"semantic", "global"}
@@ -189,15 +195,24 @@ def test_dataset_public_api_boundary() -> None:
             "AnyDataset",
             "AudioBatch",
             "Batch",
+            "DatasetUniverse",
+            "DecisionSet",
             "FieldGroup",
             "FieldRef",
             "IterableAnyDataset",
             "IndexSelection",
+            "IndexIdentity",
             "MapStyleABC",
             "Morphology",
+            "SampleIdentity",
+            "Selection",
+            "SelectionView",
             "SpeechBatch",
             "SpeechGridBatch",
             "SpeechGridView",
+            "StaticSelection",
+            "UnknownDecisionError",
+            "UniverseIdentity",
             "audio_collate",
             "build_toy_audio_dataset",
             "build_toy_speech_dataset",
@@ -228,6 +243,8 @@ def test_filter_public_api_boundary() -> None:
             "FilterLabel",
             "FilterPredicate",
             "FilterRule",
+            "FilterRun",
+            "FilterRunStatus",
             "RejectReplaceDataset",
             "cleanup_filter_generations",
         ],
@@ -276,6 +293,7 @@ def test_store_public_api_boundary() -> None:
             "FunctionViewProvider",
             "ModalityMaterializer",
             "MaterializationStatus",
+            "MaterializingViewDataset",
             "StoreFilesInUseError",
             "cleanup_store_files",
             "lease_store_files",

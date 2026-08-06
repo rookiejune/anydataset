@@ -16,6 +16,7 @@ from ..view import (
 )
 from .materialize.materializer import (
     MaterializationStatus,
+    MaterializingViewDataset,
     ModalityMaterializer,
     SampleMaterializer,
     ViewMaterializer,
@@ -38,6 +39,7 @@ __all__ = [
     "FunctionViewProvider",
     "ModalityMaterializer",
     "MaterializationStatus",
+    "MaterializingViewDataset",
     "StoreFilesInUseError",
     "cleanup_store_files",
     "lease_store_files",

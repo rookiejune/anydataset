@@ -24,17 +24,23 @@ Use these paths for application code:
   language helpers.
 - `anydataset.types`: canonical sample, item, schema, role, modality, view,
   metadata, source, preset, language types, encoded `FileBytes` payloads, and
-  the structured BiCodec `SemanticGlobalView` mapping contract.
+  the structured audio-token `SemanticAcousticView` and `SemanticGlobalView`
+  mapping contracts.
 - `anydataset.presets`: built-in dataset preset classes.
 - `anydataset.dataset`: dataset base classes, index selection, generic collate
-  helpers, and morphology collate/view contracts.
+  helpers, and morphology collate/view contracts. Focused universe and selection
+  extension contracts are listed below.
 - `anydataset.filter`: cached filter rules, filtered datasets, scalar and batch
-  filter predicate contracts, explicit filter apply reports, online reject /
+  filter predicate contracts, `FilterRun` / `FilterRunStatus` from the dynamic
+  `FilterRule.open()` entrance, explicit blocking apply reports, online reject /
   replace filtering, filter decisions, and filter cleanup entry points.
 - `anydataset.store`: canonical store writing; view, modality, and complete-sample
   materializers and provider protocols; scalar and batch transform types;
-  materialization status; explicit store migration; payload integrity checks;
-  and retained-file leasing and cleanup.
+  materialization status and the lifecycle-controlled
+  `MaterializingViewDataset` underlying online `ViewMaterializer.open()` results;
+  explicit store migration; payload integrity checks; and retained-file leasing
+  and cleanup. A selected input may return a `SelectionView` wrapping that online
+  universe rather than the bare materializing dataset.
 - `anydataset.runtime`: process/device runtime configuration.
 - `anydataset.provider`: built-in model/provider classes.
 - `anydataset.provider_service`: provider process server and remote provider /
@@ -61,9 +67,52 @@ Batch-aware integrations can type their filter predicates with
 `SampleProvider` and `BatchSampleProvider`; callers do not need to depend on
 the internal materializer modules that consume those contracts.
 
+## Dynamic view composition
+
+Dynamic operations distinguish complete execution from returned selection:
+
+- transforms and filters execute over a complete `DatasetUniverse`;
+- `SelectionView` applies the ordered intersection only at the returned dataset
+  boundary;
+- unknown live filter decisions are unresolved, not reject;
+- one-to-one transforms preserve stable `sample_id` and rebase selections by that
+  ID;
+- `sample_index` is only a dense ordinal within one universe/store;
+- transform and filter identities exclude selection state.
+
+`FilterRule.open()` returns `FilterRun`. Use `run.dataset` for the live selection,
+`run.wait()` to wait for complete decision coverage, and `run.close()` or the
+context manager to wait and release resources. `FilterRule.apply()` remains the
+blocking compatibility surface that returns `FilteredDataset`.
+
+`ViewMaterializer.open()` keeps the ready path fully lazy when `input_id` is
+explicit. With `input_id_factory`, it constructs the input identity object once
+to validate canonical provenance, reuses that object when it also supplies the
+returned selection, and still never constructs the provider. Otherwise
+foreground access computes requested values and starts a background
+full-universe sweep. `MaterializingViewDataset.close()` waits for complete
+transform coverage and staging persistence; it does not publish the canonical
+store. Publication remains an explicit `ViewMaterializer.write()`/finalize
+operation. An optional logical `dataset_id` decouples canonical and universe
+identity from the physical `output_dir` basename; omission preserves the basename
+fallback.
+
+`provider_id` is global operation provenance for the AnyTrain backend plus the
+AnyDataset adapter and semantic model recipe. It is unrelated to a sample,
+filter, or selection and is never sample metadata.
+
 ## Extension API
 
 These paths are intended for users extending anydataset:
+
+- `anydataset.dataset.universe` exports `DatasetUniverse`, `SampleIdentity`, and
+  `IndexIdentity`. `DatasetUniverse` is the complete map-style sample space for
+  operation coverage; stable lineage must come from `sample_id()`, not a dense
+  position.
+- `anydataset.dataset.view` exports the `Selection` protocol, `DecisionSet`,
+  `StaticSelection`, `SelectionView`, and `UnknownDecisionError`. These types
+  describe membership and ordered return-boundary intersection; they do not
+  authorize transforms to scan only selected rows.
 
 - `anydataset.dataset.source.DatasetSource` and
   `anydataset.dataset.source.ShardingSource` define source contracts.
@@ -102,7 +151,9 @@ Do not depend on these paths from user code:
   resolver/dataset internals, not an application extension point.
 - Concrete dataset helpers embedded in presets, such as FSD50K parser/load
   helpers, unless they are explicitly exported from `anydataset.presets`.
-- `anydataset.filter.cache.*` and `anydataset.filter.runtime.*`.
+- `anydataset.filter.cache.*`, `anydataset.filter.runtime.*`, and the concrete
+  `anydataset.filter.live` implementation module. Import `FilterRun` and
+  `FilterRunStatus` from `anydataset.filter`.
 - `anydataset.store.config`, `anydataset.store.jsonio`,
   `anydataset.store.paths`, `anydataset.store.reader`,
   `anydataset.store.manifest.*`, `anydataset.store.materialize.*`,
@@ -113,6 +164,14 @@ Do not depend on these paths from user code:
 - Names or modules that start with `_`.
 
 ## Store migration policy
+
+The canonical physical format remains Parquet manifests plus tar payload shards.
+Online filter decision/selection fragments use Arrow IPC as private in-progress
+control-plane records, while completed filter generations remain Parquet.
+Arrow IPC fragments are not a public sample-payload format. Any migration of
+waveform, token, or heterogeneous payloads to Arrow requires the benchmark gate
+recorded in [`experiments/todo.md`](experiments/todo.md) and a new versioned store
+contract.
 
 Legacy store formats are not read through silent compatibility layers. Store
 readers use an explicit `legacy_policy` when a legacy format is still readable:

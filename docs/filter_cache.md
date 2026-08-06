@@ -1,14 +1,16 @@
-# Cached Filter Partitions
+# Filter Decisions and Cached Partitions
 
-`FilteredDataset(name, factory, dataset_factory=..., ...)` applies a named rule
-to a map-style sample dataset and caches global row indices in that dataset's
-sample space. A rule does not copy sample payloads and does not change physical
-`Spec` identity. The public filter API lives under `anydataset.filter` and is
-imported from that module. Only `FilterRule` is also re-exported from the
-top-level `anydataset` package.
+A filter materializes one decision for every sample in a complete
+`DatasetUniverse`. It does not copy payloads, mutate physical `Spec` identity, or
+shrink the input of a later transform. Selected labels become a `SelectionView`
+only at the returned dataset boundary.
+
+The dynamic entrance is `FilterRule.open()`. It returns a `FilterRun` whose
+`dataset` is usable while the full-universe predicate scan continues in the
+background:
 
 ```python
-from anydataset.filter import FilterDecision, FilteredDataset, FilterRule
+from anydataset.filter import FilterDecision, FilterRule, FilterRunStatus
 
 def quality_factory():
     return lambda sample: "review" if needs_review(sample) else is_good(sample)
@@ -18,52 +20,79 @@ def dataset_factory():
     return build_dataset()
 
 
-filtered = FilteredDataset(
-    "quality_v1_parse_v3_transform_none",
+rule = FilterRule(
+    "quality_v1",
     quality_factory,
+    version="parse-v3",
+)
+run = rule.open(
     dataset_factory=dataset_factory,
+    labels="accept",
     device="cpu",
 )
-train = filtered.select_by("accept")
-audit = filtered.select_by("reject", "review")
-
-rule = FilterRule("quality_v1_parse_v3_transform_none", quality_factory)
-again = rule.apply(dataset_factory=dataset_factory, labels="accept", device="cpu")
+train = run.dataset
+first = train[0]  # waits only for decisions needed to resolve this position
+train = run.wait()  # waits for complete decision coverage
+assert run.status is FilterRunStatus.COMPLETE
+run.close()
 ```
 
 The rule factory is called inside the process that executes the predicate. The
-predicate receives the full canonical `Sample` produced by the dataset.
-`FilteredDataset(...)` checks whether the rule identity has a ready cache for the
-base dataset; if not, it builds one. It selects all available labels by default.
-`FilteredDataset.select_by(...)` creates a label view over the same cache
-without rerunning the predicate. `FilterRule.apply(...)` is a convenience
-wrapper that forwards its `name` and `factory` to `FilteredDataset`.
+predicate receives the full canonical `Sample` produced by the current stage's
+complete universe. A cold `open()` starts the scan immediately. A ready
+compatible cache returns a complete run without constructing the predicate.
 
-`FilteredDataset` is itself a map-style sample dataset, so filters can be
-chained:
+`FilterRun` exposes:
+
+- `dataset`: the live ordered intersection of upstream selections and the new
+  selected labels;
+- `status`: `RUNNING`, `COMPLETE`, or `FAILED`;
+- `wait()`: wait for complete decision coverage and return `dataset`;
+- `close()`: wait, release the generation lease, and re-raise any sticky error;
+- context-manager lifecycle equivalent to `close()`.
+
+Unknown decisions are unresolved state, not reject. Positive indexed access
+waits only for the decisions needed to identify that returned position. `len()`,
+negative indexing, complete selected-index listing, and shuffle planning require
+the complete ordered selection and therefore wait for the full scan.
+
+The existing blocking API remains available for compatibility:
 
 ```python
-accepted_text = text_rule.apply(
+filtered = rule.apply(
     dataset_factory=dataset_factory,
-).select_by("accept")
-accepted_both = speech_rule.apply(
-    dataset_factory=accepted_text.dataset_factory,
-).select_by("accept")
+    labels="accept",
+    device="cpu",
+)
 ```
 
-When a rule is applied to a filtered view, the predicate only scans the selected
-rows, but the written partition indices still refer to the original sample
-space. Cache metadata records the upstream rule, selected labels, and the
-upstream generation id; the downstream cache key is separated from the same rule
-applied to the physical dataset.
+`FilterRule.apply()` blocks until the canonical Parquet generation is ready and
+returns the historical `FilteredDataset` surface, including metrics and apply
+reports. New dynamic pipelines should use `open()`, because `FilterRun` makes the
+complete-universe operation and the returned selection separate objects.
 
-Filtered views preserve the physical dataset's lightweight cost and shuffle
-contracts. Callable dataloader costs receive the underlying `cost_row(...)`
-metadata for the selected physical index instead of materializing the full
-sample. Shuffle first keeps the physical dataset's index groups, then maps the
-selected rows into filtered-view positions and distributes that selected stream
-across DDP ranks. This retains store payload locality while balancing selection
-positions globally rather than restarting rank assignment in every group.
+## Full-universe and selection semantics
+
+If `dataset_factory()` returns a `SelectionView`, `open()` unwraps its
+`DatasetUniverse`, evaluates the predicate on every universe sample, then appends
+the new decision selection to the existing ordered intersection. Upstream labels
+or generations do not enter predicate coverage or operation identity.
+
+For example, two callers can select disjoint subsets of the same universe and
+reuse one ready decision cache for the same rule. Each caller gets a different
+returned intersection without rerunning the predicate. A later synthesize or
+tokenize operation also consumes the complete universe rather than the selected
+rows.
+
+Across a one-to-one transform, decisions are rebased with stable `sample_id`.
+The current universe's `sample_index` is only a dense ordinal and is not used as
+a cross-stage lineage key. Duplicate or missing `sample_id` values are errors.
+
+Filtered views preserve the universe's lightweight cost and shuffle contracts.
+Callable dataloader costs receive the underlying `cost_row(...)` metadata for
+the selected universe index instead of materializing the full sample. Shuffle
+keeps physical index groups, maps selected rows into returned positions, and
+distributes that selected stream across DDP ranks.
 
 Predicate return values are normalized to string labels:
 
@@ -75,23 +104,18 @@ Predicate return values are normalized to string labels:
 - `FilterDecision` carries a label plus optional per-sample metrics.
 
 `FilterRule.name` is the human-readable rule name and remains part of the cache
-identity. The optional `rule_id` and `version` fields add explicit identity;
-changing any of the three fields selects a different cache. When omitted,
-`rule_id` defaults to `name` and the original name-only cache path remains
-compatible. The factory, predicate, dataset `parse_fn`, and dataset transforms
-are deliberately not inspected by the library. Update `version` or pass an
-explicit `content_id` (for example a git sha or config hash) when those
-semantics change—including after a failed resume or partial publish—so rebuilds
-do not replay stale decisions under the same rule identity. Callers can also
-pass `rebuild=True` to `FilterRule.apply` / `FilteredDataset` to drop the current
-generation pointer and resume fragments and force a fresh publish under the same
-declared identity.
+identity. Optional `rule_id`, `version`, and `content_id` fields add explicit
+semantic identity; changing any of them selects a different decision cache.
+When omitted, `rule_id` defaults to `name` and the original name-only path remains
+compatible. The library does not infer semantic changes in a model, predicate,
+parse function, or preprocessing recipe, so callers must update `version` or
+`content_id` when those outputs can change.
 
-When a downstream rule is applied to an upstream `FilteredDataset` view, the
-downstream cache identity also pins the upstream **generation id**. Republishing
-the upstream rule under the same name/`rule_id`/`version` creates a new
-generation and therefore a new downstream cache path, even if label counts stay
-the same.
+The other identity input is the complete universe snapshot. Selection labels,
+upstream filter generations, returned sample count, and selection order are
+excluded. For application-owned logical universes, a non-empty `input_id` is
+required and must change when universe content, order, or sample lineage changes.
+`rebuild=True` forces a new generation under the same declared identity.
 
 Cache layout:
 
@@ -116,39 +140,46 @@ $ANYDATASET_HOME/
                   part-000000.parquet
               .lease
               .ready
+        .<rule_hash>.resume/
+          filter/
+            decisions/
+              <chunk-digest>.arrow
     sources/
       <spec_id>/
         metadata.json
         .ready
 ```
 
-`dataset_hash` is derived from the dataset class and physical `Spec` id for a
-single physical dataset. Store manifest provenance is included automatically,
-so a materializer input or provider version change selects a new cache.
+`dataset_hash` identifies the complete universe. For a physical dataset it is
+derived from the dataset class, physical `Spec`, sample count, and store
+provenance. A `SelectionView` contributes its universe, not its selected labels.
+Consequently a materializer input or provider version change selects a new
+filter cache through universe provenance, while a different selection does not.
 
 For a mutable or application-owned input, pass a non-empty `input_id`:
 
 ```python
-filtered = rule.apply(
+run = rule.open(
     dataset_factory=dataset_factory,
     input_id="base-plus-local-annotations-v3",
 )
+run.close()
 ```
 
-`input_id` is the caller-managed semantic version of the entire filter input
-snapshot. It supplements the automatic class, physical `Spec`, store provenance,
-and sample-count identity; it does not replace them. Change it when input content
-or ordering changes. The stored ID survives `FilteredDataset.dataset_factory`,
-pickle reconstruction, and chained filters. `FilterRule.rule_id`/`version` identify
-the predicate contract, while `input_id` versions input state.
+`input_id` is the caller-managed semantic version of the complete universe
+snapshot. It supplements automatic class, physical `Spec`, store provenance,
+sample-count, and lineage identity; it does not replace them. Change it when
+universe content, ordering, or `sample_id` membership changes. The same ID may be
+used with different selections over that unchanged universe.
 
-`rule.json` stores the base physical `Spec` id or filtered-view lineage, scanned
-sample count, and rule identity. When those values do not match, the rule is
-recomputed. `partitions.json` stores labels, counts, and shard parquet file
-names. Each parquet file stores global sample-space indices for one label shard.
-`FilterRule.apply(..., max_shard_samples=...)`
+`rule.json` stores the complete-universe identity, scanned sample count, and rule
+identity. When those values do not match, the rule is recomputed.
+`partitions.json` stores labels, counts, and Parquet shard names. Each partition
+row stores an index in the current universe's coordinate system; it is not a
+cross-transform lineage key. Selection rebasing uses `sample_id` instead.
+`FilterRule.open/apply(..., max_shard_samples=...)`
 controls the maximum number of indices written to one shard; the default is
-1,000,000. `FilterRule.apply(..., commit_samples=...)` controls how many
+1,000,000. `FilterRule.open/apply(..., commit_samples=...)` controls how many
 samples are scanned before one in-memory label batch is committed to the shard
 writer; the default is 100,000. Cache construction writes those bounded batches
 incrementally, so it does not need to hold every accepted index in one Python
@@ -157,6 +188,14 @@ resume directory and replays them into the final cache after all samples are
 covered. `write_workers` controls background fragment writer threads; the
 default is one writer so predicate execution can overlap with parquet writes.
 `write_prefetch` bounds pending write jobs.
+
+During a live `FilterRun`, every completed decision chunk is also written as an
+immutable Arrow IPC file before it becomes visible to the live selection. These
+Arrow files contain only compact `(index, label)` control-plane rows. They are
+not canonical sample payloads and do not replace the final Parquet partition and
+metrics generation. A write or scan failure is sticky; completed Arrow chunks
+remain available for diagnosis. Canonical resume and publication still use the
+versioned filter-resume metadata and Parquet generation contract.
 
 Each completed cache is published as a new immutable generation. The writer
 first atomically renames the completed generation into `generations/`, then
@@ -202,7 +241,7 @@ multi-device runs, each worker also writes lifecycle and failure details under
 `$ANYDATASET_HOME/logs/<timestamp>-<pid>/filter/part-xxxxx.log`; rank 0 mirrors
 ordinary lifecycle logs to stdout and errors to stderr.
 
-`FilterRule.apply(..., device="auto")` resolves all visible CUDA devices, or CPU
+`FilterRule.open/apply(..., device="auto")` resolves all visible CUDA devices, or CPU
 when CUDA is unavailable. One resolved device runs in the calling process;
 multiple devices start one worker per device using
 `Runtime.process_start_method`, which defaults to `"spawn"`. Pass `device="cpu"`
@@ -234,10 +273,11 @@ def dataset_factory():
     return build_dataset()
 
 
-filtered = rule.apply(
+run = rule.open(
     dataset_factory=dataset_factory,
     device=("cuda:0", "cuda:1"),
 )
+run.close()
 ```
 
 Both `dataset_factory` and the predicate factory stored in `FilterRule` should
@@ -265,10 +305,12 @@ for row in filtered.iter_metrics():
     ...
 ```
 
-Metrics rows include the global sample-space `index`, normalized `label`, and the
-user metrics payload. Metrics payloads must be JSON-serializable mappings with
-string keys; NaN and infinity are rejected. The evaluator logic that computes
-those metrics stays in user code or a higher-level evaluator package.
+Metrics rows include the current universe `index`, normalized `label`, and the
+user metrics payload. That index is a dense/local decision coordinate, not the
+stable sample-lineage identifier. Metrics payloads must be JSON-serializable
+mappings with string keys; NaN and infinity are rejected. The evaluator logic
+that computes those metrics stays in user code or a higher-level evaluator
+package.
 
 Metrics are stored as parquet shards with fixed columns:
 

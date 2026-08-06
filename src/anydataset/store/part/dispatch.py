@@ -25,8 +25,8 @@ from ..._runtime.parallel import (
     validate_spawn_value,
 )
 from .commit import commit_store_parts
-from .writer import DatasetPartWriter
-from ...types.item import Modality, Role, Sample, View
+from .writer import DatasetPartWriter, SampleRecord, sample_record
+from ...types.item import Modality, Role, View
 
 DatasetFactory = Callable[[], Any]
 
@@ -249,15 +249,23 @@ def _sample_records(
     *,
     num_workers: int,
     prefetch_factor: int | None,
-) -> Iterator[tuple[int, Sample]]:
-    for batch in runtime_sample_index_loader(
-        dataset_factory,
-        batch_size=1,
-        num_workers=num_workers,
-        prefetch_factor=prefetch_factor,
-    ):
-        yield from batch
+) -> Iterator[SampleRecord]:
+    identity_source = dataset_factory()
+    try:
+        for batch in runtime_sample_index_loader(
+            dataset_factory,
+            batch_size=1,
+            num_workers=num_workers,
+            prefetch_factor=prefetch_factor,
+        ):
+            for index, sample in batch:
+                yield sample_record(identity_source, index, sample)
+    finally:
+        close = getattr(identity_source, "close", None)
+        if callable(close):
+            close()
 
 
-def ordered_samples(dataset: Any) -> Iterator[Sample]:
-    yield from iter_ordered_samples(dataset)
+def ordered_sample_records(dataset: Any) -> Iterator[SampleRecord]:
+    for index, sample in enumerate(iter_ordered_samples(dataset)):
+        yield sample_record(dataset, index, sample)

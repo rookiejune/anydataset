@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Union
 
 from ..._io.atomic import replace_dir
 from ..._runtime.sharding import validate_shard
@@ -12,6 +13,7 @@ from .._refs import view_path
 from ..config import DEFAULT_MAX_SHARD_BYTES, DEFAULT_MAX_SHARD_SAMPLES
 from .sample_write import (
     explicit_views,
+    inherited_sample_id,
     sample_id,
     sample_id_prefix,
     sample_manifest_entry,
@@ -19,6 +21,7 @@ from .sample_write import (
     sample_view_value,
     validate_sample,
     validate_view_sets,
+    UniqueSampleIds,
 )
 from ..jsonio import write_json
 from ..manifest.schema import (
@@ -31,7 +34,7 @@ from ..manifest.io import sample_manifest_writer
 from ..paths import dataset_json_path, dataset_ready_path
 from .viewwriter import ViewWriter
 
-SampleRecord = tuple[int, Sample]
+SampleRecord = Union[tuple[int, Sample], tuple[int, str, Sample]]
 
 
 def write_sample_records(
@@ -53,14 +56,21 @@ def write_sample_records(
     previous_index: int | None = None
     prefix = sample_id_prefix(dataset_id)
 
+    sample_ids = UniqueSampleIds(root)
     try:
-        for sample_index, sample in samples:
+        for record in samples:
+            sample_index, source_sample_id, sample = _sample_record(record)
             if previous_index is not None and sample_index <= previous_index:
                 raise ValueError("Materialized sample indexes must be increasing.")
             previous_index = sample_index
             if not isinstance(sample, Mapping):
                 raise TypeError("Store writers expect Sample mappings.")
-            current_sample_id = sample_id(prefix, sample_index)
+            current_sample_id = (
+                sample_id(prefix, sample_index)
+                if source_sample_id is None
+                else source_sample_id
+            )
+            sample_ids.add(current_sample_id)
             validate_sample(sample)
             selected = views if views is not None else sample_view_refs(sample)
             if not selected:
@@ -107,6 +117,8 @@ def write_sample_records(
         for sink in sinks.values():
             sink.abort()
         raise
+    finally:
+        sample_ids.close()
 
 
 def write_dataset_part(
@@ -232,8 +244,8 @@ class DatasetFragmentWriter:
     def write(self, samples: Sequence[SampleRecord]) -> Path:
         if not samples:
             raise ValueError("DatasetFragmentWriter.write requires samples.")
-        ordered = tuple(sorted(samples, key=lambda item: item[0]))
-        indexes = tuple(index for index, _ in ordered)
+        ordered = tuple(sorted(samples, key=_sample_record_index))
+        indexes = tuple(_sample_record_index(record) for record in ordered)
         if len(set(indexes)) != len(indexes):
             raise ValueError("Dataset fragment sample indexes must be unique.")
         return replace_dir(
@@ -283,3 +295,28 @@ def part_json_path(root: str | Path) -> Path:
 
 def fragment_json_path(root: str | Path) -> Path:
     return Path(root) / "fragment.json"
+
+
+def sample_record(
+    source: object,
+    sample_index: int,
+    sample: Sample,
+) -> SampleRecord:
+    source_sample_id = inherited_sample_id(source, sample_index)
+    if source_sample_id is None:
+        return sample_index, sample
+    return sample_index, source_sample_id, sample
+
+
+def _sample_record(record: SampleRecord) -> tuple[int, str | None, Sample]:
+    if len(record) == 2:
+        sample_index, sample = record
+        return sample_index, None, sample
+    sample_index, source_sample_id, sample = record
+    if not isinstance(source_sample_id, str) or not source_sample_id:
+        raise ValueError("Stable sample IDs must be non-empty strings.")
+    return sample_index, source_sample_id, sample
+
+
+def _sample_record_index(record: SampleRecord) -> int:
+    return record[0]

@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from enum import Enum
 import math
 from pathlib import Path
-from typing import Any, TYPE_CHECKING, Protocol, TypedDict, Union, runtime_checkable
+from typing import Any, Protocol, TypedDict, Union, runtime_checkable
 
 from .._compat import NotRequired
 from .._runtime.devices import Devices
@@ -26,6 +26,14 @@ JsonValue = Union[
 ]
 FilterLabel = Union[bool, str, Enum]
 _Index = Sequence[int]
+
+
+class FilterRunStatus(str, Enum):
+    """Lifecycle state of one online filter materialization."""
+
+    RUNNING = "running"
+    COMPLETE = "complete"
+    FAILED = "failed"
 
 
 def validate_metrics(metrics: object) -> dict[str, JsonValue]:
@@ -88,6 +96,7 @@ class FilterApplyReport:
 FilterOutput = Union[FilterLabel, FilterDecision]
 FilterPredicate = Callable[[Sample], FilterOutput]
 FilterFactory = Callable[[], FilterPredicate]
+FilterChunkObserver = Callable[["_FilterChunk"], None]
 
 
 @runtime_checkable
@@ -97,17 +106,7 @@ class BatchFilterPredicate(Protocol):
     def call_batch(self, samples: Sequence[Sample]) -> Sequence[FilterOutput]: ...
 
 
-if TYPE_CHECKING:
-    from ..dataset.abc import AnyDataset
-    from ..store.reader import StoreDataset
-    from .api import FilteredDataset
-
-    FilterDataset = Union[AnyDataset, StoreDataset, FilteredDataset]
-else:
-    # Keep the runtime alias import-safe: ``FilteredDataset`` imports this
-    # module while its type-only union is still being resolved by the checker.
-    FilterDataset = MapStyleABC
-
+FilterDataset = MapStyleABC
 DatasetFactory = Callable[[], FilterDataset]
 
 

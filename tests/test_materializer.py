@@ -198,6 +198,73 @@ class ViewMaterializerTest(unittest.TestCase):
 
         strategy.materialize_sample.assert_not_called()
 
+    def test_fragment_output_sink_deduplicates_and_sorts_write_jobs(self):
+        sample = _audio_sample(torch.tensor([[1.0]]))
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with mock.patch.object(
+                materialize_fragments,
+                "write_fragment",
+            ) as write_fragment:
+                sink = materialize_fragments.FragmentOutputSink(
+                    config=materialize_fragments.FragmentBatchConfig(
+                        dataset_id="toy-audio",
+                        split="train",
+                        provenance={},
+                        max_shard_samples=10,
+                        max_shard_bytes=None,
+                        commit_samples=2,
+                        write_workers=0,
+                        write_prefetch=None,
+                        writer_start_method="spawn",
+                    ),
+                    fragments_dir=Path(tmpdir) / "fragments",
+                    completed=frozenset({0}),
+                    expected=4,
+                )
+                with sink:
+                    sink.submit(
+                        (
+                            (3, sample),
+                            (1, sample),
+                            (3, sample),
+                            (0, sample),
+                        )
+                    )
+                    sink.flush()
+                    sink.submit(((2, sample), (1, sample)))
+
+        jobs = tuple(call.args[0] for call in write_fragment.call_args_list)
+        self.assertEqual([job.indexes for job in jobs], [(1, 3), (2,)])
+        self.assertEqual(
+            [tuple(index for index, _sample in job.samples) for job in jobs],
+            [(1, 3), (2,)],
+        )
+
+    def test_fragment_output_sink_rejects_out_of_range_indexes(self):
+        sample = _audio_sample(torch.tensor([[1.0]]))
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sink = materialize_fragments.FragmentOutputSink(
+                config=materialize_fragments.FragmentBatchConfig(
+                    dataset_id="toy-audio",
+                    split="train",
+                    provenance={},
+                    max_shard_samples=10,
+                    max_shard_bytes=None,
+                    commit_samples=2,
+                    write_workers=0,
+                    write_prefetch=None,
+                    writer_start_method="spawn",
+                ),
+                fragments_dir=Path(tmpdir) / "fragments",
+                completed=frozenset(),
+                expected=1,
+            )
+            with sink:
+                with self.assertRaisesRegex(ValueError, "outside dataset: 1"):
+                    sink.submit(((1, sample),))
+
     def test_callable_id_ignores_function_memory_address(self):
         first = partial(_factory_identity_target, 1, option="value")
         second = partial(_factory_identity_target, 1, option="value")
@@ -247,6 +314,54 @@ class ViewMaterializerTest(unittest.TestCase):
                 use_map_style_loader=True,
             ),
         )
+
+    def test_resume_reuses_fragments_when_factory_execution_state_changes(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = root / "target"
+            first_calls = root / "first.calls"
+            resumed_calls = root / "resumed.calls"
+            samples = tuple(
+                _audio_sample(torch.tensor([[float(index)]])) for index in range(4)
+            )
+            materializer = ViewMaterializer(
+                target,
+                split="train",
+                batch_size=2,
+                commit_samples=2,
+                input_id="source-v1",
+                provider_id="codec-v1",
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "stop after first batch"):
+                materializer.write(
+                    dataset_factory=_ExecutionDatasetFactory(
+                        samples,
+                        root / "cache-a",
+                    ),
+                    provider_factory=_FailOnceBatchProviderFactory(first_calls),
+                    devices="cpu",
+                )
+
+            materializer.write(
+                dataset_factory=_ExecutionDatasetFactory(
+                    samples,
+                    root / "cache-b",
+                ),
+                provider_factory=_FailOnceBatchProviderFactory(resumed_calls),
+                devices="cpu",
+            )
+
+            self.assertEqual(
+                first_calls.read_text(encoding="utf-8").splitlines(),
+                ["0,1", "2,3"],
+            )
+            self.assertEqual(
+                resumed_calls.read_text(encoding="utf-8").splitlines(),
+                ["2,3"],
+            )
+            self.assertEqual(len(read_store_dataset(target)), 4)
+            self.assertEqual(list(root.glob(".target.resume.stale-*")), [])
 
     def test_resume_metadata_includes_byte_shard_limit(self):
         dataset_factory = _UnpicklableDatasetFactory(1)
@@ -784,9 +899,7 @@ class ViewMaterializerTest(unittest.TestCase):
                 ],
             )
 
-            with mock.patch(
-                "anydataset._runtime.oom.clear_cuda_cache"
-            ) as clear:
+            with mock.patch("anydataset._runtime.oom.clear_cuda_cache") as clear:
                 ViewMaterializer(target, batch_size=2).write(
                     dataset_factory=_DatasetFactory(dataset),
                     provider_factory=_StaticProviderFactory(provider),
@@ -2581,9 +2694,7 @@ class _FileSampleProvider:
         return {
             **sample,
             (Role.DEFAULT, Modality.AUDIO): AudioItem(
-                views={
-                    AudioView.FILE: FileBytes(bytes([index]) * 6000, ".flac")
-                },
+                views={AudioView.FILE: FileBytes(bytes([index]) * 6000, ".flac")},
             ),
         }
 
@@ -2594,6 +2705,15 @@ class _FileSampleProvider:
 @dataclass(frozen=True)
 class _DatasetFactory:
     dataset: object
+
+    def __call__(self):
+        return self.dataset
+
+
+@dataclass(frozen=True)
+class _ExecutionDatasetFactory:
+    dataset: object
+    cache: Path
 
     def __call__(self):
         return self.dataset

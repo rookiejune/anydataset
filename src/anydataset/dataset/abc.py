@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import operator
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from pathlib import Path
@@ -401,6 +402,35 @@ class AnyDataset(_Base, MapStyleABC):
     def __getitem__(self, index: int) -> Sample:
         return self.transform_sample(self.parse_fn(self.dataset[index]))
 
+    def sample_id(self, index: int) -> str:
+        position = _map_position(index, len(self))
+        sample_id = getattr(self.dataset, "sample_id", None)
+        if callable(sample_id):
+            value = sample_id(position)
+            if not isinstance(value, str) or not value:
+                raise ValueError("sample_id() must return a non-empty string.")
+            return value
+        return f"spec:{self.spec.id}:{position}"
+
+    def global_index(self, index: int) -> int:
+        position = _map_position(index, len(self))
+        global_index = getattr(self.dataset, "global_index", None)
+        if not callable(global_index):
+            return position
+        value = global_index(position)
+        if type(value) is not int:
+            raise TypeError("global_index() must return an integer.")
+        return value
+
+    def universe_id(self) -> str | None:
+        identity = getattr(self.dataset, "universe_id", None)
+        if not callable(identity):
+            return None
+        value = identity()
+        if value is not None and (not isinstance(value, str) or not value):
+            raise ValueError("universe_id() must return a non-empty string or None.")
+        return value
+
     def cost_row(self, index: int) -> Any:
         dataset = self.dataset
         cost_row = getattr(dataset, "cost_row", None)
@@ -484,6 +514,15 @@ class AnyDataset(_Base, MapStyleABC):
 
         for index, row in iter_map_style_shard(dataset, num_shards, shard_id):
             yield index, self.transform_sample(self.parse_fn(row))
+
+
+def _map_position(index: int, length: int) -> int:
+    position = operator.index(index)
+    if position < 0:
+        position += length
+    if position < 0 or position >= length:
+        raise IndexError("dataset index out of range")
+    return position
 
 
 def _identity_sample(row: Any) -> Sample:

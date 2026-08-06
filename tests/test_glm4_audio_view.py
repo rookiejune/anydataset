@@ -174,6 +174,7 @@ class _ProviderFactory:
 
 
 class _FrameSpec:
+    schema = "frame"
     frame_codebook_sizes = (16_384,)
 
     def __init__(self, view):

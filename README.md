@@ -372,13 +372,15 @@ Schema fields must exist in every sample in the batch. Convert values to
 tensors and normalize dtype or device in the preset parser or dataset
 transforms, before collation.
 
-## Cached Filter Partitions
+## Dynamic Filter Decisions
 
-`FilterRule` routes a map-style dataset into cached label partitions. The
-predicate receives the full canonical sample produced by the dataset.
+`FilterRule.open()` evaluates a rule over a complete map-style
+`DatasetUniverse` and exposes a live `SelectionView` while the full scan runs in
+background. Upstream selections affect only the returned ordered intersection;
+they do not reduce predicate coverage or enter filter identity.
 
 ```python
-from anydataset.filter import FilterDecision, FilteredDataset, FilterRule
+from anydataset.filter import FilterDecision, FilterRule, FilterRunStatus
 
 def quality_factory():
     return lambda sample: "review" if needs_review(sample) else is_good(sample)
@@ -388,17 +390,21 @@ def dataset_factory():
     return build_dataset()
 
 
-filtered = FilteredDataset(
-    "quality_v1_parse_v3_transform_none",
+rule = FilterRule(
+    "quality_v1",
     quality_factory,
+    version="parse-v3",
+)
+run = rule.open(
     dataset_factory=dataset_factory,
+    labels="accept",
     device="cpu",
 )
-train = filtered.select_by("accept")
-audit = filtered.select_by("reject", "review")
-
-rule = FilterRule("quality_v1_parse_v3_transform_none", quality_factory)
-again = rule.apply(dataset_factory=dataset_factory, labels="accept", device="cpu")
+train = run.dataset
+first = train[0]
+run.wait()
+assert run.status is FilterRunStatus.COMPLETE
+run.close()
 ```
 
 `True` maps to `"accept"` and `False` maps to `"reject"`. String and enum
@@ -408,11 +414,11 @@ fields add explicit predicate, parser, and transform identity. Changing any of
 these fields selects a different cache. When omitted, `rule_id` defaults to
 `name` and the legacy name-only cache path remains compatible.
 
-`FilteredDataset(...)` checks whether the rule identity already has a ready cache
-for the base dataset. If not, it builds the cache. It selects every available
-label by default. Use `select_by(...)` to derive a label view over the same
-cache. `FilterRule.apply(...)` is a convenience wrapper that forwards its
-`name` and `factory` to `FilteredDataset`.
+Unknown decisions are unresolved, not reject. Positive indexed access waits only
+for decisions needed to resolve that position; `len()`, negative indexing, and
+shuffle planning wait for complete decision coverage. `FilterRule.apply()`
+remains the blocking compatibility entrance and returns `FilteredDataset` after
+the canonical Parquet generation is ready.
 
 Use `FilterRule.apply_with_report(...)` when a caller needs wall-clock
 observability for a specific apply call without storing run state on the
@@ -437,15 +443,14 @@ partition-read timings. On hot-cache hits, `report.logs_dir` is `None` and
 `report.cache_build_seconds` is `0.0`; the report measures apply-call
 overhead, not cache schema metadata.
 
-Filter cache identity is automatic for physical datasets and filtered views.
-For a mutable or application-owned input, pass a non-empty `input_id` to
-`apply()` or `FilteredDataset(...)`. The ID versions the entire input snapshot
-and augments the automatic class, `Spec`, and sample-count identity. Change it
-when input content or ordering changes; `FilterRule.rule_id` and `version` identify
-predicate semantics. A store's manifest provenance is included automatically,
-so materializer `input_id` and `provider_id` changes also produce a new filter
-cache identity. The explicit ID is preserved by the filtered
-`dataset_factory`, pickle, and chained filters.
+Filter cache identity is automatic for physical universes. For a mutable or
+application-owned logical universe, pass a non-empty `input_id` to `open()` or
+the blocking compatibility APIs. The ID versions complete universe content,
+order, and `sample_id` membership and augments automatic class, `Spec`,
+sample-count, and store-provenance identity. Selection labels, upstream filter
+generations, and returned length are excluded, so different selections over one
+unchanged universe reuse the same decisions. `FilterRule.rule_id`, `version`,
+and `content_id` identify predicate semantics.
 
 `FilterRule` stores a zero-argument factory, and the factory builds the
 predicate inside the process that will execute it. `device="auto"` resolves to
@@ -477,6 +482,11 @@ into the final cache when all samples are covered. `write_workers` defaults to
 one background writer so predicate execution can overlap with parquet writes;
 `write_prefetch` bounds pending write jobs.
 
+A live `FilterRun` also writes completed `(index, label)` chunks as immutable
+Arrow IPC decision fragments before exposing them to the live selection. These
+are private control-plane records; completed generations remain Parquet and
+canonical sample payloads remain tar.
+
 Predicates can return `FilterDecision` when a filter should also cache
 per-sample JSON metrics:
 
@@ -494,8 +504,10 @@ filtered = rule.apply(dataset_factory=dataset_factory, metrics=True, device="cpu
 rows = list(filtered.iter_metrics())
 ```
 
-Metrics are written under the filter cache and include the original sample
-index, normalized label, and metrics payload. Set `metrics=True` explicitly;
+Metrics are written under the filter cache and include the current universe
+index, normalized label, and metrics payload. That index is not the stable
+cross-stage lineage key; one-to-one rebasing uses `sample_id`. Set
+`metrics=True` explicitly;
 when an older partition cache has no metrics side output, the rule is rebuilt.
 Completed caches are immutable generations with reader leases. See
 [`docs/filter_cache.md`](docs/filter_cache.md) for their cleanup contract and
@@ -643,7 +655,9 @@ the expanded `output_dir`, or `"dataset"` when that path has no name.
 `provenance` records semantic input state in the dataset manifest. It accepts
 only non-empty string `input_id` and `provider_id` values; use them to version
 input content or provider behavior that the dataset path and configuration do
-not capture. Provenance participates in downstream filter cache identity.
+not capture. `provider_id` is global AnyTrain-backend plus AnyDataset-adapter
+provenance, not sample or filter metadata. Provenance participates in downstream
+filter-universe identity.
 
 `write(samples)` and `write(dataset_factory=...)` are mutually exclusive. The
 defaults (`num_shards=1`, `num_workers=0`) write in the calling process and
@@ -699,7 +713,10 @@ independently versioned pickle states for short-lived runtime transport across
 spawn and `DataLoader` workers; those pickles are not a durable dataset format.
 Unsupported runtime pickle versions fail explicitly.
 
-Store payloads are written to tar shards per view. The same
+Canonical sample/view manifests are Parquet and payloads are written to tar
+shards per view. Online filter decision fragments may use Arrow IPC, but sample
+payloads remain tar until a representative benchmark justifies a versioned
+format change. The same
 `dataset.dataloader(..., shuffle=True)` entry point remains the only shuffle
 control for store training: when the prepared dataset is a `StoreDataset`, the
 loader first shuffles payload shard groups, slices every group across ranks,
@@ -859,6 +876,24 @@ with the provider output raises instead of overwriting it. To publish multiple
 derived views, run another materializer against the previous standalone store
 and explicitly retain the fields needed by the next stage.
 
+`ViewMaterializer.open()` is the dynamic entrance. With explicit `input_id`, a
+compatible ready store is opened without constructing the source or provider.
+With `input_id_factory`, ready access constructs the input identity object once
+and validates its result against canonical provenance, but still does not
+construct the provider. Otherwise foreground access computes requested values,
+then a background sweep covers every remaining sample in the complete source
+universe. If the input is a `SelectionView`, the provider still processes its
+complete universe and the same opened selection is rebased onto the output by
+stable `sample_id`. `sample_index` remains only a dense ordinal inside one
+universe/store. A successful `close()` waits for complete coverage and staging
+persistence but does not publish the store; explicit `write()`/finalize performs
+canonical publication.
+
+Pass an explicit logical `dataset_id` when the same view may be stored below
+different physical roots. It is written to the canonical manifest and anchors
+online/ready `universe_id`; when omitted, the materializer keeps the compatible
+fallback to the expanded `output_dir` basename.
+
 `write()` can materialize parts in parallel. `num_shards` controls writer
 processes, while `num_workers` controls the PyTorch `DataLoader` workers inside
 each writer process. For parallel writes, pass a picklable module-level
@@ -872,19 +907,20 @@ worker logs under `$ANYDATASET_HOME/logs/<timestamp>-<pid>/materializer`, and
 commit completed fragments when all workers finish. Materializers always use
 resumable fragments:
 completed provider batches are grouped into checkpoint chunks under a hidden
-sibling resume directory, and reruns skip completed global sample indexes
+sibling resume directory, and reruns skip completed store-local `sample_index`
 before atomically committing the final store. `commit_samples` controls that
 checkpoint granularity and defaults to `max(batch_size, 1024)` to avoid
 excessive small resume files; lower it when a workload needs finer recovery
 points.
-Resume compatibility includes an automatically derived identity for both
-factories. Set `input_id` and `provider_id` to explicit semantic versions when
-the input snapshot or provider behavior depends on state that the callables do
-not capture, such as mutable files or checkpoint contents. These IDs augment,
-rather than replace, the factory identities; changing either one quarantines
-the old resume directory instead of reusing incompatible fragments. The same
-IDs are written to the final store manifest provenance and participate in
-downstream filter cache identity.
+Resume compatibility derives an automatic callable identity for each factory
+only when its explicit semantic ID is absent. When `input_id` or `provider_id`
+is set, that ID becomes the authoritative factory identity marker, so device,
+cache path, service endpoint, and other execution-only factory state can change
+without invalidating compatible fragments. Callers must change the ID whenever
+the input snapshot or provider semantics change, including mutable files or
+checkpoint contents. A changed ID quarantines the old resume directory. The IDs
+are also written to final store provenance and participate in downstream
+complete-universe filter identity. Selection state is excluded.
 
 Materialization can be intentionally staged without changing the input
 identity. Pass `max_new_samples` or explicit increasing `sample_indexes` and

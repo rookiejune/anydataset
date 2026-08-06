@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from .api import FilterApplyResult, FilteredDataset, FilterRule
 from .cache.generations import cleanup_filter_generations
+from .live import FilterRun
 from .online import RejectReplaceDataset
 from .types import (
     BatchFilterPredicate,
@@ -12,6 +13,7 @@ from .types import (
     FilterFactory,
     FilterLabel,
     FilterPredicate,
+    FilterRunStatus,
 )
 
 __all__ = [
@@ -26,6 +28,8 @@ __all__ = [
     "FilterLabel",
     "FilterPredicate",
     "FilterRule",
+    "FilterRun",
+    "FilterRunStatus",
     "RejectReplaceDataset",
     "cleanup_filter_generations",
 ]
