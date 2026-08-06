@@ -35,6 +35,7 @@ _CLEANUP_RESUME_RETRY_ERRNOS = {
 if hasattr(errno, "ESTALE"):
     _CLEANUP_RESUME_RETRY_ERRNOS.add(errno.ESTALE)
 
+
 def resume_root(output_dir: str | Path) -> Path:
     output_dir = Path(output_dir).expanduser()
     return output_dir.parent / f".{output_dir.name}.resume"
@@ -309,17 +310,28 @@ def log_resume_summary(
     use_map_style_loader: bool,
 ) -> None:
     ranges = format_index_ranges(missing)
+    missing_count = len(missing)
+    loader = "map-style" if use_map_style_loader else "iterable"
+    if completed_count:
+        percent = 100.0 if expected == 0 else 100.0 * completed_count / expected
+        message = (
+            f"resuming {source}: {completed_count}/{expected} complete "
+            f"({percent:.1f}%); processing {missing_count} missing samples; "
+            f"loader={loader} ranges={ranges}"
+        )
+    else:
+        message = (
+            f"starting {source}: processing {missing_count}/{expected} samples; "
+            f"loader={loader} ranges={ranges}"
+        )
     write_info(
         source,
-        "resume "
-        f"expected={expected} completed={completed_count} "
-        f"missing={len(missing)} map_style={use_map_style_loader} "
-        f"ranges={ranges}",
+        message,
         event=f"{source}_resume",
         fields={
             "expected": expected,
             "completed": completed_count,
-            "missing": len(missing),
+            "missing": missing_count,
             "map_style": use_map_style_loader,
             "ranges": ranges,
         },

@@ -30,7 +30,7 @@ class _ProgressBar(Protocol):
 
     def update(self, count: int) -> None: ...
 
-    def set_postfix_str(self, value: str) -> None: ...
+    def set_postfix_str(self, value: str, *, refresh: bool = True) -> None: ...
 
 
 class ProgressWriter(Protocol[MessageT]):
@@ -163,14 +163,23 @@ class ProgressDashboard:
         self.initial = initial
         self.stages = stages
         self._stats: dict[str, _StageStats] = {}
+        self._run_samples = 0
         self._bar: _ProgressBar | None = None
         self._stage_bars: dict[str, _ProgressBar] = {}
 
     def __enter__(self) -> ProgressDashboard:
-        self._bar = _progress_bar(desc=self.desc, total=self.total, position=0)
+        self._bar = _progress_bar(
+            desc=self.desc,
+            total=self.total,
+            initial=self.initial,
+            postfix=_format_run_progress(
+                initial=self.initial,
+                run_samples=self._run_samples,
+                total=self.total,
+            ),
+            position=0,
+        )
         self._bar.__enter__()
-        if self.initial:
-            self._bar.update(self.initial)
         for position, stage in enumerate(self.stages, start=1):
             bar = _progress_bar(
                 desc=f"{stage:>8}",
@@ -207,11 +216,23 @@ class ProgressDashboard:
         ):
             stats = self._stats.setdefault(message.stage, _StageStats())
             stats.update(message)
-        if message.samples and self._counts_bar(message):
-            self._update_bar(message.samples)
-        if self.stages:
+        counts_bar = bool(message.samples and self._counts_bar(message))
+        if counts_bar:
+            self._run_samples += message.samples
+        if self.stages or self.initial:
             self._update_stage_bar(message)
-            self._set_postfix(_format_stage_postfix(self._stats, self.stages))
+            self._set_postfix(
+                _format_progress_postfix(
+                    initial=self.initial,
+                    run_samples=self._run_samples,
+                    total=self.total,
+                    stats=self._stats,
+                    stages=self.stages,
+                ),
+                refresh=not counts_bar,
+            )
+        if counts_bar:
+            self._update_bar(message.samples)
 
     def _counts_bar(self, message: Progress) -> bool:
         if self.count_stage is None:
@@ -222,9 +243,9 @@ class ProgressDashboard:
         if self._bar is not None:
             self._bar.update(samples)
 
-    def _set_postfix(self, value: str) -> None:
+    def _set_postfix(self, value: str, *, refresh: bool) -> None:
         if self._bar is not None:
-            self._bar.set_postfix_str(value)
+            self._bar.set_postfix_str(value, refresh=refresh)
 
     def _update_stage_bar(self, message: Progress) -> None:
         bar = self._stage_bars.get(message.stage)
@@ -250,28 +271,72 @@ def _progress_bar(
     *,
     desc: str,
     total: int | None,
+    initial: int = 0,
+    postfix: str = "",
     position: int = 0,
     leave: bool = True,
 ) -> _ProgressBar:
     if not sys.stdout.isatty():
         if position > 0:
             return _NullProgressBar()
-        return _LogProgressBar(desc=desc, total=total)
+        return _LogProgressBar(
+            desc=desc,
+            total=total,
+            initial=initial,
+            postfix=postfix,
+        )
     try:
         from tqdm.auto import tqdm
     except ImportError:
         return _NullProgressBar()
+    bar = tqdm(
+        total=total,
+        initial=initial,
+        unit="sample",
+        desc=desc,
+        position=position,
+        leave=leave,
+        file=sys.stdout,
+    )
+    if postfix:
+        bar.set_postfix_str(postfix, refresh=False)
     return cast(
         _ProgressBar,
-        tqdm(
-            total=total,
-            unit="sample",
-            desc=desc,
-            position=position,
-            leave=leave,
-            file=sys.stdout,
-        ),
+        bar,
     )
+
+
+def _format_progress_postfix(
+    *,
+    initial: int,
+    run_samples: int,
+    total: int | None,
+    stats: dict[str, _StageStats],
+    stages: tuple[str, ...],
+) -> str:
+    parts = [
+        _format_run_progress(
+            initial=initial,
+            run_samples=run_samples,
+            total=total,
+        ),
+        _format_stage_postfix(stats, stages),
+    ]
+    return " | ".join(part for part in parts if part)
+
+
+def _format_run_progress(
+    *,
+    initial: int,
+    run_samples: int,
+    total: int | None,
+) -> str:
+    if initial <= 0:
+        return ""
+    run = str(run_samples)
+    if total is not None:
+        run += f"/{max(0, total - initial)}"
+    return f"resumed={initial} | run={run}"
 
 
 def _format_stage_postfix(
@@ -331,16 +396,24 @@ class _NullProgressBar:
     def update(self, count: int) -> None:
         return None
 
-    def set_postfix_str(self, value: str) -> None:
+    def set_postfix_str(self, value: str, *, refresh: bool = True) -> None:
         return None
 
 
 class _LogProgressBar:
-    def __init__(self, *, desc: str, total: int | None) -> None:
+    def __init__(
+        self,
+        *,
+        desc: str,
+        total: int | None,
+        initial: int = 0,
+        postfix: str = "",
+    ) -> None:
         self.desc = desc
         self.total = total
-        self.count = 0
-        self.postfix = ""
+        self.initial = initial
+        self.count = initial
+        self.postfix = postfix
         self.started_at = time.monotonic()
         self.last_printed_at: float | None = None
 
@@ -355,9 +428,10 @@ class _LogProgressBar:
         self.count += count
         self._print()
 
-    def set_postfix_str(self, value: str) -> None:
+    def set_postfix_str(self, value: str, *, refresh: bool = True) -> None:
         self.postfix = value
-        self._print()
+        if refresh:
+            self._print()
 
     def _print(self, *, force: bool = False) -> None:
         now = time.monotonic()
@@ -368,12 +442,16 @@ class _LogProgressBar:
         ):
             return
         elapsed = max(0.0, now - self.started_at)
-        rate = self.count / elapsed if elapsed > 0 else 0.0
+        run_samples = max(0, self.count - self.initial)
+        rate = run_samples / elapsed if elapsed > 0 else 0.0
         progress = f"{self.count} sample"
         if self.total is not None:
             percent = 100.0 if self.total == 0 else 100.0 * self.count / self.total
             progress += f"/{self.total} ({percent:.1f}%)"
-        line = f"{self.desc}: {progress} [{elapsed:.0f}s, {rate:.1f} sample/s]"
+        timing = f"{elapsed:.0f}s, {rate:.1f} sample/s"
+        if self.total is not None and rate > 0 and self.count < self.total:
+            timing += f", ETA {(self.total - self.count) / rate:.0f}s"
+        line = f"{self.desc}: {progress} [{timing}]"
         if self.postfix:
             line += f" {self.postfix}"
         print(line, file=sys.stdout, flush=True)

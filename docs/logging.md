@@ -68,3 +68,8 @@ mandatory runtime rather than hard-coding an NVIDIA-specific collector.
 Stdout progress remains a separate interactive surface. TTY sessions use tqdm;
 non-interactive jobs print periodic one-line progress summaries so scheduler logs
 show current throughput without opening the run log directory.
+
+For resumed work, the primary count and percentage include previously completed
+samples, while rate, ETA, and stage counters cover only work performed by the
+current run. The display labels the historical `resumed` count and current-run
+progress separately so cumulative coverage is not mistaken for throughput.

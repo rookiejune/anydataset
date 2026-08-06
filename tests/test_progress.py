@@ -56,3 +56,41 @@ def test_progress_can_render_non_interactive_logs_to_stdout() -> None:
 
     output = stdout.getvalue()
     assert "qwen tts: 1 sample/2 (50.0%)" in output
+
+
+def test_resume_progress_separates_coverage_from_current_run_rate() -> None:
+    stdout = io.StringIO()
+    now = 0.0
+    with (
+        patch(
+            "anydataset._runtime.progress.time.monotonic",
+            side_effect=lambda: now,
+        ),
+        patch("anydataset._runtime.progress._NON_INTERACTIVE_PROGRESS_INTERVAL", 0.0),
+        redirect_stdout(stdout),
+        ProgressDashboard(
+            desc="resume demo",
+            total=100,
+            count_stage="writer",
+            initial=80,
+            stages=("writer",),
+        ) as progress,
+    ):
+        now = 2.0
+        progress.put(
+            Progress(
+                0,
+                10,
+                False,
+                None,
+                stage="writer",
+                elapsed=2.0,
+            )
+        )
+
+    output = stdout.getvalue()
+    assert "80 sample/100 (80.0%)" in output
+    assert "resumed=80 | run=0/20" in output
+    assert "90 sample/100 (90.0%) [2s, 5.0 sample/s, ETA 2s]" in output
+    assert "resumed=80 | run=10/20" in output
+    assert "writer=10 5.0/s last=2.00s" in output

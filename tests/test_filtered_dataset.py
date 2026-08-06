@@ -1389,7 +1389,11 @@ class FilteredDatasetTest(unittest.TestCase):
             )
             self.assertEqual(result.counts, {"accept": 2, "reject": 2})
             self.assertEqual(result.select_by("accept").indices, (0, 2))
-            self.assertIn("ranges=2-3", log_text)
+            self.assertIn(
+                "resuming filter: 2/4 complete (50.0%); processing 2 missing samples",
+                log_text,
+            )
+            self.assertIn("loader=map-style ranges=2-3", log_text)
             resume_event = [
                 entry for entry in events if entry["event"] == "filter_resume"
             ][-1]
