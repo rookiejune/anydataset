@@ -9,7 +9,7 @@ from __future__ import annotations
 import multiprocessing
 import sys
 import time
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from queue import Empty
 from types import TracebackType
@@ -46,6 +46,7 @@ class Progress:
     stage: str = "samples"
     elapsed: float | None = None
     pending: int | None = None
+    details: Mapping[str, object] | None = None
 
 
 @dataclass
@@ -103,8 +104,9 @@ def watch_workers(
     count_stage: str | None = None,
     initial: int = 0,
     stages: tuple[str, ...] = (),
-) -> None:
+) -> tuple[Mapping[str, object], ...]:
     done = 0
+    summaries: list[Mapping[str, object]] = []
     with ProgressDashboard(
         desc=desc,
         total=total,
@@ -124,10 +126,13 @@ def watch_workers(
             dashboard.put(message)
             if message.done:
                 done += 1
+                if message.details is not None:
+                    summaries.append(dict(message.details))
                 if message.error is not None:
                     raise RuntimeError(
                         f"{failure_prefix} {message.worker_id} failed.\n{message.error}"
                     )
+    return tuple(summaries)
 
 
 def put_progress(progress: ProgressWriter[Progress], message: Progress) -> None:

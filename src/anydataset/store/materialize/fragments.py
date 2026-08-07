@@ -8,6 +8,7 @@ from typing import Protocol
 
 from ..._compat import strict_zip
 from ..._runtime.parallel import StartMethod
+from ..._runtime.performance import PipelineWorkerStats
 from ..._runtime.progress import Progress, ProgressWriter, put_progress
 from ..._runtime.resume import index_batch_id
 from ..._runtime.write_pipeline import BackgroundWriteSink
@@ -63,6 +64,7 @@ class FragmentOutputSink:
     worker_id: int = 0
     expected: int | None = None
     sample_identity: object | None = field(default=None, repr=False)
+    performance: PipelineWorkerStats | None = field(default=None, repr=False)
     on_fragment_complete: Callable[[tuple[int, ...]], None] | None = field(
         default=None,
         repr=False,
@@ -92,14 +94,24 @@ class FragmentOutputSink:
             workers=self.config.write_workers,
             max_pending=self.config.write_prefetch,
             start_method=self.config.writer_start_method,
-            on_submit=lambda job, pending: put_stage_progress(
-                self.progress,
-                worker_id=self.worker_id,
-                stage="writer",
-                pending=pending,
-            ),
+            on_submit=self._on_write_submit,
             on_complete=self._on_write_complete,
+            on_backpressure=self._on_write_backpressure,
         )
+
+    def _on_write_submit(self, _job: FragmentWriteJob, pending: int) -> None:
+        if self.performance is not None:
+            self.performance.record_writer_submit(pending)
+        put_stage_progress(
+            self.progress,
+            worker_id=self.worker_id,
+            stage="writer",
+            pending=pending,
+        )
+
+    def _on_write_backpressure(self, elapsed: float) -> None:
+        if self.performance is not None:
+            self.performance.record_writer_backpressure(elapsed)
 
     def __enter__(self) -> FragmentOutputSink:
         self._background.__enter__()
@@ -165,9 +177,7 @@ class FragmentOutputSink:
         self._closed = True
 
     def _submit_pending(self, count: int) -> None:
-        samples = tuple(
-            sorted(self._pending_outputs[:count], key=lambda item: item[0])
-        )
+        samples = tuple(sorted(self._pending_outputs[:count], key=lambda item: item[0]))
         indexes = tuple(record[0] for record in samples)
         job = FragmentWriteJob(
             fragments_dir=self.fragments_dir,
@@ -202,6 +212,8 @@ class FragmentOutputSink:
             elapsed=elapsed,
             pending=pending,
         )
+        if self.performance is not None:
+            self.performance.record_writer_complete(len(job.samples), pending, elapsed)
         if self.on_fragment_complete is not None:
             self.on_fragment_complete(job.indexes)
 
@@ -216,6 +228,7 @@ class FragmentBatchWriter:
     sample_identity: object | None = field(default=None, repr=False)
     progress: ProgressSink | None = None
     worker_id: int = 0
+    performance: PipelineWorkerStats | None = field(default=None, repr=False)
     on_fragment_complete: Callable[[tuple[int, ...]], None] | None = field(
         default=None,
         repr=False,
@@ -271,8 +284,10 @@ class FragmentBatchWriter:
             worker_id=self.worker_id,
             stage="reader",
             samples=len(batch),
-            elapsed=time.perf_counter() - read_start,
+            elapsed=(read_elapsed := time.perf_counter() - read_start),
         )
+        if self.performance is not None:
+            self.performance.record_loader(len(batch), read_elapsed)
 
     def _materialized_batch(
         self,
@@ -280,12 +295,17 @@ class FragmentBatchWriter:
     ) -> tuple[tuple[int, Sample], ...]:
         provider_start = time.perf_counter()
         outputs = self._materialized_indexed_batch(batch)
+        provider_elapsed = time.perf_counter() - provider_start
+        if self.performance is not None:
+            self.performance.processed_samples += len(outputs)
+            self.performance.selected_samples += len(outputs)
+            self.performance.record_operation(len(outputs), provider_elapsed)
         put_stage_progress(
             self.progress,
             worker_id=self.worker_id,
             stage="provider",
             samples=len(outputs),
-            elapsed=time.perf_counter() - provider_start,
+            elapsed=provider_elapsed,
         )
         return outputs
 
@@ -322,6 +342,7 @@ class FragmentBatchWriter:
             sample_identity=self.sample_identity,
             progress=self.progress,
             worker_id=self.worker_id,
+            performance=self.performance,
             on_fragment_complete=self.on_fragment_complete,
         )
 

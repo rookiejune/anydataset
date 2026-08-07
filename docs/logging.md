@@ -24,8 +24,9 @@ manifests.
 - Filter events record cache miss reasons, resume coverage, throttled structured
   progress, per-worker performance summaries, predicate OOM batch splits,
   aggregate run summaries, and published generation paths.
-- Materializer events record resume coverage, staged status, provider OOM batch
-  splits, and final published store paths.
+- Materializer events record resume coverage, per-worker and aggregate
+  performance summaries, staged status, provider OOM batch splits, publish
+  timing, and final published store paths.
 - Provider service events record server start, readiness, stop, forced
   termination, and startup failure.
 
@@ -51,6 +52,10 @@ worker exits normally or with an error. It records:
   zero-OOM case;
 - multi-device output-queue blocked time, elapsed time, and sample throughput.
 
+The worker event also records `predicate_service_samples_per_second`, computed
+from accumulated predicate call time, and `wall_clock_samples_per_second`,
+computed from the worker lifetime. These rates are intentionally separate.
+
 `filter_run_summary` aggregates the worker counters and adds scan/writer counts
 and rates, writer job latency, maximum pending depth, writer backpressure,
 fragment/replay time, execution settings, final status, and total elapsed time.
@@ -58,6 +63,31 @@ Failed and interrupted runs emit the summary as a warning when the process can
 exit through the normal Python cleanup path. Forced process termination cannot
 guarantee a final event; the latest `filter_progress` remains the recovery
 signal in that case.
+
+`materializer_worker_summary` uses the same shared worker counter as filtering,
+with `provider` replacing `predicate`. It records provider factory/load time,
+reader batch wait, provider call/sample/batch counts, accumulated provider
+service time, writer job latency, maximum pending depth, writer backpressure,
+worker wall time, and both service-time and wall-clock throughput. A provider is
+treated as an opaque boundary; the event does not inspect provider internals.
+
+`materializer_run_summary` aggregates completed worker summaries and adds the
+resolved devices, resume/target/completed counts, execution settings, total
+wall-clock elapsed time, and `wall_clock_samples_per_second`. Snapshot producers
+use the same event with `operation="produce"` and include accumulated snapshot
+publish time. Final store publication also adds `publish_seconds` to
+`materializer_published`.
+
+For multi-worker setup, `provider_load_seconds` is the sum of worker setup time;
+`provider_load_seconds_max` is the slowest worker and therefore the useful
+critical-path value for concurrent checkpoint loading. Filters expose the
+equivalent `predicate_setup_seconds` and `predicate_setup_seconds_max` fields.
+
+For both filters and materializers, `*_service_samples_per_second` divides
+samples by accumulated stage service time. With multiple workers this is a
+per-worker service-efficiency denominator, not aggregate wall throughput.
+`wall_clock_samples_per_second` divides current-run samples by coordinator or
+worker wall time and is the field to use for end-to-end capacity planning.
 
 The timings are deliberately coarse, low-overhead wall-clock counters. They are
 intended to distinguish reader starvation, predicate cost, inter-process queue

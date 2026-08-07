@@ -1654,6 +1654,7 @@ class ViewMaterializerTest(unittest.TestCase):
                     provider_factory=_ParallelTextProviderFactory(),
                     devices=("cpu:0", "cpu:1"),
                 )
+                events = _events(home)
 
             stored = read_store_dataset(target)
             logs = _materializer_logs(home)
@@ -1685,6 +1686,41 @@ class ViewMaterializerTest(unittest.TestCase):
                 stored[1][Role.DEFAULT, Modality.TEXT].views[TextView.TEXT],
                 "cpu1:text-1",
             )
+            workers = [
+                entry["fields"]
+                for entry in events
+                if entry["event"] == "materializer_worker_summary"
+            ]
+            self.assertEqual(len(workers), 2)
+            self.assertEqual(sum(item["processed_samples"] for item in workers), 4)
+            self.assertTrue(
+                all(item["provider"] == "_TextProvider" for item in workers)
+            )
+            self.assertTrue(
+                all(item["provider_load_seconds"] >= 0.0 for item in workers)
+            )
+            self.assertTrue(all(item["provider_calls"] > 0 for item in workers))
+
+            run = [
+                entry["fields"]
+                for entry in events
+                if entry["event"] == "materializer_run_summary"
+            ][-1]
+            self.assertEqual(run["operation"], "write")
+            self.assertEqual(run["worker_count"], 2)
+            self.assertEqual(run["target_samples"], 4)
+            self.assertEqual(run["provider_samples"], 4)
+            self.assertEqual(run["writer_samples"], 4)
+            self.assertGreaterEqual(run["provider_load_seconds_max"], 0.0)
+            self.assertGreaterEqual(run["provider_service_samples_per_second"], 0.0)
+            self.assertGreaterEqual(run["wall_clock_samples_per_second"], 0.0)
+
+            published = [
+                entry["fields"]
+                for entry in events
+                if entry["event"] == "materializer_published"
+            ][-1]
+            self.assertGreaterEqual(published["publish_seconds"], 0.0)
 
     def test_materializer_three_devices_do_not_initialize_distributed(self):
         with tempfile.TemporaryDirectory() as tmpdir:

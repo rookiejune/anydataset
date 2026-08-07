@@ -45,9 +45,7 @@ _FILTER_PROGRESS_EVENT_INTERVAL = 30.0
 class _FilterRunStats:
     expected_samples: int
     resumed_samples: int
-    collection: _FilterCollectionStats = field(
-        default_factory=_FilterCollectionStats
-    )
+    collection: _FilterCollectionStats = field(default_factory=_FilterCollectionStats)
     started_at: float = field(default_factory=time.perf_counter)
     scan_samples: int = 0
     writer_samples: int = 0
@@ -92,8 +90,7 @@ class _FilterRunStats:
         now = time.perf_counter()
         if (
             not force
-            and now - self._last_progress_event_at
-            < _FILTER_PROGRESS_EVENT_INTERVAL
+            and now - self._last_progress_event_at < _FILTER_PROGRESS_EVENT_INTERVAL
         ):
             return
         self._last_progress_event_at = now
@@ -108,9 +105,7 @@ class _FilterRunStats:
                 "scan_samples": self.scan_samples,
                 "scan_samples_per_second": _rate(self.scan_samples, elapsed),
                 "writer_samples": self.writer_samples,
-                "writer_samples_per_second": _rate(
-                    self.writer_samples, elapsed
-                ),
+                "writer_samples_per_second": _rate(self.writer_samples, elapsed),
                 "writer_pending": self.writer_pending,
                 "writer_pending_max": self.writer_pending_max,
                 "writer_backpressure_seconds": self.writer_backpressure_seconds,
@@ -147,6 +142,7 @@ def _log_filter_run_summary(
         "scan_samples_per_second": _rate(stats.scan_samples, elapsed),
         "writer_samples": stats.writer_samples,
         "writer_samples_per_second": _rate(stats.writer_samples, elapsed),
+        "wall_clock_samples_per_second": _rate(stats.writer_samples, elapsed),
         "completed_samples": stats.resumed_samples + stats.writer_samples,
         "writer_jobs": stats.writer_jobs,
         "writer_job_seconds": stats.writer_elapsed_seconds,
@@ -167,9 +163,7 @@ def _log_filter_run_summary(
         "write_prefetch": write_prefetch,
         **collection,
         "split_call_ratio": _rate(oom_count, predicate_calls),
-        "predicate_call_seconds_mean": _rate(
-            predicate_seconds, predicate_calls
-        ),
+        "predicate_call_seconds_mean": _rate(predicate_seconds, predicate_calls),
         "loader_wait_seconds_mean": _rate(
             loader_wait_seconds,
             loader_batches,
@@ -336,6 +330,7 @@ class _FilterResumeFragmentWriter:
             initial=len(self.completed),
             stages=_PROGRESS_STAGES,
         ) as progress:
+
             def on_submit(_job: FilterFragmentJob, pending: int) -> None:
                 stats.record_writer_submit(pending)
                 progress.put(

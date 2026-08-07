@@ -2176,9 +2176,7 @@ class FilteredDatasetTest(unittest.TestCase):
 
         self.assertEqual(result.counts, {"zero": 3, "one": 2, "two": 2})
         worker = [
-            entry
-            for entry in events
-            if entry["event"] == "filter_worker_summary"
+            entry for entry in events if entry["event"] == "filter_worker_summary"
         ][-1]["fields"]
         self.assertEqual(worker["status"], "complete")
         self.assertEqual(worker["worker"], 0)
@@ -2197,17 +2195,19 @@ class FilteredDatasetTest(unittest.TestCase):
         self.assertEqual(worker["split_call_ratio"], 0.0)
         self.assertGreaterEqual(worker["loader_wait_seconds"], 0.0)
         self.assertGreaterEqual(worker["predicate_seconds"], 0.0)
+        self.assertGreaterEqual(worker["predicate_service_samples_per_second"], 0.0)
+        self.assertGreaterEqual(worker["wall_clock_samples_per_second"], 0.0)
 
-        progress = [
-            entry for entry in events if entry["event"] == "filter_progress"
-        ][-1]["fields"]
+        progress = [entry for entry in events if entry["event"] == "filter_progress"][
+            -1
+        ]["fields"]
         self.assertEqual(progress["scan_samples"], 7)
         self.assertEqual(progress["writer_samples"], 7)
         self.assertEqual(progress["writer_pending"], 0)
 
-        run = [
-            entry for entry in events if entry["event"] == "filter_run_summary"
-        ][-1]["fields"]
+        run = [entry for entry in events if entry["event"] == "filter_run_summary"][-1][
+            "fields"
+        ]
         self.assertEqual(run["status"], "complete")
         self.assertEqual(run["worker_count"], 1)
         self.assertEqual(run["scan_samples"], 7)
@@ -2216,6 +2216,10 @@ class FilteredDatasetTest(unittest.TestCase):
         self.assertEqual(run["oom_count"], 0)
         self.assertEqual(run["split_call_ratio"], 0.0)
         self.assertEqual(run["writer_backpressure_seconds"], 0.0)
+        self.assertGreaterEqual(run["predicate_service_samples_per_second"], 0.0)
+        self.assertGreaterEqual(run["wall_clock_samples_per_second"], 0.0)
+        self.assertGreaterEqual(run["worker_elapsed_seconds_max"], 0.0)
+        self.assertGreaterEqual(run["predicate_setup_seconds_max"], 0.0)
 
     def test_rule_apply_splits_oom_predicate_batch_in_sample_order(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -2270,9 +2274,7 @@ class FilteredDatasetTest(unittest.TestCase):
             stdout.getvalue(),
         )
         oom_events = [
-            entry
-            for entry in events
-            if entry["event"] == "filter_predicate_oom_split"
+            entry for entry in events if entry["event"] == "filter_predicate_oom_split"
         ]
         self.assertEqual(len(oom_events), 3)
         self.assertEqual(oom_events[0]["fields"]["worker"], 0)
@@ -2290,9 +2292,7 @@ class FilteredDatasetTest(unittest.TestCase):
         self.assertEqual(oom_events[-1]["fields"]["predicate_calls"], 5)
         self.assertEqual(oom_events[-1]["fields"]["split_call_ratio"], 0.6)
         worker_summary = [
-            entry
-            for entry in events
-            if entry["event"] == "filter_worker_summary"
+            entry for entry in events if entry["event"] == "filter_worker_summary"
         ][-1]["fields"]
         self.assertEqual(worker_summary["predicate_calls"], 7)
         self.assertEqual(worker_summary["predicate_samples"], 12)
@@ -2362,9 +2362,7 @@ class FilteredDatasetTest(unittest.TestCase):
         self.assertEqual(predicate.calls, 1)
         clear.assert_not_called()
         worker_summary = [
-            entry
-            for entry in events
-            if entry["event"] == "filter_worker_summary"
+            entry for entry in events if entry["event"] == "filter_worker_summary"
         ][-1]["fields"]
         self.assertEqual(worker_summary["status"], "failed")
         self.assertEqual(worker_summary["error_type"], "RuntimeError")
@@ -2434,17 +2432,13 @@ class FilteredDatasetTest(unittest.TestCase):
         self.assertEqual(one_indices, (1,))
         self.assertEqual(two_indices, (2,))
         oom_events = [
-            entry
-            for entry in events
-            if entry["event"] == "filter_predicate_oom_split"
+            entry for entry in events if entry["event"] == "filter_predicate_oom_split"
         ]
         self.assertEqual(
             {entry["fields"]["worker"] for entry in oom_events},
             {0, 1},
         )
-        self.assertTrue(
-            all(entry["fields"]["batch_size"] == 2 for entry in oom_events)
-        )
+        self.assertTrue(all(entry["fields"]["batch_size"] == 2 for entry in oom_events))
         worker_summaries = [
             entry["fields"]
             for entry in events
@@ -3130,8 +3124,7 @@ class FilteredDatasetTest(unittest.TestCase):
             )
             self.assertTrue(
                 any(
-                    event.get("event")
-                    == "filter_worker_terminated_after_completion"
+                    event.get("event") == "filter_worker_terminated_after_completion"
                     for event in events
                 )
             )

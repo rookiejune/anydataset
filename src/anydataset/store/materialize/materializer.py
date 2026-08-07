@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import time
 from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from itertools import islice
@@ -26,6 +27,10 @@ from ..._runtime.parallel import (
     set_torch_device,
     validate_process_parent,
     validate_process_value,
+)
+from ..._runtime.performance import (
+    PipelineWorkerStats,
+    aggregate_worker_summaries,
 )
 from ..._runtime.progress import (
     Progress,
@@ -519,6 +524,9 @@ class ViewMaterializer:
         device: str,
         snapshot_samples: int,
     ) -> MaterializationStatus:
+        run_started = time.perf_counter()
+        publish_seconds = 0.0
+        worker_summary: Mapping[str, object] | None = None
         dataset: Any | None = None
         source_view: SelectionView | None = None
         provider: MaterializerProvider | None = None
@@ -567,16 +575,29 @@ class ViewMaterializer:
                 completed=completed,
             )
             published_before = publisher.sample_count
+            publish_started = time.perf_counter()
             publisher.publish(force=True)
+            publish_seconds += time.perf_counter() - publish_started
             if publisher.sample_count > published_before:
                 if indexes_complete(completed, expected) and _input_is_sealed(dataset):
                     publisher.seal()
-                return MaterializationStatus(
+                status = MaterializationStatus(
                     output_dir=Path(self.output_dir).expanduser(),
                     expected=expected,
                     completed=publisher.sample_count,
                     finalized=publisher.catalog.sealed,
                 )
+                self._log_run_summary(
+                    expected=expected,
+                    resumed=published_before,
+                    run_samples=status.completed - published_before,
+                    devices=(device,),
+                    finalize=status.finalized,
+                    elapsed=time.perf_counter() - run_started,
+                    operation="produce",
+                    publish_seconds=publish_seconds,
+                )
+                return status
             missing = tuple(
                 islice(missing_indexes(completed, expected), snapshot_samples)
             )
@@ -588,72 +609,131 @@ class ViewMaterializer:
                     missing=missing,
                     use_map_style_loader=True,
                 )
-                with ProgressDashboard(
-                    desc="produce materialized snapshots",
-                    total=expected,
-                    count_stage="writer",
-                    initial=len(completed),
-                    stages=_PROGRESS_STAGES,
-                ) as progress:
-                    provider = provider_factory(device)
-                    self._validate_provider_output(provider)
-                    if self.num_workers > 0:
-                        env = set_single_worker_environment(
-                            device,
-                            device_env="ANYDATASET_MATERIALIZE_DEVICE",
-                        )
+                performance = PipelineWorkerStats(
+                    worker=0,
+                    operation="provider",
+                    operation_name=type(provider_factory).__name__,
+                    requested_batch_size=self.batch_size,
+                    num_workers=self.num_workers,
+                    prefetch_factor=self.prefetch_factor,
+                    device=device,
+                )
+                worker_status = "complete"
+                error_type: str | None = None
+                try:
+                    with ProgressDashboard(
+                        desc="produce materialized snapshots",
+                        total=expected,
+                        count_stage="writer",
+                        initial=len(completed),
+                        stages=_PROGRESS_STAGES,
+                    ) as progress:
+                        setup_started = time.perf_counter()
                         try:
-                            self._write_resumable_loader_batches(
+                            provider = provider_factory(device)
+                        finally:
+                            performance.setup_seconds = (
+                                time.perf_counter() - setup_started
+                            )
+                        performance.operation_name = type(provider).__name__
+                        self._validate_provider_output(provider)
+                        if self.num_workers > 0:
+                            env = set_single_worker_environment(
+                                device,
+                                device_env="ANYDATASET_MATERIALIZE_DEVICE",
+                            )
+                            try:
+                                self._write_resumable_loader_batches(
+                                    provider,
+                                    dataset_factory=dataset_factory,
+                                    dataset=dataset,
+                                    sample_count=expected,
+                                    use_map_style_loader=True,
+                                    completed_indexes=completed,
+                                    sample_indexes=missing,
+                                    fragments_dir=fragments_dir,
+                                    expected=expected,
+                                    progress=progress,
+                                    performance=performance,
+                                    on_fragment_complete=publisher.record,
+                                )
+                            finally:
+                                restore_environment(env)
+                        else:
+                            self._write_resumable_indexed_batches(
+                                sample_index_batches(
+                                    _missing_sample_records(
+                                        dataset,
+                                        missing,
+                                        use_map_style_loader=True,
+                                    ),
+                                    self.batch_size,
+                                ),
                                 provider,
-                                dataset_factory=dataset_factory,
-                                dataset=dataset,
-                                sample_count=expected,
-                                use_map_style_loader=True,
-                                completed_indexes=completed,
-                                sample_indexes=missing,
                                 fragments_dir=fragments_dir,
                                 expected=expected,
+                                completed_indexes=completed,
+                                sample_identity=dataset,
                                 progress=progress,
+                                performance=performance,
                                 on_fragment_complete=publisher.record,
                             )
-                        finally:
-                            restore_environment(env)
-                    else:
-                        self._write_resumable_indexed_batches(
-                            sample_index_batches(
-                                _missing_sample_records(
-                                    dataset,
-                                    missing,
-                                    use_map_style_loader=True,
-                                ),
-                                self.batch_size,
-                            ),
-                            provider,
-                            fragments_dir=fragments_dir,
-                            expected=expected,
-                            completed_indexes=completed,
-                            sample_identity=dataset,
-                            progress=progress,
-                            on_fragment_complete=publisher.record,
-                        )
+                except BaseException as exc:
+                    worker_status = (
+                        "interrupted"
+                        if isinstance(exc, (GeneratorExit, KeyboardInterrupt))
+                        else "failed"
+                    )
+                    error_type = type(exc).__name__
+                    raise
+                finally:
+                    worker_summary = self._log_worker_summary(
+                        performance,
+                        status=worker_status,
+                        error_type=error_type,
+                        expected=expected,
+                        target=len(missing),
+                    )
             completed = compact_completed_fragment_indexes(
                 fragments_dir,
                 dataset_id=self._dataset_id,
                 split=self.split,
                 expected=expected,
             )
+            publish_started = time.perf_counter()
             publisher.publish(force=True)
+            publish_seconds += time.perf_counter() - publish_started
             if indexes_complete(completed, expected) and _input_is_sealed(dataset):
                 publisher.seal()
-            return MaterializationStatus(
+            status = MaterializationStatus(
                 output_dir=Path(self.output_dir).expanduser(),
                 expected=expected,
                 completed=publisher.sample_count,
                 finalized=publisher.catalog.sealed,
             )
+            self._log_run_summary(
+                expected=expected,
+                resumed=published_before,
+                run_samples=status.completed - published_before,
+                devices=(device,),
+                finalize=status.finalized,
+                elapsed=time.perf_counter() - run_started,
+                worker_fields=(
+                    None
+                    if worker_summary is None
+                    else aggregate_worker_summaries(
+                        (worker_summary,), operation="provider"
+                    )
+                ),
+                operation="produce",
+                publish_seconds=publish_seconds,
+            )
+            return status
         finally:
             _close_resources_quietly(provider)
-            _close_resources_quietly(source_view if source_view is not None else dataset)
+            _close_resources_quietly(
+                source_view if source_view is not None else dataset
+            )
 
     def write(
         self,
@@ -800,6 +880,7 @@ class ViewMaterializer:
         max_new_samples: int | None,
         finalize: bool,
     ) -> Path | MaterializationStatus:
+        run_started = time.perf_counter()
         validate_process_value(
             "dataset_factory",
             dataset_factory,
@@ -840,6 +921,7 @@ class ViewMaterializer:
             split=self.split,
             expected=expected,
         )
+        resumed = len(completed)
         missing = self._work_indexes(
             completed,
             expected,
@@ -848,11 +930,20 @@ class ViewMaterializer:
             use_map_style_loader=use_map_style_loader,
         )
         if not missing:
-            return self._finish_resumable(
+            result = self._finish_resumable(
                 fragments_dir,
                 expected,
                 finalize=finalize,
             )
+            self._log_run_summary(
+                expected=expected,
+                resumed=resumed,
+                run_samples=0,
+                devices=devices,
+                finalize=finalize,
+                elapsed=time.perf_counter() - run_started,
+            )
+            return result
         log_resume_summary(
             "materializer",
             expected=expected,
@@ -863,7 +954,7 @@ class ViewMaterializer:
         logs_dir = run_logs_dir()
         worker_logs_dir = logs_dir / "materializer"
         logs_dir.mkdir(parents=True, exist_ok=True)
-        self._run_parallel_parts(
+        worker_fields = self._run_parallel_parts(
             dataset_factory=execution_factory,
             provider_factory=provider_factory,
             devices=devices,
@@ -886,13 +977,32 @@ class ViewMaterializer:
             )
             status = self._status(expected, completed)
             self._log_status(status)
+            self._log_run_summary(
+                expected=expected,
+                resumed=resumed,
+                run_samples=len(missing),
+                devices=devices,
+                finalize=False,
+                elapsed=time.perf_counter() - run_started,
+                worker_fields=worker_fields,
+            )
             return status
-        return self._finish_resumable(
+        result = self._finish_resumable(
             fragments_dir,
             expected,
             finalize=True,
             parts=True,
         )
+        self._log_run_summary(
+            expected=expected,
+            resumed=resumed,
+            run_samples=len(missing),
+            devices=devices,
+            finalize=True,
+            elapsed=time.perf_counter() - run_started,
+            worker_fields=worker_fields,
+        )
+        return result
 
     def _write_resumable_single(
         self,
@@ -904,6 +1014,7 @@ class ViewMaterializer:
         max_new_samples: int | None,
         finalize: bool,
     ) -> Path | MaterializationStatus:
+        run_started = time.perf_counter()
         output_dir = Path(self.output_dir).expanduser()
         dataset, source_view = _materialization_input(dataset_factory())
         execution_factory: DatasetFactory = (
@@ -933,6 +1044,7 @@ class ViewMaterializer:
             split=self.split,
             expected=expected,
         )
+        resumed = len(completed)
         missing = self._work_indexes(
             completed,
             expected,
@@ -941,11 +1053,20 @@ class ViewMaterializer:
             use_map_style_loader=use_map_style_loader,
         )
         if not missing:
-            return self._finish_resumable(
+            result = self._finish_resumable(
                 fragments_dir,
                 expected,
                 finalize=finalize,
             )
+            self._log_run_summary(
+                expected=expected,
+                resumed=resumed,
+                run_samples=0,
+                devices=(device,),
+                finalize=finalize,
+                elapsed=time.perf_counter() - run_started,
+            )
+            return result
         log_resume_summary(
             "materializer",
             expected=expected,
@@ -953,57 +1074,107 @@ class ViewMaterializer:
             missing=missing,
             use_map_style_loader=use_map_style_loader,
         )
-        with ProgressDashboard(
-            desc="materialize views",
-            total=expected,
-            count_stage="writer",
-            initial=len(completed),
-            stages=_PROGRESS_STAGES,
-        ) as progress:
-            provider = provider_factory(device)
-            self._validate_provider_output(provider)
-            if self.num_workers > 0:
-                env = set_single_worker_environment(
-                    device,
-                    device_env="ANYDATASET_MATERIALIZE_DEVICE",
-                )
+        performance = PipelineWorkerStats(
+            worker=0,
+            operation="provider",
+            operation_name=type(provider_factory).__name__,
+            requested_batch_size=self.batch_size,
+            num_workers=self.num_workers,
+            prefetch_factor=self.prefetch_factor,
+            device=device,
+        )
+        worker_status = "complete"
+        error_type: str | None = None
+        worker_summary: Mapping[str, object] | None = None
+        try:
+            with ProgressDashboard(
+                desc="materialize views",
+                total=expected,
+                count_stage="writer",
+                initial=len(completed),
+                stages=_PROGRESS_STAGES,
+            ) as progress:
+                setup_started = time.perf_counter()
                 try:
-                    self._write_resumable_loader_batches(
+                    provider = provider_factory(device)
+                finally:
+                    performance.setup_seconds = time.perf_counter() - setup_started
+                performance.operation_name = type(provider).__name__
+                self._validate_provider_output(provider)
+                if self.num_workers > 0:
+                    env = set_single_worker_environment(
+                        device,
+                        device_env="ANYDATASET_MATERIALIZE_DEVICE",
+                    )
+                    try:
+                        self._write_resumable_loader_batches(
+                            provider,
+                            dataset_factory=execution_factory,
+                            dataset=dataset,
+                            sample_count=expected,
+                            use_map_style_loader=use_map_style_loader,
+                            completed_indexes=completed,
+                            sample_indexes=missing,
+                            fragments_dir=fragments_dir,
+                            expected=expected,
+                            progress=progress,
+                            performance=performance,
+                        )
+                    finally:
+                        restore_environment(env)
+                else:
+                    self._write_resumable_indexed_batches(
+                        sample_index_batches(
+                            _missing_sample_records(
+                                dataset,
+                                missing,
+                                use_map_style_loader=use_map_style_loader,
+                            ),
+                            self.batch_size,
+                        ),
                         provider,
-                        dataset_factory=execution_factory,
-                        dataset=dataset,
-                        sample_count=expected,
-                        use_map_style_loader=use_map_style_loader,
-                        completed_indexes=completed,
-                        sample_indexes=missing,
                         fragments_dir=fragments_dir,
                         expected=expected,
+                        completed_indexes=completed,
+                        sample_identity=dataset,
                         progress=progress,
+                        performance=performance,
                     )
-                finally:
-                    restore_environment(env)
-            else:
-                self._write_resumable_indexed_batches(
-                    sample_index_batches(
-                        _missing_sample_records(
-                            dataset,
-                            missing,
-                            use_map_style_loader=use_map_style_loader,
-                        ),
-                        self.batch_size,
-                    ),
-                    provider,
-                    fragments_dir=fragments_dir,
-                    expected=expected,
-                    completed_indexes=completed,
-                    sample_identity=dataset,
-                    progress=progress,
-                )
-        return self._finish_resumable(
+        except BaseException as exc:
+            worker_status = (
+                "interrupted"
+                if isinstance(exc, (GeneratorExit, KeyboardInterrupt))
+                else "failed"
+            )
+            error_type = type(exc).__name__
+            raise
+        finally:
+            worker_summary = self._log_worker_summary(
+                performance,
+                status=worker_status,
+                error_type=error_type,
+                expected=expected,
+                target=len(missing),
+            )
+        result = self._finish_resumable(
             fragments_dir,
             expected,
             finalize=finalize,
         )
+        self._log_run_summary(
+            expected=expected,
+            resumed=resumed,
+            run_samples=len(missing),
+            devices=(device,),
+            finalize=finalize,
+            elapsed=time.perf_counter() - run_started,
+            worker_fields=(
+                None
+                if worker_summary is None
+                else aggregate_worker_summaries((worker_summary,), operation="provider")
+            ),
+        )
+        return result
 
     def _work_indexes(
         self,
@@ -1054,11 +1225,17 @@ class ViewMaterializer:
             status = self._status(expected, completed)
             self._log_status(status)
             return status
+        publish_started = time.perf_counter()
         if parts:
             path = self._commit_parts(fragments_dir / ".parts")
         else:
             path = self._commit_fragments(fragments_dir, expected)
-        self._log_published(path, expected=expected, parts=parts)
+        self._log_published(
+            path,
+            expected=expected,
+            parts=parts,
+            publish_seconds=time.perf_counter() - publish_started,
+        )
         return path
 
     def _status(
@@ -1096,7 +1273,105 @@ class ViewMaterializer:
             },
         )
 
-    def _log_published(self, path: Path, *, expected: int, parts: bool) -> None:
+    def _log_run_summary(
+        self,
+        *,
+        expected: int,
+        resumed: int,
+        run_samples: int,
+        devices: Sequence[str],
+        finalize: bool,
+        elapsed: float,
+        worker_fields: Mapping[str, object] | None = None,
+        operation: str = "write",
+        publish_seconds: float | None = None,
+    ) -> None:
+        worker_count = (
+            0 if worker_fields is None else cast(int, worker_fields["worker_count"])
+        )
+        write_info(
+            "materializer",
+            "materializer run summary: "
+            f"status='complete' run={run_samples} workers={worker_count} "
+            f"elapsed={elapsed:.3f}s",
+            event="materializer_run_summary",
+            fields={
+                "status": "complete",
+                "operation": operation,
+                "materializer": type(self).__name__,
+                "output_dir": Path(self.output_dir).expanduser(),
+                "split": self.split,
+                "dataset_id": self._dataset_id,
+                "expected_samples": expected,
+                "resumed_samples": resumed,
+                "target_samples": run_samples,
+                "completed_samples": resumed + run_samples,
+                "devices": list(devices),
+                "worker_count": worker_count,
+                "batch_size": self.batch_size,
+                "commit_samples": self.commit_samples,
+                "num_workers": self.num_workers,
+                "prefetch_factor": self.prefetch_factor,
+                "write_workers": self.write_workers,
+                "write_prefetch": self.write_prefetch,
+                "finalize": finalize,
+                "elapsed_seconds": elapsed,
+                **(
+                    {}
+                    if publish_seconds is None
+                    else {"publish_seconds": publish_seconds}
+                ),
+                "wall_clock_samples_per_second": (
+                    run_samples / elapsed if elapsed > 0 else 0.0
+                ),
+                **({} if worker_fields is None else worker_fields),
+            },
+        )
+
+    def _log_worker_summary(
+        self,
+        performance: PipelineWorkerStats,
+        *,
+        status: str,
+        error_type: str | None,
+        expected: int,
+        target: int,
+    ) -> dict[str, object]:
+        fields = performance.fields(status=status, error_type=error_type)
+        fields.update(
+            {
+                "expected_samples": expected,
+                "target_samples": target,
+                "commit_samples": self.commit_samples,
+                "write_workers": self.write_workers,
+                "write_prefetch": self.write_prefetch,
+            }
+        )
+        elapsed = cast(float, fields["elapsed_seconds"])
+        message = (
+            "materializer worker summary: "
+            f"worker={performance.worker} status={status!r} "
+            f"samples={performance.processed_samples} "
+            f"provider_calls={performance.operation_calls.calls} "
+            f"elapsed={elapsed:.3f}s"
+        )
+        write = write_info if status == "complete" else write_warning
+        write(
+            "materializer",
+            message,
+            event="materializer_worker_summary",
+            fields=fields,
+        )
+        return fields
+
+    def _log_published(
+        self,
+        path: Path,
+        *,
+        expected: int,
+        parts: bool,
+        publish_seconds: float,
+    ) -> None:
         write_info(
             "materializer",
             "published materialized store: "
@@ -1110,6 +1385,7 @@ class ViewMaterializer:
                 "dataset_id": self._dataset_id,
                 "expected": expected,
                 "parts": parts,
+                "publish_seconds": publish_seconds,
                 "batch_size": self.batch_size,
                 "commit_samples": self.commit_samples,
                 "max_shard_bytes": self.max_shard_bytes,
@@ -1195,6 +1471,7 @@ class ViewMaterializer:
         expected: int,
         progress: ProgressSink | None = None,
         worker_id: int = 0,
+        performance: PipelineWorkerStats | None = None,
         on_fragment_complete: Callable[[tuple[int, ...]], None] | None = None,
     ) -> None:
         self._write_resumable_indexed_batches(
@@ -1212,6 +1489,7 @@ class ViewMaterializer:
             sample_identity=dataset,
             progress=progress,
             worker_id=worker_id,
+            performance=performance,
             on_fragment_complete=on_fragment_complete,
         )
 
@@ -1251,7 +1529,7 @@ class ViewMaterializer:
         missing_indexes: Sequence[int],
         completed_indexes: Sequence[int] | None = None,
         finalize: bool = True,
-    ) -> None:
+    ) -> Mapping[str, object]:
         commit_samples = self.commit_samples
         if commit_samples is None:
             raise RuntimeError("materializer commit_samples was not initialized.")
@@ -1315,7 +1593,7 @@ class ViewMaterializer:
             for worker in workers:
                 worker.start()
                 started.append(worker)
-            watch_workers(
+            summaries = watch_workers(
                 workers,
                 progress,
                 desc="materialize views",
@@ -1341,6 +1619,7 @@ class ViewMaterializer:
                 f"{worker.name} exited {worker.exitcode}" for worker in failed
             )
             raise RuntimeError(f"View materialization workers failed: {details}.")
+        return aggregate_worker_summaries(summaries, operation="provider")
 
     @property
     def _materializer_mode(self) -> _MaterializerMode:
@@ -1421,6 +1700,7 @@ class ViewMaterializer:
         sample_identity: object | None = None,
         progress: ProgressSink | None = None,
         worker_id: int = 0,
+        performance: PipelineWorkerStats | None = None,
         on_fragment_complete: Callable[[tuple[int, ...]], None] | None = None,
     ) -> None:
         completed = completed_indexes
@@ -1440,6 +1720,7 @@ class ViewMaterializer:
             sample_identity=sample_identity,
             progress=progress,
             worker_id=worker_id,
+            performance=performance,
             on_fragment_complete=on_fragment_complete,
         )
         writer.write(batches)
@@ -1741,9 +2022,7 @@ class MaterializingViewDataset(MapStyleABC):
             if error is None:
                 error = exc
         resources = (
-            (self._provider, self._source)
-            if self._owns_source
-            else (self._provider,)
+            (self._provider, self._source) if self._owns_source else (self._provider,)
         )
         for resource in resources:
             try:
@@ -2029,6 +2308,7 @@ class MaterializerWorker:
         expected: int,
         progress: ProgressSink,
         worker_id: int,
+        performance: PipelineWorkerStats | None = None,
     ) -> None:
         self.materializer._validate_provider_output(provider)
         dataset, _ = _materialization_input(dataset_factory())
@@ -2045,6 +2325,7 @@ class MaterializerWorker:
                 expected=expected,
                 progress=progress,
                 worker_id=worker_id,
+                performance=performance,
             )
         finally:
             _close_resource(dataset)
