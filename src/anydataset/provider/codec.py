@@ -25,7 +25,7 @@ from ..types.item import (
 from .abc import AudioProvider
 
 if TYPE_CHECKING:
-    from anytrain.codec import AudioCodeSpec, AudioCodes, AudioTokenizer, FrameCodec
+    from anytrain.audio.codec import AudioCodeSpec, AudioCodes, AudioTokenizer, FrameCodec
 
 
 _TokenView = Union[torch.Tensor, SemanticAcousticView, SemanticGlobalView]
@@ -387,7 +387,7 @@ def _semantic_acoustic_views(
     batch_size: int,
 ) -> tuple[SemanticAcousticView, ...]:
     try:
-        from anytrain.codec import SemanticAcousticCodes
+        from anytrain.audio.codec import SemanticAcousticCodes
     except ImportError as exc:
         raise ImportError(
             "Semantic-acoustic token materialization requires the current AnyTrain "
@@ -442,7 +442,7 @@ def _semantic_global_views(
     batch_size: int,
 ) -> tuple[SemanticGlobalView, ...]:
     try:
-        from anytrain.codec import SemanticGlobalCodes
+        from anytrain.audio.codec import SemanticGlobalCodes
     except ImportError as exc:
         raise ImportError(
             "Semantic-global token materialization requires the current AnyTrain "
