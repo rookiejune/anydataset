@@ -18,7 +18,7 @@ from .catalog import (
     validate_upstream,
     write_snapshot_manifest,
 )
-from .dataset import LiveS2STDataset, SnapshotUpdate
+from .dataset import S2STDataset, S2STStatus, status
 from .growth import plan_growth
 from .model import (
     DatasetFactory,
@@ -67,21 +67,21 @@ __all__ = [
     "LanguageCatchup",
     "LanguageDeclaration",
     "LanguageSources",
-    "LiveS2STDataset",
     "PairKey",
     "PairIndexRecord",
     "PairPlan",
     "ReferenceAudio",
     "ReferenceVoice",
     "S2STConfig",
+    "S2STDataset",
     "S2STDeclaration",
     "S2STLayout",
     "S2STStage",
     "S2STState",
     "S2STView",
+    "S2STStatus",
     "SlotCursor",
     "SnapshotManifest",
-    "SnapshotUpdate",
     "SourceFamily",
     "SourceInput",
     "SourceKey",
@@ -98,6 +98,7 @@ __all__ = [
     "read_pair_index",
     "read_snapshot_manifest",
     "store_digest",
+    "status",
     "validate_catalog_entry",
     "validate_catalog_store",
     "validate_upstream",

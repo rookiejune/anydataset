@@ -27,13 +27,14 @@ Use these paths for application code:
   the structured audio-token `SemanticAcousticView` and `SemanticGlobalView`
   mapping contracts.
 - `anydataset.presets`: built-in dataset preset classes.
-- `anydataset.dataset`: dataset base classes, index selection, generic collate
-  helpers, and morphology collate/view contracts. Focused universe and selection
-  extension contracts are listed below.
-- `anydataset.filter`: cached filter rules, filtered datasets, scalar and batch
-  filter predicate contracts, `FilterRun` / `FilterRunStatus` from the dynamic
-  `FilterRule.open()` entrance, explicit blocking apply reports, online reject /
-  replace filtering, filter decisions, and filter cleanup entry points.
+- `anydataset.dataset`: dataset base classes including `AppendOnlyMapStyleABC`
+  and `DatasetGrowth`, index selection, generic collate helpers, and morphology
+  collate/view contracts. Focused universe and selection extension contracts are
+  listed below.
+- `anydataset.filter`: cached filter rules, snapshot-aligned `DecisionView` /
+  `DecisionStatus`, scalar and batch filter predicate contracts, explicit
+  blocking apply reports, online reject / replace filtering, compatibility
+  `FilterRun` / `FilterRunStatus`, filter decisions, and cleanup entry points.
 - `anydataset.store`: canonical store writing; view, modality, and complete-sample
   materializers and provider protocols; scalar and batch transform types;
   materialization status and the fixed-prefix snapshot-backed map-style datasets
@@ -46,8 +47,9 @@ Use these paths for application code:
 - `anydataset.provider_service`: provider process server and remote provider /
   filter client factories.
 - `anydataset.synthesis.s2st`: stable synthetic-S2ST source slots, growth plans,
-  views, stage snapshots, and append-only final datasets. Concrete model and
-  workspace bindings remain outside anydataset.
+  views, independently published stage catalogs, and expanding datasets assembled
+  from all snapshots in one selected catalog. Concrete model and workspace
+  bindings remain outside anydataset.
 - `anydataset.quality`: quality rule-building utilities for text,
   translation, and speech filters.
 
@@ -72,21 +74,33 @@ the internal materializer modules that consume those contracts.
 
 ## Dynamic view composition
 
-Dynamic operations distinguish complete execution from returned selection:
+Derived operations distinguish complete execution from returned selection:
 
+- snapshot partitioning belongs to the dataset prefix, independently of any
+  filter; materializers, S2ST catalogs, and decision producers consume the same
+  dataset-owned segment boundary;
+- a non-empty map-style dataset without explicit partition metadata is treated
+  as one logical snapshot; an empty dataset is the complete empty prefix;
 - transforms and filters execute over a complete `DatasetUniverse`;
 - `SelectionView` applies the ordered intersection only at the returned dataset
   boundary;
-- unknown live filter decisions are unresolved, not reject;
+- an unpublished decision suffix is unresolved, not reject;
 - one-to-one transforms preserve stable `sample_id` and rebase selections by that
   ID;
 - `sample_index` is only a dense ordinal within one universe/store;
 - transform and filter identities exclude selection state.
 
-`FilterRule.open()` returns `FilterRun`. Use `run.dataset` for the live selection,
-`run.wait()` to wait for complete decision coverage, and `run.close()` or the
-context manager to wait and release resources. `FilterRule.apply()` remains the
-blocking compatibility surface that returns `FilteredDataset`.
+`FilterRule.bind()` returns a `DecisionView` over one fixed input prefix. Its
+`produce()` call publishes decisions for at most the next missing input
+snapshot, while `load()` joins the longest contiguous published decision prefix
+and applies the selected labels. Each decision snapshot preserves input count,
+order, and `sample_id`; selection is terminal and may return fewer samples.
+`select()` changes labels without rerunning predicates, and the default label is
+`accept`.
+
+`FilterRule.open()` and `FilterRule.apply()` remain compatibility surfaces for
+the older background and blocking cache workflows. New snapshot-backed
+resources should use `bind()` and explicit producer calls.
 
 `ViewMaterializer.open()` is a read-only consumer entrance. It opens a legacy
 ready store or a fixed prefix from the append-only snapshot catalog without
@@ -95,9 +109,20 @@ later snapshots; an opened dataset has stable length. With `input_id_factory`,
 only the input identity object is constructed to validate provenance, and a
 selection is projected by stable `sample_id` onto the published subset.
 `ViewMaterializer.produce()` is the separate producer entrance: it owns the
-provider/device and a long-lived producer lease, then atomically appends durable
-delta segments. An optional logical `dataset_id` decouples catalog and universe
-identity from the physical `output_dir` basename.
+provider/device for one bounded call and atomically appends at most one durable
+snapshot. Repeated explicit calls advance coverage. An optional logical
+`dataset_id` decouples catalog and universe identity from the physical
+`output_dir` basename.
+
+`S2STDataset(..., stage=...)` traverses the selected `source`, `translation`, or
+`tts` catalog from its first snapshot through the latest visible snapshot. It
+fails when the first snapshot is missing and never waits or polls. The same
+object can atomically `refresh()` to an append-only successor; anydataset batch
+planning does this at each new loader cycle, while the active cycle keeps its
+fixed index prefix. The shared append-only contract owns worker out-of-range
+refresh and shortest-rank DDP planning. Existing callable-cost entries remain
+cached; materialized costs evaluate only the appended global-index suffix.
+The default stage is `tts`.
 
 `provider_id` is global operation provenance for the AnyTrain backend plus the
 AnyDataset adapter and semantic model recipe. It is unrelated to a sample,

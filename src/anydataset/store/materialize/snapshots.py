@@ -8,15 +8,13 @@ catalog once and therefore observes a fixed prefix for its whole lifetime.
 
 from __future__ import annotations
 
-import operator
-from bisect import bisect_right
 from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 
-from ...dataset.abc import MapStyleABC
-from ...types.item import Modality, Role, Sample, Schema, View
+from ...dataset._snapshot import SnapshotCatalogDataset, SnapshotSegment
+from ...types.item import Modality, Role, Schema, View
 from .._identity import materialized_universe_id
 from ..jsonio import read_json, write_json
 from ..manifest.schema import normalize_provenance
@@ -55,13 +53,7 @@ class SnapshotCatalog:
         return 0 if not self.entries else self.entries[-1].stop
 
 
-@dataclass(frozen=True)
-class _Segment:
-    entry: SnapshotEntry
-    dataset: StoreDataset
-
-
-class SnapshotDataset(MapStyleABC):
+class SnapshotDataset(SnapshotCatalogDataset):
     """A fixed map-style concatenation of immutable materialization segments."""
 
     def __init__(
@@ -69,56 +61,22 @@ class SnapshotDataset(MapStyleABC):
         *,
         root: Path,
         catalog: SnapshotCatalog,
-        segments: tuple[_Segment, ...],
+        stores: tuple[StoreDataset, ...],
         views: tuple[tuple[Role, Modality, View], ...],
     ) -> None:
+        segments = tuple(
+            SnapshotSegment(
+                snapshot_id=f"materialized-{entry.revision}",
+                start=entry.start,
+                sample_count=entry.sample_count,
+                dataset=store,
+            )
+            for entry, store in zip(catalog.entries, stores)
+        )
+        super().__init__(segments, sealed=catalog.sealed)
         self.root = root
         self.catalog = catalog
-        self._segments = segments
         self._views = views
-        self._stops = tuple(segment.entry.stop for segment in segments)
-        self._closed = False
-
-    @property
-    def sealed(self) -> bool:
-        return self.catalog.sealed
-
-    def __len__(self) -> int:
-        self._ensure_open()
-        return self.catalog.sample_count
-
-    def __getitem__(self, index: int) -> Sample:
-        segment, local_index = self._locate(index)
-        return segment.dataset[local_index]
-
-    def __getitems__(self, indexes: Sequence[int]) -> list[Sample]:
-        self._ensure_open()
-        normalized = tuple(_position(index, len(self)) for index in indexes)
-        if not normalized:
-            return []
-        requests: dict[int, list[tuple[int, int]]] = {}
-        for output_index, index in enumerate(normalized):
-            segment_index = bisect_right(self._stops, index)
-            entry = self._segments[segment_index].entry
-            requests.setdefault(segment_index, []).append(
-                (output_index, index - entry.start)
-            )
-        output: list[Sample | None] = [None] * len(normalized)
-        for segment_index, selected in requests.items():
-            dataset = self._segments[segment_index].dataset
-            local_indexes = tuple(local for _output, local in selected)
-            values = dataset.__getitems__(local_indexes)
-            for (output_index, _local), value in zip(selected, values):
-                output[output_index] = value
-        return [cast(Sample, value) for value in output]
-
-    def sample_id(self, index: int) -> str:
-        segment, local_index = self._locate(index)
-        return segment.dataset.sample_id(local_index)
-
-    def global_index(self, index: int) -> int:
-        normalized = _position(index, len(self))
-        return normalized
 
     def universe_id(self) -> str | None:
         self._ensure_open()
@@ -129,36 +87,6 @@ class SnapshotDataset(MapStyleABC):
             len(self),
             self._views,
         )
-
-    def cost_row(self, index: int) -> Any:
-        segment, local_index = self._locate(index)
-        return segment.dataset.cost_row(local_index)
-
-    def close(self) -> None:
-        if self._closed:
-            return
-        self._closed = True
-        error: Exception | None = None
-        for segment in reversed(self._segments):
-            try:
-                segment.dataset.close()
-            except Exception as exc:
-                if error is None:
-                    error = exc
-        if error is not None:
-            raise error
-
-    def _locate(self, index: int) -> tuple[_Segment, int]:
-        self._ensure_open()
-        normalized = _position(index, len(self))
-        segment_index = bisect_right(self._stops, normalized)
-        segment = self._segments[segment_index]
-        return segment, normalized - segment.entry.start
-
-    def _ensure_open(self) -> None:
-        if self._closed:
-            raise RuntimeError("SnapshotDataset is closed.")
-
 
 class SnapshotPublisher:
     """Publish durable dense fragment prefixes while a producer lease is held."""
@@ -335,7 +263,7 @@ def open_snapshot_dataset(
             split=split,
             provenance=normalize_provenance(provenance),
         )
-    segments: list[_Segment] = []
+    stores: list[StoreDataset] = []
     try:
         for entry in catalog.entries:
             store = _validate_segment_store(
@@ -346,15 +274,15 @@ def open_snapshot_dataset(
                 sample_count=entry.sample_count,
                 views=views,
             )
-            segments.append(_Segment(entry, store))
+            stores.append(store)
     except BaseException:
-        for segment in segments:
-            segment.dataset.close()
+        for store in stores:
+            store.close()
         raise
     return SnapshotDataset(
         root=path,
         catalog=catalog,
-        segments=tuple(segments),
+        stores=tuple(stores),
         views=views,
     )
 
@@ -530,15 +458,6 @@ def _schema_views(schema: Schema) -> tuple[tuple[Role, Modality, View], ...]:
             key=lambda item: (item[0].value, item[1].value, item[2].value),
         )
     )
-
-
-def _position(index: int, length: int) -> int:
-    position = operator.index(index)
-    if position < 0:
-        position += length
-    if position < 0 or position >= length:
-        raise IndexError("snapshot dataset index out of range")
-    return position
 
 
 def _integer(value: object, name: str, *, minimum: int) -> int:

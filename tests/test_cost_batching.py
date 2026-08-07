@@ -6,11 +6,12 @@ from unittest import mock
 
 import anydataset
 import anydataset.dataset
+import anydataset.dataset._ddp as dataset_ddp
 import pytest
 import torch
 
 from anydataset import AnyDataset, Source, Spec
-from anydataset.dataset import MapStyleABC
+from anydataset.dataset import AppendOnlyMapStyleABC, MapStyleABC
 from anydataset.dataset.batching import (
     _MAX_CALLABLE_COST_CACHE,
     _CallableCosts,
@@ -55,6 +56,98 @@ def test_cost_does_not_parse_sample() -> None:
     assert measured == [4, 1, 3, 2]
     assert parsed == [4, 3, 1, 2]
     assert batches == [[40, 30], [10, 20]]
+
+
+def test_each_loader_cycle_refreshes_growing_dataset_and_callable_costs() -> None:
+    measured: list[int] = []
+
+    class GrowingDataset(AppendOnlyMapStyleABC):
+        def __init__(self) -> None:
+            self.rows = [1]
+            self.refreshes = 0
+
+        def _refresh_impl(self) -> None:
+            self.refreshes += 1
+            if self.refreshes == 2:
+                self.rows.append(2)
+
+        def __len__(self) -> int:
+            return len(self.rows)
+
+        def __getitem__(self, index: int) -> int:
+            return self.rows[index]
+
+    dataset = GrowingDataset()
+    loader = dataset.dataloader(
+        costs=lambda row: measured.append(row) or row,
+        max_batch_memory=2,
+        max_batch_samples=1,
+        materialize_callable_costs=True,
+        shuffle=False,
+        collate_fn=list,
+    )
+
+    assert list(loader) == [[1]]
+    assert measured == [1]
+    loader.set_epoch(1)
+    assert list(loader) == [[1], [2]]
+    assert measured == [1, 2]
+
+
+def test_fixed_costs_reject_append_only_dataset_growth() -> None:
+    class GrowingDataset(AppendOnlyMapStyleABC):
+        def __init__(self) -> None:
+            self.rows = [1]
+            self.refreshes = 0
+
+        def _refresh_impl(self) -> None:
+            self.refreshes += 1
+            if self.refreshes == 2:
+                self.rows.append(2)
+
+        def __len__(self) -> int:
+            return len(self.rows)
+
+        def __getitem__(self, index: int) -> int:
+            return self.rows[index]
+
+    loader = GrowingDataset().dataloader(
+        costs=(1,),
+        max_batch_memory=1,
+        collate_fn=list,
+    )
+
+    assert list(loader) == [[1]]
+    loader.set_epoch(1)
+    with pytest.raises(ValueError, match="fixed costs cannot follow"):
+        list(loader)
+
+
+def test_append_only_planning_uses_shortest_rank_visible_prefix(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class GrowingDataset(AppendOnlyMapStyleABC):
+        def __len__(self) -> int:
+            return 2
+
+        def __getitem__(self, index: int) -> int:
+            return index
+
+        def _refresh_impl(self) -> None:
+            return
+
+    monkeypatch.setattr(dataset_ddp.dist, "is_available", lambda: True)
+    monkeypatch.setattr(dataset_ddp.dist, "is_initialized", lambda: True)
+    monkeypatch.setattr(dataset_ddp.dist, "get_world_size", lambda: 2)
+    monkeypatch.setattr(dataset_ddp.dist, "get_backend", lambda: "gloo")
+
+    def reduce_min(value: torch.Tensor, *, op: object) -> None:
+        assert op == dataset_ddp.dist.ReduceOp.MIN
+        value.fill_(1)
+
+    monkeypatch.setattr(dataset_ddp.dist, "all_reduce", reduce_min)
+
+    assert GrowingDataset()._planning_length() == 1
 
 
 def test_callable_cost_cache_is_bounded_and_reuses_small_epochs() -> None:

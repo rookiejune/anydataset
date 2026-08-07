@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
+from itertools import islice
 from pathlib import Path
 from threading import Lock, Thread
 from types import TracebackType
@@ -292,19 +293,33 @@ class ViewMaterializer:
 
         del provider_factory
         self._validate_online_contract()
-        if self.input_id is None:
-            if dataset_factory is None:
-                raise ValueError(
-                    "dataset_factory is required to resolve the materialization input_id."
+        expected: int | None = None
+        source: Any | None = None
+        source_view: SelectionView | None = None
+        if dataset_factory is not None:
+            try:
+                source, source_view = _materialization_input(dataset_factory())
+                _validate_publishable_input(source)
+                self._resolve_input_id(_materialization_identity_input(source))
+                expected = dataset_sample_count(
+                    source,
+                    context="materialization status",
                 )
-            self._resolve_ready_input_id(dataset_factory=dataset_factory)
+            finally:
+                _close_resources_quietly(
+                    source_view if source_view is not None else source
+                )
+        elif self.input_id is None:
+            raise ValueError(
+                "dataset_factory is required to resolve the materialization input_id."
+            )
         dataset = self._consumer_dataset()
         try:
             count = len(dataset)
             finalized = not isinstance(dataset, SnapshotDataset) or dataset.sealed
             return MaterializationStatus(
                 output_dir=Path(self.output_dir).expanduser(),
-                expected=count,
+                expected=count if expected is None else expected,
                 completed=count,
                 finalized=finalized,
             )
@@ -551,8 +566,20 @@ class ViewMaterializer:
                 max_shard_bytes=self.max_shard_bytes,
                 completed=completed,
             )
+            published_before = publisher.sample_count
             publisher.publish(force=True)
-            missing = missing_indexes(completed, expected)
+            if publisher.sample_count > published_before:
+                if indexes_complete(completed, expected) and _input_is_sealed(dataset):
+                    publisher.seal()
+                return MaterializationStatus(
+                    output_dir=Path(self.output_dir).expanduser(),
+                    expected=expected,
+                    completed=publisher.sample_count,
+                    finalized=publisher.catalog.sealed,
+                )
+            missing = tuple(
+                islice(missing_indexes(completed, expected), snapshot_samples)
+            )
             if missing:
                 log_resume_summary(
                     "materializer",
@@ -621,7 +648,7 @@ class ViewMaterializer:
             return MaterializationStatus(
                 output_dir=Path(self.output_dir).expanduser(),
                 expected=expected,
-                completed=len(completed),
+                completed=publisher.sample_count,
                 finalized=publisher.catalog.sealed,
             )
         finally:

@@ -19,9 +19,10 @@ from .model import (
 )
 
 SNAPSHOT_SCHEMA = "anydataset-s2st-snapshot-v1"
-CATALOG_SCHEMA = "anydataset-s2st-final-catalog-v2"
+CATALOG_SCHEMA = "anydataset-s2st-stage-catalog-v3"
 PAIR_INDEX_SCHEMA = "anydataset-s2st-pair-index-v1"
 CATALOG_FILE = "catalog.json"
+CATALOGS_DIR = "catalogs"
 _CATALOG_LOCK_FILE = ".catalog.lock"
 
 
@@ -472,11 +473,14 @@ class FinalCatalogEntry:
 @dataclass(frozen=True)
 class FinalCatalog:
     lineage_id: str
+    stage: S2STStage = S2STStage.TTS
     entries: tuple[FinalCatalogEntry, ...] = ()
     sealed: bool = False
 
     def __post_init__(self) -> None:
         _non_empty("lineage_id", self.lineage_id)
+        if not isinstance(self.stage, S2STStage):
+            raise TypeError("catalog stage must be an S2STStage.")
         if not isinstance(self.entries, tuple) or any(
             not isinstance(entry, FinalCatalogEntry) for entry in self.entries
         ):
@@ -488,7 +492,9 @@ class FinalCatalog:
         snapshots: set[str] = set()
         for entry in self.entries:
             if entry.start != start:
-                raise ValueError("final catalog entries must form one dense prefix.")
+                raise ValueError(
+                    "final catalog entries must form one dense append-only history."
+                )
             if entry.revision <= revision:
                 raise ValueError("final catalog revisions must be strictly increasing.")
             if entry.snapshot_id in snapshots:
@@ -511,10 +517,12 @@ class FinalCatalog:
 
     def validate_successor(self, previous: FinalCatalog) -> None:
         if self.lineage_id != previous.lineage_id:
-            raise ValueError("final catalog lineage changed during refresh.")
+            raise ValueError("S2ST catalog lineage changed during refresh.")
+        if self.stage is not previous.stage:
+            raise ValueError("S2ST catalog stage changed during refresh.")
         if self.entries[: len(previous.entries)] != previous.entries:
             raise ValueError(
-                "final catalog update does not preserve the previous prefix."
+                "final catalog update does not preserve all previous entries."
             )
         if previous.sealed and self != previous:
             raise ValueError("sealed final catalog cannot change.")
@@ -523,6 +531,7 @@ class FinalCatalog:
         return {
             "schema": CATALOG_SCHEMA,
             "lineage_id": self.lineage_id,
+            "stage": self.stage.value,
             "sealed": self.sealed,
             "entries": [entry.to_dict() for entry in self.entries],
         }
@@ -540,23 +549,28 @@ class FinalCatalog:
             raise TypeError("final catalog entries must be a list.")
         return cls(
             lineage_id=_string(data.get("lineage_id"), "lineage_id"),
+            stage=S2STStage(_string(data.get("stage"), "catalog stage")),
             entries=tuple(FinalCatalogEntry.from_dict(entry) for entry in raw_entries),
             sealed=sealed,
         )
 
 
 class CatalogPublisher:
-    """Atomically append complete standalone TTS stores to the final catalog."""
+    """Atomically append standalone snapshots to one stage catalog."""
 
     def __init__(
         self,
         root: str | Path,
         lineage_id: str,
         *,
+        stage: S2STStage = S2STStage.TTS,
         lock_timeout: float = 3600.0,
     ) -> None:
         self.root = Path(root)
         self.lineage_id = _non_empty("lineage_id", lineage_id)
+        if not isinstance(stage, S2STStage):
+            raise TypeError("stage must be an S2STStage.")
+        self.stage = stage
         if isinstance(lock_timeout, bool) or not isinstance(lock_timeout, (int, float)):
             raise TypeError("lock_timeout must be numeric.")
         if lock_timeout <= 0:
@@ -564,7 +578,12 @@ class CatalogPublisher:
         self.lock_timeout = float(lock_timeout)
 
     def load(self) -> FinalCatalog:
-        return load_catalog(self.root, lineage_id=self.lineage_id, missing_ok=True)
+        return load_catalog(
+            self.root,
+            lineage_id=self.lineage_id,
+            stage=self.stage,
+            missing_ok=True,
+        )
 
     def publish(
         self,
@@ -572,7 +591,7 @@ class CatalogPublisher:
         records: Sequence[PairIndexRecord],
     ) -> FinalCatalog:
         with FileLock(
-            self.root / _CATALOG_LOCK_FILE,
+            _catalog_lock_path(self.root, self.stage),
             wait_timeout=self.lock_timeout,
         ):
             return self._publish_locked(manifest, records)
@@ -582,8 +601,10 @@ class CatalogPublisher:
         manifest: SnapshotManifest,
         records: Sequence[PairIndexRecord],
     ) -> FinalCatalog:
-        if manifest.stage is not S2STStage.TTS:
-            raise ValueError("only tts snapshots can publish the final catalog.")
+        if manifest.stage is not self.stage:
+            raise ValueError(
+                "snapshot stage does not match the target S2ST catalog."
+            )
         if manifest.lineage_id != self.lineage_id:
             raise ValueError("snapshot lineage does not match final catalog publisher.")
         values = tuple(records)
@@ -608,17 +629,17 @@ class CatalogPublisher:
         if repeated is not None:
             return current
         if current.sealed:
-            raise RuntimeError("cannot publish after the final catalog is sealed.")
+            raise RuntimeError("cannot publish after the stage catalog is sealed.")
         if manifest.previous_snapshot_id != current.latest_snapshot_id:
             raise ValueError(
-                "snapshot previous id does not match final catalog latest."
+                "snapshot previous id does not match stage catalog latest."
             )
         if manifest.total_pairs != current.sample_count + len(values):
             raise ValueError(
-                "snapshot total_pairs does not extend the final catalog prefix."
+                "snapshot total_pairs does not extend the current stage catalog."
             )
         if current.entries and manifest.revision <= current.entries[-1].revision:
-            raise ValueError("snapshot revision must advance the final catalog.")
+            raise ValueError("snapshot revision must advance the stage catalog.")
         _validate_index_successor(current, index_summary, manifest)
 
         store = _root_path(self.root, manifest.store_path, "snapshot store_path")
@@ -641,8 +662,8 @@ class CatalogPublisher:
         finally:
             _close_dataset(dataset)
 
-        index_relpath = (
-            Path("indexes") / f"{manifest.revision:08d}-{manifest.snapshot_id}.jsonl"
+        index_relpath = Path("indexes") / self.stage.value / (
+            f"{manifest.revision:08d}-{manifest.snapshot_id}.jsonl"
         )
         index_path = _root_path(self.root, str(index_relpath), "pair index path")
         if index_path.exists():
@@ -651,6 +672,7 @@ class CatalogPublisher:
                     f"pair index path contains different data: {index_path}."
                 )
         else:
+            index_path.parent.mkdir(parents=True, exist_ok=True)
             atomic_write_text(index_path, encoded_index.decode("utf-8"))
         index_digest = _sha256(encoded_index)
         index_identity = _file_identity(index_path, "pair index")
@@ -677,6 +699,7 @@ class CatalogPublisher:
         )
         updated = FinalCatalog(
             lineage_id=self.lineage_id,
+            stage=self.stage,
             entries=(*current.entries, entry),
         )
         if _store_identity(store) != store_identity:
@@ -688,7 +711,7 @@ class CatalogPublisher:
 
     def seal(self) -> FinalCatalog:
         with FileLock(
-            self.root / _CATALOG_LOCK_FILE,
+            _catalog_lock_path(self.root, self.stage),
             wait_timeout=self.lock_timeout,
         ):
             current = self.load()
@@ -699,6 +722,7 @@ class CatalogPublisher:
                 raise ValueError("cannot seal an empty final catalog.")
             updated = FinalCatalog(
                 lineage_id=current.lineage_id,
+                stage=current.stage,
                 entries=current.entries,
                 sealed=True,
             )
@@ -707,7 +731,8 @@ class CatalogPublisher:
 
 
 def write_catalog(root: str | Path, catalog: FinalCatalog) -> Path:
-    target = Path(root) / CATALOG_FILE
+    target = catalog_path(root, catalog.stage)
+    target.parent.mkdir(parents=True, exist_ok=True)
     atomic_write_text(
         target,
         json.dumps(catalog.to_dict(), sort_keys=True, indent=2) + "\n",
@@ -719,9 +744,12 @@ def load_catalog(
     root: str | Path,
     *,
     lineage_id: str | None = None,
+    stage: S2STStage = S2STStage.TTS,
     missing_ok: bool = False,
 ) -> FinalCatalog:
-    path = Path(root) / CATALOG_FILE
+    if not isinstance(stage, S2STStage):
+        raise TypeError("stage must be an S2STStage.")
+    path = catalog_path(root, stage)
     if not path.exists():
         if not missing_ok:
             raise FileNotFoundError(path)
@@ -729,11 +757,30 @@ def load_catalog(
             raise ValueError(
                 "lineage_id is required when a missing catalog is allowed."
             )
-        return FinalCatalog(lineage_id=lineage_id)
-    catalog = FinalCatalog.from_dict(_read_json(path, "final catalog"))
+        return FinalCatalog(lineage_id=lineage_id, stage=stage)
+    catalog = FinalCatalog.from_dict(_read_json(path, "S2ST stage catalog"))
     if lineage_id is not None and catalog.lineage_id != lineage_id:
-        raise ValueError("final catalog lineage does not match the requested lineage.")
+        raise ValueError("S2ST catalog lineage does not match the requested lineage.")
+    if catalog.stage is not stage:
+        raise ValueError("S2ST catalog stage does not match the requested stage.")
     return catalog
+
+
+def catalog_path(root: str | Path, stage: S2STStage) -> Path:
+    """Return the publication path for one stage catalog."""
+
+    if not isinstance(stage, S2STStage):
+        raise TypeError("stage must be an S2STStage.")
+    path = Path(root)
+    if stage is S2STStage.TTS:
+        return path / CATALOG_FILE
+    return path / CATALOGS_DIR / f"{stage.value}.json"
+
+
+def _catalog_lock_path(root: Path, stage: S2STStage) -> Path:
+    if stage is S2STStage.TTS:
+        return root / _CATALOG_LOCK_FILE
+    return root / f".{stage.value}-catalog.lock"
 
 
 def catalog_source_locations(
@@ -964,7 +1011,9 @@ def _apply_index_summary(
             )
             new_sources += 1
         else:
-            raise ValueError("pair index source sequences must form one dense prefix.")
+            raise ValueError(
+                "pair index source sequences must be contiguous from zero."
+            )
         source_state = state.sources[sequence]
         overlap = source_state.targets.intersection(summary.target_languages)
         if overlap:

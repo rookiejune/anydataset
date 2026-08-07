@@ -27,11 +27,12 @@ class _CallableCosts(Sequence[int]):
     def __init__(self, dataset: MapStyleABC, cost_fn: _CostFn) -> None:
         self.dataset = dataset
         self.cost_fn = cost_fn
+        self._sample_count = len(dataset)
         self._cache: OrderedDict[int, int] = OrderedDict()
         self._materialized: tuple[int, ...] | None = None
 
     def __len__(self) -> int:
-        return len(self.dataset)
+        return self._sample_count
 
     @overload
     def __getitem__(self, index: int) -> int: ...
@@ -70,6 +71,24 @@ class _CallableCosts(Sequence[int]):
         self._cache.clear()
         self._materialized = materialized
         return materialized
+
+    def advance(self, sample_count: int) -> None:
+        """Expose an appended suffix without recomputing stable prefix costs."""
+
+        current = _non_negative_int("sample_count", sample_count)
+        if current < self._sample_count:
+            raise ValueError(
+                "callable costs cannot shrink with an append-only dataset."
+            )
+        if current == self._sample_count:
+            return
+        if self._materialized is not None:
+            suffix = tuple(
+                operator.index(self.cost_fn(self.dataset.cost_row(index)))
+                for index in range(self._sample_count, current)
+            )
+            self._materialized += suffix
+        self._sample_count = current
 
 
 @dataclass(frozen=True)
@@ -179,6 +198,15 @@ class _BatchSampler(Sampler[list[int]]):
         )
 
     def __iter__(self) -> Iterator[list[int]]:
+        previous_length = len(self.dataset)
+        growth = self.dataset.refresh()
+        sample_count = len(self.dataset)
+        if growth is not None and (
+            growth.previous_length != previous_length
+            or growth.current_length != sample_count
+        ):
+            raise RuntimeError("dataset refresh returned inconsistent growth lengths.")
+        self._advance_costs(sample_count)
         plans = self._iter_plans()
         for plan in synchronized_plans(
             plans,
@@ -187,6 +215,16 @@ class _BatchSampler(Sampler[list[int]]):
             plan_window=self.distributed_plan_window,
         ):
             yield [record.index for record in plan.records]
+
+    def _advance_costs(self, sample_count: int) -> None:
+        if isinstance(self.costs, _CallableCosts):
+            self.costs.advance(sample_count)
+            return
+        if self.costs is not None and len(self.costs) != sample_count:
+            raise ValueError(
+                "fixed costs cannot follow append-only dataset growth; "
+                "use callable costs or an appendable sequence."
+            )
 
     def _iter_plans(self) -> Iterator[_Plan]:
         costs = self.costs

@@ -164,12 +164,12 @@ def test_reopened_epoch_sees_new_prefix_while_old_epoch_is_fixed(
     assert first == MaterializationStatus(
         output_dir=tmp_path / "output",
         expected=3,
-        completed=3,
+        completed=2,
         finalized=False,
     )
     epoch_zero = materializer.open(dataset_factory=_fail_factory)
-    assert len(epoch_zero) == 3
-    assert [_codes(epoch_zero[index]) for index in range(3)] == [10, 11, 12]
+    assert len(epoch_zero) == 2
+    assert [_codes(epoch_zero[index]) for index in range(2)] == [10, 11]
 
     source_state.count = 5
     source_state.sealed = True
@@ -178,9 +178,16 @@ def test_reopened_epoch_sees_new_prefix_while_old_epoch_is_fixed(
         provider_factory=provider,
         snapshot_samples=2,
     )
-    assert second.completed == 5
-    assert second.finalized
-    assert len(epoch_zero) == 3
+    assert second.completed == 4
+    assert not second.finalized
+    third = materializer.produce(
+        dataset_factory=source,
+        provider_factory=provider,
+        snapshot_samples=2,
+    )
+    assert third.completed == 5
+    assert third.finalized
+    assert len(epoch_zero) == 2
 
     epoch_one = materializer.open(dataset_factory=_fail_factory)
     try:
@@ -196,7 +203,7 @@ def test_reopened_epoch_sees_new_prefix_while_old_epoch_is_fixed(
         epoch_zero.close()
         epoch_one.close()
 
-    assert provider_state.factories == 2
+    assert provider_state.factories == 3
     assert provider_state.samples == [0, 1, 2, 3, 4]
 
 
@@ -233,6 +240,13 @@ def test_resume_reuses_durable_fragments_and_publication_is_idempotent(
     assert failed_state.samples == [0]
 
     resumed_state = _ProviderState()
+    resumed = materializer.produce(
+        dataset_factory=source,
+        provider_factory=_ProviderFactory(resumed_state),
+        snapshot_samples=2,
+    )
+    assert resumed.completed == 1
+    assert resumed_state.samples == []
     materializer.produce(
         dataset_factory=source,
         provider_factory=_ProviderFactory(resumed_state),
@@ -252,6 +266,11 @@ def test_resume_reuses_durable_fragments_and_publication_is_idempotent(
 def test_selection_projects_onto_published_prefix(tmp_path: Path) -> None:
     state = _SourceState(3, sealed=False)
     materializer = _materializer(tmp_path / "output", tmp_path / "staging")
+    materializer.produce(
+        dataset_factory=_SourceFactory(state),
+        provider_factory=_ProviderFactory(_ProviderState()),
+        snapshot_samples=2,
+    )
     materializer.produce(
         dataset_factory=_SourceFactory(state),
         provider_factory=_ProviderFactory(_ProviderState()),
@@ -303,7 +322,7 @@ def test_shared_root_rejects_identity_mismatch(tmp_path: Path) -> None:
         mismatch.open(dataset_factory=_fail_factory)
 
 
-def test_second_producer_is_rejected_by_long_lived_lease(tmp_path: Path) -> None:
+def test_second_producer_is_rejected_by_call_scoped_lease(tmp_path: Path) -> None:
     output = tmp_path / "output"
     materializer = _materializer(output, tmp_path / "staging")
     with FileLock(producer_lock_path(output)):
@@ -372,9 +391,11 @@ def test_status_reads_only_published_catalog(tmp_path: Path) -> None:
     empty = materializer.status()
     assert (empty.expected, empty.completed, empty.finalized) == (0, 0, False)
 
-    materializer.produce(
-        dataset_factory=_SourceFactory(_SourceState(2)),
-        provider_factory=_ProviderFactory(_ProviderState()),
-    )
-    ready = materializer.status()
+    source = _SourceFactory(_SourceState(2))
+    provider = _ProviderFactory(_ProviderState())
+    materializer.produce(dataset_factory=source, provider_factory=provider)
+    partial = materializer.status(dataset_factory=source)
+    assert (partial.expected, partial.completed, partial.finalized) == (2, 1, False)
+    materializer.produce(dataset_factory=source, provider_factory=provider)
+    ready = materializer.status(dataset_factory=source)
     assert (ready.expected, ready.completed, ready.finalized) == (2, 2, True)

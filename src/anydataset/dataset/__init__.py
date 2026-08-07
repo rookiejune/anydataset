@@ -1,5 +1,7 @@
 from .abc import (
+    AppendOnlyMapStyleABC,
     AnyDataset,
+    DatasetGrowth,
     IterableAnyDataset,
     MapStyleABC,
 )
@@ -31,10 +33,12 @@ from .view import (
 )
 
 __all__ = [
+    "AppendOnlyMapStyleABC",
     "AnyDataset",
     "AudioBatch",
     "Batch",
     "DatasetUniverse",
+    "DatasetGrowth",
     "DecisionSet",
     "FieldGroup",
     "FieldRef",

@@ -225,12 +225,7 @@ def _rank_id() -> int:
 
 
 def plan_counts(local_count: int, world_size: int) -> tuple[int, ...]:
-    backend = str(dist.get_backend()).lower()
-    device = (
-        torch.device("cuda", torch.cuda.current_device())
-        if backend == "nccl"
-        else torch.device("cpu")
-    )
+    device = _collective_device()
     local = torch.tensor([local_count], dtype=torch.int64, device=device)
     gathered = [
         torch.full((1,), -1, dtype=torch.int64, device=device)
@@ -238,6 +233,33 @@ def plan_counts(local_count: int, world_size: int) -> tuple[int, ...]:
     ]
     dist.all_gather(gathered, local)
     return tuple(int(value.item()) for value in gathered)
+
+
+def minimum_rank_length(local_length: int) -> int:
+    """Return the shortest map-style length currently visible across DDP ranks."""
+
+    if isinstance(local_length, bool) or not isinstance(local_length, int):
+        raise TypeError("local_length must be an integer.")
+    if local_length < 0:
+        raise ValueError("local_length must be non-negative.")
+    if not dist.is_available() or not dist.is_initialized():
+        return local_length
+    if dist.get_world_size() == 1:
+        return local_length
+    value = torch.tensor(
+        local_length,
+        dtype=torch.int64,
+        device=_collective_device(),
+    )
+    dist.all_reduce(value, op=dist.ReduceOp.MIN)
+    return int(value.item())
+
+
+def _collective_device() -> torch.device:
+    backend = str(dist.get_backend()).lower()
+    if backend == "nccl":
+        return torch.device("cuda", torch.cuda.current_device())
+    return torch.device("cpu")
 
 
 def rank() -> tuple[int, int]:

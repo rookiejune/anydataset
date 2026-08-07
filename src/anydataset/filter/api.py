@@ -38,6 +38,7 @@ from .types import (
 
 if TYPE_CHECKING:
     from .live import FilterRun
+    from .decision import DecisionView
 
 # Keep the historical pickle entry points importable from this module.
 _restore_filter_cache = _filter_serialization.restore_filter_cache
@@ -168,6 +169,27 @@ class FilterRule:
             dataset_factory=dataset_factory,
             labels=labels,
             options=apply_options(apply_kwargs),
+        )
+
+    def bind(
+        self,
+        *,
+        dataset_factory: DatasetFactory,
+        labels: FilterLabel | Sequence[FilterLabel] | None = None,
+        input_id: str | None = None,
+        metrics: bool = False,
+    ) -> DecisionView:
+        """Bind this rule to snapshot-aligned explicit decision production."""
+
+        from .decision import DecisionView
+
+        selected = ("accept",) if labels is None else normalized_labels(labels)
+        return DecisionView(
+            rule=self,
+            dataset_factory=dataset_factory,
+            labels=selected,
+            input_id=input_id,
+            metrics=metrics,
         )
 
     def apply_with_report(
@@ -319,6 +341,11 @@ class _FilterCache:
         if self.metrics_path is None:
             raise ValueError("filtered dataset does not include metrics.")
         yield from read_metrics(self.metrics_path)
+
+    def close(self) -> None:
+        """Release this decision generation lease without owning its dataset."""
+
+        self._lease.close()
 
 
 class FilteredDataset(MapStyleABC):

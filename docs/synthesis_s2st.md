@@ -9,7 +9,7 @@
 
 ## 目标
 
-- workspace 对外只提供一个数据入口，同时具备 `access`、`generate` 和 `toy` 能力。
+- workspace 对外只提供一个数据入口，同时具备 `load`、`status`、`generate` 和 `toy` 能力。
 - 每个语言可以声明多个有序来源；同一个物理来源允许重复出现，并保留不同的稳定身份。
 - 一个 source family 经过同一个通用翻译模型扩展到其他语言。
 - 同一个 source family 的源语言和所有目标语言音频使用同一个不可变 voice condition。
@@ -57,7 +57,7 @@ speech-to-speech ──> workspace ──> anydataset
 
 - source slot、source family、pair coordinate 和 voice condition 的稳定身份。
 - source 接纳、语言扩充、speaker future-only 更新和确定性调度。
-- 三阶段 revision、精确父 snapshot、append-only final catalog 和恢复校验。
+- 三阶段 revision、精确父 snapshot、彼此隔离的 append-only stage catalog 和恢复校验。
 - `pairs` / `sources` dataset projection，以及现有 `Schema` 对 text、waveform 和 codec
   views 的选择。
 - schema-compatible toy 数据。
@@ -72,21 +72,19 @@ workspace 的 `zhuyin.datasets.s2st` 绑定实际资源：
 - 每个语言的具体 dataset factory 和 item reference。
 - translator/TTS checkpoint、revision、load options 和 capability adapter。
 - lineage root、staging 路径、完整性检查和原子发布位置。
-- 对外的 `source()`，以及其 `access()`、`toy()`、`generate()`。
+- 对外的 `source()`，以及其全量 `load()`、`status()`、`toy()` 和 producer 描述。
 
 workspace 工厂只向 workspace generation 入口领取精确输入 snapshot 和 staging 输出路径，
 写完后交回 workspace 校验和发布。工厂不自行推断 latest parent，也不访问训练 DataModule。
 
 ### speech-to-speech
 
-训练工程只负责：
+训练工程只负责通过 workspace 的 dataset factory 构造普通 Dataset 和 DataLoader。
+anydataset/workspace 的显式 producer 调用向共享路径原子发布不可变 snapshot；训练不分配生产设备、
+调度 producer，也不读取 generation DAG、catalog 或 snapshot 元数据。
 
-- 在 CUDA、模型和 distributed runtime 初始化前选择 access/generate/toy route。
-- 解析顶层 `devices`，把未分配给生成工厂的设备交给训练。
-- 启停 workspace generation service。
-- 持有 anydataset 暴露的 live final dataset，并保存训练 cursor。
-
-DataModule 不读取 generation DAG，也不判断某个样本来自哪个 revision。
+DataModule 不判断某个样本来自哪个 revision。它持有普通 Dataset；anydataset DataLoader 在新的
+batch 规划周期刷新同一对象，下一轮自动纳入已发布的 append-only snapshot。
 
 ## 公开逻辑对象
 
@@ -221,7 +219,8 @@ tts.latest = 10
 
 下游阶段必须读取 manifest 中的 `upstream_snapshot_id` 和 digest，禁止在运行中再次解析
 “当前 latest”。`translation@r` 逻辑包含 `source@r`；`tts@r` 逻辑包含 `translation@r`。
-只有 `tts.latest` 会推进训练 catalog。
+三个阶段分别推进自己的 catalog；默认训练入口只读取 `tts`，调试和下游 producer 可以显式读取
+`source` 或 `translation`。
 
 同一模型只对应一个工厂族：source 和 target audio 都由一个 `tts` 工厂生成，不配置
 `source_tts` / `target_tts` 两套模型或设备。
@@ -250,13 +249,13 @@ store_digest
 ```
 
 每个物理 store 仍遵守 anydataset standalone store 契约：store 内 sample index 必须是稠密的
-`0..N-1`。跨 revision 的逻辑全局索引由 final catalog 显式映射，不能把稀疏 global index 塞进
+`0..N-1`。跨 revision 的逻辑全局索引由 stage catalog 显式映射，不能把稀疏 global index 塞进
 store manifest，也不引入 runtime base/delta item overlay。
 
-`tts@r` 发布一个不可变、完整 canonical delta store。final catalog 按 revision 顺序连接这些 store，
+每个阶段发布一个不可变、完整 canonical delta store。阶段 catalog 按 revision 顺序连接这些 store，
 形成 append-only 逻辑 dataset：
 
-- 新 catalog 必须包含旧 catalog 的完整前缀。
+- 新 catalog 必须完整保留旧 catalog 的所有 entries。
 - 已发布 global sample index 永远映射到同一个 store/local index 和 payload digest。
 - catalog 通过 staging、完整性校验和原子替换发布。
 - invalid/corrupt 更新必须硬失败，不能继续使用旧版本并假装成功。
@@ -266,12 +265,12 @@ source key/sequence/language/speaker、本次新增 target languages，以及新
 publisher 从 catalog summary 重放全局 source/pair identity，只读取本次待发布的 records；因此增长时
 不会重新打开全部历史 pair index，同时仍会硬校验 pair 唯一性、source identity、dense sequence、
 first-for-source 和 added/total counts。完整 JSONL pair index 仍是 sample admission order 的事实来源，
-summary digest 同时绑定 index SHA256 和 summary 内容；live dataset 首次装载对应 segment 时还会
+summary digest 同时绑定 index SHA256 和 summary 内容；dataset 每次从头装载时还会对每个 segment
 重新从 JSONL records 计算 summary 并核对，summary 不能替代 index payload 校验。
 
 发布时对新的 waveform store 计算完整 content SHA256，并把 store tree 与 pair index 的 stat identity
 绑定到 catalog entry。identity 覆盖相对路径、文件类型、mode、device/inode、size、mtime 和 ctime；
-后续 publish/access/refresh 对历史 store 只扫描 metadata，不再反复读取 waveform bytes。任何普通的
+后续 publish/load 对历史 store 只扫描 metadata，不再反复读取 waveform bytes。任何普通的
 原地写、替换、增删或权限变化都会改变 identity 并硬失败。这个优化依赖已发布 store 的本地
 append-only/immutable 文件系统边界；如果部署需要抵抗能够伪造 inode/ctime 的特权协调篡改，应在
 存储层增加可信 CAS 或签名，而不能通过跳过完整性校验获得性能。
@@ -285,6 +284,20 @@ stat identity，但不读取 pair-index 或 waveform payload bytes。真正消�
 `read_pair_index(root, entry)` 完整核对 SHA256 和 summary。
 
 这个布局避免每次增长复制完整历史 store，同时不违反 standalone store 约束。
+
+每个阶段的 catalog 和锁彼此隔离：
+
+```text
+root/catalogs/source.json       # source@r
+root/catalogs/translation.json  # translation@r
+root/catalog.json               # tts@r（默认训练入口）
+```
+
+`source@r` 发布后即可独立读取，即使 `translation@r` 或 `tts@r` 尚未发布；
+缺少某个阶段的首个 snapshot 只影响该阶段的 `load(stage=...)`，不会被其他阶段的 catalog
+“补齐”。每次 `load()` 都从所选阶段的第一个 snapshot 开始遍历到该阶段当前 latest，
+返回可在显式规划边界扩张的普通 map-style dataset。catalog 本身就是逻辑数据集格式，不需要 S2ST 专用
+compact/merge；如果下游确实要求单一物理 store，应显式使用 anydataset 的通用物化 workflow。
 
 ## Dataset views
 
@@ -300,39 +313,25 @@ index，不改变 admission order。text-only、waveform、codec codes 等表示
 如果以后需要一个 family 内多目标语言的 grouped batch，应新增明确 morphology；不能改变
 `Role.TARGET` 的单 item 契约。
 
-## Live dataset 和训练 cursor
+## 增量 snapshot 和全量加载
 
-`source()` 返回 final catalog 的 cursor-aware live append-only iterable facade，而不是运行中修改
-普通 map-style dataset 的 `__len__`：
+`S2STDataset(root, lineage_id, stage=..., view=...)` 是普通 map-style dataset。构造时必须读取并校验
+所选阶段的首个 snapshot；没有首个 snapshot 时立即抛错，不等待后台生产。随后按 revision 从第一个
+增量 snapshot 到当前 latest 逐段加载，并组装构造时可见的完整逻辑数据集：
 
-- 首个 `tts` snapshot 不存在时，`wait_initial()` 阻塞并定期输出等待日志。
-- 后续在安全的 iterator/catalog refresh 边界原子切换到更长前缀。
-- refresh 校验 lineage、revision 单调、旧前缀和 payload identity。
-- facade 自己按稳定 global append index 做 rank 分片，不能依赖会在构造时冻结长度的 stock
-  `DistributedSampler`。首版 live consumer 固定 `num_workers=0`，避免 DataLoader worker 长期持有
-  不会更新的 dataset 副本，也保证 checkpoint 读取到实际 cursor；未来若增加 worker，必须先提供
-  明确的共享 refresh/cursor 协议。
-- DataModule 始终持有同一个 dataset 对象，不访问 producer、阶段目录或依赖图。
+- 每次 `load()` 都从所选阶段 catalog 的第一个 snapshot 开始遍历，不保存 cursor，也不从上次位置续读。
+- 已打开对象可通过 `refresh()` 原子吸收 append-only successor；anydataset DataLoader 在每次新的
+  batch 规划周期自动调用它。本轮已经生成的 index 保持固定，下一轮才纳入新增 snapshot。
+- 多 worker 的副本在收到超出旧视图的非负 index 时本地 refresh；DDP 规划使用所有 rank 当前可见
+  逻辑长度的最短前缀。consumer 不等待、不轮询，也不维护 snapshot cursor。
+- 上述生命周期由通用 `AppendOnlyMapStyleABC` 持有；S2ST 只实现 catalog successor 的读取和原子
+  替换。callable costs 保留旧 global index 的缓存，materialize 时只追加新 suffix。
+- 标量、任意顺序和重复 index 的 batch 读取都路由到对应 segment-local index。
+- catalog、pair index 或 immutable store identity 损坏时直接失败。
+- 没有首个 snapshot 时 `load()` 抛出缺失错误；`status(stage=...)` 可做只读预检。
 
-训练 checkpoint 保存：
-
-```text
-lineage_id
-snapshot_id
-pair_cursor
-```
-
-catalog 更新不重置 cursor，也不隐式重复首版。需要反复 overfit 首版时使用显式 overfit/bootstrap
-模式，而不是污染正式 append-only 语义。
-
-训练侧每次 refresh 只输出一条清晰日志：
-
-```text
-data.snapshot.updated previous=... current=... added_samples=...
-total_samples=... cursor=... wait_seconds=...
-```
-
-生成阶段细节留在 workspace generation 日志。
+snapshot 分段属于数据集本身，filter 只按相同分段生成一一对应的 decision，不拥有或创建 S2ST
+snapshot 概念；materializer 也复用同一套 snapshot 拼接抽象。
 
 ## 统一入口
 
@@ -342,43 +341,24 @@ workspace 入口统一为：
 from zhuyin.datasets.s2st import source
 
 dataset_source = source(...)
-dataset_source.access()
+dataset_source.status()
+dataset_source.load()
+dataset_source.load(stage="source")
+dataset_source.load(stage="translation")
+dataset_source.load(stage="tts")
 dataset_source.generate()
 dataset_source.toy()
 ```
 
-- `access()`：轻量检查 final catalog 和 store identity。`ready` 返回 live dataset；`missing` 允许
-  auto route 进入 generation；`invalid` 在所有 mode 下直接失败。
+- `status(stage=...)`：验证并汇总所选阶段 catalog 的全部增量 snapshots，不加载模型；默认阶段为 `tts`。
+- `load(stage=...)`：要求所选阶段的首个 snapshot 已发布，从第一个 snapshot 加载到该阶段 latest，
+  返回可通过 batch 规划周期自动 refresh 的普通数据集；默认阶段为 `tts`。
 - `generate()`：返回 factory 名称、producer command 和 lineage identity，不启动进程、不选择
   设备。
 - `toy()`：不加载 translator/TTS，确定性构造与 final `pairs` view 相同 schema 的短 waveform；
   family 内仍使用一致 speaker/reference identity。
 
-正式训练使用 auto route。显式 access/generate/toy mode 只用于测试和诊断，不再维护三个用户入口。
-
-## 设备配置
-
-设备只在训练工程顶层配置，key 必须与 workspace generation 暴露的工厂名一致：
-
-```yaml
-devices:
-  translation: [0, 1]
-  tts: [2, 3]
-```
-
-列表元素是当前 `CUDA_VISIBLE_DEVICES` 内的相对 id。列表长度表示该工厂的 replicas，用于调节
-各阶段吞吐。规则如下：
-
-- 同一个 id 不能出现在两个工厂列表中。source/target 共用 TTS 通过唯一 `tts` 工厂实现，而不是
-  启动两套进程共享同一卡。
-- 所有未被列出的可见设备自动用于训练；配置中没有 `training` 字段。
-- access ready 时不启动工厂，全部可见设备用于训练。
-- access missing 且只有一张可见设备时不生成数据，使用 toy 数据运行 bounded real-model perf。
-- access missing 且有多张设备时，配置必须为 generation 所需工厂分配设备，并至少剩一张训练设备。
-- unknown factory、越界 id、重复 id、空 replica list 或没有剩余训练设备都在 CUDA 初始化前报错。
-- codec 在训练设备上执行，因此不出现在 `devices`。
-
-S2ST route 会在 preflight 后派生 `trainer.devices`；用户不再单独维护训练卡列表。
+正式训练不做 source route 或生产设备切分；所有可见设备由 Lightning 管理。
 
 ## 日志
 
@@ -391,16 +371,8 @@ S2ST route 会在 preflight 后派生 `trainer.devices`；用户不再单独维�
   `future_only=true`。
 - 每个 source slot 的 cursor 和 exhausted 状态。
 
-训练日志分三类：
-
-- toy：输出模型 warmup、measurement window、step time、throughput 和 perf report；不输出 generation
-  stage 日志，也不写正式 checkpoint。
-- generate：训练指标保持不变，额外输出首次 snapshot 等待和每次 final catalog 更新；各阶段等待时间
-  写 generation 日志。
-- access：保持普通正式训练日志，不增加 toy/perf 或 generation 指标。
-
-access missing 后若 generation 配置无效，preflight 错误必须同时包含 access detail 和设备校验结果，
-不能在任何日志之前直接退出。
+训练日志保持普通训练指标、吞吐和 checkpoint。生产任务的 stage 日志由 anydataset/workspace
+producer 记录；训练只在 Dataset 构造或读取校验失败时暴露错误。
 
 ## 恢复和一致性
 
@@ -408,15 +380,16 @@ access missing 后若 generation 配置无效，preflight 错误必须同时包�
 - workspace 发布前校验 snapshot manifest、精确 parent、store integrity、sample coverage 和 digest。
 - 重启时从每个 stage 的已发布 latest 和未完成 staging 恢复；下游不重新选择 parent。
 - 同一个 revision 的重试必须幂等：相同输入和 provider identity 产生相同 sample ids；不一致结果拒绝发布。
-- 通知机制只用于减少 polling latency，final catalog 始终是事实来源。
+- producer 的通知只用于协调显式调用；阶段 catalog 始终是事实来源，consumer 不运行后台 polling。
 
 ## 首版代码范围
 
 首版按以下顺序落地：
 
 1. anytrain 增加纯字符串 translator protocol/backend 和 TTS capability 声明。
-2. anydataset 增加 S2ST identity、growth scheduler、views、toy、stage manifest 和 append-only final catalog。
+2. anydataset 增加 S2ST identity、growth scheduler、views、toy、stage manifest 和 append-only stage catalog。
 3. workspace 增加 `zhuyin.datasets.s2st`，把当前 WMT19/Qwen/MOSS 实现改为一个可选 source 配置，
    不再让 producer import speech-to-speech。
-4. speech-to-speech 把现有 source preflight 改为顶层 `devices`，只消费 live final dataset。
+4. speech-to-speech 通过 `DatasetConfig.factory` 构造普通 Dataset；batch 周期扩张、生产与 snapshot
+   生命周期留在 anydataset。
 5. 旧 WMT19 streaming 入口保留一个兼容周期并明确弃用；稳定 waveform/codec store views 不受影响。

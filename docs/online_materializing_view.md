@@ -17,6 +17,15 @@ that instant. Its length remains fixed for the dataset lifetime. Training code
 reopens the entrance at each epoch boundary and therefore sees the newest
 prefix without first asking whether the root changed.
 
+The catalog plus its immutable snapshot stores is the canonical dataset format.
+No compact or merge step is required after full coverage; readers keep routing
+the fixed prefix across its snapshot segments.
+
+Snapshot segmentation is a dataset property, not a filter feature. Other
+one-to-one operations may consume the same fixed segment sequence, while a
+non-empty plain map-style dataset is adapted as one logical snapshot. An empty
+dataset is already the complete empty prefix.
+
 ## Logical model
 
 `catalog.json` is an atomic append-only manifest. Each entry names one
@@ -62,6 +71,8 @@ materializer.produce(
     device="cuda:0",
     snapshot_samples=50_000,
 )
+
+# Repeat explicitly when the job intends to advance through more snapshots.
 
 # Training process: reopen this at every epoch boundary.
 with materializer.open(dataset_factory=source_factory) as dataset:
@@ -118,16 +129,18 @@ renumbers every segment locally while preserving each source `sample_id`.
 
 ## Producer execution
 
-`produce()` holds `<root>/.producer.lock` for the complete run. A second
-producer for that root is rejected. One provider is constructed for the run and
-closed at the end.
+Each `produce()` call holds `<root>/.producer.lock` for that bounded invocation.
+A second producer for the same root is rejected. The call publishes at most one
+snapshot and then returns. If computation is needed, one provider is constructed
+for the invocation and closed before return.
 
 Provider output first enters private resumable fragments. Only durable dense
-coverage can be published. A fragment completion may publish another delta
-when at least `snapshot_samples` unpublished rows are available; the producer
-also force-publishes a final smaller remainder before returning. Catalog writes
-are atomic, so consumers see either the previous complete catalog or the next
-complete catalog, never a partial entry.
+coverage can be published. One call computes at most `snapshot_samples` missing
+rows and force-publishes that bounded prefix. If a failed earlier call already
+left durable unpublished coverage, the next call may publish that coverage and
+return without constructing a provider. Catalog writes are atomic, so consumers
+see either the previous complete catalog or the next complete catalog, never a
+partial entry.
 
 A failed provider run leaves its unpublished fragments private. A later run
 with compatible identity reuses durable coverage and computes only missing
@@ -180,6 +193,8 @@ consumption and `produce()` for generation.
 - Every snapshot store is an immutable delta, while the logical dataset is the
   concatenation from index zero through the latest snapshot.
 - Provider failure cannot expose unpublished coverage.
+- Every producer call appends at most one snapshot; repeated calls advance the
+  prefix explicitly.
 - Producer reruns reuse durable fragments and support append-only input growth.
 - A second producer and every identity mismatch fail explicitly.
 - Selection projection permits an unpublished source suffix but rejects unknown

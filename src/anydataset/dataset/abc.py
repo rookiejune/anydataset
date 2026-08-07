@@ -3,6 +3,7 @@ from __future__ import annotations
 import operator
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterable, Iterator, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, Protocol, cast, runtime_checkable
 
@@ -21,6 +22,7 @@ from ..types import Preset, Source, Spec
 from ..types._sample import select as select_sample
 from ..types.item import Modality, Role, View
 from ..resolver import resolve_dataset, split_name_and_split
+from ._ddp import minimum_rank_length
 from ._shuffle import index_groups, shuffle_index_groups
 
 if TYPE_CHECKING:
@@ -272,6 +274,16 @@ class MapStyleABC(_DatasetOperations, Dataset, ABC):
 
         return self[index]
 
+    def refresh(self) -> DatasetGrowth | None:
+        """Refresh a dataset view before planning, returning append-only growth."""
+
+        return None
+
+    def _planning_length(self) -> int:
+        """Return the fixed sample prefix used by one loader plan."""
+
+        return len(self)
+
     def _shuffle(
         self,
         *,
@@ -281,11 +293,12 @@ class MapStyleABC(_DatasetOperations, Dataset, ABC):
         num_replicas: int,
         rank: int,
     ) -> Iterator[Sequence[int]]:
+        sample_count = self._planning_length()
         if not shuffle:
-            yield range(rank, len(self), num_replicas)
+            yield range(rank, sample_count, num_replicas)
             return
         yield from shuffle_index_groups(
-            index_groups(len(self), _DEFAULT_SHUFFLE_GROUP_SAMPLES),
+            index_groups(sample_count, _DEFAULT_SHUFFLE_GROUP_SAMPLES),
             seed=seed,
             epoch=epoch,
             num_replicas=num_replicas,
@@ -319,6 +332,61 @@ class MapStyleABC(_DatasetOperations, Dataset, ABC):
 
         for _index, sample in self.iter_indexed_range(0, usable):
             yield sample
+
+
+@dataclass(frozen=True)
+class DatasetGrowth:
+    """One append-only logical length transition."""
+
+    previous_length: int
+    current_length: int
+
+    def __post_init__(self) -> None:
+        for name, value in (
+            ("previous_length", self.previous_length),
+            ("current_length", self.current_length),
+        ):
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise TypeError(f"{name} must be an integer.")
+            if value < 0:
+                raise ValueError(f"{name} must be non-negative.")
+        if self.current_length <= self.previous_length:
+            raise ValueError("dataset growth must append at least one sample.")
+
+    @property
+    def added_length(self) -> int:
+        return self.current_length - self.previous_length
+
+
+class AppendOnlyMapStyleABC(MapStyleABC, ABC):
+    """Map-style dataset whose accepted updates preserve every existing index."""
+
+    def refresh(self) -> DatasetGrowth | None:
+        previous_length = len(self)
+        self._refresh_impl()
+        current_length = len(self)
+        if current_length < previous_length:
+            raise RuntimeError("append-only dataset length decreased during refresh.")
+        if current_length == previous_length:
+            return None
+        return DatasetGrowth(previous_length, current_length)
+
+    def _planning_length(self) -> int:
+        return minimum_rank_length(len(self))
+
+    def _position(self, index: int) -> int:
+        position = operator.index(index)
+        length = len(self)
+        if position >= length:
+            self.refresh()
+            length = len(self)
+        return _map_position(position, length)
+
+    @abstractmethod
+    def _refresh_impl(self) -> None:
+        """Atomically install an append-only successor, if one is available."""
+
+        raise NotImplementedError
 
 
 class AnyDataset(_Base, MapStyleABC):
