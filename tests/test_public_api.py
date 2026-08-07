@@ -352,7 +352,6 @@ def test_store_public_api_boundary() -> None:
             "FunctionViewProvider",
             "ModalityMaterializer",
             "MaterializationStatus",
-            "MaterializingViewDataset",
             "StoreFilesInUseError",
             "cleanup_store_files",
             "lease_store_files",

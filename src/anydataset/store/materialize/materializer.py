@@ -81,6 +81,12 @@ from .resume import (
     prepare_materializer_resume_dir,
     stored_resume_metadata,
 )
+from .snapshots import (
+    SnapshotDataset,
+    SnapshotPublisher,
+    open_snapshot_dataset,
+    producer_lock_path,
+)
 from .worker import WorkerConfig, materialize_worker
 from .modality import with_modality_provider
 from .types import (
@@ -243,188 +249,67 @@ class ViewMaterializer:
         self,
         *,
         dataset_factory: DatasetFactory,
-        provider_factory: ProviderFactory,
         selection_factory: DatasetFactory | None = None,
-        device: str = "cpu",
     ) -> MapStyleABC:
-        """Open a complete canonical store or an online materializing view.
+        """Open the fixed materialized prefix visible at this call.
 
-        The choice is dataset-wide. A compatible ready store with explicit
-        ``input_id`` is opened without constructing the source dataset or
-        provider. ``input_id_factory`` constructs only the input identity object
-        needed to validate ready provenance. Otherwise every requested sample is
-        generated from the source and only its persistence is queued in the
-        background.
+        This consumer path is read-only.  It never constructs a provider,
+        acquires a producer lease, or observes catalog updates after opening.
+        Reopen it at the next epoch boundary to see a newer prefix.
         """
 
         self._validate_online_contract()
-        if not isinstance(device, str) or not device:
-            raise ValueError("device must be a non-empty string.")
         if selection_factory is not None and not callable(selection_factory):
             raise TypeError("selection_factory must be callable or None.")
-        ready = self._ready_dataset()
-        if ready is not None:
-            return self._ready_result(
-                ready,
-                dataset_factory=dataset_factory,
-                selection_factory=selection_factory,
-            )
-
-        lock = FileLock(materializer_lock_path(self.output_dir))
-        lock.__enter__()
-        lock_owned = True
-        dataset: Any | None = None
         source_view: SelectionView | None = None
-        provider: MaterializerProvider | None = None
-        sink: FragmentOutputSink | None = None
+        dataset: MapStyleABC | None = None
         try:
-            ready = self._ready_dataset()
-            if ready is not None:
-                try:
-                    lock.__exit__(None, None, None)
-                except BaseException:
-                    _close_resources_quietly(ready)
-                    raise
-                lock_owned = False
-                return self._ready_result(
-                    ready,
+            if self.input_id is None:
+                source_view = self._resolve_ready_input_id(
                     dataset_factory=dataset_factory,
                     selection_factory=selection_factory,
                 )
-
-            source_factory = (
-                dataset_factory if selection_factory is None else selection_factory
-            )
-            dataset, source_view = _materialization_input(source_factory())
-            _validate_publishable_input(dataset)
-            if not can_select_indexes(dataset):
-                raise TypeError(
-                    "Online materializing views require a map-style source dataset."
-                )
-            self._resolve_input_id(_materialization_identity_input(dataset))
-            expected = dataset_sample_count(dataset, context="online materialization")
-            fragments_dir = prepare_materializer_resume_dir(
-                self.output_dir,
-                self._resume_metadata(
-                    dataset,
-                    dataset_factory=dataset_factory,
-                    provider_factory=provider_factory,
-                    expected=expected,
-                    use_map_style_loader=True,
-                    selection_agnostic=source_view is not None,
-                ),
-                staging_dir=self.staging_dir,
-            )
-            completed = compact_completed_fragment_indexes(
-                fragments_dir,
-                dataset_id=self._dataset_id,
-                split=self.split,
-                expected=expected,
-            )
-            provider = provider_factory(device)
-            self._validate_provider_output(provider)
-            sink = FragmentOutputSink(
-                config=self._fragment_config(),
-                fragments_dir=fragments_dir,
-                completed=completed,
-                expected=expected,
-                sample_identity=dataset,
-            )
-            sink.__enter__()
-            online = MaterializingViewDataset(
-                _source=dataset,
-                _provider=cast(Provider, provider),
-                _materializer=self,
-                _sink=sink,
-                _lock=lock,
-                _owner_pid=os.getpid(),
-                _owns_source=source_view is None,
-            )
-            return _materialization_result(online, source_view)
+            dataset = self._consumer_dataset()
+            if source_view is not None:
+                result = source_view.project(DatasetUniverse(dataset))
+                dataset = None
+                source_view = None
+                return result
+            result = _ready_materialization_result(dataset, selection_factory)
+            dataset = None
+            return result
         except BaseException:
-            source = source_view if source_view is not None else dataset
-            _abort_online_open(
-                sink,
-                provider,
-                source,
-                lock if lock_owned else None,
-            )
+            _close_resources_quietly(source_view, dataset)
             raise
 
     def status(
         self,
         *,
-        dataset_factory: DatasetFactory,
-        provider_factory: ProviderFactory,
+        dataset_factory: DatasetFactory | None = None,
+        provider_factory: ProviderFactory | None = None,
     ) -> MaterializationStatus:
-        """Inspect canonical or staging coverage without constructing a provider."""
+        """Inspect the currently published consumer prefix without a provider."""
 
+        del provider_factory
         self._validate_online_contract()
-        ready = self._ready_dataset()
-        if ready is not None:
-            try:
-                if self.input_id is None:
-                    self._resolve_ready_input_id(dataset_factory=dataset_factory)
-                    self._validate_ready_input_id(ready)
-                expected = len(ready)
-            except BaseException:
-                _close_resources_quietly(ready)
-                raise
-            _close_resource(ready)
+        if self.input_id is None:
+            if dataset_factory is None:
+                raise ValueError(
+                    "dataset_factory is required to resolve the materialization input_id."
+                )
+            self._resolve_ready_input_id(dataset_factory=dataset_factory)
+        dataset = self._consumer_dataset()
+        try:
+            count = len(dataset)
+            finalized = not isinstance(dataset, SnapshotDataset) or dataset.sealed
             return MaterializationStatus(
                 output_dir=Path(self.output_dir).expanduser(),
-                expected=expected,
-                completed=expected,
-                finalized=True,
+                expected=count,
+                completed=count,
+                finalized=finalized,
             )
-
-        dataset, source_view = _materialization_input(dataset_factory())
-        source = source_view if source_view is not None else dataset
-        try:
-            _validate_publishable_input(dataset)
-            if not can_select_indexes(dataset):
-                raise TypeError(
-                    "Online materializing views require a map-style source dataset."
-                )
-            self._resolve_input_id(_materialization_identity_input(dataset))
-            expected = dataset_sample_count(dataset, context="materialization status")
-            metadata = self._resume_metadata(
-                dataset,
-                dataset_factory=dataset_factory,
-                provider_factory=provider_factory,
-                expected=expected,
-                use_map_style_loader=True,
-                selection_agnostic=source_view is not None,
-            )
-        except BaseException:
-            _close_resources_quietly(source)
-            raise
-        _close_resource(source)
-
-        fragments_dir = materializer_fragments_dir(
-            self.output_dir,
-            staging_dir=self.staging_dir,
-        )
-        if not fragments_dir.exists() or (
-            fragments_dir.is_dir() and not any(fragments_dir.iterdir())
-        ):
-            completed: Collection[int] = ()
-        else:
-            if not fragments_dir.is_dir():
-                raise ValueError(
-                    f"Materializer staging path is not a directory: {fragments_dir}"
-                )
-            if stored_resume_metadata(fragments_dir) != metadata:
-                raise ValueError(
-                    "Materializer identity does not match the staging state."
-                )
-            completed = compact_completed_fragment_indexes(
-                fragments_dir,
-                dataset_id=self._dataset_id,
-                split=self.split,
-                expected=expected,
-            )
-        return self._status(expected, completed)
+        finally:
+            _close_resource(dataset)
 
     def _ready_result(
         self,
@@ -444,7 +329,7 @@ class ViewMaterializer:
             self._validate_ready_input_id(ready)
             if source_view is None:
                 return ready
-            return source_view.rebase(DatasetUniverse(ready))
+            return source_view.project(DatasetUniverse(ready))
         except BaseException:
             _close_resources_quietly(source_view, ready)
             raise
@@ -557,6 +442,191 @@ class ViewMaterializer:
             if dataset is not None:
                 _close_resources_quietly(dataset)
             raise
+
+    def _consumer_dataset(self) -> MapStyleABC:
+        from ..paths import dataset_ready_path
+
+        root = Path(self.output_dir).expanduser()
+        if dataset_ready_path(root).is_file():
+            ready = self._ready_dataset()
+            if ready is None:
+                raise RuntimeError("ready materialization store could not be opened.")
+            return ready
+        if self.input_id is None:
+            raise RuntimeError("materialization input_id was not resolved.")
+        schema = self.schema
+        if schema is None:
+            raise RuntimeError("materialization schema was not resolved.")
+        return open_snapshot_dataset(
+            root,
+            dataset_id=self._dataset_id,
+            split=self.split,
+            provenance=self._provenance,
+            schema=schema,
+        )
+
+    def produce(
+        self,
+        *,
+        dataset_factory: DatasetFactory,
+        provider_factory: ProviderFactory,
+        device: str = "cpu",
+        snapshot_samples: int | None = None,
+    ) -> MaterializationStatus:
+        """Materialize and publish snapshots under one explicit producer lease."""
+
+        self._validate_online_contract()
+        if not isinstance(device, str) or not device:
+            raise ValueError("device must be a non-empty string.")
+        if snapshot_samples is None:
+            snapshot_samples = self.commit_samples
+        if snapshot_samples is None:
+            raise RuntimeError("materializer commit_samples was not initialized.")
+        if self.num_workers > 0:
+            validate_process_parent(
+                context=f"{type(self).__name__} producer with DataLoader workers"
+            )
+        if self.runtime.uses_local_device:
+            set_torch_device(device)
+        with FileLock(producer_lock_path(self.output_dir)):
+            return self._produce_locked(
+                dataset_factory=dataset_factory,
+                provider_factory=provider_factory,
+                device=device,
+                snapshot_samples=snapshot_samples,
+            )
+
+    def _produce_locked(
+        self,
+        *,
+        dataset_factory: DatasetFactory,
+        provider_factory: ProviderFactory,
+        device: str,
+        snapshot_samples: int,
+    ) -> MaterializationStatus:
+        dataset: Any | None = None
+        source_view: SelectionView | None = None
+        provider: MaterializerProvider | None = None
+        try:
+            dataset, source_view = _materialization_input(dataset_factory())
+            _validate_publishable_input(dataset)
+            if not can_select_indexes(dataset):
+                raise TypeError(
+                    "Snapshot producers require a map-style source dataset."
+                )
+            self._resolve_input_id(_materialization_identity_input(dataset))
+            expected = dataset_sample_count(dataset, context="snapshot producer")
+            fragments_dir = prepare_materializer_resume_dir(
+                self.output_dir,
+                self._resume_metadata(
+                    dataset,
+                    dataset_factory=dataset_factory,
+                    provider_factory=provider_factory,
+                    expected=expected,
+                    use_map_style_loader=True,
+                    selection_agnostic=source_view is not None,
+                ),
+                staging_dir=self.staging_dir,
+                allow_input_growth=True,
+                allow_output_contents=True,
+            )
+            completed = compact_completed_fragment_indexes(
+                fragments_dir,
+                dataset_id=self._dataset_id,
+                split=self.split,
+                expected=expected,
+            )
+            schema = self.schema
+            if schema is None:
+                raise RuntimeError("snapshot producer schema was not resolved.")
+            publisher = SnapshotPublisher(
+                self.output_dir,
+                fragments_dir,
+                dataset_id=self._dataset_id,
+                split=self.split,
+                provenance=self._provenance,
+                schema=schema,
+                snapshot_samples=snapshot_samples,
+                max_shard_samples=self.max_shard_samples,
+                max_shard_bytes=self.max_shard_bytes,
+                completed=completed,
+            )
+            publisher.publish(force=True)
+            missing = missing_indexes(completed, expected)
+            if missing:
+                log_resume_summary(
+                    "materializer",
+                    expected=expected,
+                    completed_count=len(completed),
+                    missing=missing,
+                    use_map_style_loader=True,
+                )
+                with ProgressDashboard(
+                    desc="produce materialized snapshots",
+                    total=expected,
+                    count_stage="writer",
+                    initial=len(completed),
+                    stages=_PROGRESS_STAGES,
+                ) as progress:
+                    provider = provider_factory(device)
+                    self._validate_provider_output(provider)
+                    if self.num_workers > 0:
+                        env = set_single_worker_environment(
+                            device,
+                            device_env="ANYDATASET_MATERIALIZE_DEVICE",
+                        )
+                        try:
+                            self._write_resumable_loader_batches(
+                                provider,
+                                dataset_factory=dataset_factory,
+                                dataset=dataset,
+                                sample_count=expected,
+                                use_map_style_loader=True,
+                                completed_indexes=completed,
+                                sample_indexes=missing,
+                                fragments_dir=fragments_dir,
+                                expected=expected,
+                                progress=progress,
+                                on_fragment_complete=publisher.record,
+                            )
+                        finally:
+                            restore_environment(env)
+                    else:
+                        self._write_resumable_indexed_batches(
+                            sample_index_batches(
+                                _missing_sample_records(
+                                    dataset,
+                                    missing,
+                                    use_map_style_loader=True,
+                                ),
+                                self.batch_size,
+                            ),
+                            provider,
+                            fragments_dir=fragments_dir,
+                            expected=expected,
+                            completed_indexes=completed,
+                            sample_identity=dataset,
+                            progress=progress,
+                            on_fragment_complete=publisher.record,
+                        )
+            completed = compact_completed_fragment_indexes(
+                fragments_dir,
+                dataset_id=self._dataset_id,
+                split=self.split,
+                expected=expected,
+            )
+            publisher.publish(force=True)
+            if indexes_complete(completed, expected) and _input_is_sealed(dataset):
+                publisher.seal()
+            return MaterializationStatus(
+                output_dir=Path(self.output_dir).expanduser(),
+                expected=expected,
+                completed=len(completed),
+                finalized=publisher.catalog.sealed,
+            )
+        finally:
+            _close_resources_quietly(provider)
+            _close_resources_quietly(source_view if source_view is not None else dataset)
 
     def write(
         self,
@@ -1098,6 +1168,7 @@ class ViewMaterializer:
         expected: int,
         progress: ProgressSink | None = None,
         worker_id: int = 0,
+        on_fragment_complete: Callable[[tuple[int, ...]], None] | None = None,
     ) -> None:
         self._write_resumable_indexed_batches(
             self._loader(
@@ -1114,6 +1185,7 @@ class ViewMaterializer:
             sample_identity=dataset,
             progress=progress,
             worker_id=worker_id,
+            on_fragment_complete=on_fragment_complete,
         )
 
     def _loader(
@@ -1322,6 +1394,7 @@ class ViewMaterializer:
         sample_identity: object | None = None,
         progress: ProgressSink | None = None,
         worker_id: int = 0,
+        on_fragment_complete: Callable[[tuple[int, ...]], None] | None = None,
     ) -> None:
         completed = completed_indexes
         if completed is None:
@@ -1340,6 +1413,7 @@ class ViewMaterializer:
             sample_identity=sample_identity,
             progress=progress,
             worker_id=worker_id,
+            on_fragment_complete=on_fragment_complete,
         )
         writer.write(batches)
 
@@ -1991,7 +2065,7 @@ def _ready_materialization_result(
             raise TypeError(
                 "selection_factory must return a SelectionView or DatasetUniverse."
             )
-        return source_view.rebase(DatasetUniverse(dataset))
+        return source_view.project(DatasetUniverse(dataset))
     except BaseException:
         _close_resources_quietly(source, dataset)
         raise
@@ -2001,6 +2075,16 @@ def _validated_sample_provider_output(output: object) -> Sample:
     if not isinstance(output, Mapping):
         raise TypeError("sample provider output must be a sample mapping.")
     return cast(Sample, output)
+
+
+def _input_is_sealed(dataset: object) -> bool:
+    identity_input = _materialization_identity_input(dataset)
+    sealed = getattr(identity_input, "sealed", None)
+    if sealed is None:
+        return True
+    if type(sealed) is not bool:
+        raise TypeError("source dataset sealed must be a boolean when provided.")
+    return sealed
 
 
 def _missing_sample_records(

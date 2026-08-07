@@ -36,11 +36,11 @@ Use these paths for application code:
   replace filtering, filter decisions, and filter cleanup entry points.
 - `anydataset.store`: canonical store writing; view, modality, and complete-sample
   materializers and provider protocols; scalar and batch transform types;
-  materialization status and the lifecycle-controlled
-  `MaterializingViewDataset` underlying online `ViewMaterializer.open()` results;
+  materialization status and the fixed-prefix snapshot-backed map-style datasets
+  returned by `ViewMaterializer.open()`;
   explicit store migration; payload integrity checks; and retained-file leasing
-  and cleanup. A selected input may return a `SelectionView` wrapping that online
-  universe rather than the bare materializing dataset.
+  and cleanup. A selected input may return a `SelectionView` projected onto the
+  published prefix rather than the bare concatenated snapshot dataset.
 - `anydataset.runtime`: process/device runtime configuration.
 - `anydataset.provider`: built-in model/provider classes.
 - `anydataset.provider_service`: provider process server and remote provider /
@@ -88,17 +88,16 @@ Dynamic operations distinguish complete execution from returned selection:
 context manager to wait and release resources. `FilterRule.apply()` remains the
 blocking compatibility surface that returns `FilteredDataset`.
 
-`ViewMaterializer.open()` keeps the ready path fully lazy when `input_id` is
-explicit. With `input_id_factory`, it constructs the input identity object once
-to validate canonical provenance, reuses that object when it also supplies the
-returned selection, and still never constructs the provider. Otherwise
-foreground access computes requested values and starts a background
-full-universe sweep. `MaterializingViewDataset.close()` waits for complete
-transform coverage and staging persistence; it does not publish the canonical
-store. Publication remains an explicit `ViewMaterializer.write()`/finalize
-operation. An optional logical `dataset_id` decouples canonical and universe
-identity from the physical `output_dir` basename; omission preserves the basename
-fallback.
+`ViewMaterializer.open()` is a read-only consumer entrance. It opens a legacy
+ready store or a fixed prefix from the append-only snapshot catalog without
+constructing a provider, writer, or lease. Reopen at an epoch boundary to see
+later snapshots; an opened dataset has stable length. With `input_id_factory`,
+only the input identity object is constructed to validate provenance, and a
+selection is projected by stable `sample_id` onto the published subset.
+`ViewMaterializer.produce()` is the separate producer entrance: it owns the
+provider/device and a long-lived producer lease, then atomically appends durable
+delta segments. An optional logical `dataset_id` decouples catalog and universe
+identity from the physical `output_dir` basename.
 
 `provider_id` is global operation provenance for the AnyTrain backend plus the
 AnyDataset adapter and semantic model recipe. It is unrelated to a sample,

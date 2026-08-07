@@ -369,6 +369,18 @@ class SelectionView(MapStyleABC):
             (self,),
         )
 
+    def project(self, universe: DatasetUniverse) -> SelectionView:
+        """Project this selection onto a lineage-preserving target subset."""
+
+        return SelectionView(
+            universe,
+            tuple(
+                _BorrowedSelection(project_selection(selection, universe))
+                for selection in self.selections
+            ),
+            (self,),
+        )
+
     def close(self) -> None:
         if not self._resource_state.claim_close():
             return
@@ -502,6 +514,32 @@ def rebase_selection(
     return _LineageSelection(selection, universe, tuple(source_indices))
 
 
+def project_selection(
+    selection: Selection,
+    universe: DatasetUniverse,
+) -> Selection:
+    """Rebase onto a target subset while preserving exact sample lineage."""
+
+    if universe is selection.universe:
+        return selection
+    source_positions = _sample_positions(selection.universe)
+    source_indices: list[int] = []
+    seen: set[int] = set()
+    for target_index in range(len(universe)):
+        sample_id = universe.sample_id(target_index)
+        try:
+            source_index = source_positions[sample_id]
+        except KeyError as exc:
+            raise ValueError(
+                f"source universe is missing sample_id {sample_id!r}."
+            ) from exc
+        if source_index in seen:
+            raise ValueError("target universe does not have unique sample lineage.")
+        seen.add(source_index)
+        source_indices.append(source_index)
+    return _LineageSelection(selection, universe, tuple(source_indices))
+
+
 def _position(index: int, length: int) -> int:
     position = operator.index(index)
     if position < 0:
@@ -513,6 +551,7 @@ def _position(index: int, length: int) -> int:
 
 __all__ = [
     "DecisionSet",
+    "project_selection",
     "rebase_selection",
     "Selection",
     "SelectionView",

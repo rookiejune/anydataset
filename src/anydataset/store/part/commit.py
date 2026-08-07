@@ -191,13 +191,22 @@ def commit_store_fragments(
     dataset_id: str,
     split: str | None = None,
     expected_sample_count: int | None = None,
+    sample_start: int = 0,
     max_shard_samples: int | None = None,
     max_shard_bytes: int | None = None,
     provenance: Mapping[str, str] | None = None,
     progress: CommitProgress | None = None,
 ) -> Path:
+    if isinstance(sample_start, bool) or not isinstance(sample_start, int):
+        raise TypeError("sample_start must be an integer.")
+    if sample_start < 0:
+        raise ValueError("sample_start must be non-negative.")
     if expected_sample_count is not None and expected_sample_count < 0:
         raise ValueError("expected_sample_count must be non-negative.")
+    if sample_start and expected_sample_count is None:
+        raise ValueError(
+            "expected_sample_count is required when sample_start is non-zero."
+        )
     if max_shard_samples is not None:
         max_shard_samples = positive_int(
             "max_shard_samples",
@@ -244,6 +253,7 @@ def commit_store_fragments(
                 dataset_id=dataset_id,
                 split=split,
                 expected_sample_count=expected_sample_count,
+                sample_start=sample_start,
                 views=views,
                 repack_max_shard_samples=max_shard_samples,
                 repack_max_shard_bytes=max_shard_bytes,
@@ -461,6 +471,7 @@ def _commit_roots_to_tmp(
     split: str | None,
     provenance: Mapping[str, str],
     expected_sample_count: int | None = None,
+    sample_start: int = 0,
     views: tuple[tuple[Role, Modality, View], ...] | None = None,
     dense: bool = True,
     repack_max_shard_samples: int | None = None,
@@ -473,6 +484,7 @@ def _commit_roots_to_tmp(
         root,
         stores,
         expected_sample_count=expected_sample_count,
+        sample_start=sample_start,
         dense=dense,
         progress=progress,
     )
@@ -483,6 +495,7 @@ def _commit_roots_to_tmp(
         repack_max_shard_samples=repack_max_shard_samples,
         repack_max_shard_bytes=repack_max_shard_bytes,
         shard_prefix=shard_prefix,
+        sample_start=sample_start,
         progress=progress,
     )
     if dense:
@@ -506,6 +519,7 @@ def _write_committed_view_manifests(
     repack_max_shard_samples: int | None,
     repack_max_shard_bytes: int | None,
     shard_prefix: str,
+    sample_start: int,
     progress: CommitProgress | None,
 ) -> None:
     selected_views = views if views is not None else _store_views(stores)
@@ -526,6 +540,7 @@ def _write_committed_view_manifests(
                 max_shard_samples=repack_max_shard_samples,
                 max_shard_bytes=repack_max_shard_bytes,
                 shard_prefix=shard_prefix,
+                sample_start=sample_start,
                 progress=progress,
             )
             shards: frozenset[str] = frozenset()
@@ -536,6 +551,7 @@ def _write_committed_view_manifests(
                 stores,
                 view,
                 sample_indexes_by_ref.get(view[:2], ()),
+                sample_start=sample_start,
                 progress=progress,
             )
         if view_count != expected_view_count:
@@ -583,6 +599,7 @@ def _write_ordered_samples_manifest(
     stores: tuple[Path, ...],
     *,
     expected_sample_count: int | None,
+    sample_start: int = 0,
     dense: bool = True,
     progress: CommitProgress | None = None,
 ) -> int:
@@ -592,7 +609,7 @@ def _write_ordered_samples_manifest(
     pending = 0
     sample_ids = UniqueSampleIds(root)
     try:
-        for count, entry in enumerate(_merged_sample_entries(stores), start=1):
+        for entry in _merged_sample_entries(stores):
             if previous_index is not None:
                 if entry.sample_index == previous_index:
                     raise ValueError(f"Duplicate sample_index {entry.sample_index}.")
@@ -600,12 +617,20 @@ def _write_ordered_samples_manifest(
                     raise ValueError(
                         "Sample manifests must be ordered by sample_index."
                     )
-            if expected_sample_count is not None and count > expected_sample_count:
+            previous_index = entry.sample_index
+            if entry.sample_index < sample_start:
+                continue
+            if (
+                expected_sample_count is not None
+                and entry.sample_index >= sample_start + expected_sample_count
+            ):
+                break
+            if expected_sample_count is not None and count >= expected_sample_count:
                 raise ValueError(
                     "Materialized fragments coverage mismatch: "
                     f"unexpected sample_index {entry.sample_index}"
                 )
-            expected_index = count - 1
+            expected_index = sample_start + count
             if dense and entry.sample_index != expected_index:
                 if expected_sample_count is not None:
                     raise ValueError(
@@ -616,15 +641,15 @@ def _write_ordered_samples_manifest(
                     "Sample manifests must be dense by sample_index: "
                     f"missing sample_index {expected_index}."
                 )
-            previous_index = entry.sample_index
             sample_ids.add(entry.sample_id)
             writer.write(
                 SampleManifestEntry(
                     sample_id=entry.sample_id,
-                    sample_index=entry.sample_index,
+                    sample_index=count if dense else entry.sample_index,
                     items=entry.items,
                 )
             )
+            count += 1
             pending += 1
             if pending >= _PROGRESS_BATCH_SIZE:
                 _put_progress(progress, "merge-samples", pending)
@@ -632,7 +657,7 @@ def _write_ordered_samples_manifest(
         if expected_sample_count is not None and count != expected_sample_count:
             raise ValueError(
                 "Materialized fragments coverage mismatch: "
-                f"missing sample_index {count}"
+                f"missing sample_index {sample_start + count}"
             )
         writer.close()
         _put_progress(progress, "merge-samples", pending)
@@ -650,6 +675,7 @@ def _write_ordered_view_manifest(
     view: tuple[Role, Modality, View],
     sample_indexes: Iterable[int],
     *,
+    sample_start: int,
     progress: CommitProgress | None,
 ) -> tuple[int, int, frozenset[str]]:
     writer = view_manifest_writer(root, view)
@@ -661,23 +687,30 @@ def _write_ordered_view_manifest(
     shards: set[str] = set()
     try:
         for sample_index in sample_indexes:
+            source_index = sample_start + sample_index
             expected_count += 1
+            while current is not None and current.sample_index < source_index:
+                current = _next_entry(entries)
             if current is None:
                 raise ValueError(
                     f"View {view_path(view)} is missing sample_index "
-                    f"{sample_index}."
+                    f"{source_index}."
                 )
-            if current.sample_index < sample_index:
-                raise ValueError(
-                    f"View {view_path(view)} has unexpected sample_index "
-                    f"{current.sample_index}."
-                )
-            if current.sample_index != sample_index:
+            if current.sample_index != source_index:
                 raise ValueError(
                     f"View {view_path(view)} is missing sample_index "
-                    f"{sample_index}."
+                    f"{source_index}."
                 )
-            writer.write(current)
+            writer.write(
+                ViewManifestEntry(
+                    role=current.role,
+                    modality=current.modality,
+                    view=current.view,
+                    sample_index=sample_index,
+                    shard=current.shard,
+                    key=current.key,
+                )
+            )
             shards.add(current.shard)
             count += 1
             pending += 1
@@ -685,7 +718,7 @@ def _write_ordered_view_manifest(
                 _put_progress(progress, "merge-views", pending)
                 pending = 0
             current = _next_entry(entries)
-        if current is not None:
+        if sample_start == 0 and expected_count == 0 and current is not None:
             raise ValueError(
                 f"View {view_path(view)} has unexpected sample_index "
                 f"{current.sample_index}."
@@ -704,6 +737,7 @@ def _write_repacked_view_manifest(
     view: tuple[Role, Modality, View],
     sample_indexes: Iterable[int],
     *,
+    sample_start: int,
     max_shard_samples: int | None,
     max_shard_bytes: int | None,
     shard_prefix: str,
@@ -720,7 +754,7 @@ def _write_repacked_view_manifest(
     )
     current = _next_sourced_entry(entries)
     if first_index is None:
-        if current is not None:
+        if sample_start == 0 and current is not None:
             raise ValueError(
                 f"View {view_path(view)} has unexpected sample_index "
                 f"{current[1].sample_index}."
@@ -742,22 +776,20 @@ def _write_repacked_view_manifest(
     pending = 0
     try:
         for sample_index in chain((first_index,), indexes):
+            source_index = sample_start + sample_index
             expected_count += 1
+            while current is not None and current[1].sample_index < source_index:
+                current = _next_sourced_entry(entries)
             if current is None:
                 raise ValueError(
                     f"View {view_path(view)} is missing sample_index "
-                    f"{sample_index}."
+                    f"{source_index}."
                 )
             source, entry = current
-            if entry.sample_index < sample_index:
-                raise ValueError(
-                    f"View {view_path(view)} has unexpected sample_index "
-                    f"{entry.sample_index}."
-                )
-            if entry.sample_index != sample_index:
+            if entry.sample_index != source_index:
                 raise ValueError(
                     f"View {view_path(view)} is missing sample_index "
-                    f"{sample_index}."
+                    f"{source_index}."
                 )
             writer.write_payload(
                 sample_index,
@@ -772,7 +804,7 @@ def _write_repacked_view_manifest(
                 _put_progress(progress, "merge-views", pending)
                 pending = 0
             current = _next_sourced_entry(entries)
-        if current is not None:
+        if sample_start == 0 and expected_count == 0 and current is not None:
             raise ValueError(
                 f"View {view_path(view)} has unexpected sample_index "
                 f"{current[1].sample_index}."

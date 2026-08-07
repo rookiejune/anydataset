@@ -21,12 +21,25 @@ def prepare_materializer_resume_dir(
     metadata: Mapping[str, object],
     *,
     staging_dir: str | Path | None = None,
+    allow_input_growth: bool = False,
+    allow_output_contents: bool = False,
 ) -> Path:
     path = materializer_fragments_dir(output_dir, staging_dir=staging_dir)
     expected = dict(metadata)
-    if staging_dir is not None:
+    if staging_dir is not None and not allow_output_contents:
         _validate_output_target(output_dir)
-    if path.exists() and _stored_resume_metadata_or_incompatible(path) != expected:
+    stored = _stored_resume_metadata_or_incompatible(path) if path.exists() else None
+    compatible_growth = (
+        allow_input_growth
+        and stored is not None
+        and _growing_input_metadata(stored, expected)
+    )
+    if path.exists() and stored != expected and not compatible_growth:
+        if allow_input_growth:
+            raise ValueError(
+                "Materializer identity does not match the existing growing-input "
+                "staging state."
+            )
         stale = _quarantine_materializer_dir(
             output_dir,
             staging_dir=staging_dir,
@@ -42,12 +55,36 @@ def prepare_materializer_resume_dir(
                 "quarantine_dir": stale,
             },
         )
-    if staging_dir is None:
+    if staging_dir is None and not allow_output_contents:
         path = prepare_resume_dir(output_dir, "fragments")
     else:
         path.mkdir(parents=True, exist_ok=True)
     write_json(path / "resume.json", expected)
     return path
+
+
+def _growing_input_metadata(
+    stored: Mapping[str, object],
+    expected: Mapping[str, object],
+) -> bool:
+    stored_copy = dict(stored)
+    expected_copy = dict(expected)
+    stored_input = stored_copy.get("input")
+    expected_input = expected_copy.get("input")
+    if not isinstance(stored_input, Mapping) or not isinstance(expected_input, Mapping):
+        return False
+    stored_input_copy = dict(stored_input)
+    expected_input_copy = dict(expected_input)
+    stored_count = stored_input_copy.pop("sample_count", None)
+    expected_count = expected_input_copy.pop("sample_count", None)
+    stored_copy["input"] = stored_input_copy
+    expected_copy["input"] = expected_input_copy
+    return (
+        type(stored_count) is int
+        and type(expected_count) is int
+        and stored_count <= expected_count
+        and stored_copy == expected_copy
+    )
 
 
 def materializer_fragments_dir(

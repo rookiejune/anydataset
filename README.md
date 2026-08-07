@@ -876,18 +876,20 @@ with the provider output raises instead of overwriting it. To publish multiple
 derived views, run another materializer against the previous standalone store
 and explicitly retain the fields needed by the next stage.
 
-`ViewMaterializer.open()` is the dynamic entrance. With explicit `input_id`, a
-compatible ready store is opened without constructing the source or provider.
-With `input_id_factory`, ready access constructs the input identity object once
-and validates its result against canonical provenance, but still does not
-construct the provider. Otherwise foreground access computes requested values,
-then a background sweep covers every remaining sample in the complete source
-universe. If the input is a `SelectionView`, the provider still processes its
-complete universe and the same opened selection is rebased onto the output by
-stable `sample_id`. `sample_index` remains only a dense ordinal inside one
-universe/store. A successful `close()` waits for complete coverage and staging
-persistence but does not publish the store; explicit `write()`/finalize performs
-canonical publication.
+`ViewMaterializer.open()` is the read-only consumer entrance. It opens a legacy
+ready store or the fixed prefix named by `catalog.json`; it never constructs the
+provider, writer, or producer lease. If no catalog exists it returns an empty
+logical prefix. Reopen at the next epoch boundary to observe later snapshots;
+an already opened dataset never changes length. If the input is a
+`SelectionView`, its stable `sample_id` lineage is projected onto the published
+prefix, so an unmaterialized source suffix is allowed.
+
+The separate `produce()` entrance owns one provider lifetime and one
+`<output>/.producer.lock` lease. Durable fragments are published as immutable
+delta segments and appended atomically to the catalog; consumers concatenate
+those segments into the logical `0..latest` prefix. Reruns may extend an
+upstream input prefix but cannot shrink or change its identity. Only the
+producer loads models or selects devices.
 
 Pass an explicit logical `dataset_id` when the same view may be stored below
 different physical roots. It is written to the canonical manifest and anchors
@@ -899,13 +901,8 @@ processes, while `num_workers` controls the PyTorch `DataLoader` workers inside
 each writer process. For parallel writes, pass a picklable module-level
 `dataset_factory` so spawned workers construct their own dataset.
 
-For GPU-backed providers, let `devices` control execution. `devices="auto"`
-resolves every visible CUDA device, or CPU when CUDA is unavailable. One
-resolved device runs in the calling process; multiple devices use one worker
-per device with `Runtime.process_start_method` (`"spawn"` by default), write
-worker logs under `$ANYDATASET_HOME/logs/<timestamp>-<pid>/materializer`, and
-commit completed fragments when all workers finish. Materializers always use
-resumable fragments:
+For GPU-backed providers, pass `device` to the explicit producer. The consumer
+does not expose device policy. Producers use resumable fragments:
 completed provider batches are grouped into checkpoint chunks under a hidden
 sibling resume directory, and reruns skip completed store-local `sample_index`
 before atomically committing the final store. `commit_samples` controls that
@@ -922,34 +919,24 @@ checkpoint contents. A changed ID quarantines the old resume directory. The IDs
 are also written to final store provenance and participate in downstream
 complete-universe filter identity. Selection state is excluded.
 
-Materialization can be intentionally staged without changing the input
-identity. Pass `max_new_samples` or explicit increasing `sample_indexes` and
-`finalize=False`; the call returns a `MaterializationStatus` and leaves its
-hidden fragments available for the next call. The later call must use the same
-dataset/provider identities and can omit the bound to process all remaining
-indexes and atomically publish the final store:
+`produce()` can be rerun without changing the input identity. It reuses durable
+fragments, appends newly completed dense ranges, and returns a
+`MaterializationStatus` for the currently opened source prefix:
 
 ```python
-status = materializer.write(
+status = materializer.produce(
     dataset_factory=dataset_factory,
     provider_factory=provider_factory,
-    devices="auto",
-    max_new_samples=50_000,
-    finalize=False,
+    device="cuda:0",
+    snapshot_samples=50_000,
 )
-assert status.completed <= 50_000
-
-output = materializer.write(
-    dataset_factory=dataset_factory,
-    provider_factory=provider_factory,
-    devices="auto",
-)
+assert status.completed == status.expected
 ```
 
-`max_new_samples` and `sample_indexes` are supported for map-style datasets
-only. A partial run is not a readable store until finalized. To publish a dense
-completed prefix for inspection while keeping the run open, call
-`snapshot()`; snapshots do not clean up or advance the resume state:
+`max_new_samples` and `sample_indexes` remain supported by the legacy offline
+`write()` API for map-style datasets only. A partial live run is not readable
+until its producer appends a catalog entry. Legacy one-off preview publication
+is still available through `snapshot()`:
 
 ```python
 preview = materializer.snapshot(

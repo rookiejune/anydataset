@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import time
-from collections.abc import Collection, Iterable, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
@@ -63,6 +63,10 @@ class FragmentOutputSink:
     worker_id: int = 0
     expected: int | None = None
     sample_identity: object | None = field(default=None, repr=False)
+    on_fragment_complete: Callable[[tuple[int, ...]], None] | None = field(
+        default=None,
+        repr=False,
+    )
     _pending_outputs: list[SampleRecord] = field(
         init=False,
         repr=False,
@@ -198,6 +202,8 @@ class FragmentOutputSink:
             elapsed=elapsed,
             pending=pending,
         )
+        if self.on_fragment_complete is not None:
+            self.on_fragment_complete(job.indexes)
 
 
 @dataclass
@@ -210,6 +216,10 @@ class FragmentBatchWriter:
     sample_identity: object | None = field(default=None, repr=False)
     progress: ProgressSink | None = None
     worker_id: int = 0
+    on_fragment_complete: Callable[[tuple[int, ...]], None] | None = field(
+        default=None,
+        repr=False,
+    )
 
     def __post_init__(self) -> None:
         self._submitted_indexes: set[int] = set()
@@ -312,6 +322,7 @@ class FragmentBatchWriter:
             sample_identity=self.sample_identity,
             progress=self.progress,
             worker_id=self.worker_id,
+            on_fragment_complete=self.on_fragment_complete,
         )
 
 
