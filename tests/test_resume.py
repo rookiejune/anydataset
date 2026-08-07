@@ -111,9 +111,7 @@ class ResumeHelpersTest(unittest.TestCase):
             root = Path(tmpdir)
             target = root / "dataset"
             staging = root / "materializer-staging"
-            (staging / "batch" / "target" / "audio" / "waveform").mkdir(
-                parents=True
-            )
+            (staging / "batch" / "target" / "audio" / "waveform").mkdir(parents=True)
             real_rmtree = shutil.rmtree
             calls = 0
 
@@ -144,13 +142,15 @@ class ResumeHelpersTest(unittest.TestCase):
 
             stale = quarantine_resume_dir(target)
 
-            self.assertIsNotNone(stale)
+            assert stale is not None
             self.assertFalse(root.exists())
             self.assertTrue(stale.is_dir())
             self.assertTrue(stale.name.startswith(".dataset.resume.stale-"))
 
     def test_dataset_sample_count_reports_context(self):
-        with self.assertRaisesRegex(TypeError, "filter requires a dataset with __len__"):
+        with self.assertRaisesRegex(
+            TypeError, "filter requires a dataset with __len__"
+        ):
             dataset_sample_count(iter(()), context="filter")
 
     def test_validate_completed_indexes_rejects_out_of_range(self):
