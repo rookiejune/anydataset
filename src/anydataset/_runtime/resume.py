@@ -60,7 +60,13 @@ def prepare_resume_dir(output_dir: str | Path, name: str) -> Path:
 
 
 def cleanup_resume_dir(output_dir: str | Path) -> None:
-    root = resume_root(output_dir)
+    cleanup_resume_path(resume_root(output_dir))
+
+
+def cleanup_resume_path(path: str | Path) -> None:
+    """Remove one resume directory, tolerating transient shared-filesystem races."""
+
+    root = Path(path).expanduser()
     if not root.exists():
         return
 
@@ -79,7 +85,7 @@ def cleanup_resume_dir(output_dir: str | Path) -> None:
                 time.sleep(_CLEANUP_RESUME_RETRY_DELAY_SECONDS)
 
     try:
-        stale = quarantine_resume_dir(output_dir)
+        stale = quarantine_resume_path(root)
     except OSError as exc:
         if last_error is not None:
             raise last_error from exc
@@ -99,7 +105,13 @@ def cleanup_resume_dir(output_dir: str | Path) -> None:
 
 
 def quarantine_resume_dir(output_dir: str | Path) -> Path | None:
-    root = resume_root(output_dir)
+    return quarantine_resume_path(resume_root(output_dir))
+
+
+def quarantine_resume_path(path: str | Path) -> Path | None:
+    """Rename one resume directory aside without depending on its target."""
+
+    root = Path(path).expanduser()
     if not root.exists():
         return None
 

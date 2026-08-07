@@ -14,6 +14,7 @@ import anydataset.quality as quality
 import anydataset.presets as presets
 import anydataset.runtime as runtime
 import anydataset.store as store
+import anydataset.synthesis.s2st as s2st
 import anydataset.types as any_types
 
 
@@ -276,6 +277,64 @@ def test_quality_public_api_boundary() -> None:
 
 def test_runtime_public_api_boundary() -> None:
     _assert_public_all(runtime, ["AutoStartMethod", "Runtime"])
+
+
+def test_s2st_public_api_boundary() -> None:
+    _assert_public_all(
+        s2st,
+        [
+            "CATALOG_FILE",
+            "CATALOG_SCHEMA",
+            "PAIR_INDEX_SCHEMA",
+            "SNAPSHOT_SCHEMA",
+            "CatalogPublisher",
+            "DatasetFactory",
+            "FinalCatalog",
+            "FinalCatalogEntry",
+            "Growth",
+            "GrowthPhase",
+            "GrowthPlan",
+            "LanguageCatchup",
+            "LanguageDeclaration",
+            "LanguageSources",
+            "LiveS2STDataset",
+            "PairKey",
+            "PairIndexRecord",
+            "PairPlan",
+            "ReferenceAudio",
+            "ReferenceVoice",
+            "S2STConfig",
+            "S2STDeclaration",
+            "S2STLayout",
+            "S2STStage",
+            "S2STState",
+            "S2STView",
+            "SlotCursor",
+            "SnapshotManifest",
+            "SnapshotUpdate",
+            "SourceFamily",
+            "SourceInput",
+            "SourceKey",
+            "SourceSlot",
+            "SourceSlotSignature",
+            "SpeakerList",
+            "SpeakerVoice",
+            "ToyS2STDataset",
+            "Voice",
+            "VoiceAssignment",
+            "catalog_source_locations",
+            "load_catalog",
+            "plan_growth",
+            "read_pair_index",
+            "read_snapshot_manifest",
+            "store_digest",
+            "validate_catalog_entry",
+            "validate_catalog_store",
+            "validate_upstream",
+            "validate_successor",
+            "write_snapshot_manifest",
+        ],
+    )
 
 
 def test_store_public_api_boundary() -> None:

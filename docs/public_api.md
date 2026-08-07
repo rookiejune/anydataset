@@ -45,6 +45,9 @@ Use these paths for application code:
 - `anydataset.provider`: built-in model/provider classes.
 - `anydataset.provider_service`: provider process server and remote provider /
   filter client factories.
+- `anydataset.synthesis.s2st`: stable synthetic-S2ST source slots, growth plans,
+  views, stage snapshots, and append-only final datasets. Concrete model and
+  workspace bindings remain outside anydataset.
 - `anydataset.quality`: quality rule-building utilities for text,
   translation, and speech filters.
 

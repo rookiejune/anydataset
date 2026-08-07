@@ -22,6 +22,7 @@ from anydataset._runtime.resume import (
     resume_root,
     validate_completed_indexes,
 )
+from anydataset.store.materialize.resume import cleanup_materializer_resume_dir
 
 
 class ResumeHelpersTest(unittest.TestCase):
@@ -104,6 +105,36 @@ class ResumeHelpersTest(unittest.TestCase):
             stale = tuple(Path(tmpdir).glob(".dataset.resume.stale-*"))
             self.assertEqual(len(stale), 1)
             self.assertTrue((stale[0] / "fragments").is_dir())
+
+    def test_custom_materializer_staging_retries_transient_not_empty(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = root / "dataset"
+            staging = root / "materializer-staging"
+            (staging / "batch" / "target" / "audio" / "waveform").mkdir(
+                parents=True
+            )
+            real_rmtree = shutil.rmtree
+            calls = 0
+
+            def flaky_rmtree(path: Path) -> None:
+                nonlocal calls
+                calls += 1
+                if calls == 1:
+                    raise OSError(errno.ENOTEMPTY, "Directory not empty", "waveform")
+                real_rmtree(path)
+
+            with (
+                mock.patch(
+                    "anydataset._runtime.resume.shutil.rmtree",
+                    side_effect=flaky_rmtree,
+                ),
+                mock.patch("anydataset._runtime.resume.time.sleep"),
+            ):
+                cleanup_materializer_resume_dir(target, staging_dir=staging)
+
+            self.assertEqual(calls, 2)
+            self.assertFalse(staging.exists())
 
     def test_quarantine_resume_dir_renames_hidden_sibling(self):
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -2,6 +2,10 @@
 
 `anydataset` 的核心目标是把物理数据来源、数据集字段映射和训练时字段选择分开。数据集读取阶段尽量保留事实，训练阶段再由用户用 schema 明确声明需求。
 
+通用合成 S2ST 的 source family、语言扩充、voice assignment、三阶段 snapshot 和 live final
+catalog 契约见 [`synthesis_s2st.md`](synthesis_s2st.md)。它位于 synthesis 层，不属于物理
+`Source` 或内置 `Preset`。
+
 ## 边界
 
 - `Spec` 只描述物理数据源，包括 source、path、split、version 和 load options。

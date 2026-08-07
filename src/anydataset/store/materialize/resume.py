@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-import shutil
 import time
 from collections.abc import Mapping
 from pathlib import Path
@@ -9,6 +8,7 @@ from pathlib import Path
 from ..._runtime.logging import write_warning
 from ..._runtime.resume import (
     cleanup_resume_dir,
+    cleanup_resume_path,
     prepare_resume_dir,
     quarantine_resume_dir,
     resume_dir,
@@ -73,7 +73,7 @@ def cleanup_materializer_resume_dir(
         return
     if not path.is_dir():
         raise ValueError(f"Materializer staging path is not a directory: {path}")
-    shutil.rmtree(path)
+    cleanup_resume_path(path)
 
 
 def stored_resume_metadata(path: Path) -> Mapping[str, object] | None:
