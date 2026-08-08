@@ -27,6 +27,46 @@ from anydataset.types import (
 
 
 class S2STGrowthTest(unittest.TestCase):
+    def test_unsealed_source_prefix_can_grow(self):
+        source = _GrowingDataset(Lang.EN, 1)
+        config = _config(
+            (
+                _language(Lang.EN, ("en", source)),
+                _language(Lang.ZH, ("zh", _Dataset(Lang.ZH, 1))),
+            ),
+            initial=2,
+            interval=2,
+        )
+        first = plan_growth(config)
+
+        source.count = 2
+        second = plan_growth(config, first.state)
+
+        self.assertEqual(
+            [family.key for family in second.added_families],
+            [SourceKey("en", 1)],
+        )
+        en_cursor = next(cursor for cursor in second.state.cursors if cursor.slot == "en")
+        self.assertEqual(en_cursor.sample_count, 2)
+        self.assertFalse(en_cursor.exhausted)
+
+    def test_source_prefix_cannot_shrink(self):
+        source = _GrowingDataset(Lang.EN, 2)
+        config = _config(
+            (
+                _language(Lang.EN, ("en", source)),
+                _language(Lang.ZH, ("zh", _Dataset(Lang.ZH, 1))),
+            ),
+            initial=2,
+            interval=2,
+        )
+        first = plan_growth(config)
+
+        source.count = 1
+
+        with self.assertRaisesRegex(ValueError, "shrank within one lineage"):
+            plan_growth(config, first.state)
+
     def test_repeated_physical_source_slots_keep_independent_cursors(self):
         dataset = _Dataset(Lang.EN, 2)
         config = _config(
@@ -174,6 +214,10 @@ class _Dataset(MapStyleABC):
                 views={AudioView.WAVEFORM: (__import__("torch").zeros(1, 4), 16000)}
             )
         return sample
+
+
+class _GrowingDataset(_Dataset):
+    sealed = False
 
 
 def _language(language, *sources, audio=False):

@@ -186,7 +186,8 @@ data:
 
 1. 按 language 声明顺序轮转。
 2. 每个 language 内按 source slot 声明顺序轮转。
-3. 每个 slot 使用自己的递增 row cursor；耗尽时记录 `exhausted` 并跳过。
+3. 每个 slot 使用自己的递增 row cursor；未 sealed source 到达当前前缀末尾只暂时等待，只有
+   sealed source 到达末尾才记录 `exhausted`。
 
 新增语言时优先顺序固定为：
 

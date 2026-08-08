@@ -200,6 +200,7 @@ def _admit(
     next_slot = state.next_slot_index % len(slots)
     stalled = 0
     lengths: dict[str, int] = {}
+    sealed_sources: dict[str, bool] = {}
 
     while len(added_families) < limit and stalled < len(slots):
         language, slot = slots[next_slot]
@@ -224,19 +225,23 @@ def _admit(
                 )
             try:
                 length = len(dataset)
+                sealed = _dataset_is_sealed(dataset, slot.name)
             finally:
                 _close_dataset(dataset)
             lengths[slot.name] = length
-        if cursor.sample_count is not None and cursor.sample_count != length:
+            sealed_sources[slot.name] = sealed
+        else:
+            sealed = sealed_sources[slot.name]
+        if cursor.sample_count is not None and length < cursor.sample_count:
             raise ValueError(
-                f"S2ST source slot {slot.name!r} length changed within one lineage: "
-                f"{cursor.sample_count} != {length}."
+                f"S2ST source slot {slot.name!r} shrank within one lineage: "
+                f"{cursor.sample_count} -> {length}."
             )
         if cursor.next_row >= length:
             cursors[slot.name] = replace(
                 cursor,
                 sample_count=length,
-                exhausted=True,
+                exhausted=sealed,
             )
             stalled += 1
             continue
@@ -270,7 +275,7 @@ def _admit(
             cursor,
             next_row=next_row,
             sample_count=length,
-            exhausted=next_row >= length,
+            exhausted=sealed and next_row >= length,
         )
         stalled = 0
 
@@ -338,6 +343,17 @@ def _close_dataset(dataset) -> None:
     close = getattr(prepared, "close", None)
     if callable(close):
         close()
+
+
+def _dataset_is_sealed(dataset, slot: str) -> bool:
+    sealed = getattr(dataset, "sealed", None)
+    if sealed is None:
+        return True
+    if type(sealed) is not bool:
+        raise TypeError(
+            f"S2ST source slot {slot!r} sealed must be a boolean when provided."
+        )
+    return sealed
 
 
 __all__ = ["plan_growth"]
