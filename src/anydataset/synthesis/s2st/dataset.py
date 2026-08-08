@@ -1,9 +1,8 @@
-"""Expose an expanding synthetic S2ST snapshot catalog as a map-style dataset.
+"""Expose one fixed published S2ST prefix as a map-style dataset.
 
-Each catalog entry is one immutable delta. Construction requires and validates
-the first published entry, then loads every entry from the beginning through
-the catalog state visible at construction. Explicit refresh boundaries absorb
-later append-only publications into the same logical dataset object.
+Each internal catalog entry is one immutable delta. Construction validates and
+loads the prefix visible at that instant. Reopen the dataset to observe later
+publications; an existing reader never changes length.
 """
 
 from __future__ import annotations
@@ -17,7 +16,7 @@ from pathlib import Path
 from types import TracebackType
 from typing import Any, cast
 
-from ...dataset import AnyDataset, AppendOnlyMapStyleABC, MapStyleABC
+from ...dataset import AnyDataset, MapStyleABC
 from ...dataset._snapshot import SnapshotCatalogDataset, SnapshotSegment
 from ...dataset.universe import SampleIdentity
 from ...types import Lang, Role, Sample
@@ -35,23 +34,32 @@ from .model import S2STLayout, S2STStage, S2STView
 
 @dataclass(frozen=True)
 class S2STStatus:
-    """Published incremental snapshots in one S2ST lineage catalog."""
+    """Published sample coverage for one independently advancing S2ST stage."""
 
     root: Path
     lineage_id: str
     stage: S2STStage
-    snapshot_count: int
-    sample_count: int
-    latest_snapshot_id: str | None
+    expected_samples: int | None
+    published_samples: int
     sealed: bool
 
     @property
     def missing(self) -> bool:
-        return self.snapshot_count == 0
+        return self.published_samples == 0
+
+    @property
+    def pending_samples(self) -> int | None:
+        if self.expected_samples is None:
+            return None
+        return self.expected_samples - self.published_samples
+
+    @property
+    def caught_up(self) -> bool:
+        return self.pending_samples == 0
 
 
-class S2STDataset(AppendOnlyMapStyleABC):
-    """One non-empty logical dataset that absorbs append-only catalog growth."""
+class S2STDataset(MapStyleABC):
+    """The immutable published prefix visible when this reader was opened."""
 
     def __init__(
         self,
@@ -69,47 +77,29 @@ class S2STDataset(AppendOnlyMapStyleABC):
         if not isinstance(view, S2STView):
             raise TypeError("view must be an S2STView.")
         self.view = view
-        catalog, catalog_version = _load_versioned_catalog(
+        catalog, _catalog_version = _load_versioned_catalog(
             self.root,
             lineage_id=self.lineage_id,
             stage=self.stage,
+            missing_ok=True,
         )
-        if not catalog.entries:
-            raise RuntimeError("S2ST dataset requires at least one published snapshot.")
         base, indices, segments = _open_view(self.root, catalog, view)
-        if not indices:
-            base.close()
-            raise ValueError("S2ST dataset view must contain at least one sample.")
-        self.catalog = catalog
+        self._catalog = catalog
         self._base = base
         self._indices = indices
         self._snapshot_segments = segments
         self._universe_id = _view_lineage_id(self.lineage_id, self.stage, view)
-        self._catalog_version = catalog_version
         self._closed = False
 
     @property
-    def snapshot_id(self) -> str | None:
-        return self.catalog.latest_snapshot_id
-
-    @property
-    def snapshot_count(self) -> int:
-        return len(self.catalog.entries)
-
-    @property
-    def sample_count(self) -> int:
-        return len(self)
-
-    @property
-    def published_sample_count(self) -> int:
-        return len(self._base)
-
-    @property
     def sealed(self) -> bool:
-        return self.catalog.sealed
+        return self._catalog.sealed
 
     @property
     def snapshot_segments(self) -> tuple[SnapshotSegment, ...]:
+        """Immutable catalog segments included in this fixed reader prefix."""
+
+        self._ensure_open()
         return self._snapshot_segments
 
     def __len__(self) -> int:
@@ -117,11 +107,11 @@ class S2STDataset(AppendOnlyMapStyleABC):
         return len(self._indices)
 
     def __getitem__(self, index: int) -> Sample:
-        position = self._position(index)
+        position = _position(index, len(self))
         return project_sample(self._base[self._indices[position]], self.view)
 
     def __getitems__(self, indexes: Sequence[int]) -> list[Sample]:
-        positions = tuple(self._position(index) for index in indexes)
+        positions = tuple(_position(index, len(self)) for index in indexes)
         source_indexes = tuple(self._indices[index] for index in positions)
         return [
             project_sample(sample, self.view)
@@ -129,11 +119,11 @@ class S2STDataset(AppendOnlyMapStyleABC):
         ]
 
     def sample_id(self, index: int) -> str:
-        position = self._position(index)
+        position = _position(index, len(self))
         return self._base.sample_id(self._indices[position])
 
     def global_index(self, index: int) -> int:
-        position = self._position(index)
+        position = _position(index, len(self))
         return self._base.global_index(self._indices[position])
 
     def universe_id(self) -> str | None:
@@ -141,43 +131,8 @@ class S2STDataset(AppendOnlyMapStyleABC):
         return self._universe_id
 
     def cost_row(self, index: int) -> Any:
-        position = self._position(index)
+        position = _position(index, len(self))
         return self._base.cost_row(self._indices[position])
-
-    def _refresh_impl(self) -> None:
-        """Atomically install the latest valid catalog successor."""
-
-        self._ensure_open()
-        if _catalog_version(self.root, self.stage) == self._catalog_version:
-            return
-        catalog, catalog_version = _load_versioned_catalog(
-            self.root,
-            lineage_id=self.lineage_id,
-            stage=self.stage,
-        )
-        catalog.validate_successor(self.catalog)
-        if catalog.entries == self.catalog.entries:
-            self.catalog = catalog
-            self._catalog_version = catalog_version
-            return
-
-        base, indices, segments = _open_view(self.root, catalog, self.view)
-        try:
-            if indices[: len(self._indices)] != self._indices:
-                raise ValueError(
-                    "S2ST dataset refresh does not preserve its selected prefix."
-                )
-        except BaseException:
-            base.close()
-            raise
-
-        previous = self._base
-        self.catalog = catalog
-        self._base = base
-        self._indices = indices
-        self._snapshot_segments = segments
-        self._catalog_version = catalog_version
-        previous.close()
 
     def close(self) -> None:
         if self._closed:
@@ -208,7 +163,7 @@ def status(
     *,
     stage: S2STStage = S2STStage.TTS,
 ) -> S2STStatus:
-    """Validate and summarize all currently published incremental snapshots."""
+    """Validate and summarize the currently published stage prefix."""
 
     path = Path(root)
     identity = _non_empty("lineage_id", lineage_id)
@@ -222,20 +177,36 @@ def status(
     )
     for entry in catalog.entries:
         validate_catalog_entry(path, entry)
-    count = (
-        0
-        if not catalog.entries
-        else catalog.entries[-1].start + catalog.entries[-1].sample_count
-    )
+    expected = _upstream_sample_count(path, identity, stage)
+    if expected is None and catalog.sealed:
+        expected = catalog.sample_count
     return S2STStatus(
         root=path,
         lineage_id=identity,
         stage=stage,
-        snapshot_count=len(catalog.entries),
-        sample_count=count,
-        latest_snapshot_id=catalog.latest_snapshot_id,
+        expected_samples=expected,
+        published_samples=catalog.sample_count,
         sealed=catalog.sealed,
     )
+
+
+def _upstream_sample_count(
+    root: Path,
+    lineage_id: str,
+    stage: S2STStage,
+) -> int | None:
+    upstream = {
+        S2STStage.TRANSLATION: S2STStage.SOURCE,
+        S2STStage.TTS: S2STStage.TRANSLATION,
+    }.get(stage)
+    if upstream is None:
+        return None
+    return load_catalog(
+        root,
+        lineage_id=lineage_id,
+        stage=upstream,
+        missing_ok=True,
+    ).sample_count
 
 
 def project_sample(sample: Sample, view: S2STView) -> Sample:
@@ -552,7 +523,19 @@ def _load_versioned_catalog(
     *,
     lineage_id: str,
     stage: S2STStage,
+    missing_ok: bool = False,
 ) -> tuple[FinalCatalog, _CatalogVersion]:
+    path = catalog_path(root, stage)
+    if not path.is_file() and missing_ok:
+        return (
+            load_catalog(
+                root,
+                lineage_id=lineage_id,
+                stage=stage,
+                missing_ok=True,
+            ),
+            (0, 0, 0, 0),
+        )
     for _attempt in range(3):
         before = _catalog_version(root, stage)
         catalog = load_catalog(root, lineage_id=lineage_id, stage=stage)

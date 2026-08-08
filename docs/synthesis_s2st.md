@@ -83,8 +83,8 @@ workspace 工厂只向 workspace generation 入口领取精确输入 snapshot �
 anydataset/workspace 的显式 producer 调用向共享路径原子发布不可变 snapshot；训练不分配生产设备、
 调度 producer，也不读取 generation DAG、catalog 或 snapshot 元数据。
 
-DataModule 不判断某个样本来自哪个 revision。它持有普通 Dataset；anydataset DataLoader 在新的
-batch 规划周期刷新同一对象，下一轮自动纳入已发布的 append-only snapshot。
+DataModule 不判断某个样本来自哪个 revision。它持有打开时固定的普通 Dataset；调用方只在明确
+边界重新构造 dataset，新 reader 才纳入后来发布的 append-only snapshot。
 
 ## 公开逻辑对象
 
@@ -203,51 +203,42 @@ data:
 一个 revision 有三个逻辑阶段：
 
 ```text
-source@r -> translation@r -> tts@r
+source prefix -> translation prefix -> tts prefix
 ```
 
-- `source`：冻结本 revision 的 family/pair plan，并确定 voice condition。
-- `translation`：精确引用 `source@r`，增加目标文本。
-- `tts`：精确引用 `translation@r`，增加 source/target waveform，成为训练可见结果。
+- `source`：发布增长 scheduler 接纳的 family/pair delta，并确定 voice condition。
+- `translation`：通过 `StagePublisher.open_input()` 固定读取 source 当前尚未覆盖的已发布后缀，增加目标文本。
+- `tts`：通过 `StagePublisher.open_input()` 固定读取 translation 当前尚未覆盖的已发布后缀，增加 source/target waveform，成为训练可见结果。
 
-三者 revision 相同，但发布时间可以不同，例如：
+三个阶段不共享 writer 生命周期，也不要求相同 revision 同步完成。例如：
 
 ```text
-source.latest = 12
-translation.latest = 11
-tts.latest = 10
+source.published_samples = 120k
+translation.published_samples = 115k
+tts.published_samples = 100k
 ```
 
-下游阶段必须读取 manifest 中的 `upstream_snapshot_id` 和 digest，禁止在运行中再次解析
-“当前 latest”。`translation@r` 逻辑包含 `source@r`；`tts@r` 逻辑包含 `translation@r`。
-三个阶段分别推进自己的 catalog；默认训练入口只读取 `tts`，调试和下游 producer 可以显式读取
-`source` 或 `translation`。
+下游 producer 先固定一个 `StageInput`，再基于这个只读输入计算并发布。`StageInput` 对外只暴露
+普通 map-style dataset、`start/stop` 和 sample count；内部 token 绑定上游 watermark 和 digest，
+因此 source 或 translation 后续继续发布不会改变本次下游提交的输入。若同一阶段已经被其他 producer
+推进，旧的 `StageInput` 会被拒绝，调用方重新打开下一个待处理后缀即可。
+
+默认训练入口只读取 `tts`，调试和下游 producer 可以显式读取 `source` 或 `translation`。每个阶段
+都有独立 catalog 和锁，阶段之间只通过已发布 prefix 传递数据，不通过共享 provider、writer、进程或
+可变 “latest” 指针协调。
 
 同一模型只对应一个工厂族：source 和 target audio 都由一个 `tts` 工厂生成，不配置
 `source_tts` / `target_tts` 两套模型或设备。
 
-## Lineage 和 snapshot manifest
+## Lineage 和内部提交协议
 
 translator checkpoint、TTS checkpoint、voice mode 或 seed 变化时必须创建新 lineage；已有
 language/source slot 定义变化时显式失败，不能把不同语义静默混入旧数据。
 
-每个阶段 manifest 至少包含：
-
-```text
-lineage_id
-config_revision
-revision
-stage
-snapshot_id
-upstream_snapshot_id
-upstream_digest
-previous_snapshot_id
-source_count
-pair_count
-coverage
-store_path
-store_digest
-```
+调用方不直接构造或读取 snapshot manifest。公共生产入口是 `StagePublisher`：source 阶段调用
+`publish_source(store, records, config_revision=...)`，下游阶段调用
+`open_input(max_samples=...) -> publish(stage_input, store)`。manifest、commit id、catalog entry、
+pair-index 路径和 digest 是私有持久化协议；它们仍有 schema version 和显式校验，但不是稳定应用 API。
 
 每个物理 store 仍遵守 anydataset standalone store 契约：store 内 sample index 必须是稠密的
 `0..N-1`。跨 revision 的逻辑全局索引由 stage catalog 显式映射，不能把稀疏 global index 塞进
@@ -276,13 +267,10 @@ summary digest 同时绑定 index SHA256 和 summary 内容；dataset 每次从�
 append-only/immutable 文件系统边界；如果部署需要抵抗能够伪造 inode/ctime 的特权协调篡改，应在
 存储层增加可信 CAS 或签名，而不能通过跳过完整性校验获得性能。
 
-需要恢复历史 source waveform 的上层 producer 应先调用
-`catalog_source_locations(catalog, source_keys)`。summary 直接返回 source 首次发布的 entry 和
-store-local index，因此 language backfill 不需要逐 entry 读取历史 pair index。只对返回的 entry 调用
-`validate_catalog_entry(root, entry)`，再打开 store 并按 local index 取 sample；不要重新调用
-`store_digest(root / entry.store_path)`。entry validation 会检查 index/store 发布时绑定的 immutable
-stat identity，但不读取 pair-index 或 waveform payload bytes。真正消费 pair index 的路径仍必须使用
-`read_pair_index(root, entry)` 完整核对 SHA256 和 summary。
+需要恢复历史 source waveform 的上层 producer 应通过已发布 prefix reader 或 `StageInput` 读取所需
+样本，不直接依赖 catalog entry 或 store-local index。内部 summary 仍用于快速定位 source 首次发布位置，
+避免 language backfill 逐 entry 扫描历史 pair index；真正消费 pair index 的内部路径仍完整核对 SHA256
+和 summary。
 
 这个布局避免每次增长复制完整历史 store，同时不违反 standalone store 约束。
 
@@ -294,11 +282,10 @@ root/catalogs/translation.json  # translation@r
 root/catalog.json               # tts@r（默认训练入口）
 ```
 
-`source@r` 发布后即可独立读取，即使 `translation@r` 或 `tts@r` 尚未发布；
-缺少某个阶段的首个 snapshot 只影响该阶段的 `load(stage=...)`，不会被其他阶段的 catalog
-“补齐”。每次 `load()` 都从所选阶段的第一个 snapshot 开始遍历到该阶段当前 latest，
-返回可在显式规划边界扩张的普通 map-style dataset。catalog 本身就是逻辑数据集格式，不需要 S2ST 专用
-compact/merge；如果下游确实要求单一物理 store，应显式使用 anydataset 的通用物化 workflow。
+source 发布后即可独立读取，即使 translation 或 tts 尚未覆盖这部分样本；缺少某个阶段的首个提交时，
+该阶段 reader 是空的 unsealed prefix，不会被其他阶段的 catalog “补齐”。每次 `load()` 都打开所选阶段
+当前已发布 prefix，返回固定长度的普通 map-style dataset。catalog 本身就是逻辑数据集格式，不需要
+S2ST 专用 compact/merge；如果下游确实要求单一物理 store，应显式使用 anydataset 的通用物化 workflow。
 
 ## Dataset views
 
@@ -314,25 +301,23 @@ index，不改变 admission order。text-only、waveform、codec codes 等表示
 如果以后需要一个 family 内多目标语言的 grouped batch，应新增明确 morphology；不能改变
 `Role.TARGET` 的单 item 契约。
 
-## 增量 snapshot 和全量加载
+## 增量提交和固定前缀加载
 
-`S2STDataset(root, lineage_id, stage=..., view=...)` 是普通 map-style dataset。构造时必须读取并校验
-所选阶段的首个 snapshot；没有首个 snapshot 时立即抛错，不等待后台生产。随后按 revision 从第一个
-增量 snapshot 到当前 latest 逐段加载，并组装构造时可见的完整逻辑数据集：
+`S2STDataset(root, lineage_id, stage=..., view=...)` 是普通 map-style dataset。构造时读取并校验
+所选阶段当前已发布的 snapshot；没有首个 snapshot 时得到空的 unsealed 前缀，不等待后台生产。
+随后按 revision 从第一个增量 snapshot 到当前 latest 逐段加载，并组装构造时可见的完整逻辑数据集：
 
 - 每次 `load()` 都从所选阶段 catalog 的第一个 snapshot 开始遍历，不保存 cursor，也不从上次位置续读。
-- 已打开对象可通过 `refresh()` 原子吸收 append-only successor；anydataset DataLoader 在每次新的
-  batch 规划周期自动调用它。本轮已经生成的 index 保持固定，下一轮才纳入新增 snapshot。
-- 多 worker 的副本在收到超出旧视图的非负 index 时本地 refresh；DDP 规划使用所有 rank 当前可见
-  逻辑长度的最短前缀。consumer 不等待、不轮询，也不维护 snapshot cursor。
-- 上述生命周期由通用 `AppendOnlyMapStyleABC` 持有；S2ST 只实现 catalog successor 的读取和原子
-  替换。callable costs 保留旧 global index 的缓存，materialize 时只追加新 suffix。
+- 已打开对象固定在构造时的 committed watermark，不提供 `refresh()`，也不会因 DataLoader epoch、
+  worker 访问或 DDP 规划隐式增长。
+- 调用方需要在明确的 batch/epoch 或 workflow 边界重新构造；新 reader 仍从第一个 snapshot 遍历
+  到当时 latest。consumer 不等待、不轮询，也不维护 snapshot cursor。
 - 标量、任意顺序和重复 index 的 batch 读取都路由到对应 segment-local index。
 - catalog、pair index 或 immutable store identity 损坏时直接失败。
-- 没有首个 snapshot 时 `load()` 抛出缺失错误；`status(stage=...)` 可做只读预检。
+- 没有首个 snapshot 时 `load()` 返回空的 unsealed 前缀；`status(stage=...)` 可做只读预检。
 
-snapshot 分段属于数据集本身，filter 只按相同分段生成一一对应的 decision，不拥有或创建 S2ST
-snapshot 概念；materializer 也复用同一套 snapshot 拼接抽象。
+内部提交分段属于数据集本身，filter 只按相同分段生成一一对应的 decision，不拥有或创建 S2ST
+提交概念；materializer 也复用同一套固定前缀拼接抽象。
 
 ## 统一入口
 
@@ -352,8 +337,8 @@ dataset_source.toy()
 ```
 
 - `status(stage=...)`：验证并汇总所选阶段 catalog 的全部增量 snapshots，不加载模型；默认阶段为 `tts`。
-- `load(stage=...)`：要求所选阶段的首个 snapshot 已发布，从第一个 snapshot 加载到该阶段 latest，
-  返回可通过 batch 规划周期自动 refresh 的普通数据集；默认阶段为 `tts`。
+- `load(stage=...)`：从第一个 snapshot 加载到该阶段调用时可见的 latest；没有 snapshot 时返回空的
+  unsealed 前缀。返回对象长度固定，重新调用才观察新 watermark；默认阶段为 `tts`。
 - `generate()`：返回 factory 名称、producer command 和 lineage identity，不启动进程、不选择
   设备。
 - `toy()`：不加载 translator/TTS，确定性构造与 final `pairs` view 相同 schema 的短 waveform；
@@ -391,6 +376,6 @@ producer 记录；训练只在 Dataset 构造或读取校验失败时暴露错�
 2. anydataset 增加 S2ST identity、growth scheduler、views、toy、stage manifest 和 append-only stage catalog。
 3. workspace 增加 `zhuyin.datasets.s2st`，把当前 WMT19/Qwen/MOSS 实现改为一个可选 source 配置，
    不再让 producer import speech-to-speech。
-4. speech-to-speech 通过 `DatasetConfig.factory` 构造普通 Dataset；batch 周期扩张、生产与 snapshot
-   生命周期留在 anydataset。
+4. speech-to-speech 通过 `DatasetConfig.factory` 构造普通 Dataset；重新构造 dataset 才吸收扩张，
+   生产与 snapshot 生命周期留在 anydataset。
 5. 旧 WMT19 streaming 入口保留一个兼容周期并明确弃用；稳定 waveform/codec store views 不受影响。

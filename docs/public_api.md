@@ -47,9 +47,8 @@ Use these paths for application code:
 - `anydataset.provider_service`: provider process server and remote provider /
   filter client factories.
 - `anydataset.synthesis.s2st`: stable synthetic-S2ST source slots, growth plans,
-  views, independently published stage catalogs, and expanding datasets assembled
-  from all snapshots in one selected catalog. Concrete model and workspace
-  bindings remain outside anydataset.
+  views, stage publishers, pinned upstream inputs, and fixed published-prefix
+  datasets. Concrete model and workspace bindings remain outside anydataset.
 - `anydataset.quality`: quality rule-building utilities for text,
   translation, and speech filters.
 
@@ -114,15 +113,13 @@ snapshot. Repeated explicit calls advance coverage. An optional logical
 `dataset_id` decouples catalog and universe identity from the physical
 `output_dir` basename.
 
-`S2STDataset(..., stage=...)` traverses the selected `source`, `translation`, or
-`tts` catalog from its first snapshot through the latest visible snapshot. It
-fails when the first snapshot is missing and never waits or polls. The same
-object can atomically `refresh()` to an append-only successor; anydataset batch
-planning does this at each new loader cycle, while the active cycle keeps its
-fixed index prefix. The shared append-only contract owns worker out-of-range
-refresh and shortest-rank DDP planning. Existing callable-cost entries remain
-cached; materialized costs evaluate only the appended global-index suffix.
-The default stage is `tts`.
+`S2STDataset(..., stage=...)` opens the selected `source`, `translation`, or
+`tts` stage's currently published prefix. A missing stage is the empty unsealed
+prefix. The reader never waits, polls, or grows; reopen it at an explicit caller
+boundary to observe a newer append-only prefix. `StagePublisher.open_input()`
+pins a fixed upstream suffix for downstream producers, so each S2ST stage can
+advance independently while later upstream publications continue. The default
+dataset stage is `tts`.
 
 `provider_id` is global operation provenance for the AnyTrain backend plus the
 AnyDataset adapter and semantic model recipe. It is unrelated to a sample,
