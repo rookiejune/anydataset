@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from pathlib import Path
+from typing import cast
 
 from anydataset.dataset import MapStyleABC
 from anydataset.dataset._snapshot import SnapshotCatalogDataset, SnapshotSegment
@@ -18,11 +19,14 @@ class _Rows(MapStyleABC):
         return len(self.values)
 
     def __getitem__(self, index: int) -> Sample:
-        return {
+        return cast(
+            Sample,
+            {
             (Role.DEFAULT, Modality.TEXT): TextItem(
                 views={TextView.TEXT: str(self.values[index])}
             )
-        }
+            },
+        )
 
     def sample_id(self, index: int) -> str:
         return f"sample-{self.values[index]}"
@@ -45,25 +49,25 @@ def _source() -> SnapshotCatalogDataset:
 
 
 def _value(sample: Sample) -> int:
-    return int(sample[Role.DEFAULT, Modality.TEXT].views[TextView.TEXT])
+    item = cast(TextItem, sample[Role.DEFAULT, Modality.TEXT])
+    return int(cast(str, item.views[TextView.TEXT]))
 
 
 def _rule_factory():
     return lambda sample: "accept" if _value(sample) % 2 == 0 else "review"
 
 
-def test_decisions_publish_one_input_snapshot_per_call(
+def test_decisions_publish_one_internal_segment_per_call(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
     monkeypatch.setenv("ANYDATASET_HOME", str(tmp_path / "home"))
     view = FilterRule("parity", _rule_factory).bind(dataset_factory=_source)
 
-    assert view.status().completed_snapshots == 0
+    assert view.status().completed_samples == 0
     first = view.produce(device="cpu")
 
-    assert first.expected_snapshots == 2
-    assert first.completed_snapshots == 1
+    assert first.expected_samples == 5
     assert first.completed_samples == 3
     first_prefix = view.load()
     try:
@@ -72,7 +76,6 @@ def test_decisions_publish_one_input_snapshot_per_call(
         second = view.produce(device="cpu")
 
         assert second.complete
-        assert second.completed_snapshots == 2
         assert second.completed_samples == 5
         assert [_value(sample) for sample in first_prefix] == [0, 2]
         with view.load() as accepted:
@@ -106,7 +109,7 @@ def test_snapshot_id_separates_segments_with_the_same_universe_identity(
     first_status = view.produce(device="cpu", write_workers=0)
     second_status = view.produce(device="cpu", write_workers=0)
 
-    assert first_status.completed_snapshots == 1
+    assert first_status.completed_samples == 2
     assert second_status.complete
     with view.load() as accepted:
         assert [_value(sample) for sample in accepted] == [0, 2]
@@ -144,8 +147,7 @@ def test_plain_map_dataset_is_one_logical_snapshot(
 
     status = view.produce(device="cpu", write_workers=0)
 
-    assert status.expected_snapshots == 1
-    assert status.completed_snapshots == 1
+    assert status.expected_samples == 3
     assert status.completed_samples == 3
     with view.load() as accepted:
         assert [_value(sample) for sample in accepted] == [0, 2]

@@ -31,7 +31,7 @@ Use these paths for application code:
   and `DatasetGrowth`, index selection, generic collate helpers, and morphology
   collate/view contracts. Focused universe and selection extension contracts are
   listed below.
-- `anydataset.filter`: cached filter rules, snapshot-aligned `DecisionView` /
+- `anydataset.filter`: cached filter rules, published-prefix `DecisionView` /
   `DecisionStatus`, scalar and batch filter predicate contracts, explicit
   blocking apply reports, online reject / replace filtering, compatibility
   `FilterRun` / `FilterRunStatus`, filter decisions, and cleanup entry points.
@@ -75,11 +75,11 @@ the internal materializer modules that consume those contracts.
 
 Derived operations distinguish complete execution from returned selection:
 
-- snapshot partitioning belongs to the dataset prefix, independently of any
-  filter; materializers, S2ST catalogs, and decision producers consume the same
-  dataset-owned segment boundary;
+- internal partitioning belongs to the dataset prefix, independently of any
+  filter; materializers, S2ST stage producers, and decision producers consume
+  that dataset-owned boundary without exposing it as application state;
 - a non-empty map-style dataset without explicit partition metadata is treated
-  as one logical snapshot; an empty dataset is the complete empty prefix;
+  as one logical committed prefix; an empty dataset is the complete empty prefix;
 - transforms and filters execute over a complete `DatasetUniverse`;
 - `SelectionView` applies the ordered intersection only at the returned dataset
   boundary;
@@ -89,27 +89,28 @@ Derived operations distinguish complete execution from returned selection:
 - `sample_index` is only a dense ordinal within one universe/store;
 - transform and filter identities exclude selection state.
 
-`FilterRule.bind()` returns a `DecisionView` over one fixed input prefix. Its
-`produce()` call publishes decisions for at most the next missing input
-snapshot, while `load()` joins the longest contiguous published decision prefix
-and applies the selected labels. Each decision snapshot preserves input count,
-order, and `sample_id`; selection is terminal and may return fewer samples.
-`select()` changes labels without rerunning predicates, and the default label is
-`accept`.
+`FilterRule.bind()` returns a `DecisionView` over one fixed input prefix.
+`produce(max_new_samples=...)` atomically publishes at most the next missing
+sample window, while `load()` pins and joins the longest contiguous published
+decision prefix. A reader never sees the private writer tail, and an already
+loaded view never grows; a later `load()` sees a newer committed watermark. Every
+published window preserves input count, order, and `sample_id`; selection is
+terminal and may return fewer samples. `select()` changes labels without
+rerunning predicates, and the default label is `accept`.
 
 `FilterRule.open()` and `FilterRule.apply()` remain compatibility surfaces for
 the older background and blocking cache workflows. New snapshot-backed
 resources should use `bind()` and explicit producer calls.
 
 `ViewMaterializer.open()` is a read-only consumer entrance. It opens a legacy
-ready store or a fixed prefix from the append-only snapshot catalog without
+ready store or a fixed published prefix without
 constructing a provider, writer, or lease. Reopen at an epoch boundary to see
-later snapshots; an opened dataset has stable length. With `input_id_factory`,
+later publications; an opened dataset has stable length. With `input_id_factory`,
 only the input identity object is constructed to validate provenance, and a
 selection is projected by stable `sample_id` onto the published subset.
 `ViewMaterializer.produce()` is the separate producer entrance: it owns the
-provider/device for one bounded call and atomically appends at most one durable
-snapshot. Repeated explicit calls advance coverage. An optional logical
+provider/device for one bounded call and atomically appends a durable dense
+sample prefix. Repeated explicit calls advance coverage. An optional logical
 `dataset_id` decouples catalog and universe identity from the physical
 `output_dir` basename.
 

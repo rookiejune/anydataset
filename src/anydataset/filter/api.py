@@ -178,8 +178,9 @@ class FilterRule:
         labels: FilterLabel | Sequence[FilterLabel] | None = None,
         input_id: str | None = None,
         metrics: bool = False,
+        max_new_samples: int = 100_000,
     ) -> DecisionView:
-        """Bind this rule to snapshot-aligned explicit decision production."""
+        """Bind this rule to bounded explicit decision production."""
 
         from .decision import DecisionView
 
@@ -190,6 +191,7 @@ class FilterRule:
             labels=selected,
             input_id=input_id,
             metrics=metrics,
+            max_new_samples=max_new_samples,
         )
 
     def apply_with_report(

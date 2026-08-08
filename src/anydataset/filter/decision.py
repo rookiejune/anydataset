@@ -6,16 +6,18 @@ import hashlib
 import json
 import operator
 from bisect import bisect_left
+from collections.abc import Sequence
 from dataclasses import dataclass, replace
-from typing import Any
+from typing import Any, cast
 
 from typing_extensions import Unpack
 
 from ..dataset._snapshot import SnapshotSegment
 from ..dataset._snapshot import snapshot_segments as dataset_snapshot_segments
 from ..dataset.abc import MapStyleABC
-from ..dataset.universe import DatasetUniverse
+from ..dataset.universe import DatasetUniverse, SampleIdentity
 from ..dataset.view import Selection, SelectionView, rebase_selection
+from ..types.item import Sample
 from .api import FilterRule, normalized_labels, selected_index
 from .cache.generations import GenerationLease
 from .cache.identity import filter_identity, filter_path, metadata
@@ -28,27 +30,35 @@ from .types import FilterApplyKwargs, FilterLabel
 
 @dataclass(frozen=True)
 class DecisionStatus:
-    """Decision coverage over the input prefix visible at this call."""
+    """Published decision coverage over the input prefix visible at this call."""
 
-    expected_snapshots: int
-    completed_snapshots: int
     expected_samples: int
     completed_samples: int
 
     @property
     def complete(self) -> bool:
-        return self.completed_snapshots == self.expected_snapshots
+        return self.completed_samples == self.expected_samples
+
+    @property
+    def pending_samples(self) -> int:
+        return self.expected_samples - self.completed_samples
 
 
 @dataclass(frozen=True)
 class DecisionView:
-    """One filter rule bound to a complete one-to-one sample universe."""
+    """One filter rule bound to a complete one-to-one sample universe.
+
+    Input snapshots remain the semantic partition boundary. Large snapshots are
+    divided into bounded immutable decision windows so readers can pin the
+    longest committed prefix without observing the writer's private tail.
+    """
 
     rule: FilterRule
     dataset_factory: Any
     labels: tuple[str, ...] = ("accept",)
     input_id: str | None = None
     metrics: bool = False
+    max_new_samples: int = 100_000
 
     def __post_init__(self) -> None:
         if not isinstance(self.rule, FilterRule):
@@ -65,6 +75,13 @@ class DecisionView:
             raise ValueError("input_id must be non-empty or None.")
         if type(self.metrics) is not bool:
             raise TypeError("metrics must be a boolean.")
+        if isinstance(self.max_new_samples, bool) or not isinstance(
+            self.max_new_samples,
+            int,
+        ):
+            raise TypeError("max_new_samples must be an integer.")
+        if self.max_new_samples <= 0:
+            raise ValueError("max_new_samples must be positive.")
 
     def select(self, *labels: FilterLabel) -> DecisionView:
         """Return another terminal label selection over the same decisions."""
@@ -76,8 +93,11 @@ class DecisionView:
 
         source, universe = _source(self.dataset_factory())
         try:
-            segments = _segments(universe, input_id=self.input_id)
-            completed_snapshots = 0
+            segments = _segments(
+                universe,
+                input_id=self.input_id,
+                max_new_samples=self.max_new_samples,
+            )
             completed_samples = 0
             for segment in segments:
                 ready = _ready(
@@ -89,11 +109,8 @@ class DecisionView:
                 if ready is None:
                     break
                 ready.close()
-                completed_snapshots += 1
                 completed_samples += segment.sample_count
             return DecisionStatus(
-                expected_snapshots=len(segments),
-                completed_snapshots=completed_snapshots,
                 expected_samples=len(universe),
                 completed_samples=completed_samples,
             )
@@ -104,11 +121,15 @@ class DecisionView:
         self,
         **kwargs: Unpack[FilterApplyKwargs],
     ) -> DecisionStatus:
-        """Publish decisions for at most the next missing input snapshot."""
+        """Publish decisions for at most the next missing committed window."""
 
         source, universe = _source(self.dataset_factory())
         try:
-            segments = _segments(universe, input_id=self.input_id)
+            segments = _segments(
+                universe,
+                input_id=self.input_id,
+                max_new_samples=self.max_new_samples,
+            )
             target: SnapshotSegment | None = None
             for segment in segments:
                 ready = _ready(
@@ -142,7 +163,6 @@ class DecisionView:
                     allow_logical=True,
                 )
                 applied.cache.close()
-            completed_snapshots = 0
             completed_samples = 0
             for segment in segments:
                 ready = _ready(
@@ -154,11 +174,8 @@ class DecisionView:
                 if ready is None:
                     break
                 ready.close()
-                completed_snapshots += 1
                 completed_samples += segment.sample_count
             return DecisionStatus(
-                expected_snapshots=len(segments),
-                completed_snapshots=completed_snapshots,
                 expected_samples=len(universe),
                 completed_samples=completed_samples,
             )
@@ -169,7 +186,11 @@ class DecisionView:
         """Open the fixed decision prefix and apply the configured labels."""
 
         source, universe = _source(self.dataset_factory())
-        segments = _segments(universe, input_id=self.input_id)
+        segments = _segments(
+            universe,
+            input_id=self.input_id,
+            max_new_samples=self.max_new_samples,
+        )
         selected: list[int] = []
         leases: list[GenerationLease] = []
         covered_samples = 0
@@ -223,6 +244,65 @@ class _OpenedDatasetFactory:
 
 
 @dataclass(frozen=True)
+class _SnapshotWindow(MapStyleABC):
+    """Read one immutable local range without owning the underlying dataset."""
+
+    dataset: MapStyleABC
+    start: int
+    sample_count: int
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.dataset, MapStyleABC):
+            raise TypeError("snapshot window dataset must be a MapStyleABC.")
+        if not isinstance(self.dataset, SampleIdentity):
+            raise TypeError("snapshot window dataset must provide sample_id().")
+        if isinstance(self.start, bool) or not isinstance(self.start, int):
+            raise TypeError("snapshot window start must be an integer.")
+        if self.start < 0:
+            raise ValueError("snapshot window start must be non-negative.")
+        if isinstance(self.sample_count, bool) or not isinstance(
+            self.sample_count,
+            int,
+        ):
+            raise TypeError("snapshot window sample_count must be an integer.")
+        if self.sample_count <= 0:
+            raise ValueError("snapshot window sample_count must be positive.")
+        if self.start + self.sample_count > len(self.dataset):
+            raise ValueError("snapshot window exceeds the dataset length.")
+
+    def __len__(self) -> int:
+        return self.sample_count
+
+    def __getitem__(self, index: int) -> Sample:
+        return self.dataset[self.start + _position(index, len(self))]
+
+    def __getitems__(self, indexes: Sequence[int]) -> list[Sample]:
+        local = tuple(self.start + _position(index, len(self)) for index in indexes)
+        getitems = getattr(self.dataset, "__getitems__", None)
+        if callable(getitems):
+            values = getitems(local)
+            if not isinstance(values, Sequence):
+                raise TypeError("snapshot window batch read must return a sequence.")
+            if len(values) != len(local):
+                raise ValueError("snapshot window batch read returned the wrong count.")
+            return list(cast(Sequence[Sample], values))
+        return [self.dataset[index] for index in local]
+
+    def sample_id(self, index: int) -> str:
+        identity = cast(SampleIdentity, self.dataset)
+        value = identity.sample_id(self.start + _position(index, len(self)))
+        if not isinstance(value, str) or not value:
+            raise ValueError("snapshot window sample_id() must be non-empty.")
+        return value
+
+    def global_index(self, index: int) -> int:
+        return _position(index, len(self))
+
+    def cost_row(self, index: int) -> Any:
+        return self.dataset.cost_row(self.start + _position(index, len(self)))
+
+
+@dataclass(frozen=True)
 class _DecisionSelection:
     universe: DatasetUniverse
     indices: tuple[int, ...]
@@ -251,6 +331,10 @@ class _DecisionSelection:
         offset = bisect_left(self.indices, position)
         return offset < len(self.indices) and self.indices[offset] == position
 
+    @property
+    def sealed(self) -> bool:
+        return self.covered_samples == len(self.universe)
+
     def selected_index(self, position: int) -> int:
         return self.indices[_position(position, len(self.indices))]
 
@@ -277,12 +361,50 @@ def _segments(
     dataset: MapStyleABC,
     *,
     input_id: str | None,
+    max_new_samples: int,
 ) -> tuple[SnapshotSegment, ...]:
     identity = _dataset_snapshot_id(dataset, input_id=input_id)
-    return dataset_snapshot_segments(
+    source = dataset_snapshot_segments(
         dataset,
         fallback_snapshot_id=identity,
     )
+    output: list[SnapshotSegment] = []
+    for segment in source:
+        if segment.sample_count <= max_new_samples:
+            output.append(segment)
+            continue
+        local_start = 0
+        while local_start < segment.sample_count:
+            count = min(max_new_samples, segment.sample_count - local_start)
+            output.append(
+                SnapshotSegment(
+                    snapshot_id=_window_snapshot_id(segment, local_start, count),
+                    start=segment.start + local_start,
+                    sample_count=count,
+                    dataset=_SnapshotWindow(segment.dataset, local_start, count),
+                )
+            )
+            local_start += count
+    return tuple(output)
+
+
+def _window_snapshot_id(
+    segment: SnapshotSegment,
+    local_start: int,
+    sample_count: int,
+) -> str:
+    payload = json.dumps(
+        {
+            "schema": "anydataset-decision-window-v1",
+            "snapshot_id": segment.snapshot_id,
+            "segment_samples": segment.sample_count,
+            "start": local_start,
+            "sample_count": sample_count,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    return f"decision-window-v1:{hashlib.sha256(payload).hexdigest()}"
 
 
 def _dataset_snapshot_id(dataset: MapStyleABC, *, input_id: str | None) -> str:

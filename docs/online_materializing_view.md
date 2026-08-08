@@ -69,7 +69,7 @@ materializer.produce(
     dataset_factory=source_factory,
     provider_factory=provider_factory,
     device="cuda:0",
-    snapshot_samples=50_000,
+    max_new_samples=50_000,
 )
 
 # Repeat explicitly when the job intends to advance through more snapshots.
@@ -135,7 +135,7 @@ snapshot and then returns. If computation is needed, one provider is constructed
 for the invocation and closed before return.
 
 Provider output first enters private resumable fragments. Only durable dense
-coverage can be published. One call computes at most `snapshot_samples` missing
+coverage can be published. One call computes at most `max_new_samples` missing
 rows and force-publishes that bounded prefix. If a failed earlier call already
 left durable unpublished coverage, the next call may publish that coverage and
 return without constructing a provider. Catalog writes are atomic, so consumers

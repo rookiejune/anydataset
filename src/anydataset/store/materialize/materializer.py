@@ -141,16 +141,25 @@ class _UniverseDatasetFactory:
 
 @dataclass(frozen=True)
 class MaterializationStatus:
-    """Canonical or staging coverage for one materialization."""
+    """Sample coverage visible to a materialization caller."""
 
     output_dir: Path
-    expected: int
-    completed: int
-    finalized: bool = False
+    expected_samples: int | None
+    completed_samples: int
+    sealed: bool = False
 
     @property
-    def pending(self) -> int:
-        return self.expected - self.completed
+    def pending_samples(self) -> int | None:
+        if self.expected_samples is None:
+            return None
+        return self.expected_samples - self.completed_samples
+
+    @property
+    def caught_up(self) -> bool:
+        return (
+            self.expected_samples is not None
+            and self.completed_samples == self.expected_samples
+        )
 
 
 @dataclass
@@ -324,9 +333,9 @@ class ViewMaterializer:
             finalized = not isinstance(dataset, SnapshotDataset) or dataset.sealed
             return MaterializationStatus(
                 output_dir=Path(self.output_dir).expanduser(),
-                expected=count if expected is None else expected,
-                completed=count,
-                finalized=finalized,
+                expected_samples=expected,
+                completed_samples=count,
+                sealed=finalized,
             )
         finally:
             _close_resource(dataset)
@@ -491,17 +500,18 @@ class ViewMaterializer:
         dataset_factory: DatasetFactory,
         provider_factory: ProviderFactory,
         device: str = "cpu",
-        snapshot_samples: int | None = None,
+        max_new_samples: int | None = None,
     ) -> MaterializationStatus:
-        """Materialize and publish snapshots under one explicit producer lease."""
+        """Materialize and publish a bounded sample prefix under one producer lease."""
 
         self._validate_online_contract()
         if not isinstance(device, str) or not device:
             raise ValueError("device must be a non-empty string.")
-        if snapshot_samples is None:
-            snapshot_samples = self.commit_samples
-        if snapshot_samples is None:
+        if max_new_samples is None:
+            max_new_samples = self.commit_samples
+        if max_new_samples is None:
             raise RuntimeError("materializer commit_samples was not initialized.")
+        max_new_samples = positive_int("max_new_samples", max_new_samples)
         if self.num_workers > 0:
             validate_process_parent(
                 context=f"{type(self).__name__} producer with DataLoader workers"
@@ -513,7 +523,7 @@ class ViewMaterializer:
                 dataset_factory=dataset_factory,
                 provider_factory=provider_factory,
                 device=device,
-                snapshot_samples=snapshot_samples,
+                max_new_samples=max_new_samples,
             )
 
     def _produce_locked(
@@ -522,7 +532,7 @@ class ViewMaterializer:
         dataset_factory: DatasetFactory,
         provider_factory: ProviderFactory,
         device: str,
-        snapshot_samples: int,
+        max_new_samples: int,
     ) -> MaterializationStatus:
         run_started = time.perf_counter()
         publish_seconds = 0.0
@@ -569,7 +579,7 @@ class ViewMaterializer:
                 split=self.split,
                 provenance=self._provenance,
                 schema=schema,
-                snapshot_samples=snapshot_samples,
+                snapshot_samples=max_new_samples,
                 max_shard_samples=self.max_shard_samples,
                 max_shard_bytes=self.max_shard_bytes,
                 completed=completed,
@@ -583,23 +593,23 @@ class ViewMaterializer:
                     publisher.seal()
                 status = MaterializationStatus(
                     output_dir=Path(self.output_dir).expanduser(),
-                    expected=expected,
-                    completed=publisher.sample_count,
-                    finalized=publisher.catalog.sealed,
+                    expected_samples=expected,
+                    completed_samples=publisher.sample_count,
+                    sealed=publisher.catalog.sealed,
                 )
                 self._log_run_summary(
                     expected=expected,
                     resumed=published_before,
-                    run_samples=status.completed - published_before,
+                    run_samples=status.completed_samples - published_before,
                     devices=(device,),
-                    finalize=status.finalized,
+                    finalize=status.sealed,
                     elapsed=time.perf_counter() - run_started,
                     operation="produce",
                     publish_seconds=publish_seconds,
                 )
                 return status
             missing = tuple(
-                islice(missing_indexes(completed, expected), snapshot_samples)
+                islice(missing_indexes(completed, expected), max_new_samples)
             )
             if missing:
                 log_resume_summary(
@@ -707,16 +717,16 @@ class ViewMaterializer:
                 publisher.seal()
             status = MaterializationStatus(
                 output_dir=Path(self.output_dir).expanduser(),
-                expected=expected,
-                completed=publisher.sample_count,
-                finalized=publisher.catalog.sealed,
+                expected_samples=expected,
+                completed_samples=publisher.sample_count,
+                sealed=publisher.catalog.sealed,
             )
             self._log_run_summary(
                 expected=expected,
                 resumed=published_before,
-                run_samples=status.completed - published_before,
+                run_samples=status.completed_samples - published_before,
                 devices=(device,),
-                finalize=status.finalized,
+                finalize=status.sealed,
                 elapsed=time.perf_counter() - run_started,
                 worker_fields=(
                     None
@@ -1245,26 +1255,26 @@ class ViewMaterializer:
     ) -> MaterializationStatus:
         return MaterializationStatus(
             output_dir=Path(self.output_dir).expanduser(),
-            expected=expected,
-            completed=len(completed),
+            expected_samples=expected,
+            completed_samples=len(completed),
         )
 
     def _log_status(self, status: MaterializationStatus) -> None:
         write_info(
             "materializer",
             "materialization staged: "
-            f"output_dir={status.output_dir!s} expected={status.expected} "
-            f"completed={status.completed} pending={status.pending}",
+            f"output_dir={status.output_dir!s} expected={status.expected_samples} "
+            f"completed={status.completed_samples} pending={status.pending_samples}",
             event="materializer_staged",
             fields={
                 "materializer": type(self).__name__,
                 "output_dir": status.output_dir,
                 "split": self.split,
                 "dataset_id": self._dataset_id,
-                "expected": status.expected,
-                "completed": status.completed,
-                "pending": status.pending,
-                "finalized": status.finalized,
+                "expected": status.expected_samples,
+                "completed": status.completed_samples,
+                "pending": status.pending_samples,
+                "finalized": status.sealed,
                 "batch_size": self.batch_size,
                 "commit_samples": self.commit_samples,
                 "max_shard_bytes": self.max_shard_bytes,

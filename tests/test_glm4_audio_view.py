@@ -131,8 +131,8 @@ class Glm4AudioViewTest(unittest.TestCase):
                     finalize=False,
                 )
                 self.assertIsInstance(status, MaterializationStatus)
-                self.assertEqual(status.completed, 1)
-                self.assertEqual(status.pending, 1)
+                self.assertEqual(status.completed_samples, 1)
+                self.assertEqual(status.pending_samples, 1)
 
                 materializer.snapshot(
                     snapshot,

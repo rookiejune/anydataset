@@ -17,16 +17,28 @@ from anydataset.store.materialize.snapshots import (
     CATALOG_FILENAME,
     producer_lock_path,
 )
-from anydataset.types import AudioItem, AudioMeta, AudioReq, AudioView, Modality, Role
+from anydataset.types import (
+    AudioItem,
+    AudioMeta,
+    AudioReq,
+    AudioView,
+    Modality,
+    Role,
+    Schema,
+    Sample,
+)
 
 
 _REF = (Role.DEFAULT, Modality.AUDIO)
-_SCHEMA = {
+_SCHEMA = cast(
+    Schema,
+    {
     _REF: AudioReq(
         views=frozenset({AudioView.LONGCAT}),
         meta=frozenset(),
     )
-}
+    },
+)
 
 
 class _Source(MapStyleABC):
@@ -37,8 +49,10 @@ class _Source(MapStyleABC):
     def __len__(self) -> int:
         return self.count
 
-    def __getitem__(self, index: int):
-        return {
+    def __getitem__(self, index: int) -> Sample:
+        return cast(
+            Sample,
+            {
             _REF: AudioItem(
                 views={
                     AudioView.WAVEFORM: (
@@ -48,7 +62,8 @@ class _Source(MapStyleABC):
                 },
                 meta={AudioMeta.DURATION: 1.0},
             )
-        }
+            },
+        )
 
     def sample_id(self, index: int) -> str:
         return f"source-{index}"
@@ -85,7 +100,7 @@ class _ProviderFactory:
     state: _ProviderState
     fail_at: int | None = None
 
-    def __call__(self, device: str) -> _Provider:
+    def __call__(self, device: str) -> Any:
         self.state.factories += 1
         return _Provider(self.state, device, fail_at=self.fail_at)
 
@@ -160,13 +175,13 @@ def test_reopened_epoch_sees_new_prefix_while_old_epoch_is_fixed(
     first = materializer.produce(
         dataset_factory=source,
         provider_factory=provider,
-        snapshot_samples=2,
+        max_new_samples=2,
     )
     assert first == MaterializationStatus(
         output_dir=tmp_path / "output",
-        expected=3,
-        completed=2,
-        finalized=False,
+        expected_samples=3,
+        completed_samples=2,
+        sealed=False,
     )
     epoch_zero = materializer.open(dataset_factory=_fail_factory)
     assert len(epoch_zero) == 2
@@ -177,17 +192,17 @@ def test_reopened_epoch_sees_new_prefix_while_old_epoch_is_fixed(
     second = materializer.produce(
         dataset_factory=source,
         provider_factory=provider,
-        snapshot_samples=2,
+        max_new_samples=2,
     )
-    assert second.completed == 4
-    assert not second.finalized
+    assert second.completed_samples == 4
+    assert not second.sealed
     third = materializer.produce(
         dataset_factory=source,
         provider_factory=provider,
-        snapshot_samples=2,
+        max_new_samples=2,
     )
-    assert third.completed == 5
-    assert third.finalized
+    assert third.completed_samples == 5
+    assert third.sealed
     assert len(epoch_zero) == 2
 
     epoch_one = materializer.open(dataset_factory=_fail_factory)
@@ -222,7 +237,7 @@ def test_producer_logs_shared_worker_and_run_performance(
     status = materializer.produce(
         dataset_factory=source,
         provider_factory=provider,
-        snapshot_samples=2,
+        max_new_samples=2,
     )
     events = [
         json.loads(line)
@@ -230,7 +245,7 @@ def test_producer_logs_shared_worker_and_run_performance(
         for line in path.read_text(encoding="utf-8").splitlines()
     ]
 
-    assert status.completed == 2
+    assert status.completed_samples == 2
     worker = [
         entry["fields"]
         for entry in events
@@ -259,7 +274,7 @@ def test_provider_failure_does_not_expose_partial_fragment(tmp_path: Path) -> No
         materializer.produce(
             dataset_factory=_SourceFactory(state),
             provider_factory=_ProviderFactory(_ProviderState(), fail_at=1),
-            snapshot_samples=2,
+            max_new_samples=2,
         )
 
     dataset = materializer.open(dataset_factory=_fail_factory)
@@ -279,7 +294,7 @@ def test_resume_reuses_durable_fragments_and_publication_is_idempotent(
         materializer.produce(
             dataset_factory=source,
             provider_factory=_ProviderFactory(failed_state, fail_at=1),
-            snapshot_samples=2,
+            max_new_samples=2,
         )
     assert failed_state.samples == [0]
 
@@ -287,14 +302,14 @@ def test_resume_reuses_durable_fragments_and_publication_is_idempotent(
     resumed = materializer.produce(
         dataset_factory=source,
         provider_factory=_ProviderFactory(resumed_state),
-        snapshot_samples=2,
+        max_new_samples=2,
     )
-    assert resumed.completed == 1
+    assert resumed.completed_samples == 1
     assert resumed_state.samples == []
     materializer.produce(
         dataset_factory=source,
         provider_factory=_ProviderFactory(resumed_state),
-        snapshot_samples=2,
+        max_new_samples=2,
     )
     assert resumed_state.samples == [1, 2]
 
@@ -302,7 +317,7 @@ def test_resume_reuses_durable_fragments_and_publication_is_idempotent(
     materializer.produce(
         dataset_factory=source,
         provider_factory=_ProviderFactory(unused),
-        snapshot_samples=2,
+        max_new_samples=2,
     )
     assert unused.factories == 0
 
@@ -313,12 +328,12 @@ def test_selection_projects_onto_published_prefix(tmp_path: Path) -> None:
     materializer.produce(
         dataset_factory=_SourceFactory(state),
         provider_factory=_ProviderFactory(_ProviderState()),
-        snapshot_samples=2,
+        max_new_samples=2,
     )
     materializer.produce(
         dataset_factory=_SourceFactory(state),
         provider_factory=_ProviderFactory(_ProviderState()),
-        snapshot_samples=2,
+        max_new_samples=2,
     )
 
     def selection_factory() -> SelectionView:
@@ -429,13 +444,13 @@ def test_legacy_ready_store_remains_readable_without_factories(tmp_path: Path) -
 def test_status_reads_only_published_catalog(tmp_path: Path) -> None:
     materializer = _materializer(tmp_path / "output", tmp_path / "staging")
     empty = materializer.status()
-    assert (empty.expected, empty.completed, empty.finalized) == (0, 0, False)
+    assert (empty.expected_samples, empty.completed_samples, empty.sealed) == (None, 0, False)
 
     source = _SourceFactory(_SourceState(2))
     provider = _ProviderFactory(_ProviderState())
     materializer.produce(dataset_factory=source, provider_factory=provider)
     partial = materializer.status(dataset_factory=source)
-    assert (partial.expected, partial.completed, partial.finalized) == (2, 1, False)
+    assert (partial.expected_samples, partial.completed_samples, partial.sealed) == (2, 1, False)
     materializer.produce(dataset_factory=source, provider_factory=provider)
     ready = materializer.status(dataset_factory=source)
-    assert (ready.expected, ready.completed, ready.finalized) == (2, 2, True)
+    assert (ready.expected_samples, ready.completed_samples, ready.sealed) == (2, 2, True)

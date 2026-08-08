@@ -272,6 +272,14 @@ class SelectionView(MapStyleABC):
                 unknown = True
         return None if unknown else True
 
+    @property
+    def sealed(self) -> bool:
+        """Whether neither the universe nor any selection can append decisions."""
+
+        return _sealed(self.universe.dataset, "selection universe") and all(
+            _sealed(selection, "selection") for selection in self.selections
+        )
+
     def wait_decision(self, universe_index: int) -> bool:
         """Wait only for unresolved decisions needed by one universe row."""
 
@@ -437,6 +445,15 @@ def _selected_index(selection: Selection, position: int) -> int:
                 return universe_index
             selected_position += 1
     raise IndexError("selection index out of range")
+
+
+def _sealed(value: object, name: str) -> bool:
+    sealed = getattr(value, "sealed", None)
+    if sealed is None:
+        return True
+    if type(sealed) is not bool:
+        raise TypeError(f"{name} sealed must be a boolean when provided.")
+    return sealed
 
 
 def _selected_indices(selection: Selection) -> tuple[int, ...]:

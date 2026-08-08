@@ -1961,9 +1961,9 @@ class ViewMaterializerTest(unittest.TestCase):
                 finalize=False,
             )
             self.assertIsInstance(first, MaterializationStatus)
-            self.assertEqual(first.completed, 2)
-            self.assertEqual(first.expected, 5)
-            self.assertEqual(first.pending, 3)
+            self.assertEqual(first.completed_samples, 2)
+            self.assertEqual(first.expected_samples, 5)
+            self.assertEqual(first.pending_samples, 3)
             self.assertFalse(target.exists())
 
             second = materializer.write(
@@ -1974,8 +1974,8 @@ class ViewMaterializerTest(unittest.TestCase):
                 finalize=False,
             )
             self.assertIsInstance(second, MaterializationStatus)
-            self.assertEqual(second.completed, 4)
-            self.assertEqual(second.pending, 1)
+            self.assertEqual(second.completed_samples, 4)
+            self.assertEqual(second.pending_samples, 1)
 
             output = materializer.write(
                 dataset_factory=dataset_factory,
@@ -2005,7 +2005,7 @@ class ViewMaterializerTest(unittest.TestCase):
                 finalize=False,
             )
             self.assertIsInstance(status, MaterializationStatus)
-            self.assertEqual(status.completed, 2)
+            self.assertEqual(status.completed_samples, 2)
 
             materializer.write(
                 dataset_factory=dataset_factory,
@@ -2205,7 +2205,7 @@ class ViewMaterializerTest(unittest.TestCase):
                 finalize=False,
             )
             self.assertIsInstance(status, MaterializationStatus)
-            self.assertEqual(status.completed, 2)
+            self.assertEqual(status.completed_samples, 2)
 
             materializer.write(
                 dataset_factory=dataset_factory,

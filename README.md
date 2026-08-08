@@ -928,9 +928,9 @@ status = materializer.produce(
     dataset_factory=dataset_factory,
     provider_factory=provider_factory,
     device="cuda:0",
-    snapshot_samples=50_000,
+    max_new_samples=50_000,
 )
-assert status.completed == status.expected
+assert status.completed_samples == status.expected_samples
 ```
 
 `max_new_samples` and `sample_indexes` remain supported by the legacy offline
